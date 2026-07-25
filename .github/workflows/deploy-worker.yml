@@ -1,0 +1,42 @@
+# Optional: auto-deploy the Cloudflare Worker on push, instead of running
+# `npm run deploy` by hand from worker/. Disabled by default (see the `if:`
+# guard below) until you've added the two repo secrets it needs:
+#   - CLOUDFLARE_API_TOKEN   (dash.cloudflare.com -> My Profile -> API Tokens,
+#                             "Edit Cloudflare Workers" template is enough)
+#   - CLOUDFLARE_ACCOUNT_ID  (right sidebar of the Cloudflare dashboard)
+# Once both secrets exist, change `if: false` below to `if: true` (or delete
+# the line) to turn this on. See docs/SETUP.md for the full checklist.
+
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    if: false # flip to true once CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID secrets are set
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install dependencies
+        working-directory: worker
+        run: npm install
+
+      - name: Deploy
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy
