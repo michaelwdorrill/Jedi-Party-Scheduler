@@ -1,7 +1,9 @@
 import type { Env } from '../env';
+import { chunkIds, chunkRows, placeholders } from './d1';
 import { filterActiveGuildMembers } from './db';
 import { newId } from './ids';
 import {
+  assertBoolean,
   assertOneOf,
   assertOptionalString,
   assertRecurrenceInput,
@@ -123,7 +125,7 @@ type ResolvedInvitee = { userId: string; invitedVia: 'individual' | 'group'; sou
 // bounds especially: unbounded span x submissions is what let F-04 exhaust
 // Worker CPU on both request and cron paths), so this validates everything
 // present on the input, not just the fields a given call site happens to use.
-function validateEventWriteInput(input: Partial<EventWriteInput>): void {
+function validateEventWriteInput(input: Partial<EventWriteInput>, requireComplete = false): void {
   if (input.title !== undefined) assertString(input.title, 'title', LIMITS.TITLE);
   if (input.description !== undefined) assertOptionalString(input.description, 'description', LIMITS.DESCRIPTION);
   if (input.game !== undefined) assertOptionalString(input.game, 'game', LIMITS.GAME);
@@ -131,6 +133,11 @@ function validateEventWriteInput(input: Partial<EventWriteInput>): void {
   if (input.voiceChannelId !== undefined) assertOptionalString(input.voiceChannelId, 'voiceChannelId', 64);
   if (input.voiceChannelName !== undefined) assertOptionalString(input.voiceChannelName, 'voiceChannelName', LIMITS.CHANNEL_NAME);
   if (input.eventType !== undefined) assertOneOf(input.eventType, 'eventType', ['single', 'poll'] as const);
+  // Typed as boolean but never checked at runtime until now: a string or a
+  // number here silently reached the `input.eventType === 'single' &&
+  // !!input.isRecurring` branch and decided whether start_at/end_at were
+  // written, so a wrong type quietly produced a differently-shaped row.
+  if (input.isRecurring !== undefined) assertBoolean(input.isRecurring, 'isRecurring');
   if (input.pollStrategy != null) assertOneOf(input.pollStrategy, 'pollStrategy', ['threshold', 'most_votes'] as const);
   if (input.pollMode !== undefined) assertOneOf(input.pollMode, 'pollMode', ['options', 'window'] as const);
   if (input.pollResolutionMode !== undefined) {
@@ -155,8 +162,19 @@ function validateEventWriteInput(input: Partial<EventWriteInput>): void {
     input.recurrence = assertRecurrenceInput(input.recurrence, 'recurrence') as RecurrenceInput;
   }
 
-  if (input.pollThresholdCount != null) assertSafeInt(input.pollThresholdCount, 'pollThresholdCount');
-  if (input.pollDeadlineAt !== undefined) assertSafeInt(input.pollDeadlineAt, 'pollDeadlineAt');
+  // A threshold of 0 or a negative one resolves the poll the instant it's
+  // created; one larger than the invite list can never be reached, so the
+  // poll can only ever expire. Neither is a meaningful thing to ask for.
+  if (input.pollThresholdCount != null) {
+    const threshold = assertSafeInt(input.pollThresholdCount, 'pollThresholdCount');
+    if (threshold < 1 || threshold > LIMITS.MAX_RESOLVED_INVITEES) {
+      throw new ValidationError('pollThresholdCount out of range');
+    }
+  }
+  if (input.pollDeadlineAt !== undefined) {
+    const deadline = assertSafeInt(input.pollDeadlineAt, 'pollDeadlineAt');
+    if (deadline <= 0) throw new ValidationError('pollDeadlineAt must be a positive timestamp');
+  }
 
   if (input.pollOptions) {
     if (input.pollOptions.length > LIMITS.MAX_POLL_OPTIONS) {
@@ -181,16 +199,89 @@ function validateEventWriteInput(input: Partial<EventWriteInput>): void {
       throw new ValidationError('windowBlockMinutes out of range');
     }
   }
+
+  if (requireComplete) assertCompleteEventShape(input);
 }
 
+// Create requires a *coherent* event, not just individually-valid fields.
+// PATCH deliberately doesn't run this: it's a partial update by design, and
+// the shape it produces is the union of the stored row and the delta.
+//
+// Without this, a create could omit both a schedule and a recurrence rule (an
+// event that never occurs and shows on nobody's calendar), or declare a poll
+// with no candidates and no deadline (a poll that can never resolve and that
+// the deadline sweep will re-examine on every tick forever). Both were
+// storable, and both left rows that only ever made sense to delete.
+function assertCompleteEventShape(input: Partial<EventWriteInput>): void {
+  assertString(input.title, 'title', LIMITS.TITLE);
+  assertTimezone(input.timezone, 'timezone');
+  const eventType = assertOneOf(input.eventType, 'eventType', ['single', 'poll'] as const);
+
+  if (eventType === 'single') {
+    if (input.isRecurring) {
+      if (!input.recurrence) throw new ValidationError('recurrence is required when isRecurring is true');
+    } else if (input.startAt == null || input.endAt == null) {
+      throw new ValidationError('startAt and endAt are required for a non-recurring event');
+    }
+    return;
+  }
+
+  if (input.pollDeadlineAt == null) throw new ValidationError('pollDeadlineAt is required for a poll');
+  const { pollMode } = normalizePollModes(input);
+  if (pollMode === 'window') {
+    if (input.windowStartAt == null || input.windowEndAt == null || input.windowBlockMinutes == null) {
+      throw new ValidationError('windowStartAt, windowEndAt and windowBlockMinutes are required for a window poll');
+    }
+  } else if (!input.pollOptions || input.pollOptions.length === 0) {
+    throw new ValidationError('a poll needs at least one option');
+  }
+  if (input.pollStrategy === 'threshold' && input.pollThresholdCount == null) {
+    throw new ValidationError('pollThresholdCount is required when pollStrategy is threshold');
+  }
+}
+
+// Per-guild ceilings, checked at create time. Individually every event here is
+// legitimate; the problem is aggregate growth, which is what turns "one member
+// creating events" into a durable, cross-user failure -- every other member's
+// calendar has to load and expand the accumulated set on every request, and
+// the cron has to walk all of it every 15 minutes. Nothing else in the app
+// caps how many rows one person can add.
+async function assertGuildEventQuota(env: Env, guildId: string, organizerId: string, isRecurring: boolean): Promise<void> {
+  const counts = await env.DB.prepare(
+    `SELECT
+       COUNT(*) AS total,
+       SUM(CASE WHEN organizer_id = ? THEN 1 ELSE 0 END) AS mine,
+       SUM(CASE WHEN is_recurring = 1 THEN 1 ELSE 0 END) AS recurring
+     FROM events WHERE guild_id = ? AND status != 'cancelled'`,
+  )
+    .bind(organizerId, guildId)
+    .first<{ total: number; mine: number | null; recurring: number | null }>();
+
+  if ((counts?.total ?? 0) >= LIMITS.MAX_ACTIVE_EVENTS_PER_GUILD) {
+    throw new ValidationError('This server has reached its limit of scheduled events -- delete some old ones first');
+  }
+  if ((counts?.mine ?? 0) >= LIMITS.MAX_EVENTS_PER_ORGANIZER_PER_GUILD) {
+    throw new ValidationError("You've reached your limit of scheduled events on this server");
+  }
+  if (isRecurring && (counts?.recurring ?? 0) >= LIMITS.MAX_RECURRING_EVENTS_PER_GUILD) {
+    throw new ValidationError('This server has reached its limit of recurring events');
+  }
+}
+
+// Multi-row inserts rather than one statement per invitee: an event may
+// resolve to MAX_RESOLVED_INVITEES people, and a batch of that many separate
+// statements pushes against D1's per-invocation query limit for no reason.
+// ON CONFLICT DO NOTHING is what preserves an existing invitee's RSVP.
 function inviteStatements(env: Env, eventId: string, invitees: ResolvedInvitee[]): D1PreparedStatement[] {
   const now = Date.now();
-  return invitees.map((invitee) =>
+  return chunkRows(invitees, 6).map((chunk) =>
     env.DB.prepare(
       `INSERT INTO event_invites (id, event_id, user_id, invited_via, source_group_id, rsvp_status, invited_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', ?)
+       VALUES ${chunk.map(() => `(?, ?, ?, ?, ?, 'pending', ?)`).join(', ')}
        ON CONFLICT(event_id, user_id) DO NOTHING`,
-    ).bind(newId(), eventId, invitee.userId, invitee.invitedVia, invitee.sourceGroupId, now),
+    ).bind(
+      ...chunk.flatMap((invitee) => [newId(), eventId, invitee.userId, invitee.invitedVia, invitee.sourceGroupId, now]),
+    ),
   );
 }
 
@@ -200,15 +291,37 @@ function inviteStatements(env: Env, eventId: string, invitees: ResolvedInvitee[]
 // should actually revoke their access, not just leave the old row in place
 // alongside whatever got added. RSVP state for anyone who remains is
 // preserved via inviteStatements' ON CONFLICT DO NOTHING.
-function replaceInviteStatements(env: Env, eventId: string, invitees: ResolvedInvitee[]): D1PreparedStatement[] {
-  const statements: D1PreparedStatement[] =
-    invitees.length === 0
-      ? [env.DB.prepare(`DELETE FROM event_invites WHERE event_id = ?`).bind(eventId)]
-      : [
-          env.DB.prepare(
-            `DELETE FROM event_invites WHERE event_id = ? AND user_id NOT IN (${invitees.map(() => '?').join(',')})`,
-          ).bind(eventId, ...invitees.map((i) => i.userId)),
-        ];
+//
+// Expressed as a read-then-diff rather than the obvious `NOT IN (...every
+// invitee...)`: that list can hold up to MAX_RESOLVED_INVITEES entries, three
+// times D1's per-statement bound-parameter ceiling, and NOT IN is the one
+// shape that can't simply be chunked (each chunk would delete everyone absent
+// from *that* chunk, including people present in another). Reading the
+// current rows and computing the removals turns it into a positive IN list,
+// which chunks correctly -- and is usually empty, since most edits add people
+// rather than remove them.
+async function replaceInviteStatements(
+  env: Env,
+  eventId: string,
+  invitees: ResolvedInvitee[],
+): Promise<D1PreparedStatement[]> {
+  const { results: current } = await env.DB.prepare(
+    `SELECT user_id FROM event_invites WHERE event_id = ?`,
+  )
+    .bind(eventId)
+    .all<{ user_id: string }>();
+
+  const keep = new Set(invitees.map((i) => i.userId));
+  const remove = current.map((r) => r.user_id).filter((id) => !keep.has(id));
+
+  const statements: D1PreparedStatement[] = [];
+  for (const chunk of chunkIds(remove, 1)) {
+    statements.push(
+      env.DB.prepare(
+        `DELETE FROM event_invites WHERE event_id = ? AND user_id IN (${placeholders(chunk.length)})`,
+      ).bind(eventId, ...chunk),
+    );
+  }
   statements.push(...inviteStatements(env, eventId, invitees));
   return statements;
 }
@@ -236,11 +349,13 @@ export async function createEventWithInvites(
   organizerId: string,
   input: EventWriteInput,
 ): Promise<string> {
-  validateEventWriteInput(input);
+  validateEventWriteInput(input, true);
   const eventId = newId();
   const now = Date.now();
   const isRecurring = input.eventType === 'single' && !!input.isRecurring;
   const { pollMode, pollResolutionMode } = normalizePollModes(input);
+
+  await assertGuildEventQuota(env, guildId, organizerId, isRecurring);
 
   // Resolved (and validated) before anything is written, so a rejected
   // invite list (F-05: cross-guild targets) never leaves a half-created
@@ -480,7 +595,7 @@ export async function updateEvent(
   }
 
   if (invitees) {
-    statements.push(...replaceInviteStatements(env, eventId, invitees));
+    statements.push(...(await replaceInviteStatements(env, eventId, invitees)));
   }
 
   await env.DB.batch(statements);

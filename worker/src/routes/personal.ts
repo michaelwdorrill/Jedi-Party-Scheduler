@@ -3,6 +3,8 @@ import type { AppEnv } from '../lib/authMiddleware';
 import { newId } from '../lib/ids';
 import { mapPersonalEvent, type PersonalEventRow } from '../lib/personalEvents';
 import {
+  assertBoolean,
+  assertIsoDate,
   assertOneOf,
   assertOptionalString,
   assertRecurrenceInput,
@@ -20,6 +22,10 @@ function validatePersonalEventInput(body: Partial<PersonalEventInput>): void {
   if (body.description !== undefined) assertOptionalString(body.description, 'description', LIMITS.DESCRIPTION);
   if (body.timezone !== undefined) assertTimezone(body.timezone, 'timezone');
   if (body.availability !== undefined) assertOneOf(body.availability, 'availability', ['busy', 'considering', 'free'] as const);
+  // Typed as boolean but, until now, never checked: this flag decides whether
+  // start_at/end_at or the recurrence rule get written, so a non-boolean here
+  // quietly produced a differently-shaped row.
+  if (body.isRecurring !== undefined) assertBoolean(body.isRecurring, 'isRecurring');
 
   if (body.startAt != null) assertSafeInt(body.startAt, 'startAt');
   if (body.endAt != null) assertSafeInt(body.endAt, 'endAt');
@@ -198,17 +204,30 @@ personalRoutes.delete('/:id', async (c) => {
 personalRoutes.post('/:id/occurrences/:date/cancel', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
+  // Same reasoning as the guild-event override route: this path parameter is
+  // stored verbatim and later compared against expander-generated dates, so
+  // an unvalidated value writes a row that can never match anything.
+  const date = assertIsoDate(c.req.param('date'), 'date');
   const existing = await c.env.DB.prepare(`SELECT user_id FROM personal_events WHERE id = ?`)
     .bind(id)
     .first<{ user_id: string }>();
   if (!existing || existing.user_id !== userId) return c.text('Not found', 404);
+
+  const overrides = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM personal_event_overrides WHERE personal_event_id = ?`,
+  )
+    .bind(id)
+    .first<{ n: number }>();
+  if ((overrides?.n ?? 0) >= LIMITS.MAX_OVERRIDES_PER_EVENT) {
+    throw new ValidationError(`This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`);
+  }
 
   await c.env.DB.prepare(
     `INSERT INTO personal_event_overrides (id, personal_event_id, occurrence_date, is_cancelled)
      VALUES (?, ?, ?, 1)
      ON CONFLICT(personal_event_id, occurrence_date) DO UPDATE SET is_cancelled = 1`,
   )
-    .bind(newId(), id, c.req.param('date'))
+    .bind(newId(), id, date)
     .run();
   return c.json({ ok: true });
 });

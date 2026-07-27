@@ -5,7 +5,7 @@ import type { EventRow } from '../lib/events';
 import { requireActiveGuildMember } from '../lib/db';
 import { newId } from '../lib/ids';
 import { addInvitesToEvent, updateEvent, type EventWriteInput } from '../lib/eventWrites';
-import { assertOneOf, assertStringArray, LIMITS, readJsonBody } from '../lib/validate';
+import { assertIsoDate, assertOneOf, assertStringArray, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
 
 export const eventRoutes = new Hono<AppEnv>();
 
@@ -195,12 +195,31 @@ eventRoutes.delete('/:eventId', async (c) => {
   return c.json({ ok: true });
 });
 
+// Overrides are loaded and applied for every recurring event on every
+// calendar request, so an unbounded pile of them on one series is a cost
+// every viewer pays. Nothing about the feature needs hundreds.
+async function assertOverrideQuota(env: Env, eventId: string): Promise<void> {
+  const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM event_occurrence_overrides WHERE event_id = ?`)
+    .bind(eventId)
+    .first<{ n: number }>();
+  if ((row?.n ?? 0) >= LIMITS.MAX_OVERRIDES_PER_EVENT) {
+    throw new ValidationError(`This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`);
+  }
+}
+
 eventRoutes.post('/:eventId/occurrences/:date/cancel', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
-  const date = c.req.param('date');
+  // Path parameters are as attacker-controlled as bodies are, and this one is
+  // stored verbatim and later compared against dates the recurrence expander
+  // generates. An unvalidated value writes a row that can never match any
+  // occurrence -- an override that does nothing but take up space and count
+  // against the per-event cap.
+  const date = assertIsoDate(c.req.param('date'), 'date');
   const event = await loadOwnedActiveEvent(c.env, eventId, userId);
   if (!event) return c.text('Not found', 404);
+
+  await assertOverrideQuota(c.env, eventId);
 
   await c.env.DB.prepare(
     `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled)

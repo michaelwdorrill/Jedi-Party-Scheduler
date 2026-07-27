@@ -99,21 +99,34 @@ needs: editing Workers scripts and editing D1 databases.
 8. In `worker/wrangler.toml`, replace
    `REPLACE_ME_AFTER_WRANGLER_D1_CREATE` under `[[d1_databases]]` with that
    `database_id`.
-9. Apply the schema to the real (remote) database. Run **every** migration
-   file in order, oldest first:
+9. Apply the schema to the real (remote) database. On a **brand-new**
+   database, one command runs every migration in order:
    ```
-   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0001_init.sql
-   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0002_group_game.sql
-   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0003_poll_modes_and_idle_groups.sql
-   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0004_personal_events_and_free_busy.sql
-   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0005_considering_and_voice_channels.sql
-   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0006_sessions.sql
-   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0007_notification_outbox.sql
-   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0008_backfill_notification_outbox.sql
+   npm run db:migrate:remote
    ```
-   Each migration only needs to be run once, ever. When new ones are added
-   later, run just the new files against the remote database before deploying
-   the Worker that depends on them.
+   Each migration only needs to be run once, ever. On a database that is
+   already partway up to date, run **only the new files** — the command above
+   would re-run everything from the beginning, and while several migrations
+   are safe to repeat, some are not. Either apply them one at a time:
+   ```
+   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0009_notification_leases.sql
+   ```
+   ...or start from a given file with:
+   ```
+   npm run db:migrate:remote -- --from=0009_notification_leases.sql
+   ```
+   The full set, oldest first, is:
+   ```
+   0001_init.sql
+   0002_group_game.sql
+   0003_poll_modes_and_idle_groups.sql
+   0004_personal_events_and_free_busy.sql
+   0005_considering_and_voice_channels.sql
+   0006_sessions.sql
+   0007_notification_outbox.sql
+   0008_backfill_notification_outbox.sql
+   0009_notification_leases.sql
+   ```
 10. Set the three secrets (you'll be prompted to paste each value):
    ```
    npx wrangler secret put DISCORD_CLIENT_SECRET
@@ -173,6 +186,66 @@ By default you deploy the Worker yourself with `npm run deploy` whenever
 `CLOUDFLARE_API_TOKEN` (the same scoped token from step 2.3 works — it
 already has the Workers Scripts:Edit permission this needs) and
 `CLOUDFLARE_ACCOUNT_ID` (the same value from step 2.4).
+
+## Running the tests
+
+From `worker/`:
+
+```
+npm test          # the adversarial suite
+npm run typecheck
+```
+
+The suite runs the Worker's real route handlers and SQL against an in-memory
+SQLite database built from the migration files in this repo, with two
+deliberate differences from plain SQLite:
+
+- **D1's 100-bound-parameter ceiling is enforced.** Exceeding it in production
+  is a hard rejection, not a slow query, and several of this app's own limits
+  (100 invitees, 200 group members, 300 resolved invitees) sit at or above it.
+  Plain SQLite would accept thousands and hide the bug.
+- **Foreign keys are ON**, which D1 leaves off. Account deletion's statement
+  ordering is only meaningful if something checks it.
+
+CI (`.github/workflows/ci.yml`) runs both on every push and pull request.
+
+## Operations
+
+### Discord membership health
+
+Access to every server-scoped page depends on the bot being able to ask
+Discord whether you're still a member. When it can't, users see a **503 with a
+"try again in a few minutes" message**, not a permissions error — but only
+after the last successful check for that person is more than 24 hours old.
+Inside that window a Discord outage is invisible to everyone.
+
+The Worker's logs (`npx wrangler tail`) distinguish the cases, and they need
+different responses:
+
+| Log line | What it means | What to do |
+|---|---|---|
+| `Discord membership check rejected (401)` | The bot token is wrong or was regenerated | `npx wrangler secret put DISCORD_BOT_TOKEN` with the current token |
+| `Discord membership check rejected (403)` | The bot is no longer in that server | Re-invite the bot (step 1.6) |
+| `Discord membership check unavailable (429/5xx)` | Rate limit or a Discord outage | Nothing — it clears on its own |
+| `Membership for user … is Nh stale … denying access` | Someone has actually been locked out by the above | Fix whichever of the first two rows applies |
+
+A 401 or 403 will not fix itself, and after 24 hours it locks everyone out.
+Those two are the ones worth alerting on.
+
+### D1 plan limits
+
+The code assumes D1's documented **100 bound parameters per statement**, which
+applies on every plan. Queries that build a list of IDs are chunked below that
+ceiling, and bulk inserts are folded into multi-row statements, so the app's
+configured maxima (see `LIMITS` in `worker/src/lib/validate.ts`) stay inside it
+regardless of how large a group or invite list gets.
+
+D1 also caps **queries per Worker invocation**, and that limit *is*
+plan-dependent (lower on Free than on Paid). The per-guild quotas in `LIMITS`
+— events, recurring events, groups, per-event occurrence overrides — exist
+partly to bound this. If you move between plans, or raise any of those limits,
+check the current numbers at
+https://developers.cloudflare.com/d1/platform/limits/ first.
 
 ## Verifying it actually works
 

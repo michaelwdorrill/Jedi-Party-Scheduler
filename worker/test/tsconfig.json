@@ -1,0 +1,14 @@
+{
+  // The test harness runs on Node, not on workerd: it needs node:sqlite,
+  // node:fs, and import.meta.dirname, none of which exist in the Worker's own
+  // type environment. Keeping the Worker types alongside them means the tests
+  // still typecheck the real D1PreparedStatement/Response shapes they exercise.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "node"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true
+  },
+  "include": ["../test", "../vitest.config.ts"]
+}

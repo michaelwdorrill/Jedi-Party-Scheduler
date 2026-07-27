@@ -1,4 +1,5 @@
 import type { Env } from '../env';
+import { chunkIds, placeholders } from './d1';
 import { expandOccurrences, type ExpandedOccurrence, type OccurrenceOverride } from './recurrence';
 
 export interface PersonalEventRow {
@@ -60,17 +61,20 @@ export function mapPersonalEvent(row: PersonalEventRow) {
 
 async function loadOverrides(env: Env, personalEventIds: string[]): Promise<Map<string, OccurrenceOverride[]>> {
   const map = new Map<string, OccurrenceOverride[]>();
-  if (personalEventIds.length === 0) return map;
-  const placeholders = personalEventIds.map(() => '?').join(',');
-  const { results } = await env.DB.prepare(
-    `SELECT personal_event_id, occurrence_date, is_cancelled, override_start_at, override_end_at
-     FROM personal_event_overrides WHERE personal_event_id IN (${placeholders})`,
-  )
-    .bind(...personalEventIds)
-    .all<OccurrenceOverride & { personal_event_id: string }>();
-  for (const row of results) {
-    if (!map.has(row.personal_event_id)) map.set(row.personal_event_id, []);
-    map.get(row.personal_event_id)!.push(row);
+  // Chunked for the same reason as the guild-event helpers: a user is allowed
+  // up to MAX_PERSONAL_EVENTS_PER_USER of these, far past D1's per-statement
+  // bound-parameter ceiling.
+  for (const chunk of chunkIds(personalEventIds)) {
+    const { results } = await env.DB.prepare(
+      `SELECT personal_event_id, occurrence_date, is_cancelled, override_start_at, override_end_at
+       FROM personal_event_overrides WHERE personal_event_id IN (${placeholders(chunk.length)})`,
+    )
+      .bind(...chunk)
+      .all<OccurrenceOverride & { personal_event_id: string }>();
+    for (const row of results) {
+      if (!map.has(row.personal_event_id)) map.set(row.personal_event_id, []);
+      map.get(row.personal_event_id)!.push(row);
+    }
   }
   return map;
 }
