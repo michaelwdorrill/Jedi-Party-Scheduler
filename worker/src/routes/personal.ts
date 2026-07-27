@@ -2,6 +2,48 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import { newId } from '../lib/ids';
 import { mapPersonalEvent, type PersonalEventRow } from '../lib/personalEvents';
+import {
+  assertOneOf,
+  assertOptionalString,
+  assertSafeInt,
+  assertString,
+  assertTimeRange,
+  LIMITS,
+  ValidationError,
+} from '../lib/validate';
+
+function validatePersonalEventInput(body: Partial<PersonalEventInput>): void {
+  if (body.title !== undefined) assertString(body.title, 'title', LIMITS.TITLE);
+  if (body.description !== undefined) assertOptionalString(body.description, 'description', LIMITS.DESCRIPTION);
+  if (body.timezone !== undefined) assertString(body.timezone, 'timezone', 100);
+  if (body.availability !== undefined) assertOneOf(body.availability, 'availability', ['busy', 'considering', 'free'] as const);
+
+  if (body.startAt != null) assertSafeInt(body.startAt, 'startAt');
+  if (body.endAt != null) assertSafeInt(body.endAt, 'endAt');
+  if (body.startAt != null && body.endAt != null) {
+    assertTimeRange(body.startAt, body.endAt, 'event', LIMITS.MAX_EVENT_DURATION_MS);
+  }
+
+  if (body.recurrence) {
+    const r = body.recurrence;
+    assertString(r.startDate, 'recurrence.startDate', 20);
+    assertString(r.startTime, 'recurrence.startTime', 10);
+    assertSafeInt(r.interval, 'recurrence.interval');
+    if (r.interval < 1 || r.interval > LIMITS.MAX_RECURRENCE_INTERVAL) {
+      throw new ValidationError('recurrence.interval out of range');
+    }
+    assertSafeInt(r.durationMinutes, 'recurrence.durationMinutes');
+    if (r.durationMinutes < 1 || r.durationMinutes * 60_000 > LIMITS.MAX_EVENT_DURATION_MS) {
+      throw new ValidationError('recurrence.durationMinutes out of range');
+    }
+    if (r.endCount != null) {
+      assertSafeInt(r.endCount, 'recurrence.endCount');
+      if (r.endCount < 1 || r.endCount > LIMITS.MAX_RECURRENCE_COUNT) {
+        throw new ValidationError('recurrence.endCount out of range');
+      }
+    }
+  }
+}
 
 export const personalRoutes = new Hono<AppEnv>();
 
@@ -51,7 +93,8 @@ personalRoutes.get('/:id', async (c) => {
 personalRoutes.post('/', async (c) => {
   const userId = c.get('userId');
   const body = await c.req.json<PersonalEventInput>();
-  if (!body.title?.trim()) return c.text('title is required', 400);
+  validatePersonalEventInput(body);
+  if (body.isRecurring && !body.recurrence) throw new ValidationError('recurrence is required when isRecurring is true');
 
   const id = newId();
   const now = Date.now();
@@ -101,6 +144,7 @@ personalRoutes.patch('/:id', async (c) => {
   if (!existing || existing.user_id !== userId) return c.text('Not found', 404);
 
   const body = await c.req.json<Partial<PersonalEventInput>>();
+  validatePersonalEventInput(body);
   const r = body.isRecurring ? body.recurrence : undefined;
 
   const sets: string[] = ['updated_at = ?'];

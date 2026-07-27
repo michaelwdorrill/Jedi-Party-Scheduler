@@ -1,31 +1,65 @@
 import { Hono } from 'hono';
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { AppEnv } from '../lib/authMiddleware';
 import { requireAuth } from '../lib/authMiddleware';
 import { exchangeCodeForToken, fetchDiscordUser, fetchDiscordUserGuilds } from '../lib/discord';
 import { syncGuildMembership, upsertUser } from '../lib/db';
-import { signJwt } from '../lib/jwt';
-
-const JWT_TTL_SECONDS = 24 * 60 * 60; // 24h
+import { signJwt, verifyJwt } from '../lib/jwt';
+import { createSession, revokeSession, rotateSession } from '../lib/sessions';
 
 export const authRoutes = new Hono<AppEnv>();
+
+const STATE_COOKIE = 'oauth_state';
+const NO_STORE = 'no-store, private';
 
 function redirectUri(c: { req: { url: string } }): string {
   return `${new URL(c.req.url).origin}/auth/callback`;
 }
 
+function randomState(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Double-submit-cookie CSRF binding: the state only Discord ever sees is
+// mirrored into an HttpOnly cookie on *this* browser. An attacker who injects
+// a code+state pair captured from their own login attempt cannot also set
+// this cookie on the victim's browser, so the callback can tell "a login this
+// browser started" apart from "a login someone else started and redirected
+// the victim into." No server-side storage needed -- the cookie IS the state.
 authRoutes.get('/login', (c) => {
+  const state = randomState();
+  setCookie(c, STATE_COOKIE, state, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax',
+    path: '/auth',
+    maxAge: 600,
+  });
   const params = new URLSearchParams({
     client_id: c.env.DISCORD_CLIENT_ID,
     redirect_uri: redirectUri(c),
     response_type: 'code',
     scope: 'identify guilds',
+    state,
   });
   return c.redirect(`https://discord.com/api/oauth2/authorize?${params.toString()}`);
 });
 
 authRoutes.get('/callback', async (c) => {
   const code = c.req.query('code');
+  const state = c.req.query('state');
+  const cookieState = getCookie(c, STATE_COOKIE);
+  deleteCookie(c, STATE_COOKIE, { path: '/auth' });
+
   if (!code) return c.text('Missing code', 400);
+  if (!state || !cookieState || state !== cookieState) {
+    // Covers a missing/forged state, an expired cookie, and callback replay
+    // (the cookie is cleared above on first use either way).
+    return c.text('Login request could not be verified. Please try logging in again.', 400);
+  }
 
   try {
     const token = await exchangeCodeForToken(
@@ -55,15 +89,41 @@ authRoutes.get('/callback', async (c) => {
       discordGuilds.map((g) => g.id),
     );
 
-    const jwt = await signJwt(discordUser.id, c.env.JWT_SIGNING_KEY, JWT_TTL_SECONDS);
+    const session = await createSession(c.env, discordUser.id);
+    const jwt = await signJwt(discordUser.id, session.id, c.env.JWT_SIGNING_KEY);
+    c.header('Cache-Control', NO_STORE);
     return c.redirect(`${c.env.FRONTEND_URL}/#/auth/callback?token=${jwt}`);
   } catch (err) {
-    return c.text(`Login failed: ${(err as Error).message}`, 500);
+    // Never reflect the raw upstream error back to the browser -- it can
+    // contain Discord response bodies. Server-side logs get the detail.
+    console.error('OAuth callback failed:', err);
+    c.header('Cache-Control', NO_STORE);
+    return c.text('Login failed. Please try again.', 500);
   }
 });
 
-authRoutes.post('/refresh', requireAuth, async (c) => {
-  const userId = c.get('userId');
-  const jwt = await signJwt(userId, c.env.JWT_SIGNING_KEY, JWT_TTL_SECONDS);
+authRoutes.post('/refresh', async (c) => {
+  c.header('Cache-Control', NO_STORE);
+  const header = c.req.header('Authorization');
+  const token = header?.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return c.text('Unauthorized', 401);
+
+  // Deliberately ignores `exp` here: the whole point of refresh is renewing a
+  // token *after* its short lifetime has passed. Signature, structure, and
+  // claim shape are still fully validated; actual authority comes from
+  // rotateSession() confirming the underlying session is still active.
+  const payload = await verifyJwt(token, c.env.JWT_SIGNING_KEY, { ignoreExpiration: true });
+  if (!payload) return c.text('Unauthorized', 401);
+
+  const rotated = await rotateSession(c.env, payload.sid, payload.sub);
+  if (!rotated) return c.text('Unauthorized', 401);
+
+  const jwt = await signJwt(payload.sub, payload.sid, c.env.JWT_SIGNING_KEY);
   return c.json({ token: jwt });
+});
+
+authRoutes.post('/logout', requireAuth, async (c) => {
+  await revokeSession(c.env, c.get('sessionId'));
+  c.header('Cache-Control', NO_STORE);
+  return c.json({ ok: true });
 });

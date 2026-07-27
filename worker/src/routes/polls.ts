@@ -1,29 +1,36 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
+import type { Env } from '../env';
 import type { EventRow } from '../lib/events';
+import { requireActiveGuildMember } from '../lib/db';
 import {
   bestWindowBlock,
   checkThresholdAndResolve,
   checkWindowThresholdAndResolve,
   getOptionTallies,
 } from '../lib/polls';
+import { assertOneOf, assertSafeInt, assertString, assertTimeRange } from '../lib/validate';
 
 export const pollRoutes = new Hono<AppEnv>();
 
-async function requireInvitedOrOrganizer(c: { env: { DB: D1Database } }, eventId: string, userId: string) {
-  const invite = await c.env.DB.prepare(
-    `SELECT 1 FROM event_invites WHERE event_id = ? AND user_id = ?
-     UNION SELECT 1 FROM events WHERE id = ? AND organizer_id = ?`,
+// A former member holding a stale invite/organizer row must not keep poll
+// access -- current active membership in the event's guild is required too.
+async function requireInvitedOrOrganizer(env: Env, eventId: string, userId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT e.guild_id FROM events e
+     LEFT JOIN event_invites i ON i.event_id = e.id AND i.user_id = ?
+     WHERE e.id = ? AND (e.organizer_id = ? OR i.user_id IS NOT NULL)`,
   )
-    .bind(eventId, userId, eventId, userId)
-    .first();
-  return !!invite;
+    .bind(userId, eventId, userId)
+    .first<{ guild_id: string }>();
+  if (!row) return false;
+  return requireActiveGuildMember(env, userId, row.guild_id);
 }
 
 pollRoutes.get('/:eventId/poll', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
-  if (!(await requireInvitedOrOrganizer(c, eventId, userId))) return c.text('Forbidden', 403);
+  if (!(await requireInvitedOrOrganizer(c.env, eventId, userId))) return c.text('Forbidden', 403);
 
   const tallies = await getOptionTallies(c.env, eventId);
   const { results: myVotes } = await c.env.DB.prepare(
@@ -51,6 +58,8 @@ pollRoutes.post('/:eventId/poll/vote', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
   const body = await c.req.json<{ optionId: string; vote: 'yes' | 'no' | 'maybe' }>();
+  const optionId = assertString(body.optionId, 'optionId', 64);
+  const vote = assertOneOf(body.vote, 'vote', ['yes', 'no', 'maybe'] as const);
 
   const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
   if (!event || event.event_type !== 'poll' || event.poll_mode !== 'options') return c.text('Not found', 404);
@@ -58,7 +67,7 @@ pollRoutes.post('/:eventId/poll/vote', async (c) => {
   const option = await c.env.DB.prepare(
     `SELECT id, confirmed_at FROM event_poll_options WHERE id = ? AND event_id = ?`,
   )
-    .bind(body.optionId, eventId)
+    .bind(optionId, eventId)
     .first<{ id: string; confirmed_at: number | null }>();
   if (!option) return c.text('Invalid option', 400);
 
@@ -73,13 +82,13 @@ pollRoutes.post('/:eventId/poll/vote', async (c) => {
     return c.text('Voting is closed for this event', 400);
   }
 
-  if (!(await requireInvitedOrOrganizer(c, eventId, userId))) return c.text('Forbidden', 403);
+  if (!(await requireInvitedOrOrganizer(c.env, eventId, userId))) return c.text('Forbidden', 403);
 
   await c.env.DB.prepare(
     `INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES (?, ?, ?, ?)
      ON CONFLICT(option_id, user_id) DO UPDATE SET vote = excluded.vote, voted_at = excluded.voted_at`,
   )
-    .bind(body.optionId, userId, body.vote, Date.now())
+    .bind(optionId, userId, vote, Date.now())
     .run();
 
   await checkThresholdAndResolve(c.env, event);
@@ -90,7 +99,7 @@ pollRoutes.post('/:eventId/poll/vote', async (c) => {
 pollRoutes.get('/:eventId/window', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
-  if (!(await requireInvitedOrOrganizer(c, eventId, userId))) return c.text('Forbidden', 403);
+  if (!(await requireInvitedOrOrganizer(c.env, eventId, userId))) return c.text('Forbidden', 403);
 
   const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
   if (!event || event.event_type !== 'poll' || event.poll_mode !== 'window') return c.text('Not found', 404);
@@ -138,16 +147,20 @@ pollRoutes.post('/:eventId/window', async (c) => {
   const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
   if (!event || event.event_type !== 'poll' || event.poll_mode !== 'window') return c.text('Not found', 404);
   if (event.status !== 'active') return c.text('Voting is closed for this event', 400);
-  if (!(await requireInvitedOrOrganizer(c, eventId, userId))) return c.text('Forbidden', 403);
+  if (!(await requireInvitedOrOrganizer(c.env, eventId, userId))) return c.text('Forbidden', 403);
 
-  const body = await c.req.json<{ startAt: number; endAt: number }>();
+  const rawBody = await c.req.json<{ startAt: number; endAt: number }>();
+  const startAt = assertSafeInt(rawBody.startAt, 'startAt');
+  const endAt = assertSafeInt(rawBody.endAt, 'endAt');
+  assertTimeRange(startAt, endAt, 'availability');
+
   if (
     event.window_start_at == null ||
     event.window_end_at == null ||
     event.window_block_minutes == null ||
-    body.startAt < event.window_start_at ||
-    body.endAt > event.window_end_at ||
-    body.endAt - body.startAt < event.window_block_minutes * 60 * 1000
+    startAt < event.window_start_at ||
+    endAt > event.window_end_at ||
+    endAt - startAt < event.window_block_minutes * 60 * 1000
   ) {
     return c.text('Submitted range must fall within the window and cover at least one full block', 400);
   }
@@ -158,7 +171,7 @@ pollRoutes.post('/:eventId/window', async (c) => {
      ON CONFLICT(event_id, user_id) DO UPDATE SET avail_start_at = excluded.avail_start_at,
        avail_end_at = excluded.avail_end_at, submitted_at = excluded.submitted_at`,
   )
-    .bind(eventId, userId, body.startAt, body.endAt, Date.now())
+    .bind(eventId, userId, startAt, endAt, Date.now())
     .run();
 
   await checkWindowThresholdAndResolve(c.env, event);

@@ -64,8 +64,16 @@ async function notifyOnce(
     )
       .bind(newId(), user.id, eventId, notificationType, occurrenceDate, Date.now())
       .run();
-  } catch {
-    return; // already logged (and thus already attempted) for this exact notification
+  } catch (err) {
+    // A UNIQUE-constraint violation means exactly one thing: this exact
+    // notification was already logged (and thus already attempted) --
+    // skipping is correct. Any other failure (D1 outage, schema drift, a
+    // bug) must not be swallowed the same way, or a real delivery problem
+    // would look identical to "already sent" and never surface.
+    const message = (err as Error).message ?? '';
+    if (message.includes('UNIQUE constraint failed')) return;
+    console.error(`notifyOnce insert failed for ${notificationType}/${eventId}/${user.id}:`, err);
+    throw err;
   }
 
   await deliverDm(env, user, content);
@@ -95,20 +103,24 @@ async function sweepNewInvites(env: Env): Promise<void> {
   ).all<{ event_id: string; user_id: string; title: string }>();
 
   for (const row of results) {
-    const user = await env.DB.prepare(
-      `SELECT id, notifications_enabled, dm_channel_id, timezone FROM users WHERE id = ?`,
-    )
-      .bind(row.user_id)
-      .first<ParticipantRow>();
-    if (!user) continue;
-    await notifyOnce(
-      env,
-      user,
-      row.event_id,
-      'invite',
-      '',
-      `You've been invited to "${row.title}" on Uncle Owen.\n${eventLink(env, row.event_id)}`,
-    );
+    try {
+      const user = await env.DB.prepare(
+        `SELECT id, notifications_enabled, dm_channel_id, timezone FROM users WHERE id = ?`,
+      )
+        .bind(row.user_id)
+        .first<ParticipantRow>();
+      if (!user) continue;
+      await notifyOnce(
+        env,
+        user,
+        row.event_id,
+        'invite',
+        '',
+        `You've been invited to "${row.title}" on Uncle Owen.\n${eventLink(env, row.event_id)}`,
+      );
+    } catch (err) {
+      console.error(`sweepNewInvites failed for event ${row.event_id}/user ${row.user_id}:`, err);
+    }
   }
 }
 
@@ -125,15 +137,19 @@ async function sweepReminders(env: Env): Promise<void> {
     .all<EventRow>();
 
   for (const event of singleEvents) {
-    const participants = await getEventParticipants(env, event.id, event.organizer_id);
-    const remaining = event.start_at! - now;
-    for (const user of participants) {
-      if (remaining <= HOUR_MS) {
-        await notifyOnce(env, user, event.id, 'reminder_1h', '', `"${event.title}" starts in about an hour (${formatWhen(event.start_at!, user.timezone)}).\n${eventLink(env, event.id)}`);
+    try {
+      const participants = await getEventParticipants(env, event.id, event.organizer_id);
+      const remaining = event.start_at! - now;
+      for (const user of participants) {
+        if (remaining <= HOUR_MS) {
+          await notifyOnce(env, user, event.id, 'reminder_1h', '', `"${event.title}" starts in about an hour (${formatWhen(event.start_at!, user.timezone)}).\n${eventLink(env, event.id)}`);
+        }
+        if (remaining <= 24 * HOUR_MS) {
+          await notifyOnce(env, user, event.id, 'reminder_24h', '', `"${event.title}" is coming up on ${formatWhen(event.start_at!, user.timezone)}.\n${eventLink(env, event.id)}`);
+        }
       }
-      if (remaining <= 24 * HOUR_MS) {
-        await notifyOnce(env, user, event.id, 'reminder_24h', '', `"${event.title}" is coming up on ${formatWhen(event.start_at!, user.timezone)}.\n${eventLink(env, event.id)}`);
-      }
+    } catch (err) {
+      console.error(`sweepReminders (single) failed for event ${event.id}:`, err);
     }
   }
 
@@ -144,26 +160,30 @@ async function sweepReminders(env: Env): Promise<void> {
   if (recurringEvents.length > 0) {
     const overridesByEvent = await loadOverridesForEvents(env, recurringEvents.map((e) => e.id));
     for (const event of recurringEvents) {
-      const occurrences = await expandOccurrencesForEvent(
-        env,
-        event,
-        now,
-        windowEnd,
-        overridesByEvent.get(event.id) ?? [],
-      );
-      if (occurrences.length === 0) continue;
+      try {
+        const occurrences = await expandOccurrencesForEvent(
+          env,
+          event,
+          now,
+          windowEnd,
+          overridesByEvent.get(event.id) ?? [],
+        );
+        if (occurrences.length === 0) continue;
 
-      const participants = await getEventParticipants(env, event.id, event.organizer_id);
-      for (const occ of occurrences) {
-        const remaining = occ.startAt - now;
-        for (const user of participants) {
-          if (remaining <= HOUR_MS) {
-            await notifyOnce(env, user, event.id, 'reminder_1h', occ.date, `"${event.title}" starts in about an hour (${formatWhen(occ.startAt, user.timezone)}).\n${eventLink(env, event.id)}`);
-          }
-          if (remaining <= 24 * HOUR_MS) {
-            await notifyOnce(env, user, event.id, 'reminder_24h', occ.date, `"${event.title}" is coming up on ${formatWhen(occ.startAt, user.timezone)}.\n${eventLink(env, event.id)}`);
+        const participants = await getEventParticipants(env, event.id, event.organizer_id);
+        for (const occ of occurrences) {
+          const remaining = occ.startAt - now;
+          for (const user of participants) {
+            if (remaining <= HOUR_MS) {
+              await notifyOnce(env, user, event.id, 'reminder_1h', occ.date, `"${event.title}" starts in about an hour (${formatWhen(occ.startAt, user.timezone)}).\n${eventLink(env, event.id)}`);
+            }
+            if (remaining <= 24 * HOUR_MS) {
+              await notifyOnce(env, user, event.id, 'reminder_24h', occ.date, `"${event.title}" is coming up on ${formatWhen(occ.startAt, user.timezone)}.\n${eventLink(env, event.id)}`);
+            }
           }
         }
+      } catch (err) {
+        console.error(`sweepReminders (recurring) failed for event ${event.id}:`, err);
       }
     }
   }
@@ -190,13 +210,17 @@ async function sweepSingleWinnerPollNotifications(env: Env): Promise<void> {
   ).all<EventRow>();
 
   for (const event of polls) {
-    const participants = await getEventParticipants(env, event.id, event.organizer_id);
-    for (const user of participants) {
-      const message =
-        event.status === 'resolved'
-          ? `"${event.title}" is on! Time locked in: ${formatWhen(event.start_at!, user.timezone)}.\n${eventLink(env, event.id)}`
-          : `"${event.title}" didn't get enough votes and was cancelled.`;
-      await notifyOnce(env, user, event.id, 'poll_resolved', '', message);
+    try {
+      const participants = await getEventParticipants(env, event.id, event.organizer_id);
+      for (const user of participants) {
+        const message =
+          event.status === 'resolved'
+            ? `"${event.title}" is on! Time locked in: ${formatWhen(event.start_at!, user.timezone)}.\n${eventLink(env, event.id)}`
+            : `"${event.title}" didn't get enough votes and was cancelled.`;
+        await notifyOnce(env, user, event.id, 'poll_resolved', '', message);
+      }
+    } catch (err) {
+      console.error(`sweepSingleWinnerPollNotifications failed for event ${event.id}:`, err);
     }
   }
 }
@@ -212,22 +236,26 @@ async function sweepMultiWinnerPollClosedNotifications(env: Env): Promise<void> 
   ).all<EventRow>();
 
   for (const event of polls) {
-    // Per-day confirmations are notified separately (as they happen, to
-    // just that day's yes-voters) by sweepConfirmedMultiWinnerOptions --
-    // this is just a "voting closed" note to everyone else invited.
-    const { results: confirmedCount } = await env.DB.prepare(
-      `SELECT COUNT(*) as n FROM event_poll_options WHERE event_id = ? AND confirmed_at IS NOT NULL`,
-    )
-      .bind(event.id)
-      .all<{ n: number }>();
-    const n = confirmedCount[0]?.n ?? 0;
-    const participants = await getEventParticipants(env, event.id, event.organizer_id);
-    const message =
-      n > 0
-        ? `Voting for "${event.title}" has closed. ${n} day(s) got confirmed -- check the event for details.\n${eventLink(env, event.id)}`
-        : `"${event.title}" didn't get enough interest on any day and was cancelled.`;
-    for (const user of participants) {
-      await notifyOnce(env, user, event.id, 'poll_resolved', '', message);
+    try {
+      // Per-day confirmations are notified separately (as they happen, to
+      // just that day's yes-voters) by sweepConfirmedMultiWinnerOptions --
+      // this is just a "voting closed" note to everyone else invited.
+      const { results: confirmedCount } = await env.DB.prepare(
+        `SELECT COUNT(*) as n FROM event_poll_options WHERE event_id = ? AND confirmed_at IS NOT NULL`,
+      )
+        .bind(event.id)
+        .all<{ n: number }>();
+      const n = confirmedCount[0]?.n ?? 0;
+      const participants = await getEventParticipants(env, event.id, event.organizer_id);
+      const message =
+        n > 0
+          ? `Voting for "${event.title}" has closed. ${n} day(s) got confirmed -- check the event for details.\n${eventLink(env, event.id)}`
+          : `"${event.title}" didn't get enough interest on any day and was cancelled.`;
+      for (const user of participants) {
+        await notifyOnce(env, user, event.id, 'poll_resolved', '', message);
+      }
+    } catch (err) {
+      console.error(`sweepMultiWinnerPollClosedNotifications failed for event ${event.id}:`, err);
     }
   }
 }
@@ -244,23 +272,27 @@ async function sweepConfirmedMultiWinnerOptions(env: Env): Promise<void> {
   ).all<{ option_id: string; event_id: string; start_at: number; end_at: number; title: string }>();
 
   for (const opt of results) {
-    const { results: yesVoters } = await env.DB.prepare(
-      `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
-       FROM event_poll_votes epv JOIN users u ON u.id = epv.user_id
-       WHERE epv.option_id = ? AND epv.vote = 'yes'`,
-    )
-      .bind(opt.option_id)
-      .all<ParticipantRow>();
+    try {
+      const { results: yesVoters } = await env.DB.prepare(
+        `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
+         FROM event_poll_votes epv JOIN users u ON u.id = epv.user_id
+         WHERE epv.option_id = ? AND epv.vote = 'yes'`,
+      )
+        .bind(opt.option_id)
+        .all<ParticipantRow>();
 
-    for (const user of yesVoters) {
-      await notifyOnce(
-        env,
-        user,
-        opt.event_id,
-        'poll_resolved',
-        opt.option_id,
-        `"${opt.title}" is on for ${formatWhen(opt.start_at, user.timezone)}! You're confirmed.\n${eventLink(env, opt.event_id)}`,
-      );
+      for (const user of yesVoters) {
+        await notifyOnce(
+          env,
+          user,
+          opt.event_id,
+          'poll_resolved',
+          opt.option_id,
+          `"${opt.title}" is on for ${formatWhen(opt.start_at, user.timezone)}! You're confirmed.\n${eventLink(env, opt.event_id)}`,
+        );
+      }
+    } catch (err) {
+      console.error(`sweepConfirmedMultiWinnerOptions failed for option ${opt.option_id}:`, err);
     }
   }
 }
@@ -281,29 +313,33 @@ async function sweepPollDeadlineReminders(env: Env): Promise<void> {
     .all<EventRow>();
 
   for (const poll of polls) {
-    const hasVotedSubquery =
-      poll.poll_mode === 'window'
-        ? `SELECT 1 FROM event_window_availability WHERE event_id = ei.event_id AND user_id = ei.user_id`
-        : `SELECT 1 FROM event_poll_votes WHERE user_id = ei.user_id
-           AND option_id IN (SELECT id FROM event_poll_options WHERE event_id = ei.event_id)`;
+    try {
+      const hasVotedSubquery =
+        poll.poll_mode === 'window'
+          ? `SELECT 1 FROM event_window_availability WHERE event_id = ei.event_id AND user_id = ei.user_id`
+          : `SELECT 1 FROM event_poll_votes WHERE user_id = ei.user_id
+             AND option_id IN (SELECT id FROM event_poll_options WHERE event_id = ei.event_id)`;
 
-    const { results: nonVoters } = await env.DB.prepare(
-      `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
-       FROM event_invites ei JOIN users u ON u.id = ei.user_id
-       WHERE ei.event_id = ? AND NOT EXISTS (${hasVotedSubquery})`,
-    )
-      .bind(poll.id)
-      .all<ParticipantRow>();
+      const { results: nonVoters } = await env.DB.prepare(
+        `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
+         FROM event_invites ei JOIN users u ON u.id = ei.user_id
+         WHERE ei.event_id = ? AND NOT EXISTS (${hasVotedSubquery})`,
+      )
+        .bind(poll.id)
+        .all<ParticipantRow>();
 
-    for (const user of nonVoters) {
-      await notifyOnce(
-        env,
-        user,
-        poll.id,
-        'poll_deadline_reminder',
-        '',
-        `Voting for "${poll.title}" closes soon -- you haven't responded yet.\n${eventLink(env, poll.id)}`,
-      );
+      for (const user of nonVoters) {
+        await notifyOnce(
+          env,
+          user,
+          poll.id,
+          'poll_deadline_reminder',
+          '',
+          `Voting for "${poll.title}" closes soon -- you haven't responded yet.\n${eventLink(env, poll.id)}`,
+        );
+      }
+    } catch (err) {
+      console.error(`sweepPollDeadlineReminders failed for poll ${poll.id}:`, err);
     }
   }
 }
@@ -335,17 +371,21 @@ async function sweepVoiceChannelInvites(env: Env): Promise<void> {
     .all<EventRow>();
 
   for (const event of fixedTimeEvents) {
-    const optionId = event.event_type === 'poll' && event.poll_mode === 'options' ? event.resolved_option_id : null;
-    const attendees = await getConfirmedAttendeeIds(env, event, optionId);
-    for (const user of attendees) {
-      await notifyOnce(
-        env,
-        user,
-        event.id,
-        'voice_channel_invite',
-        '',
-        `"${event.title}" is starting soon -- join the "${event.voice_channel_name}" voice channel:\n${voiceChannelLink(event.guild_id, event.voice_channel_id!)}`,
-      );
+    try {
+      const optionId = event.event_type === 'poll' && event.poll_mode === 'options' ? event.resolved_option_id : null;
+      const attendees = await getConfirmedAttendeeIds(env, event, optionId);
+      for (const user of attendees) {
+        await notifyOnce(
+          env,
+          user,
+          event.id,
+          'voice_channel_invite',
+          '',
+          `"${event.title}" is starting soon -- join the "${event.voice_channel_name}" voice channel:\n${voiceChannelLink(event.guild_id, event.voice_channel_id!)}`,
+        );
+      }
+    } catch (err) {
+      console.error(`sweepVoiceChannelInvites (fixed-time) failed for event ${event.id}:`, err);
     }
   }
 
@@ -356,27 +396,31 @@ async function sweepVoiceChannelInvites(env: Env): Promise<void> {
   if (recurringEvents.length > 0) {
     const overridesByEvent = await loadOverridesForEvents(env, recurringEvents.map((e) => e.id));
     for (const event of recurringEvents) {
-      const occurrences = await expandOccurrencesForEvent(
-        env,
-        event,
-        now,
-        windowEnd,
-        overridesByEvent.get(event.id) ?? [],
-      );
-      if (occurrences.length === 0) continue;
+      try {
+        const occurrences = await expandOccurrencesForEvent(
+          env,
+          event,
+          now,
+          windowEnd,
+          overridesByEvent.get(event.id) ?? [],
+        );
+        if (occurrences.length === 0) continue;
 
-      const attendees = await getConfirmedAttendeeIds(env, event, null);
-      for (const occ of occurrences) {
-        for (const user of attendees) {
-          await notifyOnce(
-            env,
-            user,
-            event.id,
-            'voice_channel_invite',
-            occ.date,
-            `"${event.title}" is starting soon -- join the "${event.voice_channel_name}" voice channel:\n${voiceChannelLink(event.guild_id, event.voice_channel_id!)}`,
-          );
+        const attendees = await getConfirmedAttendeeIds(env, event, null);
+        for (const occ of occurrences) {
+          for (const user of attendees) {
+            await notifyOnce(
+              env,
+              user,
+              event.id,
+              'voice_channel_invite',
+              occ.date,
+              `"${event.title}" is starting soon -- join the "${event.voice_channel_name}" voice channel:\n${voiceChannelLink(event.guild_id, event.voice_channel_id!)}`,
+            );
+          }
         }
+      } catch (err) {
+        console.error(`sweepVoiceChannelInvites (recurring) failed for event ${event.id}:`, err);
       }
     }
   }
@@ -389,25 +433,29 @@ async function sweepVoiceChannelInvites(env: Env): Promise<void> {
   ).all<EventRow>();
 
   for (const poll of multiWinnerPolls) {
-    const { results: options } = await env.DB.prepare(
-      `SELECT id FROM event_poll_options
-       WHERE event_id = ? AND confirmed_at IS NOT NULL AND start_at >= ? AND start_at <= ?`,
-    )
-      .bind(poll.id, now, windowEnd)
-      .all<{ id: string }>();
+    try {
+      const { results: options } = await env.DB.prepare(
+        `SELECT id FROM event_poll_options
+         WHERE event_id = ? AND confirmed_at IS NOT NULL AND start_at >= ? AND start_at <= ?`,
+      )
+        .bind(poll.id, now, windowEnd)
+        .all<{ id: string }>();
 
-    for (const opt of options) {
-      const attendees = await getConfirmedAttendeeIds(env, poll, opt.id);
-      for (const user of attendees) {
-        await notifyOnce(
-          env,
-          user,
-          poll.id,
-          'voice_channel_invite',
-          opt.id,
-          `"${poll.title}" is starting soon -- join the "${poll.voice_channel_name}" voice channel:\n${voiceChannelLink(poll.guild_id, poll.voice_channel_id!)}`,
-        );
+      for (const opt of options) {
+        const attendees = await getConfirmedAttendeeIds(env, poll, opt.id);
+        for (const user of attendees) {
+          await notifyOnce(
+            env,
+            user,
+            poll.id,
+            'voice_channel_invite',
+            opt.id,
+            `"${poll.title}" is starting soon -- join the "${poll.voice_channel_name}" voice channel:\n${voiceChannelLink(poll.guild_id, poll.voice_channel_id!)}`,
+          );
+        }
       }
+    } catch (err) {
+      console.error(`sweepVoiceChannelInvites (multi-winner) failed for poll ${poll.id}:`, err);
     }
   }
 }
@@ -428,54 +476,70 @@ async function sweepIdleGroups(env: Env): Promise<void> {
   ).all<GroupIdleRow>();
 
   for (const group of groups) {
-    const { results: eventRows } = await env.DB.prepare(
-      `SELECT DISTINCT e.start_at, e.end_at FROM events e
-       JOIN event_invites ei ON ei.event_id = e.id
-       WHERE ei.source_group_id = ? AND e.status != 'cancelled' AND e.start_at IS NOT NULL`,
-    )
-      .bind(group.id)
-      .all<{ start_at: number; end_at: number }>();
+    try {
+      const { results: eventRows } = await env.DB.prepare(
+        `SELECT DISTINCT e.start_at, e.end_at FROM events e
+         JOIN event_invites ei ON ei.event_id = e.id
+         WHERE ei.source_group_id = ? AND e.status != 'cancelled' AND e.start_at IS NOT NULL`,
+      )
+        .bind(group.id)
+        .all<{ start_at: number; end_at: number }>();
 
-    if (eventRows.length === 0) continue; // never had an event -- not "idle", just new
+      if (eventRows.length === 0) continue; // never had an event -- not "idle", just new
 
-    const lastEventAt = Math.max(...eventRows.map((e) => e.end_at ?? e.start_at));
-    const hasUpcoming = eventRows.some((e) => e.start_at > now);
-    if (hasUpcoming) continue;
+      const lastEventAt = Math.max(...eventRows.map((e) => e.end_at ?? e.start_at));
+      const hasUpcoming = eventRows.some((e) => e.start_at > now);
+      if (hasUpcoming) continue;
 
-    const idleMs = group.idle_reminder_days * 24 * HOUR_MS;
-    if (now - lastEventAt < idleMs) continue;
+      const idleMs = group.idle_reminder_days * 24 * HOUR_MS;
+      if (now - lastEventAt < idleMs) continue;
 
-    const already = await env.DB.prepare(
-      `SELECT last_event_at FROM group_activity_nudges WHERE group_id = ?`,
-    )
-      .bind(group.id)
-      .first<{ last_event_at: number }>();
-    if (already && already.last_event_at === lastEventAt) continue; // already nudged for this idle episode
+      const already = await env.DB.prepare(
+        `SELECT last_event_at FROM group_activity_nudges WHERE group_id = ?`,
+      )
+        .bind(group.id)
+        .first<{ last_event_at: number }>();
+      if (already && already.last_event_at === lastEventAt) continue; // already nudged for this idle episode
 
-    const { results: members } = await env.DB.prepare(
-      `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone, g.name as group_name
-       FROM group_members gm JOIN users u ON u.id = gm.user_id
-       JOIN groups g ON g.id = gm.group_id
-       WHERE gm.group_id = ?`,
-    )
-      .bind(group.id)
-      .all<ParticipantRow & { group_name: string }>();
+      const { results: members } = await env.DB.prepare(
+        `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone, g.name as group_name
+         FROM group_members gm JOIN users u ON u.id = gm.user_id
+         JOIN groups g ON g.id = gm.group_id
+         WHERE gm.group_id = ?`,
+      )
+        .bind(group.id)
+        .all<ParticipantRow & { group_name: string }>();
 
-    for (const member of members) {
-      if (!member.notifications_enabled) continue;
-      await deliverDm(
-        env,
-        member,
-        `It's been a while since "${member.group_name}" last played -- want to schedule something?\n${env.FRONTEND_URL}/#/calendar`,
-      );
+      for (const member of members) {
+        if (!member.notifications_enabled) continue;
+        await deliverDm(
+          env,
+          member,
+          `It's been a while since "${member.group_name}" last played -- want to schedule something?\n${env.FRONTEND_URL}/#/calendar`,
+        );
+      }
+
+      await env.DB.prepare(
+        `INSERT INTO group_activity_nudges (group_id, last_event_at, notified_at) VALUES (?, ?, ?)
+         ON CONFLICT(group_id) DO UPDATE SET last_event_at = excluded.last_event_at, notified_at = excluded.notified_at`,
+      )
+        .bind(group.id, lastEventAt, now)
+        .run();
+    } catch (err) {
+      console.error(`sweepIdleGroups failed for group ${group.id}:`, err);
     }
+  }
+}
 
-    await env.DB.prepare(
-      `INSERT INTO group_activity_nudges (group_id, last_event_at, notified_at) VALUES (?, ?, ?)
-       ON CONFLICT(group_id) DO UPDATE SET last_event_at = excluded.last_event_at, notified_at = excluded.notified_at`,
-    )
-      .bind(group.id, lastEventAt, now)
-      .run();
+// Each sweep is independently fault-isolated: one throwing (a malformed row
+// that slipped past write-time validation, a transient D1 error) must not
+// prevent the other sweep types from running this tick, since they cover
+// unrelated notifications on their own schedules.
+async function runIsolated(name: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`Cron sweep "${name}" failed:`, err);
   }
 }
 
@@ -486,13 +550,13 @@ export async function runReminderSweep(env: Env): Promise<void> {
   // resolved/cancelled poll each tick (dedupe makes that safe) rather than
   // depending on "resolved this exact tick", since single_winner polls often
   // resolve synchronously via threshold well before any deadline.
-  await sweepPollDeadlines(env);
-  await sweepSingleWinnerPollNotifications(env);
-  await sweepMultiWinnerPollClosedNotifications(env);
-  await sweepConfirmedMultiWinnerOptions(env);
-  await sweepNewInvites(env);
-  await sweepReminders(env);
-  await sweepPollDeadlineReminders(env);
-  await sweepVoiceChannelInvites(env);
-  await sweepIdleGroups(env);
+  await runIsolated('pollDeadlines', () => sweepPollDeadlines(env));
+  await runIsolated('singleWinnerPollNotifications', () => sweepSingleWinnerPollNotifications(env));
+  await runIsolated('multiWinnerPollClosedNotifications', () => sweepMultiWinnerPollClosedNotifications(env));
+  await runIsolated('confirmedMultiWinnerOptions', () => sweepConfirmedMultiWinnerOptions(env));
+  await runIsolated('newInvites', () => sweepNewInvites(env));
+  await runIsolated('reminders', () => sweepReminders(env));
+  await runIsolated('pollDeadlineReminders', () => sweepPollDeadlineReminders(env));
+  await runIsolated('voiceChannelInvites', () => sweepVoiceChannelInvites(env));
+  await runIsolated('idleGroups', () => sweepIdleGroups(env));
 }

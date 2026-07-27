@@ -10,6 +10,7 @@ import { eventRoutes } from './routes/events';
 import { pollRoutes } from './routes/polls';
 import { personalRoutes } from './routes/personal';
 import { adminRoutes } from './routes/admin';
+import { MAX_BODY_BYTES, ValidationError } from './lib/validate';
 
 export function buildApp() {
   const app = new Hono<AppEnv>();
@@ -26,6 +27,23 @@ export function buildApp() {
       allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     });
     return corsMiddleware(c, next);
+  });
+
+  // Rejects an oversized body by its declared Content-Length before any
+  // route buffers it into memory as JSON. A request that omits
+  // Content-Length (chunked transfer) falls through to this check and to
+  // Cloudflare's own platform-level body size ceiling as a backstop.
+  app.use('*', async (c, next) => {
+    const len = c.req.header('Content-Length');
+    if (len && Number(len) > MAX_BODY_BYTES) return c.text('Request body too large', 413);
+    await next();
+    c.header('Referrer-Policy', 'no-referrer');
+  });
+
+  app.onError((err, c) => {
+    if (err instanceof ValidationError) return c.text(err.message, 400);
+    console.error('Unhandled error:', err);
+    return c.text('Internal error', 500);
   });
 
   app.route('/auth', authRoutes);
