@@ -70,7 +70,7 @@ async function sweepNewInvites(env: Env): Promise<void> {
      LEFT JOIN notification_log nl
        ON nl.user_id = ei.user_id AND nl.event_id = ei.event_id
        AND nl.notification_type = 'invite' AND nl.occurrence_date = ''
-     WHERE e.status = 'active' AND nl.id IS NULL`,
+     WHERE e.status != 'cancelled' AND nl.id IS NULL`,
   ).all<{ event_id: string; user_id: string; title: string }>();
 
   for (const row of results) {
@@ -86,7 +86,7 @@ async function sweepNewInvites(env: Env): Promise<void> {
       row.event_id,
       'invite',
       '',
-      `You've been invited to "${row.title}" on Jedi Party Scheduler.`,
+      `You've been invited to "${row.title}" on Uncle Owen.`,
     );
   }
 }

@@ -37,15 +37,17 @@ export default function GroupsPage() {
     return <p className="text-slate-400">You don't share any allow-listed servers yet.</p>;
   }
 
-  const handleSave = async (data: { name: string; memberUserIds: string[] }) => {
+  const handleSave = async (data: { name: string; game: string | null; memberUserIds: string[] }) => {
     if (editing === 'new') {
       await api.post(`/guilds/${selectedGuildId}/groups`, {
         name: data.name,
+        game: data.game,
         member_user_ids: data.memberUserIds,
       });
     } else if (editing) {
       await api.patch(`/groups/${editing.id}`, {
         name: data.name,
+        game: data.game,
         member_user_ids: data.memberUserIds,
       });
     }
@@ -97,7 +99,10 @@ export default function GroupsPage() {
               className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900 p-3"
             >
               <div>
-                <div className="font-medium">{g.name}</div>
+                <div className="font-medium">
+                  {g.name}
+                  {g.game && <span className="ml-2 text-sm font-normal text-slate-500">— {g.game}</span>}
+                </div>
                 <div className="text-sm text-slate-400">
                   {g.members.map((m) => m.globalName ?? m.username).join(', ') || 'No members'}
                 </div>

@@ -67,15 +67,17 @@ export default function EventDetailPage() {
           <h1 className="text-2xl font-semibold">{event.title}</h1>
           {event.game && <p className="text-slate-400">{event.game}</p>}
         </div>
-        {isOrganizer && event.status === 'active' && (
+        {isOrganizer && event.status !== 'cancelled' && (
           <div className="flex gap-2">
-            <Link
-              to={`/events/${event.eventId}/edit`}
-              className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
-            >
-              Edit
-            </Link>
-            {event.isRecurring && occurrenceDate && (
+            {event.status === 'active' && (
+              <Link
+                to={`/events/${event.eventId}/edit`}
+                className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
+              >
+                Edit
+              </Link>
+            )}
+            {event.status === 'active' && event.isRecurring && occurrenceDate && (
               <button
                 onClick={handleCancelOccurrence}
                 className="rounded-md border border-amber-800 px-3 py-1.5 text-sm text-amber-400 hover:bg-amber-950"
@@ -110,7 +112,7 @@ export default function EventDetailPage() {
         </div>
       )}
 
-      {event.eventType === 'poll' && event.pollOptions && (
+      {event.eventType === 'poll' && event.status === 'active' && event.pollOptions && (
         <div className="space-y-2">
           <p className="text-sm text-slate-400">
             {event.pollStrategy === 'threshold'
@@ -128,6 +130,13 @@ export default function EventDetailPage() {
               onVote={(vote) => handleVote(opt.id, vote)}
             />
           ))}
+        </div>
+      )}
+
+      {event.eventType === 'poll' && event.status === 'resolved' && event.startAt && event.endAt && (
+        <div className="rounded-lg border border-emerald-900 bg-emerald-950/40 p-4">
+          <p className="mb-1 text-sm text-emerald-400">This session is confirmed.</p>
+          <p className="font-medium">{formatTimeRange(event.startAt, event.endAt, zone)}</p>
         </div>
       )}
 

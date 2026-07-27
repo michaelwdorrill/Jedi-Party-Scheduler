@@ -7,6 +7,7 @@ interface GroupRow {
   id: string;
   guild_id: string;
   name: string;
+  game: string | null;
   created_by: string;
 }
 
@@ -36,6 +37,7 @@ groupRoutes.get('/:groupId', async (c) => {
     id: group.id,
     guildId: group.guild_id,
     name: group.name,
+    game: group.game,
     createdBy: group.created_by,
     members: await loadGroupMembers(c.env.DB, groupId),
   });
@@ -48,9 +50,14 @@ groupRoutes.patch('/:groupId', async (c) => {
   if (!group) return c.text('Not found', 404);
   if (group.created_by !== userId) return c.text('Forbidden', 403);
 
-  const body = await c.req.json<{ name?: string; member_user_ids?: string[] }>();
+  const body = await c.req.json<{ name?: string; game?: string | null; member_user_ids?: string[] }>();
   if (body.name?.trim()) {
     await c.env.DB.prepare(`UPDATE groups SET name = ? WHERE id = ?`).bind(body.name.trim(), groupId).run();
+  }
+  if (body.game !== undefined) {
+    await c.env.DB.prepare(`UPDATE groups SET game = ? WHERE id = ?`)
+      .bind(body.game?.trim() || null, groupId)
+      .run();
   }
   if (body.member_user_ids) {
     await c.env.DB.prepare(`DELETE FROM group_members WHERE group_id = ?`).bind(groupId).run();

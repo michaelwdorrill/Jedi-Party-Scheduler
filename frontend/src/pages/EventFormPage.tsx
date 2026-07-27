@@ -140,8 +140,16 @@ export default function EventFormPage() {
 
   const toggleUser = (id: string) =>
     setSelectedUserIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  const toggleGroup = (id: string) =>
-    setSelectedGroupIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const toggleGroup = (id: string) => {
+    const alreadySelected = selectedGroupIds.includes(id);
+    setSelectedGroupIds((prev) => (alreadySelected ? prev.filter((x) => x !== id) : [...prev, id]));
+    // Pre-fill the game field from the group's default, but only when adding
+    // a group and only if the organizer hasn't already typed something in.
+    if (!alreadySelected && !game.trim()) {
+      const groupGame = groups.find((g) => g.id === id)?.game;
+      if (groupGame) setGame(groupGame);
+    }
+  };
 
   const toUtcMillis = (d: string, t: string) => DateTime.fromISO(`${d}T${t}`, { zone: timezone }).toMillis();
 

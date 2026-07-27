@@ -10,10 +10,11 @@ export default function GroupEditor({
 }: {
   friends: Friend[];
   initial?: Group;
-  onSave: (data: { name: string; memberUserIds: string[] }) => void;
+  onSave: (data: { name: string; game: string | null; memberUserIds: string[] }) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(initial?.name ?? '');
+  const [game, setGame] = useState(initial?.game ?? '');
   const [memberIds, setMemberIds] = useState<string[]>(
     initial?.members.map((m) => m.id) ?? [],
   );
@@ -33,6 +34,16 @@ export default function GroupEditor({
         />
       </div>
 
+      <div>
+        <label className="mb-1 block text-sm text-slate-400">Default game (optional)</label>
+        <input
+          value={game}
+          onChange={(e) => setGame(e.target.value)}
+          placeholder="e.g. Stellaris — pre-fills new events invited via this group"
+          className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+        />
+      </div>
+
       <InviteePicker
         friends={friends}
         selectedUserIds={memberIds}
@@ -48,7 +59,7 @@ export default function GroupEditor({
         </button>
         <button
           disabled={!name.trim()}
-          onClick={() => onSave({ name: name.trim(), memberUserIds: memberIds })}
+          onClick={() => onSave({ name: name.trim(), game: game.trim() || null, memberUserIds: memberIds })}
           className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
         >
           Save

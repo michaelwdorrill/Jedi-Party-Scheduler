@@ -16,6 +16,7 @@ export interface Group {
   id: string;
   guildId: string;
   name: string;
+  game: string | null;
   createdBy: string;
   members: Friend[];
 }

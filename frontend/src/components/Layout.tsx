@@ -15,7 +15,7 @@ export default function Layout() {
       <header className="border-b border-slate-800 bg-slate-900">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
           <div className="flex items-center gap-4">
-            <span className="text-lg font-semibold">Jedi Party Scheduler</span>
+            <span className="text-lg font-semibold">Uncle Owen</span>
             <nav className="flex gap-1">
               <NavLink to="/" end className={navLinkClass}>
                 Dashboard

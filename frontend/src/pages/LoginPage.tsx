@@ -10,7 +10,7 @@ export default function LoginPage() {
 
   return (
     <div className="flex h-screen flex-col items-center justify-center gap-6">
-      <h1 className="text-3xl font-bold">Jedi Party Scheduler</h1>
+      <h1 className="text-3xl font-bold">Uncle Owen</h1>
       <p className="max-w-md text-center text-slate-400">
         Log in with Discord to see the schedule for your servers and coordinate
         sessions with your friends.

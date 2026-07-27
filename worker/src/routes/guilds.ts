@@ -20,10 +20,10 @@ guildRoutes.get('/:guildId/groups', async (c) => {
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
   const { results: groups } = await c.env.DB.prepare(
-    `SELECT id, guild_id, name, created_by FROM groups WHERE guild_id = ? ORDER BY name`,
+    `SELECT id, guild_id, name, game, created_by FROM groups WHERE guild_id = ? ORDER BY name`,
   )
     .bind(guildId)
-    .all<{ id: string; guild_id: string; name: string; created_by: string }>();
+    .all<{ id: string; guild_id: string; name: string; game: string | null; created_by: string }>();
 
   const out = [];
   for (const g of groups) {
@@ -39,6 +39,7 @@ guildRoutes.get('/:guildId/groups', async (c) => {
       id: g.id,
       guildId: g.guild_id,
       name: g.name,
+      game: g.game,
       createdBy: g.created_by,
       members: members.map((m) => ({
         id: m.id,
@@ -56,15 +57,15 @@ guildRoutes.post('/:guildId/groups', async (c) => {
   const guildId = c.req.param('guildId');
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
-  const body = await c.req.json<{ name: string; member_user_ids: string[] }>();
+  const body = await c.req.json<{ name: string; game?: string | null; member_user_ids: string[] }>();
   if (!body.name?.trim()) return c.text('name is required', 400);
 
   const groupId = newId();
   const now = Date.now();
   await c.env.DB.prepare(
-    `INSERT INTO groups (id, guild_id, name, created_by, created_at) VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO groups (id, guild_id, name, game, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
   )
-    .bind(groupId, guildId, body.name.trim(), userId, now)
+    .bind(groupId, guildId, body.name.trim(), body.game?.trim() || null, userId, now)
     .run();
 
   for (const memberId of body.member_user_ids ?? []) {
