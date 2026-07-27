@@ -5,20 +5,20 @@ compatibility_flags = ["nodejs_compat"]
 
 # Pinning this avoids Wrangler needing an "list accounts" API call (and thus
 # a broader token permission) to figure out which account to use.
-account_id = "REPLACE_ME"
+account_id = "f22e4f3ece3f69c4bd0da97be4f7a3b6"
 
 # Non-secret configuration. Secrets (DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN,
 # JWT_SIGNING_KEY) are NOT set here — see docs/SETUP.md, they're set via
 # `wrangler secret put` and never committed.
 [vars]
-DISCORD_CLIENT_ID = "REPLACE_ME"
+DISCORD_CLIENT_ID = "1531128508728737812"
 FRONTEND_URL = "https://michaelwdorrill.github.io/Jedi-Party-Scheduler"
-OWNER_DISCORD_ID = "REPLACE_ME"
+OWNER_DISCORD_ID = "346042183486537730"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "jedi-party-scheduler-db"
-database_id = "REPLACE_ME_AFTER_WRANGLER_D1_CREATE"
+database_id = "0f106451-de8f-4623-be4a-86cbf407d58b"
 
 # Runs the reminder/poll-resolution sweep every 15 minutes.
 [triggers]
