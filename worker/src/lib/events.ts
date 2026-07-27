@@ -78,6 +78,7 @@ export function mapOccurrence(
   startAt: number | null,
   endAt: number | null,
   myRsvpStatus: string | null,
+  groupId: string | null = null,
 ) {
   return {
     occurrenceId,
@@ -91,8 +92,33 @@ export function mapOccurrence(
     startAt,
     endAt,
     isRecurring: !!event.is_recurring,
+    isPersonal: false,
     organizerId: event.organizer_id,
     myRsvpStatus: (myRsvpStatus as 'pending' | 'accepted' | 'declined' | 'tentative' | null) ?? null,
     pollDeadlineAt: event.poll_deadline_at,
+    // Which saved group this event was invited through, if any. Drives stable
+    // per-group colouring on the calendar; null for ad-hoc individual invites.
+    groupId,
   };
+}
+
+// Loads the group each event was invited through, so the calendar can colour
+// a group's sessions consistently. An event invited via multiple groups just
+// takes the lowest-id one -- arbitrary but stable, which is all colouring needs.
+export async function loadPrimaryGroupForEvents(
+  env: Env,
+  eventIds: string[],
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (eventIds.length === 0) return map;
+  const placeholders = eventIds.map(() => '?').join(',');
+  const { results } = await env.DB.prepare(
+    `SELECT event_id, MIN(source_group_id) AS group_id FROM event_invites
+     WHERE event_id IN (${placeholders}) AND source_group_id IS NOT NULL
+     GROUP BY event_id`,
+  )
+    .bind(...eventIds)
+    .all<{ event_id: string; group_id: string }>();
+  for (const row of results) map.set(row.event_id, row.group_id);
+  return map;
 }

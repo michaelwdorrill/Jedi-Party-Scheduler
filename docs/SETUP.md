@@ -27,8 +27,21 @@ those require your own credentials. Do these steps yourself, in order.
    open it, and add the bot to **every** Discord server you want this app to
    support (the bot must share a server with a user for DMs to work
    reliably).
-7. Decide which Discord server(s) (guilds) you want the app to support —
-   you'll add their server IDs to the allow-list in step 4 below. To get a
+7. Under **General Information**, fill in the two policy links. Discord
+   requires both before an app can be verified, and its Developer Terms
+   require users to have an accessible way to ask for their data to be
+   modified or deleted. These pages ship with the app:
+   - Terms of Service URL:
+     `https://<your-username>.github.io/Jedi-Party-Scheduler/#/terms`
+   - Privacy Policy URL:
+     `https://<your-username>.github.io/Jedi-Party-Scheduler/#/privacy`
+
+   **Before publishing them**, open `frontend/src/lib/legal.ts` and replace
+   `REPLACE_WITH_YOUR_CONTACT_EMAIL` with an address you actually monitor.
+   Both documents cite it as the fallback route for data requests from anyone
+   who can no longer sign in.
+8. Decide which Discord server(s) (guilds) you want the app to support —
+   you'll add their server IDs to the allow-list in step 2.15 below. To get a
    server's ID, enable Developer Mode in Discord (User Settings → Advanced),
    then right-click the server icon → **Copy Server ID**.
 
@@ -86,9 +99,17 @@ needs: editing Workers scripts and editing D1 databases.
 8. In `worker/wrangler.toml`, replace
    `REPLACE_ME_AFTER_WRANGLER_D1_CREATE` under `[[d1_databases]]` with that
    `database_id`.
-9. Apply the schema to the real (remote) database:
-   `npm run db:migrate:remote`
-   (this runs `wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0001_init.sql`).
+9. Apply the schema to the real (remote) database. Run **every** migration
+   file in order, oldest first:
+   ```
+   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0001_init.sql
+   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0002_group_game.sql
+   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0003_poll_modes_and_idle_groups.sql
+   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0004_personal_events_and_free_busy.sql
+   ```
+   Each migration only needs to be run once, ever. When new ones are added
+   later, run just the new files against the remote database before deploying
+   the Worker that depends on them.
 10. Set the three secrets (you'll be prompted to paste each value):
    ```
    npx wrangler secret put DISCORD_CLIENT_SECRET
@@ -123,8 +144,8 @@ needs: editing Workers scripts and editing D1 databases.
       -d '{"id": "<discord server id>", "name": "Jedi Party"}'
     ```
     (Or insert directly: `npx wrangler d1 execute jedi-party-scheduler-db --remote --command "INSERT INTO guilds (id, name, is_active, added_at) VALUES ('<id>', 'Jedi Party', 1, <unix ms>);"`.)
-    Log out and back in (or call `POST /auth/sync-guilds`) afterward so your
-    membership cache picks up the newly allow-listed server.
+    Log out and back in afterward so your membership cache picks up the
+    newly allow-listed server (guild membership is re-synced on every login).
 
 ## 3. GitHub Pages (frontend)
 

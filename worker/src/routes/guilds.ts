@@ -4,14 +4,59 @@ import { isGuildMember, listUserGuilds } from '../lib/db';
 import { newId } from '../lib/ids';
 import { expandOccurrencesForEvent } from '../lib/recurrence';
 import type { EventRow } from '../lib/events';
-import { mapOccurrence, loadOverridesForEvents, loadMyRsvpForEvents } from '../lib/events';
+import { mapOccurrence, loadOverridesForEvents, loadMyRsvpForEvents, loadPrimaryGroupForEvents } from '../lib/events';
 import { createEventWithInvites } from '../lib/eventWrites';
+import { computeBusyBlocks } from '../lib/freeBusy';
+import { expandPersonalOccurrences } from '../lib/personalEvents';
 
 export const guildRoutes = new Hono<AppEnv>();
 
 guildRoutes.get('/', async (c) => {
   const userId = c.get('userId');
   return c.json(await listUserGuilds(c.env, userId));
+});
+
+// Scheduling assistant. Returns opaque busy ranges only -- never titles,
+// games, or who someone is with. A user is included only if they share this
+// guild with the caller AND haven't switched off free_busy_visible; users who
+// opted out are returned with visible:false and an empty block list so the UI
+// can say "hidden" rather than mislead by showing them as free.
+guildRoutes.get('/:guildId/free-busy', async (c) => {
+  const userId = c.get('userId');
+  const guildId = c.req.param('guildId');
+  if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
+
+  const from = Number(c.req.query('from'));
+  const to = Number(c.req.query('to'));
+  if (!from || !to) return c.text('from and to (unix ms) are required', 400);
+
+  const requested = (c.req.query('user_ids') ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (requested.length === 0) return c.json([]);
+
+  const placeholders = requested.map(() => '?').join(',');
+  const { results: members } = await c.env.DB.prepare(
+    `SELECT u.id, u.username, u.global_name, u.free_busy_visible
+     FROM users u JOIN user_guild_membership m ON m.user_id = u.id
+     WHERE m.guild_id = ? AND m.is_member = 1 AND u.id IN (${placeholders})`,
+  )
+    .bind(guildId, ...requested)
+    .all<{ id: string; username: string; global_name: string | null; free_busy_visible: number }>();
+
+  const out = [];
+  for (const member of members) {
+    const visible = !!member.free_busy_visible || member.id === userId;
+    out.push({
+      userId: member.id,
+      username: member.username,
+      globalName: member.global_name,
+      visible,
+      busy: visible ? await computeBusyBlocks(c.env, member.id, from, to) : [],
+    });
+  }
+  return c.json(out);
 });
 
 guildRoutes.get('/:guildId/groups', async (c) => {
@@ -100,6 +145,7 @@ guildRoutes.get('/:guildId/events', async (c) => {
 
   const overridesByEvent = await loadOverridesForEvents(c.env, events.map((e) => e.id));
   const rsvpByEvent = await loadMyRsvpForEvents(c.env, events.map((e) => e.id), userId);
+  const groupByEvent = await loadPrimaryGroupForEvents(c.env, events.map((e) => e.id));
 
   const occurrences = [];
   for (const event of events) {
@@ -114,7 +160,7 @@ guildRoutes.get('/:guildId/events', async (c) => {
       for (const opt of confirmedOptions) {
         if (opt.start_at <= to && opt.end_at >= from) {
           occurrences.push(
-            mapOccurrence(event, `${event.id}::opt:${opt.id}`, opt.start_at, opt.end_at, rsvpByEvent.get(event.id) ?? null),
+            mapOccurrence(event, `${event.id}::opt:${opt.id}`, opt.start_at, opt.end_at, rsvpByEvent.get(event.id) ?? null, groupByEvent.get(event.id) ?? null),
           );
         }
       }
@@ -124,20 +170,20 @@ guildRoutes.get('/:guildId/events', async (c) => {
         event.poll_deadline_at >= from &&
         event.poll_deadline_at <= to
       ) {
-        occurrences.push(mapOccurrence(event, event.id, null, null, rsvpByEvent.get(event.id) ?? null));
+        occurrences.push(mapOccurrence(event, event.id, null, null, rsvpByEvent.get(event.id) ?? null, groupByEvent.get(event.id) ?? null));
       }
       continue;
     }
     if (event.event_type === 'poll' && event.status !== 'resolved') {
       // Unresolved polls show once, at the poll deadline, not per-occurrence.
       if (event.poll_deadline_at && event.poll_deadline_at >= from && event.poll_deadline_at <= to) {
-        occurrences.push(mapOccurrence(event, event.id, null, null, rsvpByEvent.get(event.id) ?? null));
+        occurrences.push(mapOccurrence(event, event.id, null, null, rsvpByEvent.get(event.id) ?? null, groupByEvent.get(event.id) ?? null));
       }
       continue;
     }
     if (!event.is_recurring) {
       if (event.start_at && event.start_at <= to && (event.end_at ?? event.start_at) >= from) {
-        occurrences.push(mapOccurrence(event, event.id, event.start_at, event.end_at, rsvpByEvent.get(event.id) ?? null));
+        occurrences.push(mapOccurrence(event, event.id, event.start_at, event.end_at, rsvpByEvent.get(event.id) ?? null, groupByEvent.get(event.id) ?? null));
       }
       continue;
     }
@@ -150,9 +196,34 @@ guildRoutes.get('/:guildId/events', async (c) => {
     );
     for (const occ of expanded) {
       occurrences.push(
-        mapOccurrence(event, `${event.id}::${occ.date}`, occ.startAt, occ.endAt, rsvpByEvent.get(event.id) ?? null),
+        mapOccurrence(event, `${event.id}::${occ.date}`, occ.startAt, occ.endAt, rsvpByEvent.get(event.id) ?? null, groupByEvent.get(event.id) ?? null),
       );
     }
+  }
+
+  // The caller's own personal events ride along on whichever guild calendar
+  // they're viewing -- they aren't guild-scoped, but the point of them is to
+  // see your real availability next to your gaming schedule. Never returned
+  // for anyone but their owner.
+  for (const occ of await expandPersonalOccurrences(c.env, userId, from, to)) {
+    occurrences.push({
+      occurrenceId: `personal:${occ.occurrenceId}`,
+      eventId: occ.event.id,
+      title: occ.event.title,
+      description: occ.event.description,
+      game: null,
+      eventType: 'single' as const,
+      status: occ.event.status,
+      timezone: occ.event.timezone,
+      startAt: occ.startAt,
+      endAt: occ.endAt,
+      isRecurring: !!occ.event.is_recurring,
+      isPersonal: true,
+      organizerId: occ.event.user_id,
+      myRsvpStatus: null,
+      pollDeadlineAt: null,
+      groupId: null,
+    });
   }
 
   return c.json(occurrences);

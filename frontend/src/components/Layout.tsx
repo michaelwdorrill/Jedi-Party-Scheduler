@@ -50,6 +50,16 @@ export default function Layout() {
       <main className="mx-auto max-w-5xl px-4 py-6">
         <Outlet />
       </main>
+
+      <footer className="mx-auto max-w-5xl px-4 pb-8 pt-4 text-xs text-slate-600">
+        <NavLink to="/terms" className="hover:text-slate-400">
+          Terms
+        </NavLink>
+        <span className="px-2">·</span>
+        <NavLink to="/privacy" className="hover:text-slate-400">
+          Privacy
+        </NavLink>
+      </footer>
     </div>
   );
 }

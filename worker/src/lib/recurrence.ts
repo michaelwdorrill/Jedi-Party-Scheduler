@@ -2,17 +2,27 @@ import { DateTime } from 'luxon';
 import type { Env } from '../env';
 import type { EventRow, OverrideRow } from './events';
 
-interface RecurrenceRuleRow {
+// Shape-agnostic recurrence rule. Guild events store this in
+// event_recurrence_rules; personal events store the same fields inline on
+// personal_events. Both feed the one expander below.
+export interface RecurrenceRule {
   freq: 'DAILY' | 'WEEKLY' | 'MONTHLY';
   interval: number;
-  by_weekday: string | null; // CSV, 0=Mon..6=Sun
-  by_month_day: number | null;
-  start_date: string; // ISO date, local to event.timezone
-  start_time: string; // 'HH:MM'
-  duration_minutes: number;
-  end_type: 'never' | 'on_date' | 'after_count';
-  end_date: string | null;
-  end_count: number | null;
+  byWeekday: string | null; // CSV, 0=Mon..6=Sun
+  byMonthDay: number | null;
+  startDate: string; // ISO date, local to `zone`
+  startTime: string; // 'HH:MM'
+  durationMinutes: number;
+  endType: 'never' | 'on_date' | 'after_count';
+  endDate: string | null;
+  endCount: number | null;
+}
+
+export interface OccurrenceOverride {
+  occurrence_date: string;
+  is_cancelled: number;
+  override_start_at: number | null;
+  override_end_at: number | null;
 }
 
 export interface ExpandedOccurrence {
@@ -26,32 +36,24 @@ export interface ExpandedOccurrence {
 // pathological rule (e.g. "never"-ending daily event created years ago).
 const MAX_ITERATIONS = 3000;
 
-export async function expandOccurrencesForEvent(
-  env: Env,
-  event: EventRow,
+// Pure: expands a recurrence rule into concrete occurrences overlapping
+// [windowFromMs, windowToMs]. No DB access, so it's equally usable for guild
+// events, personal events, and unit-style checks.
+export function expandOccurrences(
+  rule: RecurrenceRule,
+  zone: string,
   windowFromMs: number,
   windowToMs: number,
-  overrides: OverrideRow[],
-): Promise<ExpandedOccurrence[]> {
-  const ruleRow = await env.DB.prepare(
-    `SELECT freq, interval, by_weekday, by_month_day, start_date, start_time,
-            duration_minutes, end_type, end_date, end_count
-     FROM event_recurrence_rules WHERE event_id = ?`,
-  )
-    .bind(event.id)
-    .first<RecurrenceRuleRow>();
-  if (!ruleRow) return [];
-  const rule: RecurrenceRuleRow = ruleRow;
-
+  overrides: OccurrenceOverride[],
+): ExpandedOccurrence[] {
   const overrideByDate = new Map(overrides.map((o) => [o.occurrence_date, o]));
-  const zone = event.timezone;
-  const seriesStart = DateTime.fromISO(rule.start_date, { zone });
+  const seriesStart = DateTime.fromISO(rule.startDate, { zone });
   const windowStart = DateTime.fromMillis(windowFromMs).setZone(zone);
   const windowEnd = DateTime.fromMillis(windowToMs).setZone(zone);
-  const endDate = rule.end_type === 'on_date' && rule.end_date ? DateTime.fromISO(rule.end_date, { zone }) : null;
-  const endCount = rule.end_type === 'after_count' ? rule.end_count ?? Infinity : Infinity;
+  const endDate = rule.endType === 'on_date' && rule.endDate ? DateTime.fromISO(rule.endDate, { zone }) : null;
+  const endCount = rule.endType === 'after_count' ? rule.endCount ?? Infinity : Infinity;
 
-  const [startHour, startMinute] = rule.start_time.split(':').map(Number);
+  const [startHour, startMinute] = rule.startTime.split(':').map(Number);
   const interval = Math.max(1, rule.interval);
 
   const results: ExpandedOccurrence[] = [];
@@ -72,7 +74,7 @@ export async function expandOccurrencesForEvent(
     if (override?.is_cancelled) return true;
 
     const naiveStart = candidateDate.set({ hour: startHour, minute: startMinute, second: 0, millisecond: 0 });
-    const naiveEnd = naiveStart.plus({ minutes: rule.duration_minutes });
+    const naiveEnd = naiveStart.plus({ minutes: rule.durationMinutes });
     const startAt = override?.override_start_at ?? naiveStart.toMillis();
     const endAt = override?.override_end_at ?? naiveEnd.toMillis();
 
@@ -84,9 +86,8 @@ export async function expandOccurrencesForEvent(
 
   if (rule.freq === 'DAILY') {
     const daysSinceStart = Math.max(0, Math.floor(windowStart.diff(seriesStart, 'days').days));
-    let k = Math.max(0, Math.floor(daysSinceStart / interval));
     // Step back one period to be safe against partial-day rounding at the boundary.
-    k = Math.max(0, k - 1);
+    let k = Math.max(0, Math.floor(daysSinceStart / interval) - 1);
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
       const candidate = seriesStart.plus({ days: k * interval });
@@ -95,21 +96,17 @@ export async function expandOccurrencesForEvent(
       k++;
     }
   } else if (rule.freq === 'WEEKLY') {
-    const weekdays = rule.by_weekday
-      ? rule.by_weekday.split(',').map(Number).sort((a, b) => a - b)
+    const weekdays = rule.byWeekday
+      ? rule.byWeekday.split(',').map(Number).sort((a, b) => a - b)
       : [seriesStart.weekday - 1]; // Luxon weekday: 1=Mon..7=Sun -> 0-indexed
 
     const seriesStartWeek = seriesStart.startOf('week'); // Luxon weeks start Monday
     const weeksSinceStart = Math.max(0, Math.floor(windowStart.diff(seriesStartWeek, 'weeks').weeks));
     let weekIndex = Math.max(0, Math.floor(weeksSinceStart / interval) - 1);
 
-    let seriesIndex = weekIndex * weekdays.length; // approximate; exactness enforced via recount below
-    // Recompute an accurate running series index by counting occurrences from series start
-    // up to (but not including) weekIndex -- bounded because weekIndex was fast-forwarded.
-    seriesIndex = 0;
-    for (let w = 0; w < weekIndex; w++) {
-      seriesIndex += weekdays.length;
-    }
+    // Occurrences elapsed before the week we fast-forwarded to, so `end_count`
+    // is measured against the true series position rather than the window.
+    let seriesIndex = weekIndex * weekdays.length;
 
     outer: for (let i = 0; i < MAX_ITERATIONS; i++) {
       const weekStart = seriesStartWeek.plus({ weeks: weekIndex * interval });
@@ -126,7 +123,7 @@ export async function expandOccurrencesForEvent(
     }
   } else {
     // MONTHLY
-    const day = rule.by_month_day ?? seriesStart.day;
+    const day = rule.byMonthDay ?? seriesStart.day;
     const seriesStartMonth = seriesStart.startOf('month');
     const monthsSinceStart = Math.max(0, Math.floor(windowStart.diff(seriesStartMonth, 'months').months));
     let monthIndex = Math.max(0, Math.floor(monthsSinceStart / interval) - 1);
@@ -145,4 +142,52 @@ export async function expandOccurrencesForEvent(
   }
 
   return results;
+}
+
+// Loads a guild event's rule from event_recurrence_rules and expands it.
+export async function expandOccurrencesForEvent(
+  env: Env,
+  event: EventRow,
+  windowFromMs: number,
+  windowToMs: number,
+  overrides: OverrideRow[],
+): Promise<ExpandedOccurrence[]> {
+  const row = await env.DB.prepare(
+    `SELECT freq, interval, by_weekday, by_month_day, start_date, start_time,
+            duration_minutes, end_type, end_date, end_count
+     FROM event_recurrence_rules WHERE event_id = ?`,
+  )
+    .bind(event.id)
+    .first<{
+      freq: 'DAILY' | 'WEEKLY' | 'MONTHLY';
+      interval: number;
+      by_weekday: string | null;
+      by_month_day: number | null;
+      start_date: string;
+      start_time: string;
+      duration_minutes: number;
+      end_type: 'never' | 'on_date' | 'after_count';
+      end_date: string | null;
+      end_count: number | null;
+    }>();
+  if (!row) return [];
+
+  return expandOccurrences(
+    {
+      freq: row.freq,
+      interval: row.interval,
+      byWeekday: row.by_weekday,
+      byMonthDay: row.by_month_day,
+      startDate: row.start_date,
+      startTime: row.start_time,
+      durationMinutes: row.duration_minutes,
+      endType: row.end_type,
+      endDate: row.end_date,
+      endCount: row.end_count,
+    },
+    event.timezone,
+    windowFromMs,
+    windowToMs,
+    overrides,
+  );
 }

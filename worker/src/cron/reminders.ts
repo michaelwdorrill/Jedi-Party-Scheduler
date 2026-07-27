@@ -1,3 +1,4 @@
+import { DateTime } from 'luxon';
 import type { Env } from '../env';
 import { newId } from '../lib/ids';
 import { sendBotDm } from '../lib/discord';
@@ -12,11 +13,12 @@ interface ParticipantRow {
   id: string;
   notifications_enabled: number;
   dm_channel_id: string | null;
+  timezone: string;
 }
 
 async function getEventParticipants(env: Env, eventId: string, organizerId: string): Promise<ParticipantRow[]> {
   const { results } = await env.DB.prepare(
-    `SELECT id, notifications_enabled, dm_channel_id FROM users WHERE id IN
+    `SELECT id, notifications_enabled, dm_channel_id, timezone FROM users WHERE id IN
        (SELECT user_id FROM event_invites WHERE event_id = ? UNION SELECT ?)`,
   )
     .bind(eventId, organizerId)
@@ -62,8 +64,16 @@ async function notifyOnce(
   await deliverDm(env, user, content);
 }
 
-function formatWhen(startAt: number): string {
-  return new Date(startAt).toUTCString();
+// Rendered in the *recipient's* configured timezone -- a DM saying "17:00
+// GMT" is useless to someone who set themselves to Eastern.
+function formatWhen(startAt: number, zone: string): string {
+  return DateTime.fromMillis(startAt).setZone(zone).toFormat("ccc d LLL, h:mm a ZZZZ");
+}
+
+// Deep link straight to the event so the DM is actionable rather than just
+// informational -- HashRouter, so the fragment is part of the URL.
+function eventLink(env: Env, eventId: string): string {
+  return `${env.FRONTEND_URL}/#/events/${eventId}`;
 }
 
 async function sweepNewInvites(env: Env): Promise<void> {
@@ -79,7 +89,7 @@ async function sweepNewInvites(env: Env): Promise<void> {
 
   for (const row of results) {
     const user = await env.DB.prepare(
-      `SELECT id, notifications_enabled, dm_channel_id FROM users WHERE id = ?`,
+      `SELECT id, notifications_enabled, dm_channel_id, timezone FROM users WHERE id = ?`,
     )
       .bind(row.user_id)
       .first<ParticipantRow>();
@@ -90,7 +100,7 @@ async function sweepNewInvites(env: Env): Promise<void> {
       row.event_id,
       'invite',
       '',
-      `You've been invited to "${row.title}" on Uncle Owen.`,
+      `You've been invited to "${row.title}" on Uncle Owen.\n${eventLink(env, row.event_id)}`,
     );
   }
 }
@@ -112,10 +122,10 @@ async function sweepReminders(env: Env): Promise<void> {
     const remaining = event.start_at! - now;
     for (const user of participants) {
       if (remaining <= HOUR_MS) {
-        await notifyOnce(env, user, event.id, 'reminder_1h', '', `"${event.title}" starts in about an hour (${formatWhen(event.start_at!)}).`);
+        await notifyOnce(env, user, event.id, 'reminder_1h', '', `"${event.title}" starts in about an hour (${formatWhen(event.start_at!, user.timezone)}).\n${eventLink(env, event.id)}`);
       }
       if (remaining <= 24 * HOUR_MS) {
-        await notifyOnce(env, user, event.id, 'reminder_24h', '', `"${event.title}" is coming up on ${formatWhen(event.start_at!)}.`);
+        await notifyOnce(env, user, event.id, 'reminder_24h', '', `"${event.title}" is coming up on ${formatWhen(event.start_at!, user.timezone)}.\n${eventLink(env, event.id)}`);
       }
     }
   }
@@ -141,10 +151,10 @@ async function sweepReminders(env: Env): Promise<void> {
         const remaining = occ.startAt - now;
         for (const user of participants) {
           if (remaining <= HOUR_MS) {
-            await notifyOnce(env, user, event.id, 'reminder_1h', occ.date, `"${event.title}" starts in about an hour (${formatWhen(occ.startAt)}).`);
+            await notifyOnce(env, user, event.id, 'reminder_1h', occ.date, `"${event.title}" starts in about an hour (${formatWhen(occ.startAt, user.timezone)}).\n${eventLink(env, event.id)}`);
           }
           if (remaining <= 24 * HOUR_MS) {
-            await notifyOnce(env, user, event.id, 'reminder_24h', occ.date, `"${event.title}" is coming up on ${formatWhen(occ.startAt)}.`);
+            await notifyOnce(env, user, event.id, 'reminder_24h', occ.date, `"${event.title}" is coming up on ${formatWhen(occ.startAt, user.timezone)}.\n${eventLink(env, event.id)}`);
           }
         }
       }
@@ -174,11 +184,11 @@ async function sweepSingleWinnerPollNotifications(env: Env): Promise<void> {
 
   for (const event of polls) {
     const participants = await getEventParticipants(env, event.id, event.organizer_id);
-    const message =
-      event.status === 'resolved'
-        ? `"${event.title}" is on! Time locked in: ${formatWhen(event.start_at!)}.`
-        : `"${event.title}" didn't get enough votes and was cancelled.`;
     for (const user of participants) {
+      const message =
+        event.status === 'resolved'
+          ? `"${event.title}" is on! Time locked in: ${formatWhen(event.start_at!, user.timezone)}.\n${eventLink(env, event.id)}`
+          : `"${event.title}" didn't get enough votes and was cancelled.`;
       await notifyOnce(env, user, event.id, 'poll_resolved', '', message);
     }
   }
@@ -207,7 +217,7 @@ async function sweepMultiWinnerPollClosedNotifications(env: Env): Promise<void> 
     const participants = await getEventParticipants(env, event.id, event.organizer_id);
     const message =
       n > 0
-        ? `Voting for "${event.title}" has closed. ${n} day(s) got confirmed -- check the event for details.`
+        ? `Voting for "${event.title}" has closed. ${n} day(s) got confirmed -- check the event for details.\n${eventLink(env, event.id)}`
         : `"${event.title}" didn't get enough interest on any day and was cancelled.`;
     for (const user of participants) {
       await notifyOnce(env, user, event.id, 'poll_resolved', '', message);
@@ -228,7 +238,7 @@ async function sweepConfirmedMultiWinnerOptions(env: Env): Promise<void> {
 
   for (const opt of results) {
     const { results: yesVoters } = await env.DB.prepare(
-      `SELECT u.id, u.notifications_enabled, u.dm_channel_id
+      `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
        FROM event_poll_votes epv JOIN users u ON u.id = epv.user_id
        WHERE epv.option_id = ? AND epv.vote = 'yes'`,
     )
@@ -242,7 +252,7 @@ async function sweepConfirmedMultiWinnerOptions(env: Env): Promise<void> {
         opt.event_id,
         'poll_resolved',
         opt.option_id,
-        `"${opt.title}" is on for ${formatWhen(opt.start_at)}! You're confirmed.`,
+        `"${opt.title}" is on for ${formatWhen(opt.start_at, user.timezone)}! You're confirmed.\n${eventLink(env, opt.event_id)}`,
       );
     }
   }
@@ -271,7 +281,7 @@ async function sweepPollDeadlineReminders(env: Env): Promise<void> {
            AND option_id IN (SELECT id FROM event_poll_options WHERE event_id = ei.event_id)`;
 
     const { results: nonVoters } = await env.DB.prepare(
-      `SELECT u.id, u.notifications_enabled, u.dm_channel_id
+      `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
        FROM event_invites ei JOIN users u ON u.id = ei.user_id
        WHERE ei.event_id = ? AND NOT EXISTS (${hasVotedSubquery})`,
     )
@@ -285,7 +295,7 @@ async function sweepPollDeadlineReminders(env: Env): Promise<void> {
         poll.id,
         'poll_deadline_reminder',
         '',
-        `Voting for "${poll.title}" closes soon -- you haven't responded yet.`,
+        `Voting for "${poll.title}" closes soon -- you haven't responded yet.\n${eventLink(env, poll.id)}`,
       );
     }
   }
@@ -332,7 +342,7 @@ async function sweepIdleGroups(env: Env): Promise<void> {
     if (already && already.last_event_at === lastEventAt) continue; // already nudged for this idle episode
 
     const { results: members } = await env.DB.prepare(
-      `SELECT u.id, u.notifications_enabled, u.dm_channel_id, g.name as group_name
+      `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone, g.name as group_name
        FROM group_members gm JOIN users u ON u.id = gm.user_id
        JOIN groups g ON g.id = gm.group_id
        WHERE gm.group_id = ?`,
@@ -345,7 +355,7 @@ async function sweepIdleGroups(env: Env): Promise<void> {
       await deliverDm(
         env,
         member,
-        `It's been a while since "${member.group_name}" last played -- want to schedule something?`,
+        `It's been a while since "${member.group_name}" last played -- want to schedule something?\n${env.FRONTEND_URL}/#/calendar`,
       );
     }
 

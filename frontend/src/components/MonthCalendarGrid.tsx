@@ -19,12 +19,25 @@ export default function MonthCalendarGrid({
   const days = buildMonthGrid(monthStart);
   const today = DateTime.now().setZone(zone).startOf('day');
 
+  // An occurrence lands on every day it overlaps, not just its start day, so
+  // overnight sessions and multi-day blocks (travel, holidays) show across the
+  // whole span. Iteration is clamped to the visible grid so a very long block
+  // can't spin here.
+  const gridStart = days[0];
+  const gridEnd = days[days.length - 1];
   const byDay = new Map<string, EventOccurrence[]>();
   for (const occ of occurrences) {
     if (occ.startAt == null) continue;
-    const key = DateTime.fromMillis(occ.startAt).setZone(zone).toISODate()!;
-    if (!byDay.has(key)) byDay.set(key, []);
-    byDay.get(key)!.push(occ);
+    const start = DateTime.fromMillis(occ.startAt).setZone(zone).startOf('day');
+    const end = DateTime.fromMillis(occ.endAt ?? occ.startAt).setZone(zone).startOf('day');
+    let cursor = start < gridStart ? gridStart : start;
+    const last = end > gridEnd ? gridEnd : end;
+    while (cursor <= last) {
+      const key = cursor.toISODate()!;
+      if (!byDay.has(key)) byDay.set(key, []);
+      byDay.get(key)!.push(occ);
+      cursor = cursor.plus({ days: 1 });
+    }
   }
 
   return (

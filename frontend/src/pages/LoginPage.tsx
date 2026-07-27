@@ -1,4 +1,4 @@
-import { Navigate } from 'react-router-dom';
+import { Link, Navigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { API_BASE_URL } from '../api/client';
 
@@ -21,6 +21,17 @@ export default function LoginPage() {
       >
         Log in with Discord
       </a>
+      <p className="text-xs text-slate-600">
+        By logging in you agree to the{' '}
+        <Link to="/terms" className="underline hover:text-slate-400">
+          Terms
+        </Link>{' '}
+        and{' '}
+        <Link to="/privacy" className="underline hover:text-slate-400">
+          Privacy Policy
+        </Link>
+        .
+      </p>
     </div>
   );
 }

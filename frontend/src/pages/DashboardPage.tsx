@@ -35,9 +35,27 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-semibold">
-        Welcome back{user ? `, ${user.globalName ?? user.username}` : ''}
-      </h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl font-semibold">
+          Welcome back{user ? `, ${user.globalName ?? user.username}` : ''}
+        </h1>
+        <div className="flex gap-2">
+          <Link
+            to="/personal/new"
+            className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
+          >
+            + Personal time
+          </Link>
+          {selectedGuildId && (
+            <Link
+              to={`/events/new?guild=${selectedGuildId}`}
+              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
+            >
+              + New Event
+            </Link>
+          )}
+        </div>
+      </div>
 
       {guilds.length === 0 ? (
         <p className="text-slate-400">
@@ -58,7 +76,7 @@ export default function DashboardPage() {
               {upcoming.map((occ) => (
                 <li key={occ.occurrenceId}>
                   <Link
-                    to={`/events/${occ.eventId}`}
+                    to={occ.isPersonal ? `/personal/${occ.eventId}` : `/events/${occ.eventId}`}
                     className="flex items-center justify-between rounded px-2 py-1.5 hover:bg-slate-800"
                   >
                     <span>{occ.title}</span>

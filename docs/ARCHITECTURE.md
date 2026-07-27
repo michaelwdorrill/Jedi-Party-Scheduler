@@ -33,11 +33,36 @@ origins, which would make any cookie third-party and subject to browser
 cookie-blocking.
 
 "Which Discord servers can this user see" is answered once at login (and
-on-demand via `POST /auth/sync-guilds`) by calling Discord's
+on every login) by calling Discord's
 `/users/@me/guilds` with the user's own OAuth token and intersecting the
 result against the `guilds` table (the owner-curated allow-list), caching
-the result in `user_guild_membership`. The bot token is used for exactly one
-thing: sending DMs.
+the result in `user_guild_membership`. Discord's access and refresh tokens
+are used once during that exchange and then discarded -- nothing in the app
+acts on Discord's behalf later, so retaining them would be keeping API Data
+past the point it's needed. The bot token is used for exactly one thing:
+sending DMs.
+
+## Privacy model
+
+Two separate guarantees, worth keeping distinct:
+
+- **Event content** (titles, descriptions, games, who's invited) is visible
+  only to an event's organiser and its invitees. This is enforced in every
+  query, not just hidden in the UI, and there is no admin endpoint that reads
+  other people's event data. It is *not* protected against whoever controls
+  the Cloudflare account, who can query D1 directly -- the Privacy Policy says
+  so plainly rather than implying otherwise.
+- **Free/busy availability** is a much weaker disclosure, and deliberately so.
+  `lib/freeBusy.ts` returns `{startAt, endAt}` and nothing else: no titles, no
+  guild, no participants, no event ids, and overlapping commitments are merged
+  so you can't even count how many separate things someone has on. Users who
+  set `free_busy_visible = 0` are returned with `visible: false` and an empty
+  list, so the UI can say "hidden" rather than falsely imply they're free.
+
+Personal events (`personal_events`) are private to their owner in the first
+sense -- nobody else can read their title through any endpoint -- while still
+feeding the second, so blocking out travel or work makes you unavailable
+without telling anyone what you're doing.
 
 ## Data model
 

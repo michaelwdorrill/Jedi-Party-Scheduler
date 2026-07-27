@@ -7,6 +7,7 @@ export interface UserRow {
   avatar_hash: string | null;
   timezone: string;
   notifications_enabled: number;
+  free_busy_visible?: number;
 }
 
 export interface GuildRow {
@@ -22,6 +23,7 @@ export function mapUser(row: UserRow) {
     avatarHash: row.avatar_hash,
     timezone: row.timezone,
     notificationsEnabled: !!row.notifications_enabled,
+    freeBusyVisible: row.free_busy_visible === undefined ? true : !!row.free_busy_visible,
   };
 }
 
@@ -83,37 +85,81 @@ export interface UpsertUserInput {
   username: string;
   globalName: string | null;
   avatarHash: string | null;
-  discordRefreshToken: string;
-  discordTokenExpiresAt: number;
 }
 
 export async function upsertUser(env: Env, input: UpsertUserInput): Promise<void> {
   const now = Date.now();
   await env.DB.prepare(
     `INSERT INTO users (id, username, global_name, avatar_hash, timezone, notifications_enabled,
-       discord_refresh_token, discord_token_expires_at, created_at, updated_at, last_login_at)
-     VALUES (?, ?, ?, ?, 'America/New_York', 1, ?, ?, ?, ?, ?)
+       created_at, updated_at, last_login_at)
+     VALUES (?, ?, ?, ?, 'America/New_York', 1, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        username = excluded.username,
        global_name = excluded.global_name,
        avatar_hash = excluded.avatar_hash,
-       discord_refresh_token = excluded.discord_refresh_token,
-       discord_token_expires_at = excluded.discord_token_expires_at,
        updated_at = excluded.updated_at,
        last_login_at = excluded.last_login_at`,
   )
-    .bind(
-      input.id,
-      input.username,
-      input.globalName,
-      input.avatarHash,
-      input.discordRefreshToken,
-      input.discordTokenExpiresAt,
-      now,
-      now,
-      now,
-    )
+    .bind(input.id, input.username, input.globalName, input.avatarHash, now, now, now)
     .run();
+}
+
+// Full erasure of a user's data, exposed as DELETE /me. Discord's Developer
+// Terms require an easily accessible way for users to have their API Data
+// deleted, and GDPR/CCPA give a right to erasure -- this is that path, done
+// in-app rather than by emailing the operator.
+//
+// Events this user organised are removed outright (they own that content, and
+// the invitees' copies are meaningless without it). Where the user was merely
+// a participant, only their own rows go: the event survives for everyone else.
+export async function deleteUserCompletely(env: Env, userId: string): Promise<void> {
+  const { results: organised } = await env.DB.prepare(
+    `SELECT id FROM events WHERE organizer_id = ?`,
+  )
+    .bind(userId)
+    .all<{ id: string }>();
+
+  for (const event of organised) {
+    // Explicit child deletes rather than relying on ON DELETE CASCADE, since
+    // D1 only enforces cascades when foreign_keys pragma is on and we'd rather
+    // not depend on that for a correctness-critical erasure path.
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id = ?)`).bind(event.id),
+      env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id = ?`).bind(event.id),
+      env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id = ?`).bind(event.id),
+      env.DB.prepare(`DELETE FROM event_invites WHERE event_id = ?`).bind(event.id),
+      env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id = ?`).bind(event.id),
+      env.DB.prepare(`DELETE FROM event_occurrence_overrides WHERE event_id = ?`).bind(event.id),
+      env.DB.prepare(`DELETE FROM notification_log WHERE event_id = ?`).bind(event.id),
+      env.DB.prepare(`DELETE FROM events WHERE id = ?`).bind(event.id),
+    ]);
+  }
+
+  const { results: ownedGroups } = await env.DB.prepare(
+    `SELECT id FROM groups WHERE created_by = ?`,
+  )
+    .bind(userId)
+    .all<{ id: string }>();
+  for (const group of ownedGroups) {
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM group_members WHERE group_id = ?`).bind(group.id),
+      env.DB.prepare(`DELETE FROM group_activity_nudges WHERE group_id = ?`).bind(group.id),
+      env.DB.prepare(`UPDATE event_invites SET source_group_id = NULL WHERE source_group_id = ?`).bind(group.id),
+      env.DB.prepare(`DELETE FROM groups WHERE id = ?`).bind(group.id),
+    ]);
+  }
+
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM personal_event_overrides WHERE personal_event_id IN (SELECT id FROM personal_events WHERE user_id = ?)`).bind(userId),
+    env.DB.prepare(`DELETE FROM personal_events WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM event_poll_votes WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM event_window_availability WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM event_invites WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM group_members WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM notification_log WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM user_guild_membership WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM users WHERE id = ?`).bind(userId),
+  ]);
 }
 
 // Intersects the caller's live Discord guild list against our allow-list and

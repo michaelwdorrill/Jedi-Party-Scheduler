@@ -5,6 +5,7 @@ export interface User {
   avatarHash: string | null;
   timezone: string;
   notificationsEnabled: boolean;
+  freeBusyVisible: boolean;
 }
 
 export interface Guild {
@@ -103,9 +104,37 @@ export interface EventOccurrence {
   startAt: number | null; // null for unresolved polls
   endAt: number | null;
   isRecurring: boolean;
+  isPersonal: boolean;
   organizerId: string;
   myRsvpStatus: RsvpStatus | null;
   pollDeadlineAt: number | null;
+  // Which saved group this event was invited through, if any. Used purely to
+  // colour a group's sessions consistently on the calendar.
+  groupId: string | null;
+}
+
+export interface PersonalEvent {
+  id: string;
+  userId: string;
+  title: string;
+  description: string | null;
+  timezone: string;
+  startAt: number | null;
+  endAt: number | null;
+  status: 'active' | 'cancelled';
+  busy: boolean;
+  isRecurring: boolean;
+  recurrence: RecurrenceRule | null;
+}
+
+// A single person's opaque availability, as returned by the scheduling
+// assistant. `busy` carries times and nothing else -- no titles, ever.
+export interface FreeBusyEntry {
+  userId: string;
+  username: string;
+  globalName: string | null;
+  visible: boolean;
+  busy: { startAt: number; endAt: number }[];
 }
 
 // Full detail as returned by GET /events/:eventId

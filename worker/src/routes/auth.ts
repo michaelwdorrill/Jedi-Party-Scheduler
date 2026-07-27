@@ -1,12 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import { requireAuth } from '../lib/authMiddleware';
-import {
-  exchangeCodeForToken,
-  fetchDiscordUser,
-  fetchDiscordUserGuilds,
-  refreshUserToken,
-} from '../lib/discord';
+import { exchangeCodeForToken, fetchDiscordUser, fetchDiscordUserGuilds } from '../lib/discord';
 import { syncGuildMembership, upsertUser } from '../lib/db';
 import { signJwt } from '../lib/jwt';
 
@@ -44,13 +39,15 @@ authRoutes.get('/callback', async (c) => {
       fetchDiscordUserGuilds(token.access_token),
     ]);
 
+    // Discord's access/refresh tokens are deliberately NOT persisted -- they
+    // are used once here to read the profile and guild list, then discarded.
+    // Nothing in the app needs to act on Discord's behalf later, so keeping
+    // them would be retaining API Data beyond what the functionality requires.
     await upsertUser(c.env, {
       id: discordUser.id,
       username: discordUser.username,
       globalName: discordUser.global_name,
       avatarHash: discordUser.avatar,
-      discordRefreshToken: token.refresh_token,
-      discordTokenExpiresAt: Date.now() + token.expires_in * 1000,
     });
     await syncGuildMembership(
       c.env,
@@ -69,35 +66,4 @@ authRoutes.post('/refresh', requireAuth, async (c) => {
   const userId = c.get('userId');
   const jwt = await signJwt(userId, c.env.JWT_SIGNING_KEY, JWT_TTL_SECONDS);
   return c.json({ token: jwt });
-});
-
-authRoutes.post('/sync-guilds', requireAuth, async (c) => {
-  const userId = c.get('userId');
-  const user = await c.env.DB.prepare(
-    `SELECT discord_refresh_token FROM users WHERE id = ?`,
-  )
-    .bind(userId)
-    .first<{ discord_refresh_token: string | null }>();
-
-  if (!user?.discord_refresh_token) return c.text('No stored Discord session', 400);
-
-  const token = await refreshUserToken(
-    user.discord_refresh_token,
-    c.env.DISCORD_CLIENT_ID,
-    c.env.DISCORD_CLIENT_SECRET,
-  );
-  await c.env.DB.prepare(
-    `UPDATE users SET discord_refresh_token = ?, discord_token_expires_at = ?, updated_at = ? WHERE id = ?`,
-  )
-    .bind(token.refresh_token, Date.now() + token.expires_in * 1000, Date.now(), userId)
-    .run();
-
-  const discordGuilds = await fetchDiscordUserGuilds(token.access_token);
-  await syncGuildMembership(
-    c.env,
-    userId,
-    discordGuilds.map((g) => g.id),
-  );
-
-  return c.json({ ok: true });
 });

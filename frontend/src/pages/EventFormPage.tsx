@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import InviteePicker from '../components/InviteePicker';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
+import SchedulingAssistant from '../components/SchedulingAssistant';
 import type { EventDetail, Friend, Group, PollMode, PollStrategy } from '../types';
 
 interface PollSlotDraft {
@@ -33,6 +34,7 @@ export default function EventFormPage() {
 
   // Single-event fields
   const [date, setDate] = useState(prefillDate);
+  const [endDate, setEndDate] = useState(prefillDate);
   const [startTime, setStartTime] = useState('13:00');
   const [endTime, setEndTime] = useState('17:00');
   const [isRecurring, setIsRecurring] = useState(false);
@@ -102,6 +104,7 @@ export default function EventFormPage() {
         const s = DateTime.fromMillis(ev.startAt).setZone(ev.timezone);
         const e = DateTime.fromMillis(ev.endAt).setZone(ev.timezone);
         setDate(s.toISODate()!);
+        setEndDate(e.toISODate()!);
         setStartTime(s.toFormat('HH:mm'));
         setEndTime(e.toFormat('HH:mm'));
       }
@@ -177,6 +180,22 @@ export default function EventFormPage() {
 
   const toUtcMillis = (d: string, t: string) => DateTime.fromISO(`${d}T${t}`, { zone: timezone }).toMillis();
 
+  // Resolve the full invitee set (individuals + everyone in the chosen groups)
+  // so the scheduling assistant reflects who would actually be asked.
+  const inviteeIds = Array.from(
+    new Set([
+      ...selectedUserIds,
+      ...selectedGroupIds.flatMap((gid) => groups.find((g) => g.id === gid)?.members.map((m) => m.id) ?? []),
+    ]),
+  );
+
+  // Moving the start forward drags an earlier end along with it, so the form
+  // can't sit in a state that would submit a negative-length event.
+  const handleStartDateChange = (next: string) => {
+    setDate(next);
+    if (endDate < next) setEndDate(next);
+  };
+
   const handleSubmit = async () => {
     setError(null);
     if (!title.trim()) {
@@ -204,7 +223,7 @@ export default function EventFormPage() {
             byMonthDay: recurrence.freq === 'MONTHLY' ? DateTime.fromISO(date).day : null,
             startDate: date,
             startTime,
-            durationMinutes: DateTime.fromISO(`${date}T${endTime}`).diff(
+            durationMinutes: DateTime.fromISO(`${endDate}T${endTime}`).diff(
               DateTime.fromISO(`${date}T${startTime}`),
               'minutes',
             ).minutes,
@@ -214,7 +233,7 @@ export default function EventFormPage() {
           };
         } else {
           body.startAt = toUtcMillis(date, startTime);
-          body.endAt = toUtcMillis(date, endTime);
+          body.endAt = toUtcMillis(endDate, endTime);
         }
       } else {
         body.pollStrategy = pollStrategy;
@@ -298,18 +317,18 @@ export default function EventFormPage() {
 
       {eventType === 'single' ? (
         <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
-          <div className="flex gap-3">
-            <div className="flex-1">
-              <label className="mb-1 block text-sm text-slate-400">Date</label>
+          <div className="flex flex-wrap gap-3">
+            <div className="flex-1 min-w-[8rem]">
+              <label className="mb-1 block text-sm text-slate-400">Starts</label>
               <input
                 type="date"
                 value={date}
-                onChange={(e) => setDate(e.target.value)}
+                onChange={(e) => handleStartDateChange(e.target.value)}
                 className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
               />
             </div>
-            <div className="flex-1">
-              <label className="mb-1 block text-sm text-slate-400">Start</label>
+            <div className="w-28">
+              <label className="mb-1 block text-sm text-slate-400">at</label>
               <input
                 type="time"
                 value={startTime}
@@ -317,8 +336,18 @@ export default function EventFormPage() {
                 className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
               />
             </div>
-            <div className="flex-1">
-              <label className="mb-1 block text-sm text-slate-400">End</label>
+            <div className="flex-1 min-w-[8rem]">
+              <label className="mb-1 block text-sm text-slate-400">Ends</label>
+              <input
+                type="date"
+                value={endDate}
+                min={date}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="w-28">
+              <label className="mb-1 block text-sm text-slate-400">at</label>
               <input
                 type="time"
                 value={endTime}
@@ -327,6 +356,11 @@ export default function EventFormPage() {
               />
             </div>
           </div>
+          {endDate !== date && (
+            <p className="text-xs text-slate-500">
+              Runs overnight / across {DateTime.fromISO(endDate).diff(DateTime.fromISO(date), 'days').days + 1} days.
+            </p>
+          )}
 
           <label className="flex items-center gap-2 text-sm text-slate-300">
             <input type="checkbox" checked={isRecurring} onChange={(e) => setIsRecurring(e.target.checked)} />
@@ -522,6 +556,39 @@ export default function EventFormPage() {
           onToggleGroup={toggleGroup}
         />
       </div>
+
+      {guildId && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+          <h2 className="mb-1 font-semibold">Availability</h2>
+          <p className="mb-3 text-xs text-slate-500">
+            Times only — you can see when someone is busy, never what they're doing.
+          </p>
+          <SchedulingAssistant
+            guildId={guildId}
+            userIds={inviteeIds}
+            date={eventType === 'single' ? date : pollMode === 'window' ? windowDate : (pollSlots[0]?.date ?? date)}
+            zone={timezone}
+            proposedStart={
+              eventType === 'single'
+                ? toUtcMillis(date, startTime)
+                : pollMode === 'window'
+                  ? toUtcMillis(windowDate, windowStartTime)
+                  : pollSlots[0]
+                    ? toUtcMillis(pollSlots[0].date, pollSlots[0].startTime)
+                    : null
+            }
+            proposedEnd={
+              eventType === 'single'
+                ? toUtcMillis(endDate, endTime)
+                : pollMode === 'window'
+                  ? toUtcMillis(windowDate, windowEndTime)
+                  : pollSlots[0]
+                    ? toUtcMillis(pollSlots[0].date, pollSlots[0].endTime)
+                    : null
+            }
+          />
+        </div>
+      )}
 
       {error && <p className="text-sm text-red-400">{error}</p>}
 
