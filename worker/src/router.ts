@@ -14,8 +14,13 @@ export function buildApp() {
   const app = new Hono<AppEnv>();
 
   app.use('*', async (c, next) => {
+    // The Origin header browsers send is always bare scheme+host (e.g.
+    // https://michaelwdorrill.github.io), never the GitHub Pages project
+    // path (/Jedi-Party-Scheduler) that FRONTEND_URL also needs to carry
+    // for the post-login redirect. Comparing against the full FRONTEND_URL
+    // would never match, silently failing every cross-origin request.
     const corsMiddleware = cors({
-      origin: c.env.FRONTEND_URL,
+      origin: new URL(c.env.FRONTEND_URL).origin,
       allowHeaders: ['Content-Type', 'Authorization'],
       allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     });
