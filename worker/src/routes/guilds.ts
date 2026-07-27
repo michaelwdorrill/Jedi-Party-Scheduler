@@ -8,6 +8,7 @@ import { mapOccurrence, loadOverridesForEvents, loadMyRsvpForEvents, loadPrimary
 import { createEventWithInvites } from '../lib/eventWrites';
 import { computeBusyBlocks } from '../lib/freeBusy';
 import { expandPersonalOccurrences } from '../lib/personalEvents';
+import { fetchGuildVoiceChannels } from '../lib/discord';
 
 export const guildRoutes = new Hono<AppEnv>();
 
@@ -57,6 +58,19 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
     });
   }
   return c.json(out);
+});
+
+guildRoutes.get('/:guildId/voice-channels', async (c) => {
+  const userId = c.get('userId');
+  const guildId = c.req.param('guildId');
+  if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
+
+  try {
+    return c.json(await fetchGuildVoiceChannels(c.env.DISCORD_BOT_TOKEN, guildId));
+  } catch (err) {
+    // Most likely the bot hasn't been invited to this server yet.
+    return c.text(`Could not list voice channels: ${(err as Error).message}`, 502);
+  }
 });
 
 guildRoutes.get('/:guildId/groups', async (c) => {

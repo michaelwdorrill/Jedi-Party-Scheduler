@@ -22,6 +22,8 @@ export interface EventRow {
   window_end_at: number | null;
   window_block_minutes: number | null;
   is_recurring: number;
+  voice_channel_id: string | null;
+  voice_channel_name: string | null;
   created_at: number;
   updated_at: number;
 }

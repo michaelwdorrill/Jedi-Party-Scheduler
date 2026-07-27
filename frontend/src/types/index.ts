@@ -113,6 +113,8 @@ export interface EventOccurrence {
   groupId: string | null;
 }
 
+export type PersonalAvailability = 'busy' | 'considering' | 'free';
+
 export interface PersonalEvent {
   id: string;
   userId: string;
@@ -122,7 +124,7 @@ export interface PersonalEvent {
   startAt: number | null;
   endAt: number | null;
   status: 'active' | 'cancelled';
-  busy: boolean;
+  availability: PersonalAvailability;
   isRecurring: boolean;
   recurrence: RecurrenceRule | null;
 }
@@ -137,6 +139,11 @@ export interface FreeBusyEntry {
   busy: { startAt: number; endAt: number }[];
 }
 
+export interface VoiceChannel {
+  id: string;
+  name: string;
+}
+
 // Full detail as returned by GET /events/:eventId
 export interface EventDetail extends EventOccurrence {
   guildId: string;
@@ -147,6 +154,8 @@ export interface EventDetail extends EventOccurrence {
   windowStartAt: number | null;
   windowEndAt: number | null;
   windowBlockMinutes: number | null;
+  voiceChannelId: string | null;
+  voiceChannelName: string | null;
   recurrence: RecurrenceRule | null;
   invites: EventInvite[];
   pollOptions: PollOption[] | null;

@@ -21,6 +21,8 @@ export interface EventWriteInput {
   eventType: 'single' | 'poll';
   timezone: string;
   invites: { userIds: string[]; groupIds: string[] };
+  voiceChannelId?: string | null;
+  voiceChannelName?: string | null;
 
   // single
   isRecurring?: boolean;
@@ -112,8 +114,8 @@ export async function createEventWithInvites(
     `INSERT INTO events (id, guild_id, organizer_id, title, description, game, event_type, timezone,
        start_at, end_at, status, poll_strategy, poll_threshold_count, poll_deadline_at,
        poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
-       is_recurring, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       is_recurring, voice_channel_id, voice_channel_name, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       eventId,
@@ -135,6 +137,8 @@ export async function createEventWithInvites(
       input.eventType === 'poll' && pollMode === 'window' ? (input.windowEndAt ?? null) : null,
       input.eventType === 'poll' && pollMode === 'window' ? (input.windowBlockMinutes ?? null) : null,
       isRecurring ? 1 : 0,
+      input.voiceChannelId ?? null,
+      input.voiceChannelName ?? null,
       now,
       now,
     )
@@ -215,6 +219,10 @@ export async function updateEvent(
   if (input.timezone !== undefined) {
     setClauses.push('timezone = ?');
     values.push(input.timezone);
+  }
+  if (input.voiceChannelId !== undefined) {
+    setClauses.push('voice_channel_id = ?', 'voice_channel_name = ?');
+    values.push(input.voiceChannelId, input.voiceChannelName ?? null);
   }
 
   // isRecurring is the signal that this request is a full single-event

@@ -125,6 +125,21 @@ export default function EventDetailPage() {
 
       {event.description && <p className="text-slate-300">{event.description}</p>}
 
+      {event.voiceChannelId && (
+        <p className="text-sm text-slate-400">
+          Voice channel:{' '}
+          <a
+            href={`https://discord.com/channels/${event.guildId}/${event.voiceChannelId}`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-indigo-400 hover:underline"
+          >
+            {event.voiceChannelName}
+          </a>{' '}
+          — confirmed attendees get a reminder DM shortly before start.
+        </p>
+      )}
+
       {event.eventType === 'single' && event.startAt && event.endAt && (
         <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
           <p className="mb-3 font-medium">{formatTimeRange(event.startAt, event.endAt, zone)}</p>

@@ -90,10 +90,12 @@ export async function computeBusyBlocks(
     for (const occ of expanded) blocks.push({ startAt: occ.startAt, endAt: occ.endAt });
   }
 
-  // Personal events, unless explicitly marked as not-busy.
+  // Only 'busy' personal events count as unavailable -- 'considering' is
+  // explicitly a non-commitment (still open to being scheduled over) and
+  // 'free' is just a personal note.
   const personal = await expandPersonalOccurrences(env, userId, fromMs, toMs);
   for (const occ of personal) {
-    if (occ.event.busy) blocks.push({ startAt: occ.startAt, endAt: occ.endAt });
+    if (occ.event.availability === 'busy') blocks.push({ startAt: occ.startAt, endAt: occ.endAt });
   }
 
   return merge(blocks);

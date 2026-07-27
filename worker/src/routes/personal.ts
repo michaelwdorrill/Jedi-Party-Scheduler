@@ -9,7 +9,7 @@ interface PersonalEventInput {
   title: string;
   description?: string | null;
   timezone: string;
-  busy?: boolean;
+  availability?: 'busy' | 'considering' | 'free';
   startAt?: number | null;
   endAt?: number | null;
   isRecurring?: boolean;
@@ -59,7 +59,7 @@ personalRoutes.post('/', async (c) => {
 
   await c.env.DB.prepare(
     `INSERT INTO personal_events
-       (id, user_id, title, description, timezone, start_at, end_at, status, busy, is_recurring,
+       (id, user_id, title, description, timezone, start_at, end_at, status, availability, is_recurring,
         freq, interval, by_weekday, by_month_day, rule_start_date, rule_start_time,
         duration_minutes, end_type, rule_end_date, end_count, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -72,7 +72,7 @@ personalRoutes.post('/', async (c) => {
       body.timezone,
       r ? null : (body.startAt ?? null),
       r ? null : (body.endAt ?? null),
-      body.busy === false ? 0 : 1,
+      body.availability ?? 'busy',
       r ? 1 : 0,
       r?.freq ?? null,
       r?.interval ?? null,
@@ -113,7 +113,7 @@ personalRoutes.patch('/:id', async (c) => {
   if (body.title !== undefined) add('title', body.title.trim());
   if (body.description !== undefined) add('description', body.description?.trim() || null);
   if (body.timezone !== undefined) add('timezone', body.timezone);
-  if (body.busy !== undefined) add('busy', body.busy ? 1 : 0);
+  if (body.availability !== undefined) add('availability', body.availability);
 
   // Same pattern as guild events: isRecurring being present is what marks this
   // as a full schedule edit, so partial updates (e.g. just renaming) never
