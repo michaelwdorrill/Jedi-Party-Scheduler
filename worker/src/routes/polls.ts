@@ -1,21 +1,29 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import type { EventRow } from '../lib/events';
-import { checkThresholdAndResolve, getOptionTallies } from '../lib/polls';
+import {
+  bestWindowBlock,
+  checkThresholdAndResolve,
+  checkWindowThresholdAndResolve,
+  getOptionTallies,
+} from '../lib/polls';
 
 export const pollRoutes = new Hono<AppEnv>();
 
-pollRoutes.get('/:eventId/poll', async (c) => {
-  const userId = c.get('userId');
-  const eventId = c.req.param('eventId');
-
+async function requireInvitedOrOrganizer(c: { env: { DB: D1Database } }, eventId: string, userId: string) {
   const invite = await c.env.DB.prepare(
     `SELECT 1 FROM event_invites WHERE event_id = ? AND user_id = ?
      UNION SELECT 1 FROM events WHERE id = ? AND organizer_id = ?`,
   )
     .bind(eventId, userId, eventId, userId)
     .first();
-  if (!invite) return c.text('Forbidden', 403);
+  return !!invite;
+}
+
+pollRoutes.get('/:eventId/poll', async (c) => {
+  const userId = c.get('userId');
+  const eventId = c.req.param('eventId');
+  if (!(await requireInvitedOrOrganizer(c, eventId, userId))) return c.text('Forbidden', 403);
 
   const tallies = await getOptionTallies(c.env, eventId);
   const { results: myVotes } = await c.env.DB.prepare(
@@ -32,6 +40,7 @@ pollRoutes.get('/:eventId/poll', async (c) => {
       startAt: t.startAt,
       endAt: t.endAt,
       displayOrder: t.displayOrder,
+      confirmedAt: t.confirmedAt,
       tally: { yes: t.yes, no: t.no, maybe: t.maybe },
       myVote: myVoteByOption.get(t.id) ?? null,
     })),
@@ -44,22 +53,27 @@ pollRoutes.post('/:eventId/poll/vote', async (c) => {
   const body = await c.req.json<{ optionId: string; vote: 'yes' | 'no' | 'maybe' }>();
 
   const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
-  if (!event || event.event_type !== 'poll') return c.text('Not found', 404);
-  if (event.status !== 'active') return c.text('Voting is closed for this event', 400);
-
-  const invite = await c.env.DB.prepare(
-    `SELECT 1 FROM event_invites WHERE event_id = ? AND user_id = ?`,
-  )
-    .bind(eventId, userId)
-    .first();
-  if (!invite && event.organizer_id !== userId) return c.text('Forbidden', 403);
+  if (!event || event.event_type !== 'poll' || event.poll_mode !== 'options') return c.text('Not found', 404);
 
   const option = await c.env.DB.prepare(
-    `SELECT id FROM event_poll_options WHERE id = ? AND event_id = ?`,
+    `SELECT id, confirmed_at FROM event_poll_options WHERE id = ? AND event_id = ?`,
   )
     .bind(body.optionId, eventId)
-    .first();
+    .first<{ id: string; confirmed_at: number | null }>();
   if (!option) return c.text('Invalid option', 400);
+
+  if (event.poll_resolution_mode === 'multi_winner') {
+    // Confirmed days stay open forever for late joiners; unconfirmed days
+    // close once the deadline passes.
+    const deadlinePassed = !!event.poll_deadline_at && Date.now() > event.poll_deadline_at;
+    if (!option.confirmed_at && deadlinePassed) {
+      return c.text('Voting for this day has closed', 400);
+    }
+  } else if (event.status !== 'active') {
+    return c.text('Voting is closed for this event', 400);
+  }
+
+  if (!(await requireInvitedOrOrganizer(c, eventId, userId))) return c.text('Forbidden', 403);
 
   await c.env.DB.prepare(
     `INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES (?, ?, ?, ?)
@@ -69,6 +83,85 @@ pollRoutes.post('/:eventId/poll/vote', async (c) => {
     .run();
 
   await checkThresholdAndResolve(c.env, event);
+
+  return c.json({ ok: true });
+});
+
+pollRoutes.get('/:eventId/window', async (c) => {
+  const userId = c.get('userId');
+  const eventId = c.req.param('eventId');
+  if (!(await requireInvitedOrOrganizer(c, eventId, userId))) return c.text('Forbidden', 403);
+
+  const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+  if (!event || event.event_type !== 'poll' || event.poll_mode !== 'window') return c.text('Not found', 404);
+
+  const { results: submissions } = await c.env.DB.prepare(
+    `SELECT ewa.user_id, u.username, u.global_name, ewa.avail_start_at, ewa.avail_end_at
+     FROM event_window_availability ewa JOIN users u ON u.id = ewa.user_id
+     WHERE ewa.event_id = ?`,
+  )
+    .bind(eventId)
+    .all<{ user_id: string; username: string; global_name: string | null; avail_start_at: number; avail_end_at: number }>();
+
+  const best =
+    event.window_start_at != null && event.window_end_at != null && event.window_block_minutes != null
+      ? bestWindowBlock(
+          event.window_start_at,
+          event.window_end_at,
+          event.window_block_minutes,
+          submissions.map((s) => ({ startAt: s.avail_start_at, endAt: s.avail_end_at })),
+        )
+      : null;
+
+  const mine = submissions.find((s) => s.user_id === userId);
+
+  return c.json({
+    windowStartAt: event.window_start_at,
+    windowEndAt: event.window_end_at,
+    windowBlockMinutes: event.window_block_minutes,
+    mySubmission: mine ? { startAt: mine.avail_start_at, endAt: mine.avail_end_at } : null,
+    submissions: submissions.map((s) => ({
+      userId: s.user_id,
+      username: s.username,
+      globalName: s.global_name,
+      startAt: s.avail_start_at,
+      endAt: s.avail_end_at,
+    })),
+    bestCandidate: best,
+  });
+});
+
+pollRoutes.post('/:eventId/window', async (c) => {
+  const userId = c.get('userId');
+  const eventId = c.req.param('eventId');
+
+  const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+  if (!event || event.event_type !== 'poll' || event.poll_mode !== 'window') return c.text('Not found', 404);
+  if (event.status !== 'active') return c.text('Voting is closed for this event', 400);
+  if (!(await requireInvitedOrOrganizer(c, eventId, userId))) return c.text('Forbidden', 403);
+
+  const body = await c.req.json<{ startAt: number; endAt: number }>();
+  if (
+    event.window_start_at == null ||
+    event.window_end_at == null ||
+    event.window_block_minutes == null ||
+    body.startAt < event.window_start_at ||
+    body.endAt > event.window_end_at ||
+    body.endAt - body.startAt < event.window_block_minutes * 60 * 1000
+  ) {
+    return c.text('Submitted range must fall within the window and cover at least one full block', 400);
+  }
+
+  await c.env.DB.prepare(
+    `INSERT INTO event_window_availability (event_id, user_id, avail_start_at, avail_end_at, submitted_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(event_id, user_id) DO UPDATE SET avail_start_at = excluded.avail_start_at,
+       avail_end_at = excluded.avail_end_at, submitted_at = excluded.submitted_at`,
+  )
+    .bind(eventId, userId, body.startAt, body.endAt, Date.now())
+    .run();
+
+  await checkWindowThresholdAndResolve(c.env, event);
 
   return c.json({ ok: true });
 });

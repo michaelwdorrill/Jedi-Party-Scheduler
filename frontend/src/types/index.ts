@@ -17,6 +17,7 @@ export interface Group {
   guildId: string;
   name: string;
   game: string | null;
+  idleReminderDays: number;
   createdBy: string;
   members: Friend[];
 }
@@ -33,6 +34,8 @@ export type EventStatus = 'active' | 'cancelled' | 'resolved';
 export type RsvpStatus = 'pending' | 'accepted' | 'declined' | 'tentative';
 export type PollStrategy = 'threshold' | 'most_votes';
 export type PollVote = 'yes' | 'no' | 'maybe';
+export type PollMode = 'options' | 'window';
+export type PollResolutionMode = 'single_winner' | 'multi_winner';
 export type RecurrenceFreq = 'DAILY' | 'WEEKLY' | 'MONTHLY';
 export type RecurrenceEndType = 'never' | 'on_date' | 'after_count';
 
@@ -54,8 +57,28 @@ export interface PollOption {
   startAt: number; // unix ms UTC
   endAt: number;
   displayOrder: number;
+  confirmedAt: number | null;
+  confirmedUsers: { userId: string; username: string; globalName: string | null }[];
   tally: { yes: number; no: number; maybe: number };
   myVote: PollVote | null;
+}
+
+export interface WindowSubmission {
+  userId: string;
+  username: string;
+  globalName: string | null;
+  startAt: number;
+  endAt: number;
+}
+
+// As returned by GET /events/:eventId/window
+export interface WindowInfo {
+  windowStartAt: number | null;
+  windowEndAt: number | null;
+  windowBlockMinutes: number | null;
+  mySubmission: { startAt: number; endAt: number } | null;
+  submissions: WindowSubmission[];
+  bestCandidate: { startAt: number; endAt: number; count: number } | null;
 }
 
 export interface EventInvite {
@@ -90,6 +113,11 @@ export interface EventDetail extends EventOccurrence {
   guildId: string;
   pollStrategy: PollStrategy | null;
   pollThresholdCount: number | null;
+  pollMode: PollMode | null;
+  pollResolutionMode: PollResolutionMode | null;
+  windowStartAt: number | null;
+  windowEndAt: number | null;
+  windowBlockMinutes: number | null;
   recurrence: RecurrenceRule | null;
   invites: EventInvite[];
   pollOptions: PollOption[] | null;

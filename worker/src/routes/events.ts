@@ -64,33 +64,40 @@ eventRoutes.get('/:eventId', async (c) => {
     }>();
 
   let pollOptions = null;
-  if (event.event_type === 'poll') {
+  if (event.event_type === 'poll' && event.poll_mode === 'options') {
     const { results: options } = await c.env.DB.prepare(
-      `SELECT id, start_at, end_at, display_order FROM event_poll_options
+      `SELECT id, start_at, end_at, display_order, confirmed_at FROM event_poll_options
        WHERE event_id = ? ORDER BY display_order`,
     )
       .bind(eventId)
-      .all<{ id: string; start_at: number; end_at: number; display_order: number }>();
+      .all<{ id: string; start_at: number; end_at: number; display_order: number; confirmed_at: number | null }>();
 
     pollOptions = [];
     for (const opt of options) {
       const { results: votes } = await c.env.DB.prepare(
-        `SELECT user_id, vote FROM event_poll_votes WHERE option_id = ?`,
+        `SELECT ev.user_id, ev.vote, u.username, u.global_name FROM event_poll_votes ev
+         JOIN users u ON u.id = ev.user_id WHERE ev.option_id = ?`,
       )
         .bind(opt.id)
-        .all<{ user_id: string; vote: string }>();
+        .all<{ user_id: string; vote: string; username: string; global_name: string | null }>();
 
       const tally = { yes: 0, no: 0, maybe: 0 };
       let myVote: string | null = null;
+      const confirmedUsers: { userId: string; username: string; globalName: string | null }[] = [];
       for (const v of votes) {
         tally[v.vote as 'yes' | 'no' | 'maybe']++;
         if (v.user_id === userId) myVote = v.vote;
+        if (v.vote === 'yes' && opt.confirmed_at) {
+          confirmedUsers.push({ userId: v.user_id, username: v.username, globalName: v.global_name });
+        }
       }
       pollOptions.push({
         id: opt.id,
         startAt: opt.start_at,
         endAt: opt.end_at,
         displayOrder: opt.display_order,
+        confirmedAt: opt.confirmed_at,
+        confirmedUsers,
         tally,
         myVote,
       });
@@ -117,6 +124,11 @@ eventRoutes.get('/:eventId', async (c) => {
     pollStrategy: event.poll_strategy,
     pollThresholdCount: event.poll_threshold_count,
     pollDeadlineAt: event.poll_deadline_at,
+    pollMode: event.poll_mode,
+    pollResolutionMode: event.poll_resolution_mode,
+    windowStartAt: event.window_start_at,
+    windowEndAt: event.window_end_at,
+    windowBlockMinutes: event.window_block_minutes,
     recurrence: recurrence
       ? {
           freq: recurrence.freq,

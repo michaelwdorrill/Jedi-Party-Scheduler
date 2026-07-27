@@ -6,7 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import InviteePicker from '../components/InviteePicker';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
-import type { EventDetail, Friend, Group, PollStrategy } from '../types';
+import type { EventDetail, Friend, Group, PollMode, PollStrategy } from '../types';
 
 interface PollSlotDraft {
   key: string;
@@ -46,15 +46,25 @@ export default function EventFormPage() {
     endCount: 10,
   });
 
-  // Poll fields
-  const [pollSlots, setPollSlots] = useState<PollSlotDraft[]>([
-    { key: crypto.randomUUID(), date: prefillDate, startTime: '13:00', endTime: '17:00' },
-  ]);
+  // Poll fields (shared)
+  const [pollMode, setPollMode] = useState<PollMode>('options');
   const [pollStrategy, setPollStrategy] = useState<PollStrategy>('threshold');
   const [pollThreshold, setPollThreshold] = useState(3);
   const [pollDeadline, setPollDeadline] = useState(
     DateTime.fromISO(prefillDate).minus({ days: 1 }).toISODate()!,
   );
+
+  // Poll fields ('options' mode)
+  const [pollSlots, setPollSlots] = useState<PollSlotDraft[]>([
+    { key: crypto.randomUUID(), date: prefillDate, startTime: '13:00', endTime: '17:00' },
+  ]);
+  const [multiWinner, setMultiWinner] = useState(false);
+
+  // Poll fields ('window' mode)
+  const [windowDate, setWindowDate] = useState(prefillDate);
+  const [windowStartTime, setWindowStartTime] = useState('12:00');
+  const [windowEndTime, setWindowEndTime] = useState('18:00');
+  const [windowBlockHours, setWindowBlockHours] = useState(3);
 
   const [friends, setFriends] = useState<Friend[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -107,24 +117,38 @@ export default function EventFormPage() {
           endCount: ev.recurrence.endCount ?? 10,
         });
       }
-      if (ev.pollOptions) {
+      if (ev.eventType === 'poll') {
         setPollStrategy(ev.pollStrategy ?? 'threshold');
         setPollThreshold(ev.pollThresholdCount ?? 3);
+        setPollMode(ev.pollMode ?? 'options');
+        setMultiWinner(ev.pollResolutionMode === 'multi_winner');
         if (ev.pollDeadlineAt) {
           setPollDeadline(DateTime.fromMillis(ev.pollDeadlineAt).setZone(ev.timezone).toISODate()!);
         }
-        setPollSlots(
-          ev.pollOptions.map((o) => {
-            const s = DateTime.fromMillis(o.startAt).setZone(ev.timezone);
-            const e = DateTime.fromMillis(o.endAt).setZone(ev.timezone);
-            return {
-              key: o.id,
-              date: s.toISODate()!,
-              startTime: s.toFormat('HH:mm'),
-              endTime: e.toFormat('HH:mm'),
-            };
-          }),
-        );
+        if (ev.pollMode === 'window') {
+          if (ev.windowStartAt) {
+            const s = DateTime.fromMillis(ev.windowStartAt).setZone(ev.timezone);
+            setWindowDate(s.toISODate()!);
+            setWindowStartTime(s.toFormat('HH:mm'));
+          }
+          if (ev.windowEndAt) {
+            setWindowEndTime(DateTime.fromMillis(ev.windowEndAt).setZone(ev.timezone).toFormat('HH:mm'));
+          }
+          if (ev.windowBlockMinutes) setWindowBlockHours(ev.windowBlockMinutes / 60);
+        } else if (ev.pollOptions) {
+          setPollSlots(
+            ev.pollOptions.map((o) => {
+              const s = DateTime.fromMillis(o.startAt).setZone(ev.timezone);
+              const e = DateTime.fromMillis(o.endAt).setZone(ev.timezone);
+              return {
+                key: o.id,
+                date: s.toISODate()!,
+                startTime: s.toFormat('HH:mm'),
+                endTime: e.toFormat('HH:mm'),
+              };
+            }),
+          );
+        }
       }
     });
   }, [isEdit, eventId]);
@@ -196,10 +220,19 @@ export default function EventFormPage() {
         body.pollStrategy = pollStrategy;
         body.pollThresholdCount = pollStrategy === 'threshold' ? pollThreshold : null;
         body.pollDeadlineAt = DateTime.fromISO(`${pollDeadline}T23:59`, { zone: timezone }).toMillis();
-        body.pollOptions = pollSlots.map((s) => ({
-          startAt: toUtcMillis(s.date, s.startTime),
-          endAt: toUtcMillis(s.date, s.endTime),
-        }));
+        body.pollMode = pollMode;
+
+        if (pollMode === 'window') {
+          body.windowStartAt = toUtcMillis(windowDate, windowStartTime);
+          body.windowEndAt = toUtcMillis(windowDate, windowEndTime);
+          body.windowBlockMinutes = windowBlockHours * 60;
+        } else {
+          body.pollResolutionMode = pollStrategy === 'threshold' && multiWinner ? 'multi_winner' : 'single_winner';
+          body.pollOptions = pollSlots.map((s) => ({
+            startAt: toUtcMillis(s.date, s.startTime),
+            endAt: toUtcMillis(s.date, s.endTime),
+          }));
+        }
       }
 
       if (isEdit) {
@@ -303,54 +336,120 @@ export default function EventFormPage() {
         </div>
       ) : (
         <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
-          <div className="space-y-2">
-            {pollSlots.map((slot) => (
-              <div key={slot.key} className="flex items-center gap-2">
-                <input
-                  type="date"
-                  value={slot.date}
-                  onChange={(e) =>
-                    setPollSlots((prev) =>
-                      prev.map((s) => (s.key === slot.key ? { ...s, date: e.target.value } : s)),
-                    )
-                  }
-                  className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
-                />
-                <input
-                  type="time"
-                  value={slot.startTime}
-                  onChange={(e) =>
-                    setPollSlots((prev) =>
-                      prev.map((s) => (s.key === slot.key ? { ...s, startTime: e.target.value } : s)),
-                    )
-                  }
-                  className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
-                />
-                <span className="text-slate-500">to</span>
-                <input
-                  type="time"
-                  value={slot.endTime}
-                  onChange={(e) =>
-                    setPollSlots((prev) =>
-                      prev.map((s) => (s.key === slot.key ? { ...s, endTime: e.target.value } : s)),
-                    )
-                  }
-                  className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
-                />
-                {pollSlots.length > 1 && (
-                  <button
-                    onClick={() => removePollSlot(slot.key)}
-                    className="text-xs text-red-400 hover:underline"
-                  >
-                    Remove
-                  </button>
-                )}
+          {!isEdit && (
+            <div className="flex gap-1 rounded-md bg-slate-800 p-1 w-fit">
+              <button
+                onClick={() => setPollMode('options')}
+                className={`rounded px-3 py-1 text-xs ${pollMode === 'options' ? 'bg-indigo-600 text-white' : 'text-slate-300'}`}
+              >
+                Candidate days/times
+              </button>
+              <button
+                onClick={() => setPollMode('window')}
+                className={`rounded px-3 py-1 text-xs ${pollMode === 'window' ? 'bg-indigo-600 text-white' : 'text-slate-300'}`}
+              >
+                Time window
+              </button>
+            </div>
+          )}
+
+          {pollMode === 'options' ? (
+            <div className="space-y-2">
+              {pollSlots.map((slot) => (
+                <div key={slot.key} className="flex items-center gap-2">
+                  <input
+                    type="date"
+                    value={slot.date}
+                    onChange={(e) =>
+                      setPollSlots((prev) =>
+                        prev.map((s) => (s.key === slot.key ? { ...s, date: e.target.value } : s)),
+                      )
+                    }
+                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                  />
+                  <input
+                    type="time"
+                    value={slot.startTime}
+                    onChange={(e) =>
+                      setPollSlots((prev) =>
+                        prev.map((s) => (s.key === slot.key ? { ...s, startTime: e.target.value } : s)),
+                      )
+                    }
+                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                  />
+                  <span className="text-slate-500">to</span>
+                  <input
+                    type="time"
+                    value={slot.endTime}
+                    onChange={(e) =>
+                      setPollSlots((prev) =>
+                        prev.map((s) => (s.key === slot.key ? { ...s, endTime: e.target.value } : s)),
+                      )
+                    }
+                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                  />
+                  {pollSlots.length > 1 && (
+                    <button
+                      onClick={() => removePollSlot(slot.key)}
+                      className="text-xs text-red-400 hover:underline"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              ))}
+              <button onClick={addPollSlot} className="text-sm text-indigo-400 hover:underline">
+                + Add another time slot
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-sm text-slate-400">
+                Propose a window of time; invitees mark the range within it they could commit to, and the
+                best-overlapping block is picked automatically.
+              </p>
+              <div className="flex flex-wrap items-end gap-3">
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">Date</label>
+                  <input
+                    type="date"
+                    value={windowDate}
+                    onChange={(e) => setWindowDate(e.target.value)}
+                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">Window start</label>
+                  <input
+                    type="time"
+                    value={windowStartTime}
+                    onChange={(e) => setWindowStartTime(e.target.value)}
+                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">Window end</label>
+                  <input
+                    type="time"
+                    value={windowEndTime}
+                    onChange={(e) => setWindowEndTime(e.target.value)}
+                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">Session length (hours)</label>
+                  <input
+                    type="number"
+                    min={0.5}
+                    step={0.5}
+                    value={windowBlockHours}
+                    onChange={(e) => setWindowBlockHours(Math.max(0.5, Number(e.target.value)))}
+                    className="w-24 rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                  />
+                </div>
               </div>
-            ))}
-            <button onClick={addPollSlot} className="text-sm text-indigo-400 hover:underline">
-              + Add another time slot
-            </button>
-          </div>
+            </div>
+          )}
 
           <div className="flex items-center gap-3">
             <label className="flex items-center gap-1 text-sm">
@@ -374,11 +473,29 @@ export default function EventFormPage() {
               <input
                 type="radio"
                 checked={pollStrategy === 'most_votes'}
-                onChange={() => setPollStrategy('most_votes')}
+                onChange={() => {
+                  setPollStrategy('most_votes');
+                  setMultiWinner(false);
+                }}
               />
               Pick the most popular slot at the deadline
             </label>
           </div>
+
+          {pollMode === 'options' && pollStrategy === 'threshold' && (
+            <label className="flex items-start gap-2 text-sm text-slate-300">
+              <input
+                type="checkbox"
+                checked={multiWinner}
+                onChange={(e) => setMultiWinner(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                Confirm each day independently — if multiple days each get enough "I'm in"s, they all happen
+                (instead of picking just one winner).
+              </span>
+            </label>
+          )}
 
           <div>
             <label className="mb-1 block text-sm text-slate-400">

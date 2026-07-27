@@ -20,10 +20,10 @@ guildRoutes.get('/:guildId/groups', async (c) => {
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
   const { results: groups } = await c.env.DB.prepare(
-    `SELECT id, guild_id, name, game, created_by FROM groups WHERE guild_id = ? ORDER BY name`,
+    `SELECT id, guild_id, name, game, idle_reminder_days, created_by FROM groups WHERE guild_id = ? ORDER BY name`,
   )
     .bind(guildId)
-    .all<{ id: string; guild_id: string; name: string; game: string | null; created_by: string }>();
+    .all<{ id: string; guild_id: string; name: string; game: string | null; idle_reminder_days: number; created_by: string }>();
 
   const out = [];
   for (const g of groups) {
@@ -40,6 +40,7 @@ guildRoutes.get('/:guildId/groups', async (c) => {
       guildId: g.guild_id,
       name: g.name,
       game: g.game,
+      idleReminderDays: g.idle_reminder_days,
       createdBy: g.created_by,
       members: members.map((m) => ({
         id: m.id,
@@ -57,15 +58,15 @@ guildRoutes.post('/:guildId/groups', async (c) => {
   const guildId = c.req.param('guildId');
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
-  const body = await c.req.json<{ name: string; game?: string | null; member_user_ids: string[] }>();
+  const body = await c.req.json<{ name: string; game?: string | null; idle_reminder_days?: number; member_user_ids: string[] }>();
   if (!body.name?.trim()) return c.text('name is required', 400);
 
   const groupId = newId();
   const now = Date.now();
   await c.env.DB.prepare(
-    `INSERT INTO groups (id, guild_id, name, game, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO groups (id, guild_id, name, game, idle_reminder_days, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(groupId, guildId, body.name.trim(), body.game?.trim() || null, userId, now)
+    .bind(groupId, guildId, body.name.trim(), body.game?.trim() || null, body.idle_reminder_days ?? 2, userId, now)
     .run();
 
   for (const memberId of body.member_user_ids ?? []) {
@@ -102,6 +103,31 @@ guildRoutes.get('/:guildId/events', async (c) => {
 
   const occurrences = [];
   for (const event of events) {
+    if (event.event_type === 'poll' && event.poll_resolution_mode === 'multi_winner') {
+      // Each independently-confirmed day is its own occurrence, and stays on
+      // the calendar even after the parent poll stops accepting new votes.
+      const { results: confirmedOptions } = await c.env.DB.prepare(
+        `SELECT id, start_at, end_at FROM event_poll_options WHERE event_id = ? AND confirmed_at IS NOT NULL`,
+      )
+        .bind(event.id)
+        .all<{ id: string; start_at: number; end_at: number }>();
+      for (const opt of confirmedOptions) {
+        if (opt.start_at <= to && opt.end_at >= from) {
+          occurrences.push(
+            mapOccurrence(event, `${event.id}::opt:${opt.id}`, opt.start_at, opt.end_at, rsvpByEvent.get(event.id) ?? null),
+          );
+        }
+      }
+      if (
+        event.status === 'active' &&
+        event.poll_deadline_at &&
+        event.poll_deadline_at >= from &&
+        event.poll_deadline_at <= to
+      ) {
+        occurrences.push(mapOccurrence(event, event.id, null, null, rsvpByEvent.get(event.id) ?? null));
+      }
+      continue;
+    }
     if (event.event_type === 'poll' && event.status !== 'resolved') {
       // Unresolved polls show once, at the poll deadline, not per-occurrence.
       if (event.poll_deadline_at && event.poll_deadline_at >= from && event.poll_deadline_at <= to) {

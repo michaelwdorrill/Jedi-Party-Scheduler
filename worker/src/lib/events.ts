@@ -16,6 +16,11 @@ export interface EventRow {
   poll_threshold_count: number | null;
   poll_deadline_at: number | null;
   resolved_option_id: string | null;
+  poll_mode: 'options' | 'window';
+  poll_resolution_mode: 'single_winner' | 'multi_winner';
+  window_start_at: number | null;
+  window_end_at: number | null;
+  window_block_minutes: number | null;
   is_recurring: number;
   created_at: number;
   updated_at: number;

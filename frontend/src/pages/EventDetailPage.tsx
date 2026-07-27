@@ -5,7 +5,8 @@ import { useAuth } from '../auth/AuthContext';
 import { formatTimeRange } from '../lib/datetime';
 import PollOptionRow from '../components/PollOptionRow';
 import RsvpButtons from '../components/RsvpButtons';
-import type { EventDetail, PollVote, RsvpStatus } from '../types';
+import WindowAvailabilityPicker from '../components/WindowAvailabilityPicker';
+import type { EventDetail, PollVote, RsvpStatus, WindowInfo } from '../types';
 
 export default function EventDetailPage() {
   const { eventId } = useParams();
@@ -14,17 +15,30 @@ export default function EventDetailPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [event, setEvent] = useState<EventDetail | null>(null);
+  const [windowInfo, setWindowInfo] = useState<WindowInfo | null>(null);
+  const [windowDraft, setWindowDraft] = useState<{ startAt: number; endAt: number } | null>(null);
   const [loading, setLoading] = useState(true);
 
   const load = async () => {
     if (!eventId) return;
     setLoading(true);
     try {
-      setEvent(await api.get<EventDetail>(`/events/${eventId}`));
+      const ev = await api.get<EventDetail>(`/events/${eventId}`);
+      setEvent(ev);
+      if (ev.eventType === 'poll' && ev.pollMode === 'window') {
+        const w = await api.get<WindowInfo>(`/events/${eventId}/window`);
+        setWindowInfo(w);
+        setWindowDraft((prev) => prev ?? w.mySubmission ?? defaultWindowDraft(w));
+      }
     } finally {
       setLoading(false);
     }
   };
+
+  function defaultWindowDraft(w: WindowInfo): { startAt: number; endAt: number } | null {
+    if (w.windowStartAt == null || w.windowEndAt == null || w.windowBlockMinutes == null) return null;
+    return { startAt: w.windowStartAt, endAt: Math.min(w.windowEndAt, w.windowStartAt + w.windowBlockMinutes * 60000) };
+  }
 
   useEffect(() => {
     void load();
@@ -36,6 +50,8 @@ export default function EventDetailPage() {
 
   const isOrganizer = event.organizerId === user?.id;
   const zone = user?.timezone ?? event.timezone;
+  const deadlinePassed = !!event.pollDeadlineAt && Date.now() > event.pollDeadlineAt;
+  const isMultiWinner = event.pollResolutionMode === 'multi_winner';
 
   const handleRsvp = async (status: RsvpStatus) => {
     await api.post(`/events/${event.eventId}/rsvp`, { status });
@@ -44,6 +60,12 @@ export default function EventDetailPage() {
 
   const handleVote = async (optionId: string, vote: PollVote) => {
     await api.post(`/events/${event.eventId}/poll/vote`, { optionId, vote });
+    await load();
+  };
+
+  const handleSubmitWindow = async () => {
+    if (!windowDraft) return;
+    await api.post(`/events/${event.eventId}/window`, windowDraft);
     await load();
   };
 
@@ -112,7 +134,7 @@ export default function EventDetailPage() {
         </div>
       )}
 
-      {event.eventType === 'poll' && event.status === 'active' && event.pollOptions && (
+      {event.eventType === 'poll' && event.pollMode === 'options' && !isMultiWinner && event.status === 'active' && event.pollOptions && (
         <div className="space-y-2">
           <p className="text-sm text-slate-400">
             {event.pollStrategy === 'threshold'
@@ -132,6 +154,61 @@ export default function EventDetailPage() {
           ))}
         </div>
       )}
+
+      {event.eventType === 'poll' && isMultiWinner && event.pollOptions && (
+        <div className="space-y-2">
+          <p className="text-sm text-slate-400">
+            Each day is confirmed independently once {event.pollThresholdCount} people say they're in — any that
+            qualify all happen. You can still vote (or join a confirmed day) any time before it starts.
+          </p>
+          {event.pollOptions.map((opt) => (
+            <PollOptionRow
+              key={opt.id}
+              option={opt}
+              zone={zone}
+              onVote={(vote) => handleVote(opt.id, vote)}
+              votingDisabled={!opt.confirmedAt && deadlinePassed}
+            />
+          ))}
+        </div>
+      )}
+
+      {event.eventType === 'poll' &&
+        event.pollMode === 'window' &&
+        event.status === 'active' &&
+        windowInfo &&
+        windowInfo.windowStartAt != null &&
+        windowInfo.windowEndAt != null &&
+        windowInfo.windowBlockMinutes != null && (
+          <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
+            <p className="text-sm text-slate-400">
+              {event.pollStrategy === 'threshold'
+                ? `Confirms once ${event.pollThresholdCount} people can commit to the same block, otherwise by the deadline.`
+                : 'The best-overlapping block wins at the deadline.'}
+              {event.pollDeadlineAt && (
+                <> Voting closes {formatTimeRange(event.pollDeadlineAt, event.pollDeadlineAt, zone).split(' –')[0]}.</>
+              )}
+            </p>
+            {windowDraft && (
+              <WindowAvailabilityPicker
+                windowStartAt={windowInfo.windowStartAt}
+                windowEndAt={windowInfo.windowEndAt}
+                blockMinutes={windowInfo.windowBlockMinutes}
+                value={windowDraft}
+                onChange={setWindowDraft}
+                zone={zone}
+                otherSubmissions={windowInfo.submissions.filter((s) => s.userId !== user?.id)}
+                bestCandidate={windowInfo.bestCandidate}
+              />
+            )}
+            <button
+              onClick={handleSubmitWindow}
+              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
+            >
+              {windowInfo.mySubmission ? 'Update my availability' : 'Submit my availability'}
+            </button>
+          </div>
+        )}
 
       {event.eventType === 'poll' && event.status === 'resolved' && event.startAt && event.endAt && (
         <div className="rounded-lg border border-emerald-900 bg-emerald-950/40 p-4">

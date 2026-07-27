@@ -9,15 +9,16 @@ interface OptionTally {
   yes: number;
   no: number;
   maybe: number;
+  confirmedAt: number | null;
 }
 
 export async function getOptionTallies(env: Env, eventId: string): Promise<OptionTally[]> {
   const { results: options } = await env.DB.prepare(
-    `SELECT id, display_order, start_at, end_at FROM event_poll_options
+    `SELECT id, display_order, start_at, end_at, confirmed_at FROM event_poll_options
      WHERE event_id = ? ORDER BY display_order`,
   )
     .bind(eventId)
-    .all<{ id: string; display_order: number; start_at: number; end_at: number }>();
+    .all<{ id: string; display_order: number; start_at: number; end_at: number; confirmed_at: number | null }>();
 
   const tallies: OptionTally[] = [];
   for (const opt of options) {
@@ -27,14 +28,23 @@ export async function getOptionTallies(env: Env, eventId: string): Promise<Optio
       .bind(opt.id)
       .all<{ vote: string; n: number }>();
 
-    const t: OptionTally = { id: opt.id, displayOrder: opt.display_order, startAt: opt.start_at, endAt: opt.end_at, yes: 0, no: 0, maybe: 0 };
+    const t: OptionTally = {
+      id: opt.id,
+      displayOrder: opt.display_order,
+      startAt: opt.start_at,
+      endAt: opt.end_at,
+      confirmedAt: opt.confirmed_at,
+      yes: 0,
+      no: 0,
+      maybe: 0,
+    };
     for (const c of counts) t[c.vote as 'yes' | 'no' | 'maybe'] = c.n;
     tallies.push(t);
   }
   return tallies;
 }
 
-async function markResolved(env: Env, eventId: string, option: OptionTally): Promise<void> {
+async function markResolved(env: Env, eventId: string, option: { id: string; startAt: number; endAt: number }): Promise<void> {
   await env.DB.prepare(
     `UPDATE events SET status = 'resolved', resolved_option_id = ?, start_at = ?, end_at = ?, updated_at = ?
      WHERE id = ?`,
@@ -60,29 +70,104 @@ function pickMostVotes(tallies: OptionTally[]): OptionTally | null {
   })[0];
 }
 
-// Called synchronously after a vote is cast, but only meaningful for the
-// 'threshold' strategy -- checks whether any option just crossed the
-// configured yes-count and resolves the event immediately if so.
-export async function checkThresholdAndResolve(env: Env, event: EventRow): Promise<boolean> {
-  if (event.event_type !== 'poll' || event.status !== 'active') return false;
-  if (event.poll_strategy !== 'threshold' || !event.poll_threshold_count) return false;
+async function confirmOption(env: Env, optionId: string): Promise<void> {
+  await env.DB.prepare(`UPDATE event_poll_options SET confirmed_at = ? WHERE id = ?`)
+    .bind(Date.now(), optionId)
+    .run();
+}
+
+// Called synchronously after a vote is cast. For 'single_winner' events,
+// mirrors the original behavior: the first option to cross the threshold
+// resolves the whole event. For 'multi_winner' events, every option is
+// checked independently -- each one that crosses the threshold gets its own
+// confirmed_at, and the parent event is never marked resolved here (it can
+// keep collecting votes on other candidate days). Returns the ids of any
+// options newly confirmed in this call, so the caller/cron can notify them.
+export async function checkThresholdAndResolve(env: Env, event: EventRow): Promise<string[]> {
+  if (event.event_type !== 'poll' || event.poll_mode !== 'options') return [];
+  if (event.poll_strategy !== 'threshold' || !event.poll_threshold_count) return [];
 
   const tallies = await getOptionTallies(env, event.id);
+
+  if (event.poll_resolution_mode === 'multi_winner') {
+    if (event.status !== 'active') return [];
+    const newlyConfirmed: string[] = [];
+    for (const t of tallies) {
+      if (!t.confirmedAt && t.yes >= event.poll_threshold_count) {
+        await confirmOption(env, t.id);
+        newlyConfirmed.push(t.id);
+      }
+    }
+    return newlyConfirmed;
+  }
+
+  if (event.status !== 'active') return [];
   const winner = tallies
     .filter((t) => t.yes >= event.poll_threshold_count!)
     .sort((a, b) => a.displayOrder - b.displayOrder || a.id.localeCompare(b.id))[0];
 
   if (winner) {
     await markResolved(env, event.id, winner);
+    return [winner.id];
+  }
+  return [];
+}
+
+// Finds the block of `blockMinutes` within [windowStart, windowEnd] (stepped
+// at 30-minute granularity) covered by the most submitted availability
+// ranges. Ties keep the earliest (soonest) candidate, since candidates are
+// walked chronologically and only replaced on a strictly higher count.
+const WINDOW_STEP_MS = 30 * 60 * 1000;
+
+export interface WindowCandidate {
+  startAt: number;
+  endAt: number;
+  count: number;
+}
+
+export function bestWindowBlock(
+  windowStart: number,
+  windowEnd: number,
+  blockMinutes: number,
+  submissions: { startAt: number; endAt: number }[],
+): WindowCandidate | null {
+  const blockMs = blockMinutes * 60 * 1000;
+  let best: WindowCandidate | null = null;
+  for (let s = windowStart; s + blockMs <= windowEnd; s += WINDOW_STEP_MS) {
+    const e = s + blockMs;
+    const count = submissions.filter((sub) => sub.startAt <= s && sub.endAt >= e).length;
+    if (!best || count > best.count) best = { startAt: s, endAt: e, count };
+  }
+  return best;
+}
+
+async function getWindowSubmissions(env: Env, eventId: string) {
+  const { results } = await env.DB.prepare(
+    `SELECT avail_start_at as "startAt", avail_end_at as "endAt" FROM event_window_availability WHERE event_id = ?`,
+  )
+    .bind(eventId)
+    .all<{ startAt: number; endAt: number }>();
+  return results;
+}
+
+// Called synchronously after an attendee submits/updates their window
+// availability. Window-mode events are always single_winner (enforced at
+// creation), so this resolves the whole event, same as the options path.
+export async function checkWindowThresholdAndResolve(env: Env, event: EventRow): Promise<boolean> {
+  if (event.event_type !== 'poll' || event.poll_mode !== 'window' || event.status !== 'active') return false;
+  if (event.poll_strategy !== 'threshold' || !event.poll_threshold_count) return false;
+  if (event.window_start_at == null || event.window_end_at == null || event.window_block_minutes == null) return false;
+
+  const submissions = await getWindowSubmissions(env, event.id);
+  const best = bestWindowBlock(event.window_start_at, event.window_end_at, event.window_block_minutes, submissions);
+  if (best && best.count >= event.poll_threshold_count) {
+    await markResolved(env, event.id, { id: 'window', startAt: best.startAt, endAt: best.endAt });
     return true;
   }
   return false;
 }
 
-// Called from the cron sweep for polls whose deadline has passed: resolves
-// via most-votes logic regardless of strategy (this is both the primary
-// resolution path for 'most_votes' and the fallback for 'threshold' polls
-// that never crossed their threshold).
+// Called from the cron sweep for polls whose deadline has passed.
 export async function resolvePastDeadlinePolls(env: Env): Promise<string[]> {
   const now = Date.now();
   const { results: events } = await env.DB.prepare(
@@ -93,6 +178,38 @@ export async function resolvePastDeadlinePolls(env: Env): Promise<string[]> {
 
   const resolvedEventIds: string[] = [];
   for (const event of events) {
+    if (event.poll_resolution_mode === 'multi_winner') {
+      // Unconfirmed options are simply dropped (never voted on again); any
+      // already-confirmed options stay confirmed and remain joinable.
+      const tallies = await getOptionTallies(env, event.id);
+      const anyConfirmed = tallies.some((t) => t.confirmedAt);
+      if (anyConfirmed) {
+        await env.DB.prepare(`UPDATE events SET status = 'resolved', updated_at = ? WHERE id = ?`)
+          .bind(now, event.id)
+          .run();
+      } else {
+        await markCancelled(env, event.id);
+      }
+      resolvedEventIds.push(event.id);
+      continue;
+    }
+
+    if (event.poll_mode === 'window') {
+      if (event.window_start_at != null && event.window_end_at != null && event.window_block_minutes != null) {
+        const submissions = await getWindowSubmissions(env, event.id);
+        const best = bestWindowBlock(event.window_start_at, event.window_end_at, event.window_block_minutes, submissions);
+        if (best && best.count > 0) {
+          await markResolved(env, event.id, { id: 'window', startAt: best.startAt, endAt: best.endAt });
+        } else {
+          await markCancelled(env, event.id);
+        }
+      } else {
+        await markCancelled(env, event.id);
+      }
+      resolvedEventIds.push(event.id);
+      continue;
+    }
+
     const tallies = await getOptionTallies(env, event.id);
     const winner = pickMostVotes(tallies);
     if (winner) {

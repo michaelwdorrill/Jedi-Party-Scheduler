@@ -32,7 +32,24 @@ export interface EventWriteInput {
   pollStrategy?: 'threshold' | 'most_votes';
   pollThresholdCount?: number | null;
   pollDeadlineAt?: number;
+  pollMode?: 'options' | 'window';
+  pollResolutionMode?: 'single_winner' | 'multi_winner';
   pollOptions?: { startAt: number; endAt: number }[];
+  windowStartAt?: number;
+  windowEndAt?: number;
+  windowBlockMinutes?: number;
+}
+
+// multi_winner only makes sense for discrete day/slot options (each day
+// independently reaches its own quorum) and window mode always resolves to
+// exactly one block, so the two combinations below are the only valid pairs.
+function normalizePollModes(input: {
+  pollMode?: 'options' | 'window';
+  pollResolutionMode?: 'single_winner' | 'multi_winner';
+}) {
+  const pollMode = input.pollMode ?? 'options';
+  const pollResolutionMode = pollMode === 'window' ? 'single_winner' : (input.pollResolutionMode ?? 'single_winner');
+  return { pollMode, pollResolutionMode };
 }
 
 async function resolveInviteeUserIds(
@@ -89,12 +106,14 @@ export async function createEventWithInvites(
   const eventId = newId();
   const now = Date.now();
   const isRecurring = input.eventType === 'single' && !!input.isRecurring;
+  const { pollMode, pollResolutionMode } = normalizePollModes(input);
 
   await env.DB.prepare(
     `INSERT INTO events (id, guild_id, organizer_id, title, description, game, event_type, timezone,
        start_at, end_at, status, poll_strategy, poll_threshold_count, poll_deadline_at,
+       poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
        is_recurring, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       eventId,
@@ -110,6 +129,11 @@ export async function createEventWithInvites(
       input.eventType === 'poll' ? (input.pollStrategy ?? null) : null,
       input.eventType === 'poll' ? (input.pollThresholdCount ?? null) : null,
       input.eventType === 'poll' ? (input.pollDeadlineAt ?? null) : null,
+      pollMode,
+      pollResolutionMode,
+      input.eventType === 'poll' && pollMode === 'window' ? (input.windowStartAt ?? null) : null,
+      input.eventType === 'poll' && pollMode === 'window' ? (input.windowEndAt ?? null) : null,
+      input.eventType === 'poll' && pollMode === 'window' ? (input.windowBlockMinutes ?? null) : null,
       isRecurring ? 1 : 0,
       now,
       now,
@@ -140,7 +164,7 @@ export async function createEventWithInvites(
       .run();
   }
 
-  if (input.eventType === 'poll' && input.pollOptions) {
+  if (input.eventType === 'poll' && pollMode === 'options' && input.pollOptions) {
     let order = 0;
     for (const opt of input.pollOptions) {
       await env.DB.prepare(
@@ -241,6 +265,7 @@ export async function updateEvent(
     // Replacing poll options resets any votes already cast on the old set --
     // acceptable for v1 since editing a poll's candidate slots after voting
     // has started is an edge case, not the common path.
+    const { pollMode, pollResolutionMode } = normalizePollModes(input);
     await env.DB.prepare(
       `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id = ?)`,
     )
@@ -256,9 +281,39 @@ export async function updateEvent(
         .run();
     }
     await env.DB.prepare(
-      `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ? WHERE id = ?`,
+      `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
+         poll_mode = ?, poll_resolution_mode = ?, window_start_at = NULL, window_end_at = NULL,
+         window_block_minutes = NULL
+       WHERE id = ?`,
     )
-      .bind(input.pollStrategy ?? null, input.pollThresholdCount ?? null, input.pollDeadlineAt ?? null, eventId)
+      .bind(
+        input.pollStrategy ?? null,
+        input.pollThresholdCount ?? null,
+        input.pollDeadlineAt ?? null,
+        pollMode,
+        pollResolutionMode,
+        eventId,
+      )
+      .run();
+  }
+
+  if (input.windowStartAt !== undefined) {
+    await env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id = ?`).bind(eventId).run();
+    await env.DB.prepare(
+      `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
+         poll_mode = 'window', poll_resolution_mode = 'single_winner',
+         window_start_at = ?, window_end_at = ?, window_block_minutes = ?
+       WHERE id = ?`,
+    )
+      .bind(
+        input.pollStrategy ?? null,
+        input.pollThresholdCount ?? null,
+        input.pollDeadlineAt ?? null,
+        input.windowStartAt,
+        input.windowEndAt ?? null,
+        input.windowBlockMinutes ?? null,
+        eventId,
+      )
       .run();
   }
 

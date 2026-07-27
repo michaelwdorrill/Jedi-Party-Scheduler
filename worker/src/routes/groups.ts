@@ -8,6 +8,7 @@ interface GroupRow {
   guild_id: string;
   name: string;
   game: string | null;
+  idle_reminder_days: number;
   created_by: string;
 }
 
@@ -38,6 +39,7 @@ groupRoutes.get('/:groupId', async (c) => {
     guildId: group.guild_id,
     name: group.name,
     game: group.game,
+    idleReminderDays: group.idle_reminder_days,
     createdBy: group.created_by,
     members: await loadGroupMembers(c.env.DB, groupId),
   });
@@ -50,13 +52,23 @@ groupRoutes.patch('/:groupId', async (c) => {
   if (!group) return c.text('Not found', 404);
   if (group.created_by !== userId) return c.text('Forbidden', 403);
 
-  const body = await c.req.json<{ name?: string; game?: string | null; member_user_ids?: string[] }>();
+  const body = await c.req.json<{
+    name?: string;
+    game?: string | null;
+    idle_reminder_days?: number;
+    member_user_ids?: string[];
+  }>();
   if (body.name?.trim()) {
     await c.env.DB.prepare(`UPDATE groups SET name = ? WHERE id = ?`).bind(body.name.trim(), groupId).run();
   }
   if (body.game !== undefined) {
     await c.env.DB.prepare(`UPDATE groups SET game = ? WHERE id = ?`)
       .bind(body.game?.trim() || null, groupId)
+      .run();
+  }
+  if (body.idle_reminder_days !== undefined) {
+    await c.env.DB.prepare(`UPDATE groups SET idle_reminder_days = ? WHERE id = ?`)
+      .bind(body.idle_reminder_days, groupId)
       .run();
   }
   if (body.member_user_ids) {

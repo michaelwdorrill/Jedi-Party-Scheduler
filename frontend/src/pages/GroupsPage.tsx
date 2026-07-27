@@ -37,17 +37,24 @@ export default function GroupsPage() {
     return <p className="text-slate-400">You don't share any allow-listed servers yet.</p>;
   }
 
-  const handleSave = async (data: { name: string; game: string | null; memberUserIds: string[] }) => {
+  const handleSave = async (data: {
+    name: string;
+    game: string | null;
+    idleReminderDays: number;
+    memberUserIds: string[];
+  }) => {
     if (editing === 'new') {
       await api.post(`/guilds/${selectedGuildId}/groups`, {
         name: data.name,
         game: data.game,
+        idle_reminder_days: data.idleReminderDays,
         member_user_ids: data.memberUserIds,
       });
     } else if (editing) {
       await api.patch(`/groups/${editing.id}`, {
         name: data.name,
         game: data.game,
+        idle_reminder_days: data.idleReminderDays,
         member_user_ids: data.memberUserIds,
       });
     }
