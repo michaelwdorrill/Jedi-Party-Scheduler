@@ -38,7 +38,10 @@ export default function PrivacyPage() {
           <strong>Operational records.</strong> The ID of the direct-message channel between you and
           the bot (so it isn't re-created on every notification), and a log of which notifications
           have already been sent to you, which exists solely to stop the service from messaging you
-          twice about the same thing.
+          twice about the same thing. Also a record of your active login sessions — creation time,
+          last-used time, and expiry — which is what lets a session be revoked immediately (by you
+          logging out, or by deleting your account) rather than staying valid until it naturally
+          expires.
         </p>
       </Section>
 
@@ -167,8 +170,8 @@ export default function PrivacyPage() {
             <>
               <strong>Erasure.</strong> "Delete my account" immediately and permanently removes your
               profile, personal time blocks, votes, invitations, group memberships, notification
-              records, and the events you organised. There is no soft-delete or grace period, and
-              nothing is retained for analytics.
+              records, login sessions, and the events you organised. There is no soft-delete or grace
+              period, and nothing is retained for analytics.
             </>,
             <>
               <strong>Rectification.</strong> Edit your events, groups, and preferences at any time.
