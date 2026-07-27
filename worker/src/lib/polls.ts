@@ -196,46 +196,53 @@ export async function resolvePastDeadlinePolls(env: Env): Promise<string[]> {
 
   const resolvedEventIds: string[] = [];
   for (const event of events) {
-    if (event.poll_resolution_mode === 'multi_winner') {
-      // Unconfirmed options are simply dropped (never voted on again); any
-      // already-confirmed options stay confirmed and remain joinable.
-      const tallies = await getOptionTallies(env, event.id);
-      const anyConfirmed = tallies.some((t) => t.confirmedAt);
-      if (anyConfirmed) {
-        await env.DB.prepare(`UPDATE events SET status = 'resolved', updated_at = ? WHERE id = ? AND status = 'active'`)
-          .bind(now, event.id)
-          .run();
-      } else {
-        await markCancelled(env, event.id);
-      }
-      resolvedEventIds.push(event.id);
-      continue;
-    }
-
-    if (event.poll_mode === 'window') {
-      if (event.window_start_at != null && event.window_end_at != null && event.window_block_minutes != null) {
-        const submissions = await getWindowSubmissions(env, event.id);
-        const best = bestWindowBlock(event.window_start_at, event.window_end_at, event.window_block_minutes, submissions);
-        if (best && best.count > 0) {
-          await markResolved(env, event.id, { id: 'window', startAt: best.startAt, endAt: best.endAt });
+    try {
+      if (event.poll_resolution_mode === 'multi_winner') {
+        // Unconfirmed options are simply dropped (never voted on again); any
+        // already-confirmed options stay confirmed and remain joinable.
+        const tallies = await getOptionTallies(env, event.id);
+        const anyConfirmed = tallies.some((t) => t.confirmedAt);
+        if (anyConfirmed) {
+          await env.DB.prepare(`UPDATE events SET status = 'resolved', updated_at = ? WHERE id = ? AND status = 'active'`)
+            .bind(now, event.id)
+            .run();
         } else {
           await markCancelled(env, event.id);
         }
+        resolvedEventIds.push(event.id);
+        continue;
+      }
+
+      if (event.poll_mode === 'window') {
+        if (event.window_start_at != null && event.window_end_at != null && event.window_block_minutes != null) {
+          const submissions = await getWindowSubmissions(env, event.id);
+          const best = bestWindowBlock(event.window_start_at, event.window_end_at, event.window_block_minutes, submissions);
+          if (best && best.count > 0) {
+            await markResolved(env, event.id, { id: 'window', startAt: best.startAt, endAt: best.endAt });
+          } else {
+            await markCancelled(env, event.id);
+          }
+        } else {
+          await markCancelled(env, event.id);
+        }
+        resolvedEventIds.push(event.id);
+        continue;
+      }
+
+      const tallies = await getOptionTallies(env, event.id);
+      const winner = pickMostVotes(tallies);
+      if (winner) {
+        await markResolved(env, event.id, winner);
       } else {
         await markCancelled(env, event.id);
       }
       resolvedEventIds.push(event.id);
-      continue;
+    } catch (err) {
+      // One malformed/expensive poll record must not stop the deadline sweep
+      // from resolving the rest -- it'll be retried (still 'active' and past
+      // its deadline) on the next tick rather than silently blocking others.
+      console.error(`resolvePastDeadlinePolls failed for event ${event.id}:`, err);
     }
-
-    const tallies = await getOptionTallies(env, event.id);
-    const winner = pickMostVotes(tallies);
-    if (winner) {
-      await markResolved(env, event.id, winner);
-    } else {
-      await markCancelled(env, event.id);
-    }
-    resolvedEventIds.push(event.id);
   }
   return resolvedEventIds;
 }

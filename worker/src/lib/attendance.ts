@@ -8,6 +8,19 @@ export interface AttendeeRow {
   timezone: string;
 }
 
+// Same cache-only reasoning as reminders.ts's getEventParticipants: this runs
+// inside the 15-minute cron sweep, so it must not make a live Discord call
+// per attendee. Requiring cached active guild membership is enough to stop
+// DMing someone who left (or whose guild was deactivated) since the event
+// was created -- including the organizer, who isn't exempt from having left.
+function membershipJoin(idsSubquery: string): string {
+  return `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
+          FROM users u
+          JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1
+          JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
+          WHERE u.id IN (${idsSubquery})`;
+}
+
 // Who actually committed to a given occurrence -- the organizer always
 // counts, plus (for single events) accepted invitees, or (for polls) whoever
 // voted yes on the winning option / submitted availability covering the
@@ -25,13 +38,12 @@ export async function getConfirmedAttendeeIds(
     // resolved start/end.
     if (event.start_at == null || event.end_at == null) return [];
     const { results } = await env.DB.prepare(
-      `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
-       FROM event_window_availability ewa JOIN users u ON u.id = ewa.user_id
-       WHERE ewa.event_id = ? AND ewa.avail_start_at <= ? AND ewa.avail_end_at >= ?
-       UNION
-       SELECT id, notifications_enabled, dm_channel_id, timezone FROM users WHERE id = ?`,
+      membershipJoin(
+        `SELECT user_id FROM event_window_availability WHERE event_id = ? AND avail_start_at <= ? AND avail_end_at >= ?
+         UNION SELECT ?`,
+      ),
     )
-      .bind(event.id, event.start_at, event.end_at, event.organizer_id)
+      .bind(event.guild_id, event.id, event.start_at, event.end_at, event.organizer_id)
       .all<AttendeeRow>();
     return results;
   }
@@ -39,25 +51,17 @@ export async function getConfirmedAttendeeIds(
   if (event.event_type === 'poll') {
     if (!optionId) return [];
     const { results } = await env.DB.prepare(
-      `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
-       FROM event_poll_votes epv JOIN users u ON u.id = epv.user_id
-       WHERE epv.option_id = ? AND epv.vote = 'yes'
-       UNION
-       SELECT id, notifications_enabled, dm_channel_id, timezone FROM users WHERE id = ?`,
+      membershipJoin(`SELECT user_id FROM event_poll_votes WHERE option_id = ? AND vote = 'yes' UNION SELECT ?`),
     )
-      .bind(optionId, event.organizer_id)
+      .bind(event.guild_id, optionId, event.organizer_id)
       .all<AttendeeRow>();
     return results;
   }
 
   const { results } = await env.DB.prepare(
-    `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
-     FROM event_invites ei JOIN users u ON u.id = ei.user_id
-     WHERE ei.event_id = ? AND ei.rsvp_status = 'accepted'
-     UNION
-     SELECT id, notifications_enabled, dm_channel_id, timezone FROM users WHERE id = ?`,
+    membershipJoin(`SELECT user_id FROM event_invites WHERE event_id = ? AND rsvp_status = 'accepted' UNION SELECT ?`),
   )
-    .bind(event.id, event.organizer_id)
+    .bind(event.guild_id, event.id, event.organizer_id)
     .all<AttendeeRow>();
   return results;
 }

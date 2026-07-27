@@ -4,8 +4,8 @@ import type { Env } from '../env';
 import type { EventRow } from '../lib/events';
 import { requireActiveGuildMember } from '../lib/db';
 import { newId } from '../lib/ids';
-import { updateEvent } from '../lib/eventWrites';
-import { assertOneOf, assertStringArray, LIMITS } from '../lib/validate';
+import { addInvitesToEvent, updateEvent, type EventWriteInput } from '../lib/eventWrites';
+import { assertOneOf, assertStringArray, LIMITS, readJsonBody } from '../lib/validate';
 
 export const eventRoutes = new Hono<AppEnv>();
 
@@ -178,7 +178,7 @@ eventRoutes.patch('/:eventId', async (c) => {
   const event = await loadOwnedActiveEvent(c.env, eventId, userId);
   if (!event) return c.text('Not found', 404);
 
-  const body = await c.req.json();
+  const body = await readJsonBody<Partial<EventWriteInput>>(c);
   await updateEvent(c.env, eventId, event.guild_id, body);
   return c.json({ ok: true });
 });
@@ -218,10 +218,13 @@ eventRoutes.post('/:eventId/invites', async (c) => {
   const event = await loadOwnedActiveEvent(c.env, eventId, userId);
   if (!event) return c.text('Not found', 404);
 
-  const body = await c.req.json<{ userIds?: string[]; groupIds?: string[] }>();
+  const body = await readJsonBody<{ userIds?: string[]; groupIds?: string[] }>(c);
   const userIds = assertStringArray(body.userIds ?? [], 'userIds', LIMITS.MAX_INVITEES, 64);
   const groupIds = assertStringArray(body.groupIds ?? [], 'groupIds', LIMITS.MAX_GROUP_IDS, 64);
-  await updateEvent(c.env, eventId, event.guild_id, { invites: { userIds, groupIds } });
+  // Additive only -- unlike PATCH /:eventId (the full edit form, which
+  // replaces the invite list to match whatever it submits), this endpoint's
+  // whole purpose is inviting more people without touching anyone already invited.
+  await addInvitesToEvent(c.env, eventId, event.guild_id, userIds, groupIds);
   return c.json({ ok: true });
 });
 
@@ -241,7 +244,7 @@ eventRoutes.delete('/:eventId/invites/:userId', async (c) => {
 eventRoutes.post('/:eventId/rsvp', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
-  const body = await c.req.json<{ status: 'accepted' | 'declined' | 'tentative' }>();
+  const body = await readJsonBody<{ status: 'accepted' | 'declined' | 'tentative' }>(c);
   const status = assertOneOf(body.status, 'status', ['accepted', 'declined', 'tentative'] as const);
 
   const event = await c.env.DB.prepare(`SELECT guild_id FROM events WHERE id = ?`).bind(eventId).first<{ guild_id: string }>();

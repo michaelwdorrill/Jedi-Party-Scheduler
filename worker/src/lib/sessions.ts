@@ -8,6 +8,13 @@ import { newId } from './ids';
 // within this window without forcing that, but never past it.
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+// One person logging in from a phone, a laptop, and a work computer is
+// normal; thousands of rows for one account is not. Login itself has no
+// rate limit (that's a bigger piece of infrastructure this app doesn't have
+// yet -- see the F-06 follow-up note), so this caps the *storage* consequence
+// of repeated logins rather than the logins themselves.
+const MAX_SESSIONS_PER_USER = 20;
+
 export async function createSession(env: Env, userId: string): Promise<{ id: string }> {
   const id = newId();
   const now = Date.now();
@@ -17,7 +24,24 @@ export async function createSession(env: Env, userId: string): Promise<{ id: str
   )
     .bind(id, userId, now, now, now + SESSION_TTL_MS)
     .run();
+
+  await env.DB.prepare(
+    `DELETE FROM sessions WHERE user_id = ? AND id NOT IN (
+       SELECT id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
+     )`,
+  )
+    .bind(userId, userId, MAX_SESSIONS_PER_USER)
+    .run();
+
   return { id };
+}
+
+// Expired and revoked sessions are permanently inert (isSessionActive always
+// rejects them) but nothing else ever removes the rows -- called from the
+// cron sweep so storage doesn't grow forever.
+export async function pruneStaleSessions(env: Env): Promise<void> {
+  const now = Date.now();
+  await env.DB.prepare(`DELETE FROM sessions WHERE expires_at < ? OR revoked_at IS NOT NULL`).bind(now).run();
 }
 
 // The authority check behind every authenticated request: the JWT's

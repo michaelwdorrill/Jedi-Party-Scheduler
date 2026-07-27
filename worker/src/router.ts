@@ -10,7 +10,7 @@ import { eventRoutes } from './routes/events';
 import { pollRoutes } from './routes/polls';
 import { personalRoutes } from './routes/personal';
 import { adminRoutes } from './routes/admin';
-import { MAX_BODY_BYTES, ValidationError } from './lib/validate';
+import { BodyTooLargeError, MAX_BODY_BYTES, ValidationError } from './lib/validate';
 
 export function buildApp() {
   const app = new Hono<AppEnv>();
@@ -41,6 +41,7 @@ export function buildApp() {
   });
 
   app.onError((err, c) => {
+    if (err instanceof BodyTooLargeError) return c.text(err.message, 413);
     if (err instanceof ValidationError) return c.text(err.message, 400);
     console.error('Unhandled error:', err);
     return c.text('Internal error', 500);

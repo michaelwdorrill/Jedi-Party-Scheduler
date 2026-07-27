@@ -5,17 +5,20 @@ import { mapPersonalEvent, type PersonalEventRow } from '../lib/personalEvents';
 import {
   assertOneOf,
   assertOptionalString,
+  assertRecurrenceInput,
   assertSafeInt,
   assertString,
   assertTimeRange,
+  assertTimezone,
   LIMITS,
+  readJsonBody,
   ValidationError,
 } from '../lib/validate';
 
 function validatePersonalEventInput(body: Partial<PersonalEventInput>): void {
   if (body.title !== undefined) assertString(body.title, 'title', LIMITS.TITLE);
   if (body.description !== undefined) assertOptionalString(body.description, 'description', LIMITS.DESCRIPTION);
-  if (body.timezone !== undefined) assertString(body.timezone, 'timezone', 100);
+  if (body.timezone !== undefined) assertTimezone(body.timezone, 'timezone');
   if (body.availability !== undefined) assertOneOf(body.availability, 'availability', ['busy', 'considering', 'free'] as const);
 
   if (body.startAt != null) assertSafeInt(body.startAt, 'startAt');
@@ -24,24 +27,9 @@ function validatePersonalEventInput(body: Partial<PersonalEventInput>): void {
     assertTimeRange(body.startAt, body.endAt, 'event', LIMITS.MAX_EVENT_DURATION_MS);
   }
 
+  // Normalized in place, same reasoning as eventWrites.ts's guild-event path.
   if (body.recurrence) {
-    const r = body.recurrence;
-    assertString(r.startDate, 'recurrence.startDate', 20);
-    assertString(r.startTime, 'recurrence.startTime', 10);
-    assertSafeInt(r.interval, 'recurrence.interval');
-    if (r.interval < 1 || r.interval > LIMITS.MAX_RECURRENCE_INTERVAL) {
-      throw new ValidationError('recurrence.interval out of range');
-    }
-    assertSafeInt(r.durationMinutes, 'recurrence.durationMinutes');
-    if (r.durationMinutes < 1 || r.durationMinutes * 60_000 > LIMITS.MAX_EVENT_DURATION_MS) {
-      throw new ValidationError('recurrence.durationMinutes out of range');
-    }
-    if (r.endCount != null) {
-      assertSafeInt(r.endCount, 'recurrence.endCount');
-      if (r.endCount < 1 || r.endCount > LIMITS.MAX_RECURRENCE_COUNT) {
-        throw new ValidationError('recurrence.endCount out of range');
-      }
-    }
+    body.recurrence = assertRecurrenceInput(body.recurrence, 'recurrence') as NonNullable<PersonalEventInput['recurrence']>;
   }
 }
 
@@ -92,9 +80,18 @@ personalRoutes.get('/:id', async (c) => {
 
 personalRoutes.post('/', async (c) => {
   const userId = c.get('userId');
-  const body = await c.req.json<PersonalEventInput>();
+  const body = await readJsonBody<PersonalEventInput>(c);
   validatePersonalEventInput(body);
   if (body.isRecurring && !body.recurrence) throw new ValidationError('recurrence is required when isRecurring is true');
+
+  const { results: countRows } = await c.env.DB.prepare(
+    `SELECT COUNT(*) as n FROM personal_events WHERE user_id = ? AND status = 'active'`,
+  )
+    .bind(userId)
+    .all<{ n: number }>();
+  if ((countRows[0]?.n ?? 0) >= LIMITS.MAX_PERSONAL_EVENTS_PER_USER) {
+    throw new ValidationError(`You've reached the maximum of ${LIMITS.MAX_PERSONAL_EVENTS_PER_USER} personal events`);
+  }
 
   const id = newId();
   const now = Date.now();
@@ -143,7 +140,7 @@ personalRoutes.patch('/:id', async (c) => {
     .first<{ user_id: string }>();
   if (!existing || existing.user_id !== userId) return c.text('Not found', 404);
 
-  const body = await c.req.json<Partial<PersonalEventInput>>();
+  const body = await readJsonBody<Partial<PersonalEventInput>>(c);
   validatePersonalEventInput(body);
   const r = body.isRecurring ? body.recurrence : undefined;
 

@@ -40,6 +40,29 @@ export async function fetchGuildVoiceChannels(botToken: string, guildId: string)
   return channels.filter((c) => VOICE_CHANNEL_TYPES.has(c.type)).map((c) => ({ id: c.id, name: c.name }));
 }
 
+export type GuildMembershipStatus = 'member' | 'not_member' | 'unknown';
+
+// Live check against Discord's own membership record, used to revalidate a
+// stale cache entry (see requireActiveGuildMember in db.ts). This single
+// REST lookup does not require the privileged GUILD_MEMBERS intent -- that's
+// only needed for the gateway member list/events, not this per-user fetch.
+export async function checkGuildMembership(
+  botToken: string,
+  guildId: string,
+  userId: string,
+): Promise<GuildMembershipStatus> {
+  try {
+    const res = await fetch(`${API_BASE}/guilds/${guildId}/members/${userId}`, {
+      headers: { Authorization: `Bot ${botToken}` },
+    });
+    if (res.status === 200) return 'member';
+    if (res.status === 404) return 'not_member';
+    return 'unknown'; // rate-limited, bot lacks guild access, transient 5xx, etc.
+  } catch {
+    return 'unknown'; // network failure -- caller decides how to treat this
+  }
+}
+
 export async function exchangeCodeForToken(
   code: string,
   clientId: string,

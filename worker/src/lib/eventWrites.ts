@@ -1,7 +1,18 @@
 import type { Env } from '../env';
 import { filterActiveGuildMembers } from './db';
 import { newId } from './ids';
-import { assertOptionalString, assertSafeInt, assertString, assertStringArray, assertTimeRange, LIMITS, ValidationError } from './validate';
+import {
+  assertOneOf,
+  assertOptionalString,
+  assertRecurrenceInput,
+  assertSafeInt,
+  assertString,
+  assertStringArray,
+  assertTimeRange,
+  assertTimezone,
+  LIMITS,
+  ValidationError,
+} from './validate';
 
 export interface RecurrenceInput {
   freq: 'DAILY' | 'WEEKLY' | 'MONTHLY';
@@ -97,6 +108,10 @@ async function resolveInviteeUserIds(
     }
   }
 
+  if (out.size > LIMITS.MAX_RESOLVED_INVITEES) {
+    throw new ValidationError(`Resolved invite list is too large (max ${LIMITS.MAX_RESOLVED_INVITEES})`);
+  }
+
   return [...out.values()];
 }
 
@@ -112,9 +127,15 @@ function validateEventWriteInput(input: Partial<EventWriteInput>): void {
   if (input.title !== undefined) assertString(input.title, 'title', LIMITS.TITLE);
   if (input.description !== undefined) assertOptionalString(input.description, 'description', LIMITS.DESCRIPTION);
   if (input.game !== undefined) assertOptionalString(input.game, 'game', LIMITS.GAME);
-  if (input.timezone !== undefined) assertString(input.timezone, 'timezone', 100);
+  if (input.timezone !== undefined) assertTimezone(input.timezone, 'timezone');
   if (input.voiceChannelId !== undefined) assertOptionalString(input.voiceChannelId, 'voiceChannelId', 64);
   if (input.voiceChannelName !== undefined) assertOptionalString(input.voiceChannelName, 'voiceChannelName', LIMITS.CHANNEL_NAME);
+  if (input.eventType !== undefined) assertOneOf(input.eventType, 'eventType', ['single', 'poll'] as const);
+  if (input.pollStrategy != null) assertOneOf(input.pollStrategy, 'pollStrategy', ['threshold', 'most_votes'] as const);
+  if (input.pollMode !== undefined) assertOneOf(input.pollMode, 'pollMode', ['options', 'window'] as const);
+  if (input.pollResolutionMode !== undefined) {
+    assertOneOf(input.pollResolutionMode, 'pollResolutionMode', ['single_winner', 'multi_winner'] as const);
+  }
 
   if (input.invites) {
     assertStringArray(input.invites.userIds, 'invites.userIds', LIMITS.MAX_INVITEES, 64);
@@ -127,24 +148,11 @@ function validateEventWriteInput(input: Partial<EventWriteInput>): void {
     assertTimeRange(input.startAt, input.endAt, 'event', LIMITS.MAX_EVENT_DURATION_MS);
   }
 
+  // Normalized in place (deduped/sorted byWeekday, nulled-out irrelevant end
+  // fields) -- every later reference to input.recurrence, including the
+  // INSERT statements built below, uses this cleaned value, not the raw body.
   if (input.recurrence) {
-    const r = input.recurrence;
-    assertString(r.startDate, 'recurrence.startDate', 20);
-    assertString(r.startTime, 'recurrence.startTime', 10);
-    assertSafeInt(r.interval, 'recurrence.interval');
-    if (r.interval < 1 || r.interval > LIMITS.MAX_RECURRENCE_INTERVAL) {
-      throw new ValidationError('recurrence.interval out of range');
-    }
-    assertSafeInt(r.durationMinutes, 'recurrence.durationMinutes');
-    if (r.durationMinutes < 1 || r.durationMinutes * 60_000 > LIMITS.MAX_EVENT_DURATION_MS) {
-      throw new ValidationError('recurrence.durationMinutes out of range');
-    }
-    if (r.endCount != null) {
-      assertSafeInt(r.endCount, 'recurrence.endCount');
-      if (r.endCount < 1 || r.endCount > LIMITS.MAX_RECURRENCE_COUNT) {
-        throw new ValidationError('recurrence.endCount out of range');
-      }
-    }
+    input.recurrence = assertRecurrenceInput(input.recurrence, 'recurrence') as RecurrenceInput;
   }
 
   if (input.pollThresholdCount != null) assertSafeInt(input.pollThresholdCount, 'pollThresholdCount');
@@ -184,6 +192,42 @@ function inviteStatements(env: Env, eventId: string, invitees: ResolvedInvitee[]
        ON CONFLICT(event_id, user_id) DO NOTHING`,
     ).bind(newId(), eventId, invitee.userId, invitee.invitedVia, invitee.sourceGroupId, now),
   );
+}
+
+// Full replacement: also removes invite rows for anyone NOT in the
+// newly-resolved list. This is what the edit form's invitee picker implies --
+// it submits the complete desired list, so unchecking someone and saving
+// should actually revoke their access, not just leave the old row in place
+// alongside whatever got added. RSVP state for anyone who remains is
+// preserved via inviteStatements' ON CONFLICT DO NOTHING.
+function replaceInviteStatements(env: Env, eventId: string, invitees: ResolvedInvitee[]): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] =
+    invitees.length === 0
+      ? [env.DB.prepare(`DELETE FROM event_invites WHERE event_id = ?`).bind(eventId)]
+      : [
+          env.DB.prepare(
+            `DELETE FROM event_invites WHERE event_id = ? AND user_id NOT IN (${invitees.map(() => '?').join(',')})`,
+          ).bind(eventId, ...invitees.map((i) => i.userId)),
+        ];
+  statements.push(...inviteStatements(env, eventId, invitees));
+  return statements;
+}
+
+// Additive-only: for the dedicated "invite more people" endpoint (POST
+// /events/:eventId/invites), which -- unlike a full edit-form submission --
+// should never remove anyone already invited.
+export async function addInvitesToEvent(
+  env: Env,
+  eventId: string,
+  guildId: string,
+  userIds: string[],
+  groupIds: string[],
+): Promise<void> {
+  assertStringArray(userIds, 'userIds', LIMITS.MAX_INVITEES, 64);
+  assertStringArray(groupIds, 'groupIds', LIMITS.MAX_GROUP_IDS, 64);
+  const invitees = await resolveInviteeUserIds(env, guildId, userIds, groupIds);
+  if (invitees.length === 0) return;
+  await env.DB.batch(inviteStatements(env, eventId, invitees));
 }
 
 export async function createEventWithInvites(
@@ -436,7 +480,7 @@ export async function updateEvent(
   }
 
   if (invitees) {
-    statements.push(...inviteStatements(env, eventId, invitees));
+    statements.push(...replaceInviteStatements(env, eventId, invitees));
   }
 
   await env.DB.batch(statements);
