@@ -37,3 +37,14 @@ custom domain (F-03) is sorted.
    candidate-day polls and the time-window mode) currently don't offer that
    same separate start-date/end-date shape — worth revisiting so the two
    creation paths behave consistently.
+
+7. **Pick the server directly on the New Event screen.** Right now which
+   server an event belongs to is set by the top-bar guild switcher, and the
+   event form just inherits whatever that's currently set to. That's not
+   coming across as intuitive — the New Event screen itself should offer a
+   server picker rather than relying on a dropdown elsewhere on the page.
+
+8. **Visual design pass.** The app has had zero design attention — it's
+   functional, not designed. Wants pitches/options for making the whole
+   platform look better (layout, color, typography, general polish) before
+   or around release.
