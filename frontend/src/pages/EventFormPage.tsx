@@ -7,7 +7,7 @@ import InviteePicker from '../components/InviteePicker';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
 import SchedulingAssistant from '../components/SchedulingAssistant';
-import type { EventDetail, Friend, Group, PollMode, PollStrategy } from '../types';
+import type { EventDetail, Friend, Group, PollMode, PollStrategy, VoiceChannel } from '../types';
 
 interface PollSlotDraft {
   key: string;
@@ -75,6 +75,15 @@ export default function EventFormPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Voice channel to nudge confirmed attendees toward near start time. Only
+  // fetchable once we know which guild the event belongs to -- for edits
+  // that's the loaded event's guild, since the edit route carries no
+  // `?guild=` param.
+  const [loadedGuildId, setLoadedGuildId] = useState('');
+  const effectiveGuildId = guildId || loadedGuildId;
+  const [voiceChannels, setVoiceChannels] = useState<VoiceChannel[]>([]);
+  const [voiceChannelId, setVoiceChannelId] = useState('');
+
   useEffect(() => {
     if (!guildId) return;
     Promise.all([
@@ -87,6 +96,14 @@ export default function EventFormPage() {
   }, [guildId]);
 
   useEffect(() => {
+    if (!effectiveGuildId) return;
+    api
+      .get<VoiceChannel[]>(`/guilds/${effectiveGuildId}/voice-channels`)
+      .then(setVoiceChannels)
+      .catch(() => setVoiceChannels([])); // e.g. bot not yet invited to this server
+  }, [effectiveGuildId]);
+
+  useEffect(() => {
     if (!isEdit || !eventId) return;
     api.get<EventDetail>(`/events/${eventId}`).then((ev) => {
       setTitle(ev.title);
@@ -94,6 +111,8 @@ export default function EventFormPage() {
       setGame(ev.game ?? '');
       setTimezone(ev.timezone);
       setEventType(ev.eventType);
+      setLoadedGuildId(ev.guildId);
+      setVoiceChannelId(ev.voiceChannelId ?? '');
       setSelectedUserIds(
         ev.invites.filter((i) => i.invitedVia === 'individual').map((i) => i.userId),
       );
@@ -211,6 +230,10 @@ export default function EventFormPage() {
         eventType,
         timezone,
         invites: { userIds: selectedUserIds, groupIds: selectedGroupIds },
+        voiceChannelId: voiceChannelId || null,
+        voiceChannelName: voiceChannelId
+          ? (voiceChannels.find((vc) => vc.id === voiceChannelId)?.name ?? null)
+          : null,
       };
 
       if (eventType === 'single') {
@@ -542,6 +565,34 @@ export default function EventFormPage() {
               className="rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
             />
           </div>
+        </div>
+      )}
+
+      {effectiveGuildId && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+          <h2 className="mb-1 font-semibold">Voice channel (optional)</h2>
+          <p className="mb-3 text-xs text-slate-500">
+            Shortly before start, confirmed attendees get a DM with a link to join this channel. Discord
+            doesn't let a bot pull people into voice automatically -- this is just a one-click nudge.
+          </p>
+          {voiceChannels.length === 0 ? (
+            <p className="text-sm text-slate-500">
+              No voice channels found -- make sure the bot has been invited to this server.
+            </p>
+          ) : (
+            <select
+              value={voiceChannelId}
+              onChange={(e) => setVoiceChannelId(e.target.value)}
+              className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+            >
+              <option value="">None</option>
+              {voiceChannels.map((vc) => (
+                <option key={vc.id} value={vc.id}>
+                  {vc.name}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
       )}
 

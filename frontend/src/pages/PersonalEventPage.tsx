@@ -5,7 +5,7 @@ import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
-import type { PersonalEvent } from '../types';
+import type { PersonalEvent, PersonalAvailability } from '../types';
 
 // Personal time: private to you, never shown to anyone else, and (unless you
 // untick "show me as busy") it makes you look unavailable in other people's
@@ -20,7 +20,7 @@ export default function PersonalEventPage() {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [timezone, setTimezone] = useState(user?.timezone ?? 'America/New_York');
-  const [busy, setBusy] = useState(true);
+  const [availability, setAvailability] = useState<PersonalAvailability>('busy');
   const [date, setDate] = useState(today);
   const [endDate, setEndDate] = useState(today);
   const [startTime, setStartTime] = useState('09:00');
@@ -47,7 +47,7 @@ export default function PersonalEventPage() {
         setTitle(pe.title);
         setDescription(pe.description ?? '');
         setTimezone(pe.timezone);
-        setBusy(pe.busy);
+        setAvailability(pe.availability);
         if (pe.startAt) {
           const s = DateTime.fromMillis(pe.startAt).setZone(pe.timezone);
           setDate(s.toISODate()!);
@@ -95,7 +95,7 @@ export default function PersonalEventPage() {
         title: title.trim(),
         description: description.trim() || null,
         timezone,
-        busy,
+        availability,
         isRecurring,
       };
       if (isRecurring) {
@@ -230,18 +230,46 @@ export default function PersonalEventPage() {
         </label>
         {isRecurring && <RecurrenceForm value={recurrence} onChange={setRecurrence} />}
 
-        <label className="flex items-start gap-2 text-sm text-slate-300">
-          <input
-            type="checkbox"
-            checked={busy}
-            onChange={(e) => setBusy(e.target.checked)}
-            className="mt-0.5"
-          />
-          <span>
-            Show me as busy — others see an opaque block here and won't schedule over it. Untick for
-            something you want on your own calendar without blocking your availability.
-          </span>
-        </label>
+        <div className="space-y-2">
+          <label className="flex items-start gap-2 text-sm text-slate-300">
+            <input
+              type="radio"
+              name="availability"
+              checked={availability === 'busy'}
+              onChange={() => setAvailability('busy')}
+              className="mt-0.5"
+            />
+            <span>
+              <strong>Busy</strong> — others see an opaque block here and won't schedule over it.
+            </span>
+          </label>
+          <label className="flex items-start gap-2 text-sm text-slate-300">
+            <input
+              type="radio"
+              name="availability"
+              checked={availability === 'considering'}
+              onChange={() => setAvailability('considering')}
+              className="mt-0.5"
+            />
+            <span>
+              <strong>Considering</strong> — you haven't committed, and could still play. Doesn't block
+              this time slot in the scheduling assistant.
+            </span>
+          </label>
+          <label className="flex items-start gap-2 text-sm text-slate-300">
+            <input
+              type="radio"
+              name="availability"
+              checked={availability === 'free'}
+              onChange={() => setAvailability('free')}
+              className="mt-0.5"
+            />
+            <span>
+              <strong>Free</strong> — just a personal note on your own calendar; never blocks your
+              availability.
+            </span>
+          </label>
+        </div>
       </div>
 
       {error && <p className="text-sm text-red-400">{error}</p>}

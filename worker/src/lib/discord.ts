@@ -19,6 +19,27 @@ export interface DiscordGuild {
   name: string;
 }
 
+export interface DiscordVoiceChannel {
+  id: string;
+  name: string;
+}
+
+// Discord channel types: 2 = GUILD_VOICE, 13 = GUILD_STAGE_VOICE.
+// https://discord.com/developers/docs/resources/channel#channel-object-channel-types
+const VOICE_CHANNEL_TYPES = new Set([2, 13]);
+
+// Lists the guild's voice/stage channels for the event-organizer's picker.
+// Bots don't need any special permission beyond already being a member of the
+// guild to list channels via this endpoint.
+export async function fetchGuildVoiceChannels(botToken: string, guildId: string): Promise<DiscordVoiceChannel[]> {
+  const res = await fetch(`${API_BASE}/guilds/${guildId}/channels`, {
+    headers: { Authorization: `Bot ${botToken}` },
+  });
+  if (!res.ok) throw new Error(`Discord /guilds/${guildId}/channels failed: ${res.status}`);
+  const channels = (await res.json()) as { id: string; name: string; type: number }[];
+  return channels.filter((c) => VOICE_CHANNEL_TYPES.has(c.type)).map((c) => ({ id: c.id, name: c.name }));
+}
+
 export async function exchangeCodeForToken(
   code: string,
   clientId: string,

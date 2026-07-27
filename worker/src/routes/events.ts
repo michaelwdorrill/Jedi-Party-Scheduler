@@ -129,6 +129,8 @@ eventRoutes.get('/:eventId', async (c) => {
     windowStartAt: event.window_start_at,
     windowEndAt: event.window_end_at,
     windowBlockMinutes: event.window_block_minutes,
+    voiceChannelId: event.voice_channel_id,
+    voiceChannelName: event.voice_channel_name,
     recurrence: recurrence
       ? {
           freq: recurrence.freq,

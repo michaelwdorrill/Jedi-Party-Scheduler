@@ -10,7 +10,10 @@ export interface PersonalEventRow {
   start_at: number | null;
   end_at: number | null;
   status: 'active' | 'cancelled';
-  busy: number;
+  // 'busy' blocks the free/busy view; 'considering' explicitly does not --
+  // it means "not committed, could still play" -- and 'free' is a personal
+  // note that never affects availability at all.
+  availability: 'busy' | 'considering' | 'free';
   is_recurring: number;
   freq: 'DAILY' | 'WEEKLY' | 'MONTHLY' | null;
   interval: number | null;
@@ -36,7 +39,7 @@ export function mapPersonalEvent(row: PersonalEventRow) {
     startAt: row.start_at,
     endAt: row.end_at,
     status: row.status,
-    busy: !!row.busy,
+    availability: row.availability,
     isRecurring: !!row.is_recurring,
     recurrence: row.is_recurring
       ? {

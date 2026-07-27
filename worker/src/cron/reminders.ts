@@ -6,6 +6,7 @@ import type { EventRow } from '../lib/events';
 import { loadOverridesForEvents } from '../lib/events';
 import { expandOccurrencesForEvent } from '../lib/recurrence';
 import { resolvePastDeadlinePolls } from '../lib/polls';
+import { getConfirmedAttendeeIds } from '../lib/attendance';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -44,7 +45,13 @@ async function notifyOnce(
   env: Env,
   user: ParticipantRow,
   eventId: string,
-  notificationType: 'invite' | 'reminder_24h' | 'reminder_1h' | 'poll_resolved' | 'poll_deadline_reminder',
+  notificationType:
+    | 'invite'
+    | 'reminder_24h'
+    | 'reminder_1h'
+    | 'poll_resolved'
+    | 'poll_deadline_reminder'
+    | 'voice_channel_invite',
   occurrenceDate: string,
   content: string,
 ): Promise<void> {
@@ -301,6 +308,110 @@ async function sweepPollDeadlineReminders(env: Env): Promise<void> {
   }
 }
 
+// Deep link into the specific voice channel. Discord bots have no API to
+// force a disconnected user into a voice channel -- this is as close as a
+// DM can get, and it's still one click for someone who said they'd be there.
+function voiceChannelLink(guildId: string, channelId: string): string {
+  return `https://discord.com/channels/${guildId}/${channelId}`;
+}
+
+const VOICE_INVITE_LEAD_MS = 10 * 60 * 1000;
+
+// Nudges confirmed attendees toward the event's voice channel a few minutes
+// before it starts. Only fires for events where the organizer picked a
+// channel; scoped to whoever actually committed (accepted RSVP / yes-voted
+// the winning poll option / window availability covering the resolved time),
+// never the full invite list.
+async function sweepVoiceChannelInvites(env: Env): Promise<void> {
+  const now = Date.now();
+  const windowEnd = now + VOICE_INVITE_LEAD_MS;
+
+  const { results: fixedTimeEvents } = await env.DB.prepare(
+    `SELECT * FROM events
+     WHERE voice_channel_id IS NOT NULL AND is_recurring = 0 AND status IN ('active','resolved')
+       AND start_at IS NOT NULL AND start_at >= ? AND start_at <= ?`,
+  )
+    .bind(now, windowEnd)
+    .all<EventRow>();
+
+  for (const event of fixedTimeEvents) {
+    const optionId = event.event_type === 'poll' && event.poll_mode === 'options' ? event.resolved_option_id : null;
+    const attendees = await getConfirmedAttendeeIds(env, event, optionId);
+    for (const user of attendees) {
+      await notifyOnce(
+        env,
+        user,
+        event.id,
+        'voice_channel_invite',
+        '',
+        `"${event.title}" is starting soon -- join the "${event.voice_channel_name}" voice channel:\n${voiceChannelLink(event.guild_id, event.voice_channel_id!)}`,
+      );
+    }
+  }
+
+  const { results: recurringEvents } = await env.DB.prepare(
+    `SELECT * FROM events WHERE voice_channel_id IS NOT NULL AND is_recurring = 1 AND status = 'active'`,
+  ).all<EventRow>();
+
+  if (recurringEvents.length > 0) {
+    const overridesByEvent = await loadOverridesForEvents(env, recurringEvents.map((e) => e.id));
+    for (const event of recurringEvents) {
+      const occurrences = await expandOccurrencesForEvent(
+        env,
+        event,
+        now,
+        windowEnd,
+        overridesByEvent.get(event.id) ?? [],
+      );
+      if (occurrences.length === 0) continue;
+
+      const attendees = await getConfirmedAttendeeIds(env, event, null);
+      for (const occ of occurrences) {
+        for (const user of attendees) {
+          await notifyOnce(
+            env,
+            user,
+            event.id,
+            'voice_channel_invite',
+            occ.date,
+            `"${event.title}" is starting soon -- join the "${event.voice_channel_name}" voice channel:\n${voiceChannelLink(event.guild_id, event.voice_channel_id!)}`,
+          );
+        }
+      }
+    }
+  }
+
+  // multi_winner polls confirm each day independently, so each confirmed
+  // option has its own attendee list (whoever voted yes on that day).
+  const { results: multiWinnerPolls } = await env.DB.prepare(
+    `SELECT * FROM events
+     WHERE voice_channel_id IS NOT NULL AND event_type = 'poll' AND poll_resolution_mode = 'multi_winner'`,
+  ).all<EventRow>();
+
+  for (const poll of multiWinnerPolls) {
+    const { results: options } = await env.DB.prepare(
+      `SELECT id FROM event_poll_options
+       WHERE event_id = ? AND confirmed_at IS NOT NULL AND start_at >= ? AND start_at <= ?`,
+    )
+      .bind(poll.id, now, windowEnd)
+      .all<{ id: string }>();
+
+    for (const opt of options) {
+      const attendees = await getConfirmedAttendeeIds(env, poll, opt.id);
+      for (const user of attendees) {
+        await notifyOnce(
+          env,
+          user,
+          poll.id,
+          'voice_channel_invite',
+          opt.id,
+          `"${poll.title}" is starting soon -- join the "${poll.voice_channel_name}" voice channel:\n${voiceChannelLink(poll.guild_id, poll.voice_channel_id!)}`,
+        );
+      }
+    }
+  }
+}
+
 interface GroupIdleRow {
   id: string;
   idle_reminder_days: number;
@@ -382,5 +493,6 @@ export async function runReminderSweep(env: Env): Promise<void> {
   await sweepNewInvites(env);
   await sweepReminders(env);
   await sweepPollDeadlineReminders(env);
+  await sweepVoiceChannelInvites(env);
   await sweepIdleGroups(env);
 }
