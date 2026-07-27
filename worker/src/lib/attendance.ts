@@ -1,4 +1,5 @@
 import type { Env } from '../env';
+import { MEMBERSHIP_GRACE_MS } from './db';
 import type { EventRow } from './events';
 
 export interface AttendeeRow {
@@ -8,17 +9,24 @@ export interface AttendeeRow {
   timezone: string;
 }
 
-// Same cache-only reasoning as reminders.ts's getEventParticipants: this runs
-// inside the 15-minute cron sweep, so it must not make a live Discord call
-// per attendee. Requiring cached active guild membership is enough to stop
-// DMing someone who left (or whose guild was deactivated) since the event
-// was created -- including the organizer, who isn't exempt from having left.
+// Same reasoning as reminders.ts's getEventParticipants: this runs inside the
+// 15-minute cron sweep, so it must not make a live Discord call per attendee.
+// It requires cached active guild membership *confirmed within the grace
+// window* -- enough to stop DMing someone who left (or whose guild was
+// deactivated) since the event was created, including the organizer, who
+// isn't exempt from having left. The background revalidation sweep is what
+// keeps rows inside that window.
 function membershipJoin(idsSubquery: string): string {
   return `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
           FROM users u
-          JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1
+          JOIN user_guild_membership m
+            ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
           JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
           WHERE u.id IN (${idsSubquery})`;
+}
+
+function membershipCutoff(): number {
+  return Date.now() - MEMBERSHIP_GRACE_MS;
 }
 
 // Who actually committed to a given occurrence -- the organizer always
@@ -43,7 +51,7 @@ export async function getConfirmedAttendeeIds(
          UNION SELECT ?`,
       ),
     )
-      .bind(event.guild_id, event.id, event.start_at, event.end_at, event.organizer_id)
+      .bind(event.guild_id, membershipCutoff(), event.id, event.start_at, event.end_at, event.organizer_id)
       .all<AttendeeRow>();
     return results;
   }
@@ -53,7 +61,7 @@ export async function getConfirmedAttendeeIds(
     const { results } = await env.DB.prepare(
       membershipJoin(`SELECT user_id FROM event_poll_votes WHERE option_id = ? AND vote = 'yes' UNION SELECT ?`),
     )
-      .bind(event.guild_id, optionId, event.organizer_id)
+      .bind(event.guild_id, membershipCutoff(), optionId, event.organizer_id)
       .all<AttendeeRow>();
     return results;
   }
@@ -61,7 +69,7 @@ export async function getConfirmedAttendeeIds(
   const { results } = await env.DB.prepare(
     membershipJoin(`SELECT user_id FROM event_invites WHERE event_id = ? AND rsvp_status = 'accepted' UNION SELECT ?`),
   )
-    .bind(event.guild_id, event.id, event.organizer_id)
+    .bind(event.guild_id, membershipCutoff(), event.id, event.organizer_id)
     .all<AttendeeRow>();
   return results;
 }

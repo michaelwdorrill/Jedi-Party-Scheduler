@@ -62,8 +62,11 @@ export default function SettingsPage() {
     setDeleting(true);
     try {
       await api.delete('/me');
+      // The account (and every session with it) is already gone server-side,
+      // so there's nothing left to revoke -- clearing the token first is what
+      // makes logout() skip the revocation it would otherwise queue.
       clearToken();
-      logout();
+      await logout();
       window.location.hash = '#/login';
     } finally {
       setDeleting(false);

@@ -211,6 +211,19 @@ export const LIMITS = {
   MAX_RECURRENCE_INTERVAL: 1000,
   MAX_RECURRENCE_COUNT: 3650, // ~10 years of daily occurrences
   MAX_PERSONAL_EVENTS_PER_USER: 500,
+
+  // Aggregate ceilings. Everything above bounds a single object; these bound
+  // how many objects can accumulate, which is the part that turns ordinary
+  // use into a durable availability problem -- every member's calendar loads
+  // and expands the whole visible set, and the cron walks all of it every 15
+  // minutes. Generous for a friend group, finite for everyone else.
+  MAX_ACTIVE_EVENTS_PER_GUILD: 1000,
+  MAX_EVENTS_PER_ORGANIZER_PER_GUILD: 300,
+  MAX_RECURRING_EVENTS_PER_GUILD: 100,
+  MAX_GROUPS_PER_GUILD: 100,
+  // Per-occurrence cancels/moves on one recurring series. A series can run for
+  // years, but nobody needs to individually override a thousand of its days.
+  MAX_OVERRIDES_PER_EVENT: 500,
   MAX_EVENT_DURATION_MS: 366 * 24 * 60 * 60 * 1000, // a year -- generous ceiling for e.g. long travel blocks
 } as const;
 

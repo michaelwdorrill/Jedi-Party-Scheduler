@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import type { Env } from '../env';
+import { chunkRows } from '../lib/d1';
 import { filterActiveGuildMembers, requireActiveGuildMember } from '../lib/db';
 import { assertOptionalString, assertSafeInt, assertString, assertStringArray, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
 
@@ -119,13 +120,14 @@ groupRoutes.patch('/:groupId', async (c) => {
   if (memberIds !== undefined) {
     const now = Date.now();
     statements.push(c.env.DB.prepare(`DELETE FROM group_members WHERE group_id = ?`).bind(groupId));
-    for (const memberId of memberIds) {
+    // Multi-row inserts: a roster may hold MAX_GROUP_MEMBERS people, and one
+    // statement each would put that many queries in a single batch.
+    for (const chunk of chunkRows(memberIds, 3)) {
       statements.push(
-        c.env.DB.prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`).bind(
-          groupId,
-          memberId,
-          now,
-        ),
+        c.env.DB.prepare(
+          `INSERT INTO group_members (group_id, user_id, added_at)
+           VALUES ${chunk.map(() => '(?, ?, ?)').join(', ')}`,
+        ).bind(...chunk.flatMap((memberId) => [groupId, memberId, now])),
       );
     }
   }
@@ -155,6 +157,7 @@ groupRoutes.delete('/:groupId', async (c) => {
   await c.env.DB.batch([
     c.env.DB.prepare(`UPDATE event_invites SET source_group_id = NULL WHERE source_group_id = ?`).bind(groupId),
     c.env.DB.prepare(`DELETE FROM group_members WHERE group_id = ?`).bind(groupId),
+    c.env.DB.prepare(`DELETE FROM group_nudge_log WHERE group_id = ?`).bind(groupId),
     c.env.DB.prepare(`DELETE FROM group_activity_nudges WHERE group_id = ?`).bind(groupId),
     c.env.DB.prepare(`DELETE FROM groups WHERE id = ?`).bind(groupId),
   ]);

@@ -1,51 +1,44 @@
 import { DateTime } from 'luxon';
 import type { Env } from '../env';
-import { newId } from '../lib/ids';
-import { sendBotDm } from '../lib/discord';
-import type { EventRow } from '../lib/events';
+import type { EventRow, OverrideRow } from '../lib/events';
 import { loadOverridesForEvents } from '../lib/events';
 import { expandOccurrencesForEvent } from '../lib/recurrence';
 import { resolvePastDeadlinePolls } from '../lib/polls';
 import { getConfirmedAttendeeIds } from '../lib/attendance';
 import { pruneStaleSessions } from '../lib/sessions';
+import { MEMBERSHIP_GRACE_MS, revalidateStaleMemberships } from '../lib/db';
+import { deliverThroughOutbox, type DmRecipient } from '../lib/outbox';
 
 const HOUR_MS = 60 * 60 * 1000;
 
-interface ParticipantRow {
-  id: string;
-  notifications_enabled: number;
-  dm_channel_id: string | null;
-  timezone: string;
+type ParticipantRow = DmRecipient;
+
+// Cron never makes a live Discord call per recipient -- that would mean one
+// Discord request per invitee on every 15-minute tick. It relies on the cache
+// instead, but not on a cache of arbitrary age: every recipient query below
+// requires the membership row to have been confirmed within this window, and
+// sweepMembershipRevalidation (further down) is what keeps rows inside it.
+//
+// So a membership that Discord hasn't confirmed for over a day stops
+// receiving DMs, the same bound interactive requests apply. Someone who left
+// the server can't keep getting private event titles in their DMs
+// indefinitely just because they never opened the app again.
+function membershipCutoff(): number {
+  return Date.now() - MEMBERSHIP_GRACE_MS;
 }
 
-// Cron never makes a live Discord call per recipient (unlike the interactive
-// isGuildMember() path) -- that would mean one Discord request per invitee on
-// every 15-minute tick. Instead this just requires the *cached* membership to
-// still say active guild + current member, which is enough to stop DMing
-// someone who left or whose guild got deactivated; live revalidation happens
-// next time they hit the app themselves.
-async function getEventParticipants(env: Env, eventId: string, guildId: string, organizerId: string): Promise<ParticipantRow[]> {
-  const { results } = await env.DB.prepare(
-    `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
-     FROM users u
-     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1
-     JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
-     WHERE u.id IN (SELECT user_id FROM event_invites WHERE event_id = ? UNION SELECT ?)`,
-  )
-    .bind(guildId, eventId, organizerId)
-    .all<ParticipantRow>();
-  return results;
-}
+// How many stale membership rows to re-verify per tick. At the 15-minute cron
+// cadence this is 200 checks an hour, far more than a friend-group-sized
+// install needs to keep everyone inside the freshness window, while still
+// bounding what one tick can spend on outbound Discord calls.
+const MEMBERSHIP_REVALIDATIONS_PER_TICK = 50;
 
-async function deliverDm(env: Env, user: ParticipantRow, content: string): Promise<void> {
-  const { result, channelId } = await sendBotDm(env.DISCORD_BOT_TOKEN, user.id, content, user.dm_channel_id);
-  if (channelId && channelId !== user.dm_channel_id) {
-    await env.DB.prepare(`UPDATE users SET dm_channel_id = ? WHERE id = ?`).bind(channelId, user.id).run();
-  }
-  if (result.status === 429 && result.retryAfterMs) {
-    await new Promise((resolve) => setTimeout(resolve, Math.min(result.retryAfterMs!, 5000)));
-  }
-}
+// Recurring events are processed in pages, and each page loads its own
+// overrides. Previously one global preload ran for every recurring event in
+// the database, outside the per-event try/catch -- so once that query got big
+// enough to fail, it took the entire recurring sweep down with it before a
+// single reminder was processed.
+const RECURRING_PAGE_SIZE = 50;
 
 type NotificationType =
   | 'invite'
@@ -55,13 +48,9 @@ type NotificationType =
   | 'poll_deadline_reminder'
   | 'voice_channel_invite';
 
-// Outbox semantics: `sent_at` means "first attempted" (it's also the claim
-// timestamp), `delivered_at` is set only once Discord confirms success, and
-// `failed_at` is set only for a permanent (non-retryable) failure. Both NULL
-// means still pending -- the next sweep tries again. This replaces the old
-// behavior where the dedupe row's mere existence meant "sent," so a
-// transient Discord/network failure permanently looked delivered and was
-// never retried.
+// Event-scoped notifications go through the shared leased outbox (see
+// lib/outbox.ts), keyed on the same four columns as notification_log's UNIQUE
+// constraint.
 async function notifyOnce(
   env: Env,
   user: ParticipantRow,
@@ -70,76 +59,31 @@ async function notifyOnce(
   occurrenceDate: string,
   content: string,
 ): Promise<void> {
-  if (!user.notifications_enabled) return;
+  await deliverThroughOutbox(
+    env,
+    'notification_log',
+    {
+      user_id: user.id,
+      event_id: eventId,
+      notification_type: notificationType,
+      occurrence_date: occurrenceDate,
+    },
+    user,
+    content,
+  );
+}
 
-  const existing = await env.DB.prepare(
-    `SELECT id, delivered_at, failed_at FROM notification_log
-     WHERE user_id = ? AND event_id = ? AND notification_type = ? AND occurrence_date = ?`,
+async function getEventParticipants(env: Env, eventId: string, guildId: string, organizerId: string): Promise<ParticipantRow[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
+     FROM users u
+     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
+     WHERE u.id IN (SELECT user_id FROM event_invites WHERE event_id = ? UNION SELECT ?)`,
   )
-    .bind(user.id, eventId, notificationType, occurrenceDate)
-    .first<{ id: string; delivered_at: number | null; failed_at: number | null }>();
-
-  if (existing && (existing.delivered_at != null || existing.failed_at != null)) {
-    return; // already resolved, one way or the other -- nothing to retry
-  }
-
-  let logId: string;
-  if (existing) {
-    // Retrying a previously-pending attempt. Claim it with a compare-and-set
-    // so two overlapping cron ticks can't both send the same DM -- if
-    // another process already resolved or is mid-attempt, this affects 0
-    // rows and we back off rather than double-send.
-    logId = existing.id;
-    const claim = await env.DB.prepare(
-      `UPDATE notification_log SET sent_at = ? WHERE id = ? AND delivered_at IS NULL AND failed_at IS NULL`,
-    )
-      .bind(Date.now(), logId)
-      .run();
-    if (claim.meta.changes === 0) return;
-  } else {
-    logId = newId();
-    try {
-      await env.DB.prepare(
-        `INSERT INTO notification_log (id, user_id, event_id, notification_type, occurrence_date, sent_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-        .bind(logId, user.id, eventId, notificationType, occurrenceDate, Date.now())
-        .run();
-    } catch (err) {
-      // A UNIQUE-constraint violation means a concurrent call already
-      // inserted the same claim between our SELECT and this INSERT -- that
-      // other call owns this attempt. Any other failure (D1 outage, schema
-      // drift, a bug) must not be swallowed the same way.
-      const message = (err as Error).message ?? '';
-      if (message.includes('UNIQUE constraint failed')) return;
-      console.error(`notifyOnce insert failed for ${notificationType}/${eventId}/${user.id}:`, err);
-      throw err;
-    }
-  }
-
-  const { result, channelId } = await sendBotDm(env.DISCORD_BOT_TOKEN, user.id, content, user.dm_channel_id);
-  if (channelId && channelId !== user.dm_channel_id) {
-    await env.DB.prepare(`UPDATE users SET dm_channel_id = ? WHERE id = ?`).bind(channelId, user.id).run();
-  }
-
-  if (result.ok) {
-    await env.DB.prepare(`UPDATE notification_log SET delivered_at = ? WHERE id = ?`).bind(Date.now(), logId).run();
-    return;
-  }
-
-  if (result.status === 429) {
-    if (result.retryAfterMs) await new Promise((resolve) => setTimeout(resolve, Math.min(result.retryAfterMs!, 5000)));
-    return; // leave pending -- retried next tick (Discord's own rate limit, not our fault)
-  }
-
-  if (result.status >= 500) {
-    return; // transient -- leave pending for retry next tick
-  }
-
-  // A permanent 4xx (e.g. the recipient blocked DMs, or the cached channel
-  // is gone) won't succeed by retrying it verbatim -- mark it terminal so it
-  // stops being picked up, without pretending it was delivered.
-  await env.DB.prepare(`UPDATE notification_log SET failed_at = ? WHERE id = ?`).bind(Date.now(), logId).run();
+    .bind(guildId, membershipCutoff(), eventId, organizerId)
+    .all<ParticipantRow>();
+  return results;
 }
 
 // Rendered in the *recipient's* configured timezone -- a DM saying "17:00
@@ -155,27 +99,49 @@ function eventLink(env: Env, eventId: string): string {
 }
 
 async function sweepNewInvites(env: Env): Promise<void> {
+  const now = Date.now();
+  // Two fixes over the previous version, both in the WHERE clause:
+  //
+  // 1. It joins membership. This sweep discloses a private event's title and
+  //    link by DM, and it was the one recipient query with no guild check at
+  //    all -- an invite row left over from before someone left the server was
+  //    enough to keep receiving them.
+  // 2. It selects rows that are pending *and due*, not only rows with no log
+  //    entry. Under the outbox model a transient failure leaves a pending
+  //    row behind, and `nl.id IS NULL` would never match it again -- the
+  //    first failed invite DM was the last one anyone would ever get.
   const { results } = await env.DB.prepare(
-    `SELECT ei.event_id, ei.user_id, e.title
+    `SELECT ei.event_id, ei.user_id, e.title,
+            u.notifications_enabled, u.dm_channel_id, u.timezone
      FROM event_invites ei
      JOIN events e ON e.id = ei.event_id
+     JOIN users u ON u.id = ei.user_id
+     JOIN user_guild_membership m
+       ON m.user_id = ei.user_id AND m.guild_id = e.guild_id AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
      LEFT JOIN notification_log nl
        ON nl.user_id = ei.user_id AND nl.event_id = ei.event_id
        AND nl.notification_type = 'invite' AND nl.occurrence_date = ''
-     WHERE e.status != 'cancelled' AND nl.id IS NULL`,
-  ).all<{ event_id: string; user_id: string; title: string }>();
+     WHERE e.status != 'cancelled'
+       AND (
+         nl.id IS NULL
+         OR (nl.delivered_at IS NULL AND nl.failed_at IS NULL
+             AND (nl.next_attempt_at IS NULL OR nl.next_attempt_at <= ?))
+       )`,
+  )
+    .bind(membershipCutoff(), now)
+    .all<{ event_id: string; user_id: string; title: string } & Omit<ParticipantRow, 'id'>>();
 
   for (const row of results) {
     try {
-      const user = await env.DB.prepare(
-        `SELECT id, notifications_enabled, dm_channel_id, timezone FROM users WHERE id = ?`,
-      )
-        .bind(row.user_id)
-        .first<ParticipantRow>();
-      if (!user) continue;
       await notifyOnce(
         env,
-        user,
+        {
+          id: row.user_id,
+          notifications_enabled: row.notifications_enabled,
+          dm_channel_id: row.dm_channel_id,
+          timezone: row.timezone,
+        },
         row.event_id,
         'invite',
         '',
@@ -216,39 +182,58 @@ async function sweepReminders(env: Env): Promise<void> {
     }
   }
 
-  const { results: recurringEvents } = await env.DB.prepare(
-    `SELECT * FROM events WHERE is_recurring = 1 AND status = 'active'`,
-  ).all<EventRow>();
+  await forEachRecurringPage(env, `SELECT * FROM events WHERE is_recurring = 1 AND status = 'active'`, async (event, overrides) => {
+    const occurrences = await expandOccurrencesForEvent(env, event, now, windowEnd, overrides);
+    if (occurrences.length === 0) return;
 
-  if (recurringEvents.length > 0) {
-    const overridesByEvent = await loadOverridesForEvents(env, recurringEvents.map((e) => e.id));
-    for (const event of recurringEvents) {
-      try {
-        const occurrences = await expandOccurrencesForEvent(
-          env,
-          event,
-          now,
-          windowEnd,
-          overridesByEvent.get(event.id) ?? [],
-        );
-        if (occurrences.length === 0) continue;
-
-        const participants = await getEventParticipants(env, event.id, event.guild_id, event.organizer_id);
-        for (const occ of occurrences) {
-          const remaining = occ.startAt - now;
-          for (const user of participants) {
-            if (remaining <= HOUR_MS) {
-              await notifyOnce(env, user, event.id, 'reminder_1h', occ.date, `"${event.title}" starts in about an hour (${formatWhen(occ.startAt, user.timezone)}).\n${eventLink(env, event.id)}`);
-            }
-            if (remaining <= 24 * HOUR_MS) {
-              await notifyOnce(env, user, event.id, 'reminder_24h', occ.date, `"${event.title}" is coming up on ${formatWhen(occ.startAt, user.timezone)}.\n${eventLink(env, event.id)}`);
-            }
-          }
+    const participants = await getEventParticipants(env, event.id, event.guild_id, event.organizer_id);
+    for (const occ of occurrences) {
+      const remaining = occ.startAt - now;
+      for (const user of participants) {
+        if (remaining <= HOUR_MS) {
+          await notifyOnce(env, user, event.id, 'reminder_1h', occ.date, `"${event.title}" starts in about an hour (${formatWhen(occ.startAt, user.timezone)}).\n${eventLink(env, event.id)}`);
         }
-      } catch (err) {
-        console.error(`sweepReminders (recurring) failed for event ${event.id}:`, err);
+        if (remaining <= 24 * HOUR_MS) {
+          await notifyOnce(env, user, event.id, 'reminder_24h', occ.date, `"${event.title}" is coming up on ${formatWhen(occ.startAt, user.timezone)}.\n${eventLink(env, event.id)}`);
+        }
       }
     }
+  });
+}
+
+// Walks a recurring-event query in pages, preloading each page's occurrence
+// overrides and isolating failures at both levels: one bad event skips only
+// itself, and one bad page (including its override preload) skips only that
+// page. The previous shape -- one global preload for every recurring event in
+// the database, outside the loop's try/catch -- meant that query failing
+// aborted the whole sweep before any event was processed.
+async function forEachRecurringPage(
+  env: Env,
+  sql: string,
+  handle: (event: EventRow, overrides: OverrideRow[]) => Promise<void>,
+): Promise<void> {
+  let offset = 0;
+  for (;;) {
+    const { results: page } = await env.DB.prepare(`${sql} ORDER BY id LIMIT ? OFFSET ?`)
+      .bind(RECURRING_PAGE_SIZE, offset)
+      .all<EventRow>();
+    if (page.length === 0) return;
+    offset += page.length;
+
+    try {
+      const overridesByEvent = await loadOverridesForEvents(env, page.map((e) => e.id));
+      for (const event of page) {
+        try {
+          await handle(event, overridesByEvent.get(event.id) ?? []);
+        } catch (err) {
+          console.error(`recurring sweep failed for event ${event.id}:`, err);
+        }
+      }
+    } catch (err) {
+      console.error(`recurring sweep failed for page at offset ${offset - page.length}:`, err);
+    }
+
+    if (page.length < RECURRING_PAGE_SIZE) return;
   }
 }
 
@@ -340,11 +325,11 @@ async function sweepConfirmedMultiWinnerOptions(env: Env): Promise<void> {
         `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
          FROM event_poll_votes epv
          JOIN users u ON u.id = epv.user_id
-         JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1
+         JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
          JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
          WHERE epv.option_id = ? AND epv.vote = 'yes'`,
       )
-        .bind(opt.guild_id, opt.option_id)
+        .bind(opt.guild_id, membershipCutoff(), opt.option_id)
         .all<ParticipantRow>();
 
       for (const user of yesVoters) {
@@ -390,11 +375,11 @@ async function sweepPollDeadlineReminders(env: Env): Promise<void> {
         `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
          FROM event_invites ei
          JOIN users u ON u.id = ei.user_id
-         JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1
+         JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
          JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
          WHERE ei.event_id = ? AND NOT EXISTS (${hasVotedSubquery})`,
       )
-        .bind(poll.guild_id, poll.id)
+        .bind(poll.guild_id, membershipCutoff(), poll.id)
         .all<ParticipantRow>();
 
       for (const user of nonVoters) {
@@ -458,41 +443,28 @@ async function sweepVoiceChannelInvites(env: Env): Promise<void> {
     }
   }
 
-  const { results: recurringEvents } = await env.DB.prepare(
+  await forEachRecurringPage(
+    env,
     `SELECT * FROM events WHERE voice_channel_id IS NOT NULL AND is_recurring = 1 AND status = 'active'`,
-  ).all<EventRow>();
+    async (event, overrides) => {
+      const occurrences = await expandOccurrencesForEvent(env, event, now, windowEnd, overrides);
+      if (occurrences.length === 0) return;
 
-  if (recurringEvents.length > 0) {
-    const overridesByEvent = await loadOverridesForEvents(env, recurringEvents.map((e) => e.id));
-    for (const event of recurringEvents) {
-      try {
-        const occurrences = await expandOccurrencesForEvent(
-          env,
-          event,
-          now,
-          windowEnd,
-          overridesByEvent.get(event.id) ?? [],
-        );
-        if (occurrences.length === 0) continue;
-
-        const attendees = await getConfirmedAttendeeIds(env, event, null);
-        for (const occ of occurrences) {
-          for (const user of attendees) {
-            await notifyOnce(
-              env,
-              user,
-              event.id,
-              'voice_channel_invite',
-              occ.date,
-              `"${event.title}" is starting soon -- join the "${event.voice_channel_name}" voice channel:\n${voiceChannelLink(event.guild_id, event.voice_channel_id!)}`,
-            );
-          }
+      const attendees = await getConfirmedAttendeeIds(env, event, null);
+      for (const occ of occurrences) {
+        for (const user of attendees) {
+          await notifyOnce(
+            env,
+            user,
+            event.id,
+            'voice_channel_invite',
+            occ.date,
+            `"${event.title}" is starting soon -- join the "${event.voice_channel_name}" voice channel:\n${voiceChannelLink(event.guild_id, event.voice_channel_id!)}`,
+          );
         }
-      } catch (err) {
-        console.error(`sweepVoiceChannelInvites (recurring) failed for event ${event.id}:`, err);
       }
-    }
-  }
+    },
+  );
 
   // multi_winner polls confirm each day independently, so each confirmed
   // option has its own attendee list (whoever voted yes on that day).
@@ -563,34 +535,40 @@ async function sweepIdleGroups(env: Env): Promise<void> {
       const idleMs = group.idle_reminder_days * 24 * HOUR_MS;
       if (now - lastEventAt < idleMs) continue;
 
-      const already = await env.DB.prepare(
-        `SELECT last_event_at FROM group_activity_nudges WHERE group_id = ?`,
-      )
-        .bind(group.id)
-        .first<{ last_event_at: number }>();
-      if (already && already.last_event_at === lastEventAt) continue; // already nudged for this idle episode
-
       const { results: members } = await env.DB.prepare(
         `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone, g.name as group_name
          FROM group_members gm
          JOIN users u ON u.id = gm.user_id
          JOIN groups g ON g.id = gm.group_id
-         JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = g.guild_id AND m.is_member = 1
+         JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = g.guild_id AND m.is_member = 1 AND m.verified_at >= ?
          JOIN guilds gu ON gu.id = m.guild_id AND gu.is_active = 1
          WHERE gm.group_id = ?`,
       )
-        .bind(group.id)
+        .bind(membershipCutoff(), group.id)
         .all<ParticipantRow & { group_name: string }>();
 
+      // Nudges now go through the same leased outbox as every other DM,
+      // keyed per member per idle episode. Previously this fired a bare
+      // send and then recorded the group as nudged regardless of the
+      // outcome, so a rate-limited or 5xx nudge was silently dropped and
+      // the "already nudged" marker guaranteed it was never retried.
+      //
+      // That marker is also no longer the gate -- the outbox row is. Once a
+      // member's nudge is delivered (or permanently fails) their row is
+      // terminal and re-running this sweep is a no-op for them, while a
+      // member whose nudge is still pending gets picked up on a later tick.
       for (const member of members) {
-        if (!member.notifications_enabled) continue;
-        await deliverDm(
+        await deliverThroughOutbox(
           env,
+          'group_nudge_log',
+          { group_id: group.id, user_id: member.id, last_event_at: lastEventAt },
           member,
           `It's been a while since "${member.group_name}" last played -- want to schedule something?\n${env.FRONTEND_URL}/#/calendar`,
         );
       }
 
+      // Kept purely as the "when did this group last get nudged" record the
+      // rest of the app reads; it no longer decides whether to send.
       await env.DB.prepare(
         `INSERT INTO group_activity_nudges (group_id, last_event_at, notified_at) VALUES (?, ?, ?)
          ON CONFLICT(group_id) DO UPDATE SET last_event_at = excluded.last_event_at, notified_at = excluded.notified_at`,
@@ -601,6 +579,17 @@ async function sweepIdleGroups(env: Env): Promise<void> {
       console.error(`sweepIdleGroups failed for group ${group.id}:`, err);
     }
   }
+}
+
+// Keeps the membership cache fresh enough for every recipient query above to
+// filter on verified_at alone. Without this the cron would face a choice
+// between one live Discord call per recipient per tick (unaffordable) and
+// trusting rows of unbounded age (what review flagged) -- this is the third
+// option: a bounded, steady background refresh that neither scales with the
+// notification volume nor lets any row drift past the grace window.
+async function sweepMembershipRevalidation(env: Env): Promise<void> {
+  const checked = await revalidateStaleMemberships(env, MEMBERSHIP_REVALIDATIONS_PER_TICK);
+  if (checked > 0) console.log(`Revalidated ${checked} stale guild membership row(s).`);
 }
 
 // Each sweep is independently fault-isolated: one throwing (a malformed row
@@ -622,6 +611,9 @@ export async function runReminderSweep(env: Env): Promise<void> {
   // resolved/cancelled poll each tick (dedupe makes that safe) rather than
   // depending on "resolved this exact tick", since single_winner polls often
   // resolve synchronously via threshold well before any deadline.
+  // Runs first so every recipient query in the sweeps below sees the
+  // freshest membership state this tick can afford.
+  await runIsolated('membershipRevalidation', () => sweepMembershipRevalidation(env));
   await runIsolated('pollDeadlines', () => sweepPollDeadlines(env));
   await runIsolated('singleWinnerPollNotifications', () => sweepSingleWinnerPollNotifications(env));
   await runIsolated('multiWinnerPollClosedNotifications', () => sweepMultiWinnerPollClosedNotifications(env));

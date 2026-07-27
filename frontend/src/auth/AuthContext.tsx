@@ -2,13 +2,17 @@ import { createContext, useCallback, useContext, useEffect, useState, ReactNode 
 import { api } from '../api/client';
 import type { User } from '../types';
 import { clearToken, getToken, setToken } from './tokenStorage';
+import { revokeOrQueue, startRevocationRetries } from './pendingRevocation';
 
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
   isAuthenticated: boolean;
   login: (token: string) => Promise<void>;
-  logout: () => void;
+  // Resolves false when the server-side session could not be confirmed
+  // revoked. The local session is cleared either way -- the caller decides
+  // whether to say anything about it.
+  logout: () => Promise<boolean>;
   refreshUser: () => Promise<void>;
 }
 
@@ -42,6 +46,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void refreshUser();
   }, [refreshUser]);
 
+  // A logout whose network call didn't land leaves a token parked in storage;
+  // this retries it now and on every return to connectivity, so the session
+  // still gets revoked even though the tab that asked for it is long gone.
+  useEffect(() => startRevocationRetries(), []);
+
   const login = useCallback(
     async (token: string) => {
       setToken(token);
@@ -51,12 +60,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [refreshUser],
   );
 
-  const logout = useCallback(() => {
-    // Best-effort: revoke the server-side session so the token can't be used
-    // again even if it leaks. Local state is cleared either way.
-    void api.post('/auth/logout').catch(() => {});
+  const logout = useCallback(async () => {
+    const token = getToken();
+    // Clear the local session first so the UI responds immediately and can't
+    // be left half-logged-in by a hanging request.
     clearToken();
     setUser(null);
+    if (!token) return true;
+    // The token is durably parked before it's used, so a revocation that
+    // fails here is retried later rather than lost with the only credential
+    // that could have identified the session.
+    return revokeOrQueue(token);
   }, []);
 
   return (

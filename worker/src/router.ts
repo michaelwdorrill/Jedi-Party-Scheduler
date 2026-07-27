@@ -10,6 +10,7 @@ import { eventRoutes } from './routes/events';
 import { pollRoutes } from './routes/polls';
 import { personalRoutes } from './routes/personal';
 import { adminRoutes } from './routes/admin';
+import { MembershipUnavailableError } from './lib/db';
 import { BodyTooLargeError, MAX_BODY_BYTES, ValidationError } from './lib/validate';
 
 export function buildApp() {
@@ -43,6 +44,19 @@ export function buildApp() {
   app.onError((err, c) => {
     if (err instanceof BodyTooLargeError) return c.text(err.message, 413);
     if (err instanceof ValidationError) return c.text(err.message, 400);
+    // Membership couldn't be confirmed with Discord and the cached answer is
+    // too old to keep honouring. Deliberately a 503, not a 403: nothing about
+    // the caller's authorization has been established, so telling them
+    // they're forbidden would be a guess -- and the wrong one to act on. See
+    // MEMBERSHIP_GRACE_MS in lib/db.ts.
+    if (err instanceof MembershipUnavailableError) {
+      c.header('Retry-After', '300');
+      return c.text(
+        "Can't confirm your Discord server membership right now -- this is usually a temporary " +
+          'Discord problem. Try again in a few minutes.',
+        503,
+      );
+    }
     console.error('Unhandled error:', err);
     return c.text('Internal error', 500);
   });

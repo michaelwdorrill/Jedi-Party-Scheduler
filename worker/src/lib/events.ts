@@ -1,4 +1,5 @@
 import type { Env } from '../env';
+import { chunkIds, placeholders } from './d1';
 
 export interface EventRow {
   id: string;
@@ -36,22 +37,28 @@ export interface OverrideRow {
   override_end_at: number | null;
 }
 
+// These three helpers each take "every event the caller can see", which is
+// unbounded from the caller's point of view -- one guild member creating
+// enough events that another member's calendar crosses D1's bound-parameter
+// ceiling was a persistent, cross-user denial of service, since the records
+// stay and every subsequent calendar load fails the same way. Chunking is
+// what makes the list size irrelevant.
 export async function loadOverridesForEvents(
   env: Env,
   eventIds: string[],
 ): Promise<Map<string, OverrideRow[]>> {
   const map = new Map<string, OverrideRow[]>();
-  if (eventIds.length === 0) return map;
-  const placeholders = eventIds.map(() => '?').join(',');
-  const { results } = await env.DB.prepare(
-    `SELECT event_id, occurrence_date, is_cancelled, override_start_at, override_end_at
-     FROM event_occurrence_overrides WHERE event_id IN (${placeholders})`,
-  )
-    .bind(...eventIds)
-    .all<OverrideRow>();
-  for (const row of results) {
-    if (!map.has(row.event_id)) map.set(row.event_id, []);
-    map.get(row.event_id)!.push(row);
+  for (const chunk of chunkIds(eventIds)) {
+    const { results } = await env.DB.prepare(
+      `SELECT event_id, occurrence_date, is_cancelled, override_start_at, override_end_at
+       FROM event_occurrence_overrides WHERE event_id IN (${placeholders(chunk.length)})`,
+    )
+      .bind(...chunk)
+      .all<OverrideRow>();
+    for (const row of results) {
+      if (!map.has(row.event_id)) map.set(row.event_id, []);
+      map.get(row.event_id)!.push(row);
+    }
   }
   return map;
 }
@@ -62,15 +69,15 @@ export async function loadMyRsvpForEvents(
   userId: string,
 ): Promise<Map<string, string>> {
   const map = new Map<string, string>();
-  if (eventIds.length === 0) return map;
-  const placeholders = eventIds.map(() => '?').join(',');
-  const { results } = await env.DB.prepare(
-    `SELECT event_id, rsvp_status FROM event_invites
-     WHERE user_id = ? AND event_id IN (${placeholders})`,
-  )
-    .bind(userId, ...eventIds)
-    .all<{ event_id: string; rsvp_status: string }>();
-  for (const row of results) map.set(row.event_id, row.rsvp_status);
+  for (const chunk of chunkIds(eventIds, 1)) {
+    const { results } = await env.DB.prepare(
+      `SELECT event_id, rsvp_status FROM event_invites
+       WHERE user_id = ? AND event_id IN (${placeholders(chunk.length)})`,
+    )
+      .bind(userId, ...chunk)
+      .all<{ event_id: string; rsvp_status: string }>();
+    for (const row of results) map.set(row.event_id, row.rsvp_status);
+  }
   return map;
 }
 
@@ -112,15 +119,15 @@ export async function loadPrimaryGroupForEvents(
   eventIds: string[],
 ): Promise<Map<string, string>> {
   const map = new Map<string, string>();
-  if (eventIds.length === 0) return map;
-  const placeholders = eventIds.map(() => '?').join(',');
-  const { results } = await env.DB.prepare(
-    `SELECT event_id, MIN(source_group_id) AS group_id FROM event_invites
-     WHERE event_id IN (${placeholders}) AND source_group_id IS NOT NULL
-     GROUP BY event_id`,
-  )
-    .bind(...eventIds)
-    .all<{ event_id: string; group_id: string }>();
-  for (const row of results) map.set(row.event_id, row.group_id);
+  for (const chunk of chunkIds(eventIds)) {
+    const { results } = await env.DB.prepare(
+      `SELECT event_id, MIN(source_group_id) AS group_id FROM event_invites
+       WHERE event_id IN (${placeholders(chunk.length)}) AND source_group_id IS NOT NULL
+       GROUP BY event_id`,
+    )
+      .bind(...chunk)
+      .all<{ event_id: string; group_id: string }>();
+    for (const row of results) map.set(row.event_id, row.group_id);
+  }
   return map;
 }

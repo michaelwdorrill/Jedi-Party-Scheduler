@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
+import { chunkIds, chunkRows, placeholders } from '../lib/d1';
 import { filterActiveGuildMembers, isGuildMember, listUserGuilds } from '../lib/db';
 import { newId } from '../lib/ids';
 import { expandOccurrencesForEvent } from '../lib/recurrence';
@@ -60,14 +61,20 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
   );
   if (requested.length === 0) return c.json([]);
 
-  const placeholders = requested.map(() => '?').join(',');
-  const { results: members } = await c.env.DB.prepare(
-    `SELECT u.id, u.username, u.global_name, u.free_busy_visible
-     FROM users u JOIN user_guild_membership m ON m.user_id = u.id
-     WHERE m.guild_id = ? AND m.is_member = 1 AND u.id IN (${placeholders})`,
-  )
-    .bind(guildId, ...requested)
-    .all<{ id: string; username: string; global_name: string | null; free_busy_visible: number }>();
+  // MAX_FREE_BUSY_USERS is 100, which with the guild ID would be 101 bound
+  // parameters -- past D1's per-statement ceiling, so a fully-populated
+  // scheduling assistant request would have failed outright.
+  const members: { id: string; username: string; global_name: string | null; free_busy_visible: number }[] = [];
+  for (const chunk of chunkIds(requested, 1)) {
+    const { results } = await c.env.DB.prepare(
+      `SELECT u.id, u.username, u.global_name, u.free_busy_visible
+       FROM users u JOIN user_guild_membership m ON m.user_id = u.id
+       WHERE m.guild_id = ? AND m.is_member = 1 AND u.id IN (${placeholders(chunk.length)})`,
+    )
+      .bind(guildId, ...chunk)
+      .all<{ id: string; username: string; global_name: string | null; free_busy_visible: number }>();
+    members.push(...results);
+  }
 
   const out = [];
   for (const member of members) {
@@ -107,32 +114,41 @@ guildRoutes.get('/:guildId/groups', async (c) => {
     .bind(guildId)
     .all<{ id: string; guild_id: string; name: string; game: string | null; idle_reminder_days: number; created_by: string }>();
 
-  const out = [];
-  for (const g of groups) {
-    const { results: members } = await c.env.DB.prepare(
-      `SELECT u.id, u.username, u.global_name, u.avatar_hash
+  // One chunked query for every group's members, rather than one query per
+  // group: the previous N+1 shape issued a database round trip per group on
+  // a page that loads on every visit to the groups screen, and D1 also caps
+  // how many queries a single Worker invocation may issue.
+  const membersByGroup = new Map<string, { id: string; username: string; global_name: string | null; avatar_hash: string | null }[]>();
+  for (const chunk of chunkIds(groups.map((g) => g.id))) {
+    const { results } = await c.env.DB.prepare(
+      `SELECT gm.group_id, u.id, u.username, u.global_name, u.avatar_hash
        FROM group_members gm JOIN users u ON u.id = gm.user_id
-       WHERE gm.group_id = ?`,
+       WHERE gm.group_id IN (${placeholders(chunk.length)})`,
     )
-      .bind(g.id)
-      .all<{ id: string; username: string; global_name: string | null; avatar_hash: string | null }>();
+      .bind(...chunk)
+      .all<{ group_id: string; id: string; username: string; global_name: string | null; avatar_hash: string | null }>();
+    for (const row of results) {
+      if (!membersByGroup.has(row.group_id)) membersByGroup.set(row.group_id, []);
+      membersByGroup.get(row.group_id)!.push(row);
+    }
+  }
 
-    out.push({
+  return c.json(
+    groups.map((g) => ({
       id: g.id,
       guildId: g.guild_id,
       name: g.name,
       game: g.game,
       idleReminderDays: g.idle_reminder_days,
       createdBy: g.created_by,
-      members: members.map((m) => ({
+      members: (membersByGroup.get(g.id) ?? []).map((m) => ({
         id: m.id,
         username: m.username,
         globalName: m.global_name,
         avatarHash: m.avatar_hash,
       })),
-    });
-  }
-  return c.json(out);
+    })),
+  );
 });
 
 guildRoutes.post('/:guildId/groups', async (c) => {
@@ -152,16 +168,24 @@ guildRoutes.post('/:guildId/groups', async (c) => {
     throw new ValidationError('One or more members are not current members of this server');
   }
 
+  const groupCount = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM groups WHERE guild_id = ?`)
+    .bind(guildId)
+    .first<{ n: number }>();
+  if ((groupCount?.n ?? 0) >= LIMITS.MAX_GROUPS_PER_GUILD) {
+    throw new ValidationError('This server has reached its limit of groups');
+  }
+
   const groupId = newId();
   const now = Date.now();
   await c.env.DB.batch([
     c.env.DB.prepare(
       `INSERT INTO groups (id, guild_id, name, game, idle_reminder_days, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).bind(groupId, guildId, name, game, idleReminderDays, userId, now),
-    ...memberIds.map((memberId) =>
+    ...chunkRows(memberIds, 3).map((chunk) =>
       c.env.DB.prepare(
-        `INSERT OR IGNORE INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`,
-      ).bind(groupId, memberId, now),
+        `INSERT OR IGNORE INTO group_members (group_id, user_id, added_at)
+         VALUES ${chunk.map(() => '(?, ?, ?)').join(', ')}`,
+      ).bind(...chunk.flatMap((memberId) => [groupId, memberId, now])),
     ),
   ]);
 
@@ -175,13 +199,26 @@ guildRoutes.get('/:guildId/events', async (c) => {
 
   const { from, to } = parseRangeQuery(c);
 
-  // Only events the user is the organizer of, or is individually/group-invited to.
+  // Only events the user is the organizer of, or is individually/group-invited
+  // to -- and only ones that could possibly land in the requested window.
+  // Without that second filter this loaded every event the user had ever been
+  // part of on every calendar view, then discarded almost all of them after
+  // expansion, so the cost of viewing one month grew with the guild's entire
+  // history. Recurring events and open polls are unfiltered because whether
+  // they fall in the window isn't a property of a stored timestamp: a series
+  // has to be expanded to find out, and a multi-winner poll's confirmed days
+  // live in a separate table.
   const { results: events } = await c.env.DB.prepare(
     `SELECT DISTINCT e.* FROM events e
      LEFT JOIN event_invites i ON i.event_id = e.id AND i.user_id = ?
-     WHERE e.guild_id = ? AND (e.organizer_id = ? OR i.user_id IS NOT NULL)`,
+     WHERE e.guild_id = ? AND (e.organizer_id = ? OR i.user_id IS NOT NULL)
+       AND (
+         e.is_recurring = 1
+         OR e.event_type = 'poll'
+         OR (e.start_at IS NOT NULL AND e.start_at <= ? AND COALESCE(e.end_at, e.start_at) >= ?)
+       )`,
   )
-    .bind(userId, guildId, userId)
+    .bind(userId, guildId, userId, to, from)
     .all<EventRow>();
 
   const overridesByEvent = await loadOverridesForEvents(c.env, events.map((e) => e.id));

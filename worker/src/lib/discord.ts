@@ -40,12 +40,26 @@ export async function fetchGuildVoiceChannels(botToken: string, guildId: string)
   return channels.filter((c) => VOICE_CHANNEL_TYPES.has(c.type)).map((c) => ({ id: c.id, name: c.name }));
 }
 
-export type GuildMembershipStatus = 'member' | 'not_member' | 'unknown';
+// Deliberately more granular than "yes / no / dunno". Only `member` and
+// `not_member` are answers about the *user*; the other two are answers about
+// our own ability to ask the question, and they have very different
+// operational meanings:
+//
+//   bot_unauthorized  the bot token is wrong/revoked (401), or the bot isn't
+//                     in this guild any more (403). Persistent, and nothing
+//                     resolves it except an operator fixing the Discord app.
+//   temporarily_unavailable  rate limit (429), Discord 5xx, or a network
+//                     failure. Expected to clear on its own.
+//
+// Collapsing these into one bucket is what made the previous version
+// indistinguishable in logs: a permanently broken bot looked exactly like a
+// thirty-second Discord blip. See docs/SETUP.md's operations note.
+export type GuildMembershipStatus = 'member' | 'not_member' | 'bot_unauthorized' | 'temporarily_unavailable';
 
 // Live check against Discord's own membership record, used to revalidate a
-// stale cache entry (see requireActiveGuildMember in db.ts). This single
-// REST lookup does not require the privileged GUILD_MEMBERS intent -- that's
-// only needed for the gateway member list/events, not this per-user fetch.
+// stale cache entry (see isGuildMember in db.ts). This single REST lookup
+// does not require the privileged GUILD_MEMBERS intent -- that's only needed
+// for the gateway member list/events, not this per-user fetch.
 export async function checkGuildMembership(
   botToken: string,
   guildId: string,
@@ -57,9 +71,19 @@ export async function checkGuildMembership(
     });
     if (res.status === 200) return 'member';
     if (res.status === 404) return 'not_member';
-    return 'unknown'; // rate-limited, bot lacks guild access, transient 5xx, etc.
-  } catch {
-    return 'unknown'; // network failure -- caller decides how to treat this
+    if (res.status === 401 || res.status === 403) {
+      console.error(
+        `Discord membership check rejected (${res.status}) for guild ${guildId}: ` +
+          `the bot token is invalid or the bot is no longer in this server. ` +
+          `Membership can no longer be verified until this is fixed.`,
+      );
+      return 'bot_unauthorized';
+    }
+    console.warn(`Discord membership check unavailable (${res.status}) for guild ${guildId}/user ${userId}`);
+    return 'temporarily_unavailable';
+  } catch (err) {
+    console.warn(`Discord membership check failed for guild ${guildId}/user ${userId}:`, err);
+    return 'temporarily_unavailable';
   }
 }
 
@@ -181,9 +205,17 @@ export async function sendBotDm(
   });
 
   if (messageRes.status === 429) {
+    // Discord reports the wait in the JSON body's `retry_after` (seconds), and
+    // also in the standard Retry-After header. Read the body first, but fall
+    // back to the header rather than defaulting to one second when the body
+    // isn't the shape we expect -- a truncated or non-JSON error response
+    // would otherwise turn a long rate-limit window into an immediate retry.
     const body = (await messageRes.json().catch(() => ({}))) as { retry_after?: number };
+    const headerSeconds = Number(messageRes.headers.get('Retry-After'));
+    const seconds =
+      body.retry_after ?? (Number.isFinite(headerSeconds) && headerSeconds > 0 ? headerSeconds : 1);
     return {
-      result: { ok: false, status: 429, retryAfterMs: (body.retry_after ?? 1) * 1000 },
+      result: { ok: false, status: 429, retryAfterMs: seconds * 1000 },
       channelId,
     };
   }

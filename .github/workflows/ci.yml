@@ -1,0 +1,64 @@
+# Typecheck and test both halves of the repo on every push and pull request.
+#
+# This runs unconditionally -- unlike the deploy workflows, which are opt-in --
+# because the whole point is to catch a regression before it reaches the
+# deploy step, not after.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22, not 20: the pinned Wrangler declares an engine of
+          # >=22.0.0, and the test harness uses the built-in node:sqlite
+          # module. Building on 20 was building against a toolchain the
+          # lockfile doesn't actually support.
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      # `npm ci` installs exactly what package-lock.json resolves, so CI
+      # tests the same dependency tree that gets deployed. `npm install` is
+      # free to pick up newer versions and quietly drift from it.
+      - name: Install dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: worker
+        run: npm run typecheck
+
+      - name: Test
+        working-directory: worker
+        run: npm test
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # `npm run build` runs `tsc -b` before Vite, so this covers typechecking
+      # and the production bundle in one step.
+      - name: Build
+        working-directory: frontend
+        run: npm run build
