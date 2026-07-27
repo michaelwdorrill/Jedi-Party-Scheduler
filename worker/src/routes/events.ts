@@ -1,30 +1,45 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
+import type { Env } from '../env';
 import type { EventRow } from '../lib/events';
+import { requireActiveGuildMember } from '../lib/db';
 import { newId } from '../lib/ids';
 import { updateEvent } from '../lib/eventWrites';
+import { assertOneOf, assertStringArray, LIMITS } from '../lib/validate';
 
 export const eventRoutes = new Hono<AppEnv>();
 
-async function loadEventIfVisible(
-  db: D1Database,
-  eventId: string,
-  userId: string,
-): Promise<EventRow | null> {
-  const event = await db.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+async function loadEventIfVisible(env: Env, eventId: string, userId: string): Promise<EventRow | null> {
+  const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
   if (!event) return null;
+  // A former member holding a stale invite (or even the organizer, if they
+  // left/were removed) must not keep visibility -- current active membership
+  // in the event's guild is required regardless of how they're connected to it.
+  if (!(await requireActiveGuildMember(env, userId, event.guild_id))) return null;
   if (event.organizer_id === userId) return event;
-  const invite = await db
+  const invite = await env.DB
     .prepare(`SELECT 1 FROM event_invites WHERE event_id = ? AND user_id = ?`)
     .bind(eventId, userId)
     .first();
   return invite ? event : null;
 }
 
+// Organizer-only mutations all share this: load the event, confirm it
+// exists, confirm the requester organizes it, AND confirm they're still a
+// current active member of its guild (leaving/removal revokes control too,
+// not just visibility).
+async function loadOwnedActiveEvent(env: Env, eventId: string, userId: string): Promise<EventRow | null> {
+  const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+  if (!event) return null;
+  if (event.organizer_id !== userId) return null;
+  if (!(await requireActiveGuildMember(env, userId, event.guild_id))) return null;
+  return event;
+}
+
 eventRoutes.get('/:eventId', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
-  const event = await loadEventIfVisible(c.env.DB, eventId, userId);
+  const event = await loadEventIfVisible(c.env, eventId, userId);
   if (!event) return c.text('Not found', 404);
 
   const recurrence = event.is_recurring
@@ -160,9 +175,8 @@ eventRoutes.get('/:eventId', async (c) => {
 eventRoutes.patch('/:eventId', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
-  const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+  const event = await loadOwnedActiveEvent(c.env, eventId, userId);
   if (!event) return c.text('Not found', 404);
-  if (event.organizer_id !== userId) return c.text('Forbidden', 403);
 
   const body = await c.req.json();
   await updateEvent(c.env, eventId, event.guild_id, body);
@@ -172,9 +186,8 @@ eventRoutes.patch('/:eventId', async (c) => {
 eventRoutes.delete('/:eventId', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
-  const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+  const event = await loadOwnedActiveEvent(c.env, eventId, userId);
   if (!event) return c.text('Not found', 404);
-  if (event.organizer_id !== userId) return c.text('Forbidden', 403);
 
   await c.env.DB.prepare(`UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ?`)
     .bind(Date.now(), eventId)
@@ -186,9 +199,8 @@ eventRoutes.post('/:eventId/occurrences/:date/cancel', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
   const date = c.req.param('date');
-  const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+  const event = await loadOwnedActiveEvent(c.env, eventId, userId);
   if (!event) return c.text('Not found', 404);
-  if (event.organizer_id !== userId) return c.text('Forbidden', 403);
 
   await c.env.DB.prepare(
     `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled)
@@ -203,14 +215,13 @@ eventRoutes.post('/:eventId/occurrences/:date/cancel', async (c) => {
 eventRoutes.post('/:eventId/invites', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
-  const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+  const event = await loadOwnedActiveEvent(c.env, eventId, userId);
   if (!event) return c.text('Not found', 404);
-  if (event.organizer_id !== userId) return c.text('Forbidden', 403);
 
   const body = await c.req.json<{ userIds?: string[]; groupIds?: string[] }>();
-  await updateEvent(c.env, eventId, event.guild_id, {
-    invites: { userIds: body.userIds ?? [], groupIds: body.groupIds ?? [] },
-  });
+  const userIds = assertStringArray(body.userIds ?? [], 'userIds', LIMITS.MAX_INVITEES, 64);
+  const groupIds = assertStringArray(body.groupIds ?? [], 'groupIds', LIMITS.MAX_GROUP_IDS, 64);
+  await updateEvent(c.env, eventId, event.guild_id, { invites: { userIds, groupIds } });
   return c.json({ ok: true });
 });
 
@@ -218,9 +229,8 @@ eventRoutes.delete('/:eventId/invites/:userId', async (c) => {
   const requesterId = c.get('userId');
   const eventId = c.req.param('eventId');
   const targetUserId = c.req.param('userId');
-  const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+  const event = await loadOwnedActiveEvent(c.env, eventId, requesterId);
   if (!event) return c.text('Not found', 404);
-  if (event.organizer_id !== requesterId) return c.text('Forbidden', 403);
 
   await c.env.DB.prepare(`DELETE FROM event_invites WHERE event_id = ? AND user_id = ?`)
     .bind(eventId, targetUserId)
@@ -232,11 +242,17 @@ eventRoutes.post('/:eventId/rsvp', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
   const body = await c.req.json<{ status: 'accepted' | 'declined' | 'tentative' }>();
+  const status = assertOneOf(body.status, 'status', ['accepted', 'declined', 'tentative'] as const);
+
+  const event = await c.env.DB.prepare(`SELECT guild_id FROM events WHERE id = ?`).bind(eventId).first<{ guild_id: string }>();
+  if (!event || !(await requireActiveGuildMember(c.env, userId, event.guild_id))) {
+    return c.text('Not invited to this event', 403);
+  }
 
   const result = await c.env.DB.prepare(
     `UPDATE event_invites SET rsvp_status = ?, responded_at = ? WHERE event_id = ? AND user_id = ?`,
   )
-    .bind(body.status, Date.now(), eventId, userId)
+    .bind(status, Date.now(), eventId, userId)
     .run();
 
   if (result.meta.changes === 0) return c.text('Not invited to this event', 403);

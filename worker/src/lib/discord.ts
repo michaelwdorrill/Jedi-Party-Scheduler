@@ -104,6 +104,21 @@ export interface DmSendResult {
   retryAfterMs?: number;
 }
 
+// Discord's hard cap on a message's content field.
+const DISCORD_MAX_CONTENT_LENGTH = 2000;
+
+// User-controlled strings (event titles, group names, voice-channel names)
+// get interpolated into DM content built elsewhere. Truncating here --
+// rather than trusting callers to have already bounded everything -- is the
+// one place that guarantees Discord never rejects a message for being too
+// long, which would otherwise leave a notification permanently "sent" in our
+// dedupe log (see notifyOnce) despite never actually reaching the recipient.
+function boundContent(content: string): string {
+  return content.length > DISCORD_MAX_CONTENT_LENGTH
+    ? `${content.slice(0, DISCORD_MAX_CONTENT_LENGTH - 1)}…`
+    : content;
+}
+
 // Opens (or reuses) a DM channel with the given user and sends `content` via
 // the bot. Returns enough info for the caller to decide whether to retry.
 export async function sendBotDm(
@@ -136,7 +151,10 @@ export async function sendBotDm(
       Authorization: `Bot ${botToken}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ content }),
+    // allowed_mentions suppresses @everyone/@here/user/role pings that could
+    // otherwise be smuggled in through a user-controlled event/group/channel
+    // name and fired off by the trusted bot account.
+    body: JSON.stringify({ content: boundContent(content), allowed_mentions: { parse: [] } }),
   });
 
   if (messageRes.status === 429) {

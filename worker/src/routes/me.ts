@@ -57,6 +57,7 @@ meRoutes.delete('/', async (c) => {
 // Everything this app holds about the caller, in one JSON payload (GDPR
 // right of access / data portability).
 meRoutes.get('/export', async (c) => {
+  c.header('Cache-Control', 'no-store, private');
   const userId = c.get('userId');
   const tables: Record<string, string> = {
     profile: `SELECT ${PROFILE_COLUMNS}, created_at, updated_at, last_login_at FROM users WHERE id = ?`,

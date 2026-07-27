@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
-import { isGuildMember, listUserGuilds } from '../lib/db';
+import { filterActiveGuildMembers, isGuildMember, listUserGuilds } from '../lib/db';
 import { newId } from '../lib/ids';
 import { expandOccurrencesForEvent } from '../lib/recurrence';
 import type { EventRow } from '../lib/events';
@@ -9,8 +9,27 @@ import { createEventWithInvites } from '../lib/eventWrites';
 import { computeBusyBlocks } from '../lib/freeBusy';
 import { expandPersonalOccurrences } from '../lib/personalEvents';
 import { fetchGuildVoiceChannels } from '../lib/discord';
+import {
+  assertOptionalString,
+  assertSafeInt,
+  assertStringArray,
+  assertString,
+  LIMITS,
+  ValidationError,
+} from '../lib/validate';
 
 export const guildRoutes = new Hono<AppEnv>();
+
+function parseRangeQuery(c: { req: { query: (k: string) => string | undefined } }): { from: number; to: number } {
+  const from = Number(c.req.query('from'));
+  const to = Number(c.req.query('to'));
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) {
+    throw new ValidationError('from and to (unix ms) are required');
+  }
+  if (to <= from) throw new ValidationError('to must be after from');
+  if (to - from > LIMITS.MAX_QUERY_RANGE_MS) throw new ValidationError('from/to range is too large');
+  return { from, to };
+}
 
 guildRoutes.get('/', async (c) => {
   const userId = c.get('userId');
@@ -27,14 +46,17 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
   const guildId = c.req.param('guildId');
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
-  const from = Number(c.req.query('from'));
-  const to = Number(c.req.query('to'));
-  if (!from || !to) return c.text('from and to (unix ms) are required', 400);
+  const { from, to } = parseRangeQuery(c);
 
-  const requested = (c.req.query('user_ids') ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const requested = assertStringArray(
+    (c.req.query('user_ids') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    'user_ids',
+    LIMITS.MAX_FREE_BUSY_USERS,
+    64,
+  );
   if (requested.length === 0) return c.json([]);
 
   const placeholders = requested.map(() => '?').join(',');
@@ -118,23 +140,29 @@ guildRoutes.post('/:guildId/groups', async (c) => {
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
   const body = await c.req.json<{ name: string; game?: string | null; idle_reminder_days?: number; member_user_ids: string[] }>();
-  if (!body.name?.trim()) return c.text('name is required', 400);
+  const name = assertString(body.name, 'name', LIMITS.GROUP_NAME);
+  const game = assertOptionalString(body.game, 'game', LIMITS.GAME);
+  const idleReminderDays = body.idle_reminder_days === undefined ? 2 : assertSafeInt(body.idle_reminder_days, 'idle_reminder_days');
+  if (idleReminderDays < 1 || idleReminderDays > 3650) throw new ValidationError('idle_reminder_days out of range');
+  const memberIds = assertStringArray(body.member_user_ids ?? [], 'member_user_ids', LIMITS.MAX_GROUP_MEMBERS, 64);
+
+  const active = await filterActiveGuildMembers(c.env, guildId, memberIds);
+  if (memberIds.some((id) => !active.has(id))) {
+    throw new ValidationError('One or more members are not current members of this server');
+  }
 
   const groupId = newId();
   const now = Date.now();
-  await c.env.DB.prepare(
-    `INSERT INTO groups (id, guild_id, name, game, idle_reminder_days, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(groupId, guildId, body.name.trim(), body.game?.trim() || null, body.idle_reminder_days ?? 2, userId, now)
-    .run();
-
-  for (const memberId of body.member_user_ids ?? []) {
-    await c.env.DB.prepare(
-      `INSERT OR IGNORE INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`,
-    )
-      .bind(groupId, memberId, now)
-      .run();
-  }
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO groups (id, guild_id, name, game, idle_reminder_days, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(groupId, guildId, name, game, idleReminderDays, userId, now),
+    ...memberIds.map((memberId) =>
+      c.env.DB.prepare(
+        `INSERT OR IGNORE INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`,
+      ).bind(groupId, memberId, now),
+    ),
+  ]);
 
   return c.json({ id: groupId }, 201);
 });
@@ -144,9 +172,7 @@ guildRoutes.get('/:guildId/events', async (c) => {
   const guildId = c.req.param('guildId');
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
-  const from = Number(c.req.query('from'));
-  const to = Number(c.req.query('to'));
-  if (!from || !to) return c.text('from and to (unix ms) are required', 400);
+  const { from, to } = parseRangeQuery(c);
 
   // Only events the user is the organizer of, or is individually/group-invited to.
   const { results: events } = await c.env.DB.prepare(

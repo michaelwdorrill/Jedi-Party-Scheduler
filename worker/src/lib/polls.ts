@@ -1,5 +1,6 @@
 import type { Env } from '../env';
 import type { EventRow } from './events';
+import { LIMITS } from './validate';
 
 interface OptionTally {
   id: string;
@@ -44,19 +45,27 @@ export async function getOptionTallies(env: Env, eventId: string): Promise<Optio
   return tallies;
 }
 
-async function markResolved(env: Env, eventId: string, option: { id: string; startAt: number; endAt: number }): Promise<void> {
-  await env.DB.prepare(
+// Compare-and-set: only transitions an event that's still 'active'. Two
+// concurrent requests (a synchronous threshold-crossing vote racing the cron
+// deadline sweep, or two votes crossing threshold in the same instant) must
+// produce exactly one resolution and one notification claim, not two -- the
+// WHERE clause makes the database the arbiter instead of a check-then-act
+// race in application code. Returns whether *this* call won the transition.
+async function markResolved(env: Env, eventId: string, option: { id: string; startAt: number; endAt: number }): Promise<boolean> {
+  const result = await env.DB.prepare(
     `UPDATE events SET status = 'resolved', resolved_option_id = ?, start_at = ?, end_at = ?, updated_at = ?
-     WHERE id = ?`,
+     WHERE id = ? AND status = 'active'`,
   )
     .bind(option.id, option.startAt, option.endAt, Date.now(), eventId)
     .run();
+  return result.meta.changes > 0;
 }
 
-async function markCancelled(env: Env, eventId: string): Promise<void> {
-  await env.DB.prepare(`UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ?`)
+async function markCancelled(env: Env, eventId: string): Promise<boolean> {
+  const result = await env.DB.prepare(`UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'active'`)
     .bind(Date.now(), eventId)
     .run();
+  return result.meta.changes > 0;
 }
 
 function pickMostVotes(tallies: OptionTally[]): OptionTally | null {
@@ -70,10 +79,12 @@ function pickMostVotes(tallies: OptionTally[]): OptionTally | null {
   })[0];
 }
 
-async function confirmOption(env: Env, optionId: string): Promise<void> {
-  await env.DB.prepare(`UPDATE event_poll_options SET confirmed_at = ? WHERE id = ?`)
+// Same compare-and-set principle as markResolved, scoped to one option.
+async function confirmOption(env: Env, optionId: string): Promise<boolean> {
+  const result = await env.DB.prepare(`UPDATE event_poll_options SET confirmed_at = ? WHERE id = ? AND confirmed_at IS NULL`)
     .bind(Date.now(), optionId)
     .run();
+  return result.meta.changes > 0;
 }
 
 // Called synchronously after a vote is cast. For 'single_winner' events,
@@ -94,8 +105,7 @@ export async function checkThresholdAndResolve(env: Env, event: EventRow): Promi
     const newlyConfirmed: string[] = [];
     for (const t of tallies) {
       if (!t.confirmedAt && t.yes >= event.poll_threshold_count) {
-        await confirmOption(env, t.id);
-        newlyConfirmed.push(t.id);
+        if (await confirmOption(env, t.id)) newlyConfirmed.push(t.id);
       }
     }
     return newlyConfirmed;
@@ -106,8 +116,7 @@ export async function checkThresholdAndResolve(env: Env, event: EventRow): Promi
     .filter((t) => t.yes >= event.poll_threshold_count!)
     .sort((a, b) => a.displayOrder - b.displayOrder || a.id.localeCompare(b.id))[0];
 
-  if (winner) {
-    await markResolved(env, event.id, winner);
+  if (winner && (await markResolved(env, event.id, winner))) {
     return [winner.id];
   }
   return [];
@@ -132,6 +141,16 @@ export function bestWindowBlock(
   submissions: { startAt: number; endAt: number }[],
 ): WindowCandidate | null {
   const blockMs = blockMinutes * 60 * 1000;
+  if (blockMs <= 0 || windowEnd <= windowStart) return null;
+
+  // Write-time validation (see routes/guilds.ts, lib/eventWrites.ts) is
+  // supposed to keep every stored window well within this ceiling. This is
+  // the last line of defense against a row that predates that validation, or
+  // any other path that could otherwise hand this function an attacker-sized
+  // span -- without it, work scales with span x submission count, unbounded.
+  const candidateCount = Math.floor((windowEnd - blockMs - windowStart) / WINDOW_STEP_MS) + 1;
+  if (candidateCount > LIMITS.MAX_WINDOW_CANDIDATES) return null;
+
   let best: WindowCandidate | null = null;
   for (let s = windowStart; s + blockMs <= windowEnd; s += WINDOW_STEP_MS) {
     const e = s + blockMs;
@@ -161,8 +180,7 @@ export async function checkWindowThresholdAndResolve(env: Env, event: EventRow):
   const submissions = await getWindowSubmissions(env, event.id);
   const best = bestWindowBlock(event.window_start_at, event.window_end_at, event.window_block_minutes, submissions);
   if (best && best.count >= event.poll_threshold_count) {
-    await markResolved(env, event.id, { id: 'window', startAt: best.startAt, endAt: best.endAt });
-    return true;
+    return markResolved(env, event.id, { id: 'window', startAt: best.startAt, endAt: best.endAt });
   }
   return false;
 }
@@ -184,7 +202,7 @@ export async function resolvePastDeadlinePolls(env: Env): Promise<string[]> {
       const tallies = await getOptionTallies(env, event.id);
       const anyConfirmed = tallies.some((t) => t.confirmedAt);
       if (anyConfirmed) {
-        await env.DB.prepare(`UPDATE events SET status = 'resolved', updated_at = ? WHERE id = ?`)
+        await env.DB.prepare(`UPDATE events SET status = 'resolved', updated_at = ? WHERE id = ? AND status = 'active'`)
           .bind(now, event.id)
           .run();
       } else {

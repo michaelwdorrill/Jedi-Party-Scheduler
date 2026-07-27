@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import { isOwner } from '../lib/db';
+import { assertString } from '../lib/validate';
 
 export const adminRoutes = new Hono<AppEnv>();
 
@@ -20,13 +21,14 @@ adminRoutes.get('/guilds', async (c) => {
 
 adminRoutes.post('/guilds', async (c) => {
   const body = await c.req.json<{ id: string; name: string }>();
-  if (!body.id || !body.name) return c.text('id and name are required', 400);
+  const id = assertString(body.id, 'id', 64);
+  const name = assertString(body.name, 'name', 200);
 
   await c.env.DB.prepare(
     `INSERT INTO guilds (id, name, is_active, added_at) VALUES (?, ?, 1, ?)
      ON CONFLICT(id) DO UPDATE SET name = excluded.name, is_active = 1`,
   )
-    .bind(body.id, body.name, Date.now())
+    .bind(id, name, Date.now())
     .run();
   return c.json({ ok: true }, 201);
 });

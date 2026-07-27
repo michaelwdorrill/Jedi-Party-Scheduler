@@ -1,4 +1,5 @@
 import type { Env } from '../env';
+import { revokeAllSessionsForUser } from './sessions';
 
 export interface UserRow {
   id: string;
@@ -40,13 +41,44 @@ export function mapGuild(row: GuildRow) {
   return { id: row.id, name: row.name };
 }
 
+// Requires BOTH that the cache says the user is currently a member AND that
+// the guild itself hasn't been deactivated -- deactivating a guild is
+// supposed to immediately block every route derived from it, not just stop
+// it from appearing in listings.
 export async function isGuildMember(env: Env, userId: string, guildId: string): Promise<boolean> {
   const row = await env.DB.prepare(
-    `SELECT 1 FROM user_guild_membership WHERE user_id = ? AND guild_id = ? AND is_member = 1`,
+    `SELECT 1 FROM user_guild_membership m
+     JOIN guilds g ON g.id = m.guild_id
+     WHERE m.user_id = ? AND m.guild_id = ? AND m.is_member = 1 AND g.is_active = 1`,
   )
     .bind(userId, guildId)
     .first();
   return !!row;
+}
+
+// Same check, phrased for call sites that resolve a guildId from some other
+// object (an event, a group, a poll) rather than from the URL directly, and
+// want a uniform 404 for "not found" vs "not yours" rather than leaking which
+// one it is.
+export async function requireActiveGuildMember(env: Env, userId: string, guildId: string): Promise<boolean> {
+  return isGuildMember(env, userId, guildId);
+}
+
+// Given a set of candidate user IDs, returns only the ones who are currently
+// active members of the given (active) guild. Used to validate group-member
+// and event-invite targets so a request can't graft a user from one guild
+// onto another guild's roster/invite list just by knowing their ID.
+export async function filterActiveGuildMembers(env: Env, guildId: string, userIds: string[]): Promise<Set<string>> {
+  if (userIds.length === 0) return new Set();
+  const placeholders = userIds.map(() => '?').join(',');
+  const { results } = await env.DB.prepare(
+    `SELECT m.user_id FROM user_guild_membership m
+     JOIN guilds g ON g.id = m.guild_id
+     WHERE m.guild_id = ? AND m.is_member = 1 AND g.is_active = 1 AND m.user_id IN (${placeholders})`,
+  )
+    .bind(guildId, ...userIds)
+    .all<{ user_id: string }>();
+  return new Set(results.map((r) => r.user_id));
 }
 
 export async function listUserGuilds(env: Env, userId: string) {
@@ -113,6 +145,11 @@ export async function upsertUser(env: Env, input: UpsertUserInput): Promise<void
 // the invitees' copies are meaningless without it). Where the user was merely
 // a participant, only their own rows go: the event survives for everyone else.
 export async function deleteUserCompletely(env: Env, userId: string): Promise<void> {
+  // Revoke every session first, before touching any other data. If something
+  // below fails partway through, the account is still immediately and fully
+  // locked out rather than left accessible with partially-deleted data.
+  await revokeAllSessionsForUser(env, userId);
+
   const { results: organised } = await env.DB.prepare(
     `SELECT id FROM events WHERE organizer_id = ?`,
   )

@@ -1,5 +1,7 @@
 import type { Env } from '../env';
+import { filterActiveGuildMembers } from './db';
 import { newId } from './ids';
+import { assertOptionalString, assertSafeInt, assertString, assertStringArray, assertTimeRange, LIMITS, ValidationError } from './validate';
 
 export interface RecurrenceInput {
   freq: 'DAILY' | 'WEEKLY' | 'MONTHLY';
@@ -62,8 +64,18 @@ async function resolveInviteeUserIds(
 ): Promise<ResolvedInvitee[]> {
   const out = new Map<string, ResolvedInvitee>();
 
-  for (const userId of userIds) {
-    out.set(userId, { userId, invitedVia: 'individual', sourceGroupId: null });
+  if (userIds.length > 0) {
+    // Direct invitees are organizer-chosen IDs -- validate every one is a
+    // current active member of this guild and reject the whole request if
+    // not, rather than silently inviting (and DM-notifying) an outsider.
+    const active = await filterActiveGuildMembers(env, guildId, userIds);
+    const invalid = userIds.filter((id) => !active.has(id));
+    if (invalid.length > 0) {
+      throw new ValidationError('One or more invited users are not current members of this server');
+    }
+    for (const userId of userIds) {
+      out.set(userId, { userId, invitedVia: 'individual', sourceGroupId: null });
+    }
   }
 
   for (const groupId of groupIds) {
@@ -74,8 +86,12 @@ async function resolveInviteeUserIds(
     )
       .bind(groupId, guildId)
       .all<{ user_id: string }>();
+    // Group-derived invitees can drift out of guild membership over time
+    // without anyone editing the group -- filter those out rather than
+    // reject, since the organizer didn't choose them individually.
+    const active = await filterActiveGuildMembers(env, guildId, results.map((r) => r.user_id));
     for (const row of results) {
-      if (!out.has(row.user_id)) {
+      if (active.has(row.user_id) && !out.has(row.user_id)) {
         out.set(row.user_id, { userId: row.user_id, invitedVia: 'group', sourceGroupId: groupId });
       }
     }
@@ -86,17 +102,88 @@ async function resolveInviteeUserIds(
 
 type ResolvedInvitee = { userId: string; invitedVia: 'individual' | 'group'; sourceGroupId: string | null };
 
-async function insertInvites(env: Env, eventId: string, invitees: ResolvedInvitee[]) {
+// Applied to every create/update -- both callers pass user-controlled JSON
+// bodies with only compile-time typing (which enforces nothing at runtime).
+// Every numeric field here is a potential CPU/DoS vector (see the window
+// bounds especially: unbounded span x submissions is what let F-04 exhaust
+// Worker CPU on both request and cron paths), so this validates everything
+// present on the input, not just the fields a given call site happens to use.
+function validateEventWriteInput(input: Partial<EventWriteInput>): void {
+  if (input.title !== undefined) assertString(input.title, 'title', LIMITS.TITLE);
+  if (input.description !== undefined) assertOptionalString(input.description, 'description', LIMITS.DESCRIPTION);
+  if (input.game !== undefined) assertOptionalString(input.game, 'game', LIMITS.GAME);
+  if (input.timezone !== undefined) assertString(input.timezone, 'timezone', 100);
+  if (input.voiceChannelId !== undefined) assertOptionalString(input.voiceChannelId, 'voiceChannelId', 64);
+  if (input.voiceChannelName !== undefined) assertOptionalString(input.voiceChannelName, 'voiceChannelName', LIMITS.CHANNEL_NAME);
+
+  if (input.invites) {
+    assertStringArray(input.invites.userIds, 'invites.userIds', LIMITS.MAX_INVITEES, 64);
+    assertStringArray(input.invites.groupIds, 'invites.groupIds', LIMITS.MAX_GROUP_IDS, 64);
+  }
+
+  if (input.startAt !== undefined) assertSafeInt(input.startAt, 'startAt');
+  if (input.endAt !== undefined) assertSafeInt(input.endAt, 'endAt');
+  if (input.startAt !== undefined && input.endAt !== undefined) {
+    assertTimeRange(input.startAt, input.endAt, 'event', LIMITS.MAX_EVENT_DURATION_MS);
+  }
+
+  if (input.recurrence) {
+    const r = input.recurrence;
+    assertString(r.startDate, 'recurrence.startDate', 20);
+    assertString(r.startTime, 'recurrence.startTime', 10);
+    assertSafeInt(r.interval, 'recurrence.interval');
+    if (r.interval < 1 || r.interval > LIMITS.MAX_RECURRENCE_INTERVAL) {
+      throw new ValidationError('recurrence.interval out of range');
+    }
+    assertSafeInt(r.durationMinutes, 'recurrence.durationMinutes');
+    if (r.durationMinutes < 1 || r.durationMinutes * 60_000 > LIMITS.MAX_EVENT_DURATION_MS) {
+      throw new ValidationError('recurrence.durationMinutes out of range');
+    }
+    if (r.endCount != null) {
+      assertSafeInt(r.endCount, 'recurrence.endCount');
+      if (r.endCount < 1 || r.endCount > LIMITS.MAX_RECURRENCE_COUNT) {
+        throw new ValidationError('recurrence.endCount out of range');
+      }
+    }
+  }
+
+  if (input.pollThresholdCount != null) assertSafeInt(input.pollThresholdCount, 'pollThresholdCount');
+  if (input.pollDeadlineAt !== undefined) assertSafeInt(input.pollDeadlineAt, 'pollDeadlineAt');
+
+  if (input.pollOptions) {
+    if (input.pollOptions.length > LIMITS.MAX_POLL_OPTIONS) {
+      throw new ValidationError(`pollOptions must have ${LIMITS.MAX_POLL_OPTIONS} items or fewer`);
+    }
+    for (const opt of input.pollOptions) {
+      assertSafeInt(opt.startAt, 'pollOptions[].startAt');
+      assertSafeInt(opt.endAt, 'pollOptions[].endAt');
+      assertTimeRange(opt.startAt, opt.endAt, 'pollOptions[]', LIMITS.MAX_EVENT_DURATION_MS);
+    }
+  }
+
+  if (input.windowStartAt !== undefined) {
+    assertSafeInt(input.windowStartAt, 'windowStartAt');
+    assertSafeInt(input.windowEndAt, 'windowEndAt');
+    assertSafeInt(input.windowBlockMinutes, 'windowBlockMinutes');
+    assertTimeRange(input.windowStartAt, input.windowEndAt!, 'window', LIMITS.MAX_WINDOW_SPAN_MS);
+    if (
+      input.windowBlockMinutes! < LIMITS.MIN_WINDOW_BLOCK_MINUTES ||
+      input.windowBlockMinutes! > LIMITS.MAX_WINDOW_BLOCK_MINUTES
+    ) {
+      throw new ValidationError('windowBlockMinutes out of range');
+    }
+  }
+}
+
+function inviteStatements(env: Env, eventId: string, invitees: ResolvedInvitee[]): D1PreparedStatement[] {
   const now = Date.now();
-  for (const invitee of invitees) {
-    await env.DB.prepare(
+  return invitees.map((invitee) =>
+    env.DB.prepare(
       `INSERT INTO event_invites (id, event_id, user_id, invited_via, source_group_id, rsvp_status, invited_at)
        VALUES (?, ?, ?, ?, ?, 'pending', ?)
        ON CONFLICT(event_id, user_id) DO NOTHING`,
-    )
-      .bind(newId(), eventId, invitee.userId, invitee.invitedVia, invitee.sourceGroupId, now)
-      .run();
-  }
+    ).bind(newId(), eventId, invitee.userId, invitee.invitedVia, invitee.sourceGroupId, now),
+  );
 }
 
 export async function createEventWithInvites(
@@ -105,19 +192,33 @@ export async function createEventWithInvites(
   organizerId: string,
   input: EventWriteInput,
 ): Promise<string> {
+  validateEventWriteInput(input);
   const eventId = newId();
   const now = Date.now();
   const isRecurring = input.eventType === 'single' && !!input.isRecurring;
   const { pollMode, pollResolutionMode } = normalizePollModes(input);
 
-  await env.DB.prepare(
-    `INSERT INTO events (id, guild_id, organizer_id, title, description, game, event_type, timezone,
-       start_at, end_at, status, poll_strategy, poll_threshold_count, poll_deadline_at,
-       poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
-       is_recurring, voice_channel_id, voice_channel_name, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
+  // Resolved (and validated) before anything is written, so a rejected
+  // invite list (F-05: cross-guild targets) never leaves a half-created
+  // event behind for the caller to retry into.
+  const invitees = await resolveInviteeUserIds(
+    env,
+    guildId,
+    input.invites?.userIds ?? [],
+    input.invites?.groupIds ?? [],
+  );
+
+  // Everything below is one D1 batch -- a failure partway through (a full
+  // event with no recurrence rule, or no invites) is exactly the partial-
+  // object problem F-08 flagged; batch() commits all-or-nothing.
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(
+      `INSERT INTO events (id, guild_id, organizer_id, title, description, game, event_type, timezone,
+         start_at, end_at, status, poll_strategy, poll_threshold_count, poll_deadline_at,
+         poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
+         is_recurring, voice_channel_id, voice_channel_name, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
       eventId,
       guildId,
       organizerId,
@@ -141,18 +242,18 @@ export async function createEventWithInvites(
       input.voiceChannelName ?? null,
       now,
       now,
-    )
-    .run();
+    ),
+  ];
 
   if (isRecurring && input.recurrence) {
     const r = input.recurrence;
-    await env.DB.prepare(
-      `INSERT INTO event_recurrence_rules
-         (event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
-          duration_minutes, end_type, end_date, end_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO event_recurrence_rules
+           (event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
+            duration_minutes, end_type, end_date, end_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
         eventId,
         r.freq,
         r.interval,
@@ -164,28 +265,24 @@ export async function createEventWithInvites(
         r.endType,
         r.endDate ?? null,
         r.endCount ?? null,
-      )
-      .run();
+      ),
+    );
   }
 
   if (input.eventType === 'poll' && pollMode === 'options' && input.pollOptions) {
     let order = 0;
     for (const opt of input.pollOptions) {
-      await env.DB.prepare(
-        `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order) VALUES (?, ?, ?, ?, ?)`,
-      )
-        .bind(newId(), eventId, opt.startAt, opt.endAt, order++)
-        .run();
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order) VALUES (?, ?, ?, ?, ?)`,
+        ).bind(newId(), eventId, opt.startAt, opt.endAt, order++),
+      );
     }
   }
 
-  const invitees = await resolveInviteeUserIds(
-    env,
-    guildId,
-    input.invites?.userIds ?? [],
-    input.invites?.groupIds ?? [],
-  );
-  await insertInvites(env, eventId, invitees);
+  statements.push(...inviteStatements(env, eventId, invitees));
+
+  await env.DB.batch(statements);
 
   return eventId;
 }
@@ -196,6 +293,7 @@ export async function updateEvent(
   guildId: string,
   input: Partial<EventWriteInput>,
 ): Promise<void> {
+  validateEventWriteInput(input);
   const now = Date.now();
 
   // Build the SET clause only from fields the caller actually included --
@@ -238,21 +336,33 @@ export async function updateEvent(
   }
 
   values.push(eventId);
-  await env.DB.prepare(`UPDATE events SET ${setClauses.join(', ')} WHERE id = ?`)
-    .bind(...values)
-    .run();
+
+  // Invitee resolution (and possible rejection -- F-05) happens before any
+  // statement is queued, same reasoning as createEventWithInvites: a request
+  // that's going to fail validation shouldn't partially apply first.
+  const invitees = input.invites
+    ? await resolveInviteeUserIds(env, guildId, input.invites.userIds, input.invites.groupIds)
+    : null;
+
+  // Every conditional block below queues its statements instead of running
+  // them immediately; one env.DB.batch() at the end makes the whole PATCH
+  // atomic -- a single request editing both, say, the schedule and the poll
+  // options can't leave the poll options replaced but the schedule untouched.
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(`UPDATE events SET ${setClauses.join(', ')} WHERE id = ?`).bind(...values),
+  ];
 
   if (input.isRecurring !== undefined) {
-    await env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id = ?`).bind(eventId).run();
+    statements.push(env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id = ?`).bind(eventId));
     if (input.isRecurring && input.recurrence) {
       const r = input.recurrence;
-      await env.DB.prepare(
-        `INSERT INTO event_recurrence_rules
-           (event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
-            duration_minutes, end_type, end_date, end_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-        .bind(
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO event_recurrence_rules
+             (event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
+              duration_minutes, end_type, end_date, end_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
           eventId,
           r.freq,
           r.interval,
@@ -264,8 +374,8 @@ export async function updateEvent(
           r.endType,
           r.endDate ?? null,
           r.endCount ?? null,
-        )
-        .run();
+        ),
+      );
     }
   }
 
@@ -274,46 +384,46 @@ export async function updateEvent(
     // acceptable for v1 since editing a poll's candidate slots after voting
     // has started is an edge case, not the common path.
     const { pollMode, pollResolutionMode } = normalizePollModes(input);
-    await env.DB.prepare(
-      `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id = ?)`,
-    )
-      .bind(eventId)
-      .run();
-    await env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id = ?`).bind(eventId).run();
+    statements.push(
+      env.DB.prepare(
+        `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id = ?)`,
+      ).bind(eventId),
+      env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id = ?`).bind(eventId),
+    );
     let order = 0;
     for (const opt of input.pollOptions) {
-      await env.DB.prepare(
-        `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order) VALUES (?, ?, ?, ?, ?)`,
-      )
-        .bind(newId(), eventId, opt.startAt, opt.endAt, order++)
-        .run();
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order) VALUES (?, ?, ?, ?, ?)`,
+        ).bind(newId(), eventId, opt.startAt, opt.endAt, order++),
+      );
     }
-    await env.DB.prepare(
-      `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
-         poll_mode = ?, poll_resolution_mode = ?, window_start_at = NULL, window_end_at = NULL,
-         window_block_minutes = NULL
-       WHERE id = ?`,
-    )
-      .bind(
+    statements.push(
+      env.DB.prepare(
+        `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
+           poll_mode = ?, poll_resolution_mode = ?, window_start_at = NULL, window_end_at = NULL,
+           window_block_minutes = NULL
+         WHERE id = ?`,
+      ).bind(
         input.pollStrategy ?? null,
         input.pollThresholdCount ?? null,
         input.pollDeadlineAt ?? null,
         pollMode,
         pollResolutionMode,
         eventId,
-      )
-      .run();
+      ),
+    );
   }
 
   if (input.windowStartAt !== undefined) {
-    await env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id = ?`).bind(eventId).run();
-    await env.DB.prepare(
-      `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
-         poll_mode = 'window', poll_resolution_mode = 'single_winner',
-         window_start_at = ?, window_end_at = ?, window_block_minutes = ?
-       WHERE id = ?`,
-    )
-      .bind(
+    statements.push(
+      env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id = ?`).bind(eventId),
+      env.DB.prepare(
+        `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
+           poll_mode = 'window', poll_resolution_mode = 'single_winner',
+           window_start_at = ?, window_end_at = ?, window_block_minutes = ?
+         WHERE id = ?`,
+      ).bind(
         input.pollStrategy ?? null,
         input.pollThresholdCount ?? null,
         input.pollDeadlineAt ?? null,
@@ -321,12 +431,13 @@ export async function updateEvent(
         input.windowEndAt ?? null,
         input.windowBlockMinutes ?? null,
         eventId,
-      )
-      .run();
+      ),
+    );
   }
 
-  if (input.invites) {
-    const invitees = await resolveInviteeUserIds(env, guildId, input.invites.userIds, input.invites.groupIds);
-    await insertInvites(env, eventId, invitees);
+  if (invitees) {
+    statements.push(...inviteStatements(env, eventId, invitees));
   }
+
+  await env.DB.batch(statements);
 }
