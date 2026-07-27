@@ -109,6 +109,7 @@ needs: editing Workers scripts and editing D1 databases.
    npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0005_considering_and_voice_channels.sql
    npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0006_sessions.sql
    npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0007_notification_outbox.sql
+   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0008_backfill_notification_outbox.sql
    ```
    Each migration only needs to be run once, ever. When new ones are added
    later, run just the new files against the remote database before deploying
