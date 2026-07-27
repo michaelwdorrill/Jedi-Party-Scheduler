@@ -1,3 +1,4 @@
+# Builds the frontend and publishes it to GitHub Pages.
 name: Deploy Pages
 
 on:
