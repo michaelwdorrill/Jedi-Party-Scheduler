@@ -7,6 +7,7 @@ import { loadOverridesForEvents } from '../lib/events';
 import { expandOccurrencesForEvent } from '../lib/recurrence';
 import { resolvePastDeadlinePolls } from '../lib/polls';
 import { getConfirmedAttendeeIds } from '../lib/attendance';
+import { pruneStaleSessions } from '../lib/sessions';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -17,12 +18,21 @@ interface ParticipantRow {
   timezone: string;
 }
 
-async function getEventParticipants(env: Env, eventId: string, organizerId: string): Promise<ParticipantRow[]> {
+// Cron never makes a live Discord call per recipient (unlike the interactive
+// isGuildMember() path) -- that would mean one Discord request per invitee on
+// every 15-minute tick. Instead this just requires the *cached* membership to
+// still say active guild + current member, which is enough to stop DMing
+// someone who left or whose guild got deactivated; live revalidation happens
+// next time they hit the app themselves.
+async function getEventParticipants(env: Env, eventId: string, guildId: string, organizerId: string): Promise<ParticipantRow[]> {
   const { results } = await env.DB.prepare(
-    `SELECT id, notifications_enabled, dm_channel_id, timezone FROM users WHERE id IN
-       (SELECT user_id FROM event_invites WHERE event_id = ? UNION SELECT ?)`,
+    `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
+     FROM users u
+     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1
+     JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
+     WHERE u.id IN (SELECT user_id FROM event_invites WHERE event_id = ? UNION SELECT ?)`,
   )
-    .bind(eventId, organizerId)
+    .bind(guildId, eventId, organizerId)
     .all<ParticipantRow>();
   return results;
 }
@@ -37,46 +47,99 @@ async function deliverDm(env: Env, user: ParticipantRow, content: string): Promi
   }
 }
 
-// Inserts the dedupe record *before* attempting delivery -- the row's
-// insertion succeeding (not the DM succeeding) is what "sent" means here.
-// If the insert fails (UNIQUE violation), a notification of this exact kind
-// was already logged and we skip sending again.
+type NotificationType =
+  | 'invite'
+  | 'reminder_24h'
+  | 'reminder_1h'
+  | 'poll_resolved'
+  | 'poll_deadline_reminder'
+  | 'voice_channel_invite';
+
+// Outbox semantics: `sent_at` means "first attempted" (it's also the claim
+// timestamp), `delivered_at` is set only once Discord confirms success, and
+// `failed_at` is set only for a permanent (non-retryable) failure. Both NULL
+// means still pending -- the next sweep tries again. This replaces the old
+// behavior where the dedupe row's mere existence meant "sent," so a
+// transient Discord/network failure permanently looked delivered and was
+// never retried.
 async function notifyOnce(
   env: Env,
   user: ParticipantRow,
   eventId: string,
-  notificationType:
-    | 'invite'
-    | 'reminder_24h'
-    | 'reminder_1h'
-    | 'poll_resolved'
-    | 'poll_deadline_reminder'
-    | 'voice_channel_invite',
+  notificationType: NotificationType,
   occurrenceDate: string,
   content: string,
 ): Promise<void> {
   if (!user.notifications_enabled) return;
 
-  try {
-    await env.DB.prepare(
-      `INSERT INTO notification_log (id, user_id, event_id, notification_type, occurrence_date, sent_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(newId(), user.id, eventId, notificationType, occurrenceDate, Date.now())
-      .run();
-  } catch (err) {
-    // A UNIQUE-constraint violation means exactly one thing: this exact
-    // notification was already logged (and thus already attempted) --
-    // skipping is correct. Any other failure (D1 outage, schema drift, a
-    // bug) must not be swallowed the same way, or a real delivery problem
-    // would look identical to "already sent" and never surface.
-    const message = (err as Error).message ?? '';
-    if (message.includes('UNIQUE constraint failed')) return;
-    console.error(`notifyOnce insert failed for ${notificationType}/${eventId}/${user.id}:`, err);
-    throw err;
+  const existing = await env.DB.prepare(
+    `SELECT id, delivered_at, failed_at FROM notification_log
+     WHERE user_id = ? AND event_id = ? AND notification_type = ? AND occurrence_date = ?`,
+  )
+    .bind(user.id, eventId, notificationType, occurrenceDate)
+    .first<{ id: string; delivered_at: number | null; failed_at: number | null }>();
+
+  if (existing && (existing.delivered_at != null || existing.failed_at != null)) {
+    return; // already resolved, one way or the other -- nothing to retry
   }
 
-  await deliverDm(env, user, content);
+  let logId: string;
+  if (existing) {
+    // Retrying a previously-pending attempt. Claim it with a compare-and-set
+    // so two overlapping cron ticks can't both send the same DM -- if
+    // another process already resolved or is mid-attempt, this affects 0
+    // rows and we back off rather than double-send.
+    logId = existing.id;
+    const claim = await env.DB.prepare(
+      `UPDATE notification_log SET sent_at = ? WHERE id = ? AND delivered_at IS NULL AND failed_at IS NULL`,
+    )
+      .bind(Date.now(), logId)
+      .run();
+    if (claim.meta.changes === 0) return;
+  } else {
+    logId = newId();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO notification_log (id, user_id, event_id, notification_type, occurrence_date, sent_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(logId, user.id, eventId, notificationType, occurrenceDate, Date.now())
+        .run();
+    } catch (err) {
+      // A UNIQUE-constraint violation means a concurrent call already
+      // inserted the same claim between our SELECT and this INSERT -- that
+      // other call owns this attempt. Any other failure (D1 outage, schema
+      // drift, a bug) must not be swallowed the same way.
+      const message = (err as Error).message ?? '';
+      if (message.includes('UNIQUE constraint failed')) return;
+      console.error(`notifyOnce insert failed for ${notificationType}/${eventId}/${user.id}:`, err);
+      throw err;
+    }
+  }
+
+  const { result, channelId } = await sendBotDm(env.DISCORD_BOT_TOKEN, user.id, content, user.dm_channel_id);
+  if (channelId && channelId !== user.dm_channel_id) {
+    await env.DB.prepare(`UPDATE users SET dm_channel_id = ? WHERE id = ?`).bind(channelId, user.id).run();
+  }
+
+  if (result.ok) {
+    await env.DB.prepare(`UPDATE notification_log SET delivered_at = ? WHERE id = ?`).bind(Date.now(), logId).run();
+    return;
+  }
+
+  if (result.status === 429) {
+    if (result.retryAfterMs) await new Promise((resolve) => setTimeout(resolve, Math.min(result.retryAfterMs!, 5000)));
+    return; // leave pending -- retried next tick (Discord's own rate limit, not our fault)
+  }
+
+  if (result.status >= 500) {
+    return; // transient -- leave pending for retry next tick
+  }
+
+  // A permanent 4xx (e.g. the recipient blocked DMs, or the cached channel
+  // is gone) won't succeed by retrying it verbatim -- mark it terminal so it
+  // stops being picked up, without pretending it was delivered.
+  await env.DB.prepare(`UPDATE notification_log SET failed_at = ? WHERE id = ?`).bind(Date.now(), logId).run();
 }
 
 // Rendered in the *recipient's* configured timezone -- a DM saying "17:00
@@ -138,7 +201,7 @@ async function sweepReminders(env: Env): Promise<void> {
 
   for (const event of singleEvents) {
     try {
-      const participants = await getEventParticipants(env, event.id, event.organizer_id);
+      const participants = await getEventParticipants(env, event.id, event.guild_id, event.organizer_id);
       const remaining = event.start_at! - now;
       for (const user of participants) {
         if (remaining <= HOUR_MS) {
@@ -170,7 +233,7 @@ async function sweepReminders(env: Env): Promise<void> {
         );
         if (occurrences.length === 0) continue;
 
-        const participants = await getEventParticipants(env, event.id, event.organizer_id);
+        const participants = await getEventParticipants(env, event.id, event.guild_id, event.organizer_id);
         for (const occ of occurrences) {
           const remaining = occ.startAt - now;
           for (const user of participants) {
@@ -211,7 +274,7 @@ async function sweepSingleWinnerPollNotifications(env: Env): Promise<void> {
 
   for (const event of polls) {
     try {
-      const participants = await getEventParticipants(env, event.id, event.organizer_id);
+      const participants = await getEventParticipants(env, event.id, event.guild_id, event.organizer_id);
       for (const user of participants) {
         const message =
           event.status === 'resolved'
@@ -246,7 +309,7 @@ async function sweepMultiWinnerPollClosedNotifications(env: Env): Promise<void> 
         .bind(event.id)
         .all<{ n: number }>();
       const n = confirmedCount[0]?.n ?? 0;
-      const participants = await getEventParticipants(env, event.id, event.organizer_id);
+      const participants = await getEventParticipants(env, event.id, event.guild_id, event.organizer_id);
       const message =
         n > 0
           ? `Voting for "${event.title}" has closed. ${n} day(s) got confirmed -- check the event for details.\n${eventLink(env, event.id)}`
@@ -265,20 +328,23 @@ async function sweepMultiWinnerPollClosedNotifications(env: Env): Promise<void> 
 // This sweep notifies just that day's yes-voters, as soon as we notice.
 async function sweepConfirmedMultiWinnerOptions(env: Env): Promise<void> {
   const { results } = await env.DB.prepare(
-    `SELECT epo.id as option_id, epo.event_id, epo.start_at, epo.end_at, e.title
+    `SELECT epo.id as option_id, epo.event_id, epo.start_at, epo.end_at, e.title, e.guild_id
      FROM event_poll_options epo
      JOIN events e ON e.id = epo.event_id
      WHERE e.poll_resolution_mode = 'multi_winner' AND epo.confirmed_at IS NOT NULL`,
-  ).all<{ option_id: string; event_id: string; start_at: number; end_at: number; title: string }>();
+  ).all<{ option_id: string; event_id: string; start_at: number; end_at: number; title: string; guild_id: string }>();
 
   for (const opt of results) {
     try {
       const { results: yesVoters } = await env.DB.prepare(
         `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
-         FROM event_poll_votes epv JOIN users u ON u.id = epv.user_id
+         FROM event_poll_votes epv
+         JOIN users u ON u.id = epv.user_id
+         JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1
+         JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
          WHERE epv.option_id = ? AND epv.vote = 'yes'`,
       )
-        .bind(opt.option_id)
+        .bind(opt.guild_id, opt.option_id)
         .all<ParticipantRow>();
 
       for (const user of yesVoters) {
@@ -322,10 +388,13 @@ async function sweepPollDeadlineReminders(env: Env): Promise<void> {
 
       const { results: nonVoters } = await env.DB.prepare(
         `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
-         FROM event_invites ei JOIN users u ON u.id = ei.user_id
+         FROM event_invites ei
+         JOIN users u ON u.id = ei.user_id
+         JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1
+         JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
          WHERE ei.event_id = ? AND NOT EXISTS (${hasVotedSubquery})`,
       )
-        .bind(poll.id)
+        .bind(poll.guild_id, poll.id)
         .all<ParticipantRow>();
 
       for (const user of nonVoters) {
@@ -503,8 +572,11 @@ async function sweepIdleGroups(env: Env): Promise<void> {
 
       const { results: members } = await env.DB.prepare(
         `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone, g.name as group_name
-         FROM group_members gm JOIN users u ON u.id = gm.user_id
+         FROM group_members gm
+         JOIN users u ON u.id = gm.user_id
          JOIN groups g ON g.id = gm.group_id
+         JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = g.guild_id AND m.is_member = 1
+         JOIN guilds gu ON gu.id = m.guild_id AND gu.is_active = 1
          WHERE gm.group_id = ?`,
       )
         .bind(group.id)
@@ -559,4 +631,5 @@ export async function runReminderSweep(env: Env): Promise<void> {
   await runIsolated('pollDeadlineReminders', () => sweepPollDeadlineReminders(env));
   await runIsolated('voiceChannelInvites', () => sweepVoiceChannelInvites(env));
   await runIsolated('idleGroups', () => sweepIdleGroups(env));
+  await runIsolated('pruneStaleSessions', () => pruneStaleSessions(env));
 }

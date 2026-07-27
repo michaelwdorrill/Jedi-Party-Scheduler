@@ -9,7 +9,7 @@ import {
   checkWindowThresholdAndResolve,
   getOptionTallies,
 } from '../lib/polls';
-import { assertOneOf, assertSafeInt, assertString, assertTimeRange } from '../lib/validate';
+import { assertOneOf, assertSafeInt, assertString, assertTimeRange, LIMITS, readJsonBody } from '../lib/validate';
 
 export const pollRoutes = new Hono<AppEnv>();
 
@@ -57,7 +57,7 @@ pollRoutes.get('/:eventId/poll', async (c) => {
 pollRoutes.post('/:eventId/poll/vote', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
-  const body = await c.req.json<{ optionId: string; vote: 'yes' | 'no' | 'maybe' }>();
+  const body = await readJsonBody<{ optionId: string; vote: 'yes' | 'no' | 'maybe' }>(c);
   const optionId = assertString(body.optionId, 'optionId', 64);
   const vote = assertOneOf(body.vote, 'vote', ['yes', 'no', 'maybe'] as const);
 
@@ -149,7 +149,7 @@ pollRoutes.post('/:eventId/window', async (c) => {
   if (event.status !== 'active') return c.text('Voting is closed for this event', 400);
   if (!(await requireInvitedOrOrganizer(c.env, eventId, userId))) return c.text('Forbidden', 403);
 
-  const rawBody = await c.req.json<{ startAt: number; endAt: number }>();
+  const rawBody = await readJsonBody<{ startAt: number; endAt: number }>(c);
   const startAt = assertSafeInt(rawBody.startAt, 'startAt');
   const endAt = assertSafeInt(rawBody.endAt, 'endAt');
   assertTimeRange(startAt, endAt, 'availability');
@@ -163,6 +163,18 @@ pollRoutes.post('/:eventId/window', async (c) => {
     endAt - startAt < event.window_block_minutes * 60 * 1000
   ) {
     return c.text('Submitted range must fall within the window and cover at least one full block', 400);
+  }
+
+  // Invite lists are already capped (see MAX_RESOLVED_INVITEES), which
+  // indirectly bounds distinct submitters since submission requires an
+  // invite -- this is just a direct backstop against a pre-cap event row.
+  const { results: existingCount } = await c.env.DB.prepare(
+    `SELECT COUNT(*) as n FROM event_window_availability WHERE event_id = ? AND user_id != ?`,
+  )
+    .bind(eventId, userId)
+    .all<{ n: number }>();
+  if ((existingCount[0]?.n ?? 0) >= LIMITS.MAX_WINDOW_SUBMISSIONS) {
+    return c.text('This poll has reached its maximum number of submissions', 400);
   }
 
   await c.env.DB.prepare(

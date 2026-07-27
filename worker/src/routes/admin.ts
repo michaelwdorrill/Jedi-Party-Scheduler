@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import { isOwner } from '../lib/db';
-import { assertString } from '../lib/validate';
+import { assertString, readJsonBody } from '../lib/validate';
 
 export const adminRoutes = new Hono<AppEnv>();
 
@@ -20,7 +20,7 @@ adminRoutes.get('/guilds', async (c) => {
 });
 
 adminRoutes.post('/guilds', async (c) => {
-  const body = await c.req.json<{ id: string; name: string }>();
+  const body = await readJsonBody<{ id: string; name: string }>(c);
   const id = assertString(body.id, 'id', 64);
   const name = assertString(body.name, 'name', 200);
 

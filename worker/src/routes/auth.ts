@@ -1,9 +1,8 @@
 import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { AppEnv } from '../lib/authMiddleware';
-import { requireAuth } from '../lib/authMiddleware';
 import { exchangeCodeForToken, fetchDiscordUser, fetchDiscordUserGuilds } from '../lib/discord';
-import { syncGuildMembership, upsertUser } from '../lib/db';
+import { listUserGuilds, syncGuildMembership, upsertUser } from '../lib/db';
 import { signJwt, verifyJwt } from '../lib/jwt';
 import { createSession, revokeSession, rotateSession } from '../lib/sessions';
 
@@ -89,6 +88,16 @@ authRoutes.get('/callback', async (c) => {
       discordGuilds.map((g) => g.id),
     );
 
+    // This app has nothing to offer someone who shares none of the
+    // allow-listed servers -- personal scheduling is meant to complement a
+    // guild's calendar, not stand alone. Reject before any session/JWT is
+    // issued rather than letting an unrelated Discord account accumulate data.
+    const activeGuilds = await listUserGuilds(c.env, discordUser.id);
+    if (activeGuilds.length === 0) {
+      c.header('Cache-Control', NO_STORE);
+      return c.text("You're not a member of any server this app is set up for.", 403);
+    }
+
     const session = await createSession(c.env, discordUser.id);
     const jwt = await signJwt(discordUser.id, session.id, c.env.JWT_SIGNING_KEY);
     c.header('Cache-Control', NO_STORE);
@@ -122,8 +131,19 @@ authRoutes.post('/refresh', async (c) => {
   return c.json({ token: jwt });
 });
 
-authRoutes.post('/logout', requireAuth, async (c) => {
-  await revokeSession(c.env, c.get('sessionId'));
+authRoutes.post('/logout', async (c) => {
   c.header('Cache-Control', NO_STORE);
+  // Deliberately not gated on requireAuth: the whole point of logout is to
+  // revoke a session, and that must still work when the access token handed
+  // to it has already expired (e.g. the browser sat idle past 30 minutes
+  // before the user clicked "log out"). Signature and claim shape are still
+  // fully verified -- this isn't an open revoke-anything endpoint, just one
+  // that doesn't also demand a *currently valid* token to do its job.
+  const header = c.req.header('Authorization');
+  const token = header?.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return c.json({ ok: true }); // nothing to revoke
+
+  const payload = await verifyJwt(token, c.env.JWT_SIGNING_KEY, { ignoreExpiration: true });
+  if (payload) await revokeSession(c.env, payload.sid);
   return c.json({ ok: true });
 });

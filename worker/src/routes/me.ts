@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import { deleteUserCompletely, isGuildMember, listFriends, mapUser, type UserRow } from '../lib/db';
+import { assertBoolean, assertTimezone, readJsonBody } from '../lib/validate';
 
 export const meRoutes = new Hono<AppEnv>();
 
@@ -17,11 +18,14 @@ meRoutes.get('/', async (c) => {
 
 meRoutes.patch('/', async (c) => {
   const userId = c.get('userId');
-  const body = await c.req.json<{
+  const body = await readJsonBody<{
     timezone?: string;
     notificationsEnabled?: boolean;
     freeBusyVisible?: boolean;
-  }>();
+  }>(c);
+  if (body.timezone !== undefined) assertTimezone(body.timezone, 'timezone');
+  if (body.notificationsEnabled !== undefined) assertBoolean(body.notificationsEnabled, 'notificationsEnabled');
+  if (body.freeBusyVisible !== undefined) assertBoolean(body.freeBusyVisible, 'freeBusyVisible');
 
   await c.env.DB.prepare(
     `UPDATE users SET

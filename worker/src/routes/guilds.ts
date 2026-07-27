@@ -5,7 +5,7 @@ import { newId } from '../lib/ids';
 import { expandOccurrencesForEvent } from '../lib/recurrence';
 import type { EventRow } from '../lib/events';
 import { mapOccurrence, loadOverridesForEvents, loadMyRsvpForEvents, loadPrimaryGroupForEvents } from '../lib/events';
-import { createEventWithInvites } from '../lib/eventWrites';
+import { createEventWithInvites, type EventWriteInput } from '../lib/eventWrites';
 import { computeBusyBlocks } from '../lib/freeBusy';
 import { expandPersonalOccurrences } from '../lib/personalEvents';
 import { fetchGuildVoiceChannels } from '../lib/discord';
@@ -15,6 +15,7 @@ import {
   assertStringArray,
   assertString,
   LIMITS,
+  readJsonBody,
   ValidationError,
 } from '../lib/validate';
 
@@ -139,7 +140,7 @@ guildRoutes.post('/:guildId/groups', async (c) => {
   const guildId = c.req.param('guildId');
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
-  const body = await c.req.json<{ name: string; game?: string | null; idle_reminder_days?: number; member_user_ids: string[] }>();
+  const body = await readJsonBody<{ name: string; game?: string | null; idle_reminder_days?: number; member_user_ids: string[] }>(c);
   const name = assertString(body.name, 'name', LIMITS.GROUP_NAME);
   const game = assertOptionalString(body.game, 'game', LIMITS.GAME);
   const idleReminderDays = body.idle_reminder_days === undefined ? 2 : assertSafeInt(body.idle_reminder_days, 'idle_reminder_days');
@@ -274,7 +275,7 @@ guildRoutes.post('/:guildId/events', async (c) => {
   const guildId = c.req.param('guildId');
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
-  const body = await c.req.json();
+  const body = await readJsonBody<EventWriteInput>(c);
   const eventId = await createEventWithInvites(c.env, guildId, userId, body);
   return c.json({ id: eventId }, 201);
 });

@@ -1,5 +1,12 @@
 import type { Env } from '../env';
+import { checkGuildMembership } from './discord';
 import { revokeAllSessionsForUser } from './sessions';
+
+// How long a cached membership row is trusted before an interactive request
+// forces a live Discord check. Bounds how long someone who left a guild can
+// keep acting on it through an active application session -- previously that
+// was only refreshed on the next full OAuth login (up to 7 days).
+const MEMBERSHIP_FRESHNESS_MS = 60 * 60 * 1000;
 
 export interface UserRow {
   id: string;
@@ -45,15 +52,42 @@ export function mapGuild(row: GuildRow) {
 // the guild itself hasn't been deactivated -- deactivating a guild is
 // supposed to immediately block every route derived from it, not just stop
 // it from appearing in listings.
+//
+// The cache itself is only refreshed on full OAuth login, which could leave
+// someone who left Discord authorized for the rest of their (up to 7-day)
+// session. When the cached row is older than MEMBERSHIP_FRESHNESS_MS, this
+// revalidates live against Discord via the bot before trusting it further --
+// a single per-request REST call, not a gateway subscription, so it doesn't
+// need the privileged members intent. A transient Discord/network failure
+// fails open for *this* request (so a Discord blip doesn't lock everyone
+// out) but does not refresh verified_at, so the next request retries.
 export async function isGuildMember(env: Env, userId: string, guildId: string): Promise<boolean> {
   const row = await env.DB.prepare(
-    `SELECT 1 FROM user_guild_membership m
+    `SELECT m.is_member, m.verified_at, g.is_active FROM user_guild_membership m
      JOIN guilds g ON g.id = m.guild_id
-     WHERE m.user_id = ? AND m.guild_id = ? AND m.is_member = 1 AND g.is_active = 1`,
+     WHERE m.user_id = ? AND m.guild_id = ?`,
   )
     .bind(userId, guildId)
-    .first();
-  return !!row;
+    .first<{ is_member: number; verified_at: number; is_active: number }>();
+
+  if (!row || !row.is_active) return false;
+  if (!row.is_member) return false;
+  if (Date.now() - row.verified_at <= MEMBERSHIP_FRESHNESS_MS) return true;
+
+  const status = await checkGuildMembership(env.DISCORD_BOT_TOKEN, guildId, userId);
+  if (status === 'unknown') return true;
+
+  const now = Date.now();
+  if (status === 'member') {
+    await env.DB.prepare(`UPDATE user_guild_membership SET verified_at = ? WHERE user_id = ? AND guild_id = ?`)
+      .bind(now, userId, guildId)
+      .run();
+    return true;
+  }
+  await env.DB.prepare(`UPDATE user_guild_membership SET is_member = 0, verified_at = ? WHERE user_id = ? AND guild_id = ?`)
+    .bind(now, userId, guildId)
+    .run();
+  return false;
 }
 
 // Same check, phrased for call sites that resolve a guildId from some other
@@ -195,6 +229,10 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
     env.DB.prepare(`DELETE FROM group_members WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM notification_log WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM user_guild_membership WHERE user_id = ?`).bind(userId),
+    // The upfront revokeAllSessionsForUser() call only sets revoked_at, so the
+    // rows (and their FK to users) are still here -- delete them for real, or
+    // the final DELETE FROM users below fails against that constraint.
+    env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM users WHERE id = ?`).bind(userId),
   ]);
 }

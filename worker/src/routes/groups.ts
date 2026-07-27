@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import type { Env } from '../env';
 import { filterActiveGuildMembers, requireActiveGuildMember } from '../lib/db';
-import { assertOptionalString, assertSafeInt, assertString, assertStringArray, LIMITS, ValidationError } from '../lib/validate';
+import { assertOptionalString, assertSafeInt, assertString, assertStringArray, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
 
 export const groupRoutes = new Hono<AppEnv>();
 
@@ -74,43 +74,65 @@ groupRoutes.patch('/:groupId', async (c) => {
   }
   if (group.created_by !== userId) return c.text('Forbidden', 403);
 
-  const body = await c.req.json<{
+  const body = await readJsonBody<{
     name?: string;
     game?: string | null;
     idle_reminder_days?: number;
     member_user_ids?: string[];
-  }>();
-  if (body.name !== undefined) {
-    const name = assertString(body.name, 'name', LIMITS.GROUP_NAME);
-    await c.env.DB.prepare(`UPDATE groups SET name = ? WHERE id = ?`).bind(name, groupId).run();
-  }
-  if (body.game !== undefined) {
-    const game = assertOptionalString(body.game, 'game', LIMITS.GAME);
-    await c.env.DB.prepare(`UPDATE groups SET game = ? WHERE id = ?`).bind(game, groupId).run();
-  }
-  if (body.idle_reminder_days !== undefined) {
-    const days = assertSafeInt(body.idle_reminder_days, 'idle_reminder_days');
-    if (days < 1 || days > 3650) throw new ValidationError('idle_reminder_days out of range');
-    await c.env.DB.prepare(`UPDATE groups SET idle_reminder_days = ? WHERE id = ?`).bind(days, groupId).run();
-  }
-  if (body.member_user_ids) {
-    const memberIds = assertStringArray(body.member_user_ids, 'member_user_ids', LIMITS.MAX_GROUP_MEMBERS, 64);
-    await assertValidGroupMemberTargets(c.env, group.guild_id, memberIds);
+  }>(c);
 
+  // Validate and resolve every field before queuing any mutation -- an
+  // invalid member target must not leave the name/settings changed while
+  // the roster half of the same request fails.
+  const name = body.name !== undefined ? assertString(body.name, 'name', LIMITS.GROUP_NAME) : undefined;
+  const game = body.game !== undefined ? assertOptionalString(body.game, 'game', LIMITS.GAME) : undefined;
+  let days: number | undefined;
+  if (body.idle_reminder_days !== undefined) {
+    days = assertSafeInt(body.idle_reminder_days, 'idle_reminder_days');
+    if (days < 1 || days > 3650) throw new ValidationError('idle_reminder_days out of range');
+  }
+  let memberIds: string[] | undefined;
+  if (body.member_user_ids) {
+    memberIds = assertStringArray(body.member_user_ids, 'member_user_ids', LIMITS.MAX_GROUP_MEMBERS, 64);
+    await assertValidGroupMemberTargets(c.env, group.guild_id, memberIds);
+  }
+
+  const statements: D1PreparedStatement[] = [];
+  const setClauses: string[] = [];
+  const values: unknown[] = [];
+  if (name !== undefined) {
+    setClauses.push('name = ?');
+    values.push(name);
+  }
+  if (game !== undefined) {
+    setClauses.push('game = ?');
+    values.push(game);
+  }
+  if (days !== undefined) {
+    setClauses.push('idle_reminder_days = ?');
+    values.push(days);
+  }
+  if (setClauses.length > 0) {
+    values.push(groupId);
+    statements.push(c.env.DB.prepare(`UPDATE groups SET ${setClauses.join(', ')} WHERE id = ?`).bind(...values));
+  }
+  if (memberIds !== undefined) {
     const now = Date.now();
-    // Batched so a failure partway through can't leave the roster with only
-    // some of the new members and none of the old ones.
-    await c.env.DB.batch([
-      c.env.DB.prepare(`DELETE FROM group_members WHERE group_id = ?`).bind(groupId),
-      ...memberIds.map((memberId) =>
+    statements.push(c.env.DB.prepare(`DELETE FROM group_members WHERE group_id = ?`).bind(groupId));
+    for (const memberId of memberIds) {
+      statements.push(
         c.env.DB.prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`).bind(
           groupId,
           memberId,
           now,
         ),
-      ),
-    ]);
+      );
+    }
   }
+  // One batch for the whole request -- a failure partway through leaves
+  // nothing applied, rather than scalar fields changed with a stale roster
+  // (or vice versa).
+  if (statements.length > 0) await c.env.DB.batch(statements);
   return c.json({ ok: true });
 });
 
@@ -123,7 +145,19 @@ groupRoutes.delete('/:groupId', async (c) => {
   }
   if (group.created_by !== userId) return c.text('Forbidden', 403);
 
-  await c.env.DB.prepare(`DELETE FROM groups WHERE id = ?`).bind(groupId).run();
+  // event_invites.source_group_id references this group with no cascade/
+  // set-null delete action, so a group that was ever used to invite people
+  // to an event would otherwise block its own deletion with a FK violation
+  // (the same class of bug fixed for account deletion's sessions FK). Clear
+  // the historical reference first, in the same batch -- this never touches
+  // the event or its invitees, just detaches which group originally sourced
+  // the invite.
+  await c.env.DB.batch([
+    c.env.DB.prepare(`UPDATE event_invites SET source_group_id = NULL WHERE source_group_id = ?`).bind(groupId),
+    c.env.DB.prepare(`DELETE FROM group_members WHERE group_id = ?`).bind(groupId),
+    c.env.DB.prepare(`DELETE FROM group_activity_nudges WHERE group_id = ?`).bind(groupId),
+    c.env.DB.prepare(`DELETE FROM groups WHERE id = ?`).bind(groupId),
+  ]);
   return c.json({ ok: true });
 });
 
@@ -136,7 +170,7 @@ groupRoutes.post('/:groupId/members', async (c) => {
   }
   if (group.created_by !== userId) return c.text('Forbidden', 403);
 
-  const body = await c.req.json<{ userId: string }>();
+  const body = await readJsonBody<{ userId: string }>(c);
   const targetId = assertString(body.userId, 'userId', 64);
   await assertValidGroupMemberTargets(c.env, group.guild_id, [targetId]);
 

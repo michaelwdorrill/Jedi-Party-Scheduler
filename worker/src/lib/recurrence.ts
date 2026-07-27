@@ -96,9 +96,18 @@ export function expandOccurrences(
       k++;
     }
   } else if (rule.freq === 'WEEKLY') {
-    const weekdays = rule.byWeekday
-      ? rule.byWeekday.split(',').map(Number).sort((a, b) => a - b)
-      : [seriesStart.weekday - 1]; // Luxon weekday: 1=Mon..7=Sun -> 0-indexed
+    // Write-time validation (see validate.ts) is supposed to keep this to at
+    // most 7 unique 0-6 values, but this expander is the actual place CPU
+    // gets spent -- the inner loop below runs once per entry, per outer
+    // iteration, so an unvalidated/legacy row with thousands of duplicate
+    // entries would multiply MAX_ITERATIONS by that count. Dedupe, filter to
+    // the valid domain, and cap here too as the real defense.
+    const parsed = rule.byWeekday
+      ? [...new Set(rule.byWeekday.split(',').map(Number))]
+          .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
+          .slice(0, 7)
+      : [];
+    const weekdays = (parsed.length > 0 ? parsed : [seriesStart.weekday - 1]).sort((a, b) => a - b); // Luxon weekday: 1=Mon..7=Sun -> 0-indexed
 
     const seriesStartWeek = seriesStart.startOf('week'); // Luxon weeks start Monday
     const weeksSinceStart = Math.max(0, Math.floor(windowStart.diff(seriesStartWeek, 'weeks').weeks));
