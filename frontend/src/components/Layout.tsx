@@ -8,24 +8,34 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
     isActive ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
   }`;
 
+type LogoutBanner = 'none' | 'queued' | 'unresolved';
+
 export default function Layout() {
   const { user, logout } = useAuth();
-  const [revokeFailed, setRevokeFailed] = useState(false);
+  const [logoutBanner, setLogoutBanner] = useState<LogoutBanner>('none');
 
   // Saying "logged out" when the server-side session is still alive would be
-  // a lie the user can't act on. It's queued for retry either way, but they
-  // deserve to know it hasn't happened yet.
+  // a lie the user can't act on. Distinguishes two cases: queued (it'll be
+  // retried automatically) from unresolved (storage itself failed, so there
+  // is no record of this anywhere and the user needs to know that plainly).
   const handleLogout = async () => {
-    const revoked = await logout();
-    setRevokeFailed(!revoked);
+    const { confirmed, queued } = await logout();
+    setLogoutBanner(confirmed ? 'none' : queued ? 'queued' : 'unresolved');
   };
 
   return (
     <div className="min-h-screen">
-      {revokeFailed && (
+      {logoutBanner === 'queued' && (
         <div className="bg-amber-900/60 px-4 py-2 text-center text-sm text-amber-100">
           You're signed out on this device, but we couldn't reach the server to end the session. It'll
           be ended automatically next time you're online.
+        </div>
+      )}
+      {logoutBanner === 'unresolved' && (
+        <div className="bg-red-900/60 px-4 py-2 text-center text-sm text-red-100">
+          You're signed out on this device, but we couldn't confirm the server-side session ended, and
+          couldn't even record it for automatic retry. If this device is shared or was compromised,
+          contact support.
         </div>
       )}
       <header className="border-b border-slate-800 bg-slate-900">

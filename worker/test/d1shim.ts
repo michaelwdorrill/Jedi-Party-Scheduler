@@ -49,6 +49,7 @@ class ShimStatement {
   constructor(
     private readonly db: DatabaseSync,
     private readonly sql: string,
+    private readonly onQuery: () => void,
   ) {}
 
   bind(...values: unknown[]): ShimStatement {
@@ -62,47 +63,85 @@ class ShimStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    this.onQuery();
     const row = this.stmt().get(...(this.values as never[]));
     return row === undefined ? null : plain<T>(row);
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    this.onQuery();
     return { results: this.stmt().all(...(this.values as never[])).map((r) => plain<T>(r)) };
   }
 
   async run(): Promise<{ meta: { changes: number } }> {
+    this.onQuery();
     const res = this.stmt().run(...(this.values as never[]));
     return { meta: { changes: Number(res.changes) } };
   }
 
-  // Used by batch() to execute inside an already-open transaction.
-  execute(): void {
-    this.stmt().run(...(this.values as never[]));
+  // Used by batch() to execute inside an already-open transaction. Returns
+  // the same shape run() does, since real D1 batch() results are also
+  // per-statement D1Result objects with .meta.changes -- worker code (event
+  // creation's quota guard, the recurring-conversion guard) reads that
+  // return value to tell "the guarded write no-opped" apart from every other
+  // outcome, so a shim that discarded it couldn't exercise that code at all.
+  execute(): { meta: { changes: number } } {
+    this.onQuery();
+    const res = this.stmt().run(...(this.values as never[]));
+    return { meta: { changes: Number(res.changes) } };
   }
 }
 
+// Cloudflare also caps the number of queries a single Worker invocation may
+// issue against D1 -- 50 on the Free plan, 1,000 on Paid -- separately from
+// the per-statement bound-parameter ceiling above. That budget is exactly
+// what F-04's remaining findings were about (a valid, in-quota calendar or
+// free/busy request whose per-record queries added up past it), and a shim
+// that enforces the parameter ceiling but not this would let that whole
+// category of regression back in invisibly. `queryCount` is incremented by
+// every first()/all()/run()/execute() call -- one increment per statement
+// execution, matching how D1 bills a batch() (each statement inside it
+// counts individually, not the batch as one call).
 export class ShimDatabase {
+  queryCount = 0;
+
   constructor(readonly raw: DatabaseSync) {}
 
   prepare(sql: string): ShimStatement {
-    return new ShimStatement(this.raw, sql);
+    return new ShimStatement(this.raw, sql, () => {
+      this.queryCount++;
+    });
   }
 
   // D1 documents batch() as a single transaction: all statements commit or
   // none do. Modelling that faithfully is what makes the account-deletion and
-  // event-write atomicity tests mean anything.
-  async batch<T = unknown>(statements: ShimStatement[]): Promise<T[]> {
+  // event-write atomicity tests mean anything. The returned array mirrors
+  // real D1Result[] -- one entry per statement, each with .meta.changes.
+  async batch<T = unknown>(statements: ShimStatement[]): Promise<({ meta: { changes: number } } & Partial<T>)[]> {
+    const outcomes: { meta: { changes: number } }[] = [];
     this.raw.exec('BEGIN');
     try {
-      for (const statement of statements) statement.execute();
+      for (const statement of statements) outcomes.push(statement.execute());
       this.raw.exec('COMMIT');
     } catch (err) {
       this.raw.exec('ROLLBACK');
       throw err;
     }
-    return [] as T[];
+    return outcomes as ({ meta: { changes: number } } & Partial<T>)[];
+  }
+
+  // Call at the start of whatever you're measuring (a route handler, a cron
+  // sweep) so queryCount reflects just that invocation's cost, not setup/seed
+  // queries too.
+  resetQueryCount(): void {
+    this.queryCount = 0;
   }
 }
+
+// Cloudflare's documented per-Worker-invocation D1 query budgets.
+// https://developers.cloudflare.com/d1/platform/limits/
+export const D1_FREE_PLAN_QUERY_BUDGET = 50;
+export const D1_PAID_PLAN_QUERY_BUDGET = 1000;
 
 const MIGRATIONS_DIR = join(import.meta.dirname, '..', 'migrations');
 

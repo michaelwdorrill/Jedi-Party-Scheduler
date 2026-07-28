@@ -240,12 +240,30 @@ ceiling, and bulk inserts are folded into multi-row statements, so the app's
 configured maxima (see `LIMITS` in `worker/src/lib/validate.ts`) stay inside it
 regardless of how large a group or invite list gets.
 
-D1 also caps **queries per Worker invocation**, and that limit *is*
-plan-dependent (lower on Free than on Paid). The per-guild quotas in `LIMITS`
-— events, recurring events, groups, per-event occurrence overrides — exist
-partly to bound this. If you move between plans, or raise any of those limits,
-check the current numbers at
-https://developers.cloudflare.com/d1/platform/limits/ first.
+D1 also caps **queries per Worker invocation** — 50 on Free, 1,000 on Paid.
+Unlike the parameter ceiling, this one used to scale with *how much data was
+visible*, not just how much one request touched: loading a calendar or a
+free/busy check used to run a handful of queries per event or per person, so
+a guild that was otherwise entirely within its configured limits could still
+push one request over the Free-plan budget. That's fixed by bulk-loading
+(chunked `IN` queries instead of one query per record) rather than by raising
+the plan — the app is built to stay within the **Free plan's 50-query budget**
+at every one of its own configured maxima:
+
+- a calendar request for the maximum 300 active events (100 of them
+  recurring, up to 200 as multi-winner polls with confirmed options);
+- a free/busy request for the maximum 100 users, each with a recurring
+  event; and
+- the cron's membership-revalidation sweep at its configured 50-row tick.
+
+`worker/test/pass4.test.ts` asserts this with an actual query counter (see
+`worker/test/d1shim.ts`'s `queryCount`), not just that the request succeeds —
+run `npm test` in `worker/` to see it pass. If you raise any of the `LIMITS`
+in `worker/src/lib/validate.ts` significantly, re-run that test file and
+check the counts still clear 50; if they don't, either lower the limit back
+down or move to the Paid plan and raise the budget those tests check against.
+
+Current numbers: https://developers.cloudflare.com/d1/platform/limits/
 
 ## Verifying it actually works
 

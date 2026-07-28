@@ -2,17 +2,17 @@ import { createContext, useCallback, useContext, useEffect, useState, ReactNode 
 import { api } from '../api/client';
 import type { User } from '../types';
 import { clearToken, getToken, setToken } from './tokenStorage';
-import { revokeOrQueue, startRevocationRetries } from './pendingRevocation';
+import { revokeOrQueue, startRevocationRetries, type LogoutOutcome } from './pendingRevocation';
 
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
   isAuthenticated: boolean;
   login: (token: string) => Promise<void>;
-  // Resolves false when the server-side session could not be confirmed
-  // revoked. The local session is cleared either way -- the caller decides
-  // whether to say anything about it.
-  logout: () => Promise<boolean>;
+  // The local session is cleared either way; this reports what happened to
+  // the server-side one, so the caller can be honest about it rather than
+  // always claiming success.
+  logout: () => Promise<LogoutOutcome>;
   refreshUser: () => Promise<void>;
 }
 
@@ -66,7 +66,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // be left half-logged-in by a hanging request.
     clearToken();
     setUser(null);
-    if (!token) return true;
+    if (!token) return { confirmed: true, queued: false };
     // The token is durably parked before it's used, so a revocation that
     // fails here is retried later rather than lost with the only credential
     // that could have identified the session.

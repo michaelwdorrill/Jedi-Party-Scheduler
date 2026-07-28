@@ -240,12 +240,20 @@ function assertCompleteEventShape(input: Partial<EventWriteInput>): void {
   }
 }
 
-// Per-guild ceilings, checked at create time. Individually every event here is
-// legitimate; the problem is aggregate growth, which is what turns "one member
-// creating events" into a durable, cross-user failure -- every other member's
+// Per-guild ceilings, checked at create time (and, for the recurring cap
+// specifically, whenever PATCH converts an existing event into a recurring
+// one -- see updateEvent). Individually every event here is legitimate; the
+// problem is aggregate growth, which is what turns "one member creating
+// events" into a durable, cross-user failure -- every other member's
 // calendar has to load and expand the accumulated set on every request, and
 // the cron has to walk all of it every 15 minutes. Nothing else in the app
 // caps how many rows one person can add.
+//
+// This is a friendly, specific-message pre-check for the common case, not
+// the actual enforcement -- that's the WHERE-guarded INSERT/UPDATE built
+// into the caller's statement (see guardedEventInsertGuard /
+// guardedRecurringConversionGuard below), which closes the TOCTOU window
+// between this check and the write.
 async function assertGuildEventQuota(env: Env, guildId: string, organizerId: string, isRecurring: boolean): Promise<void> {
   const counts = await env.DB.prepare(
     `SELECT
@@ -266,6 +274,27 @@ async function assertGuildEventQuota(env: Env, guildId: string, organizerId: str
   if (isRecurring && (counts?.recurring ?? 0) >= LIMITS.MAX_RECURRING_EVENTS_PER_GUILD) {
     throw new ValidationError('This server has reached its limit of recurring events');
   }
+}
+
+// SQL fragment (3 `?` placeholders: guildId, guildId, MAX_ACTIVE; guildId,
+// organizerId, MAX_ORGANIZER; and conditionally guildId, MAX_RECURRING) that
+// makes the quota check part of the same atomic statement as the write,
+// rather than a separate query a concurrent request could race between.
+// Appended to an INSERT's SELECT ... WHERE clause (create) or an UPDATE's
+// WHERE clause (recurring conversion on PATCH). If the guard fails, the
+// statement affects zero rows instead of erroring -- the caller checks
+// meta.changes to tell "blocked by quota" apart from every other outcome.
+function eventQuotaGuardSql(includeRecurring: boolean): string {
+  const total = `(SELECT COUNT(*) FROM events WHERE guild_id = ? AND status != 'cancelled') < ?`;
+  const mine = `(SELECT COUNT(*) FROM events WHERE guild_id = ? AND organizer_id = ? AND status != 'cancelled') < ?`;
+  const recurring = `(SELECT COUNT(*) FROM events WHERE guild_id = ? AND status != 'cancelled' AND is_recurring = 1) < ?`;
+  return includeRecurring ? `${total} AND ${mine} AND ${recurring}` : `${total} AND ${mine}`;
+}
+
+function eventQuotaGuardParams(guildId: string, organizerId: string, includeRecurring: boolean): unknown[] {
+  const params: unknown[] = [guildId, LIMITS.MAX_ACTIVE_EVENTS_PER_GUILD, guildId, organizerId, LIMITS.MAX_EVENTS_PER_ORGANIZER_PER_GUILD];
+  if (includeRecurring) params.push(guildId, LIMITS.MAX_RECURRING_EVENTS_PER_GUILD);
+  return params;
 }
 
 // Multi-row inserts rather than one statement per invitee: an event may
@@ -355,6 +384,8 @@ export async function createEventWithInvites(
   const isRecurring = input.eventType === 'single' && !!input.isRecurring;
   const { pollMode, pollResolutionMode } = normalizePollModes(input);
 
+  // Friendly, specific-message rejection for the common (non-racing) case --
+  // see the guarded INSERT below for the actual atomic enforcement.
   await assertGuildEventQuota(env, guildId, organizerId, isRecurring);
 
   // Resolved (and validated) before anything is written, so a rejected
@@ -370,13 +401,24 @@ export async function createEventWithInvites(
   // Everything below is one D1 batch -- a failure partway through (a full
   // event with no recurrence rule, or no invites) is exactly the partial-
   // object problem F-08 flagged; batch() commits all-or-nothing.
+  //
+  // The main INSERT is itself guarded (INSERT ... SELECT ... WHERE <quota
+  // check>) so the check-then-write gap between assertGuildEventQuota above
+  // and this statement can't be raced by a concurrent create: if a
+  // concurrent request already filled the last slot, this INSERT affects
+  // zero rows instead of erroring. D1 doesn't enforce the events<-children
+  // foreign keys (see deleteUserCompletely's comment on the same point), so
+  // a guard-tripped INSERT here would otherwise leave the children below
+  // referencing a nonexistent event; the post-batch check further down
+  // detects that and cleans them up before reporting the race to the caller.
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
       `INSERT INTO events (id, guild_id, organizer_id, title, description, game, event_type, timezone,
          start_at, end_at, status, poll_strategy, poll_threshold_count, poll_deadline_at,
          poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
          is_recurring, voice_channel_id, voice_channel_name, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE ${eventQuotaGuardSql(isRecurring)}`,
     ).bind(
       eventId,
       guildId,
@@ -401,6 +443,7 @@ export async function createEventWithInvites(
       input.voiceChannelName ?? null,
       now,
       now,
+      ...eventQuotaGuardParams(guildId, organizerId, isRecurring),
     ),
   ];
 
@@ -441,7 +484,22 @@ export async function createEventWithInvites(
 
   statements.push(...inviteStatements(env, eventId, invitees));
 
-  await env.DB.batch(statements);
+  const results = await env.DB.batch(statements);
+
+  // Guard tripped: a concurrent request already used the last slot between
+  // assertGuildEventQuota's check and this batch. The event row was never
+  // created, but the unconditional child statements above still ran and now
+  // reference an event id that doesn't exist -- clean those up immediately
+  // rather than leaving orphaned rows nothing will ever reference again.
+  if (results[0].meta.changes === 0) {
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id = ?)`).bind(eventId),
+      env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id = ?`).bind(eventId),
+      env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id = ?`).bind(eventId),
+      env.DB.prepare(`DELETE FROM event_invites WHERE event_id = ?`).bind(eventId),
+    ]);
+    throw new ValidationError('This server just hit its event limit -- please try again');
+  }
 
   return eventId;
 }
@@ -451,9 +509,29 @@ export async function updateEvent(
   eventId: string,
   guildId: string,
   input: Partial<EventWriteInput>,
+  wasRecurring = false,
 ): Promise<void> {
   validateEventWriteInput(input);
   const now = Date.now();
+
+  // createEventWithInvites checks this at write time; PATCH previously never
+  // did, so an existing non-recurring event could be converted to recurring
+  // after the guild was already at its recurring-event cap -- every visible
+  // calendar and cron sweep would then carry one more expansion than the
+  // limit was meant to allow. Only relevant for an actual false->true
+  // transition; editing an already-recurring event's schedule doesn't add a
+  // new recurring row, so it isn't re-checked against the cap.
+  const convertingToRecurring = input.isRecurring === true && !wasRecurring;
+  if (convertingToRecurring) {
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM events WHERE guild_id = ? AND status != 'cancelled' AND is_recurring = 1`,
+    )
+      .bind(guildId)
+      .first<{ n: number }>();
+    if ((row?.n ?? 0) >= LIMITS.MAX_RECURRING_EVENTS_PER_GUILD) {
+      throw new ValidationError('This server has reached its limit of recurring events');
+    }
+  }
 
   // Build the SET clause only from fields the caller actually included --
   // e.g. POST /events/:id/invites calls this with just `{ invites }`, and
@@ -496,6 +574,17 @@ export async function updateEvent(
 
   values.push(eventId);
 
+  // When converting to recurring, the UPDATE itself carries the same kind of
+  // atomic guard createEventWithInvites uses: an extra WHERE condition that
+  // makes zero rows change instead of erroring if a concurrent request beat
+  // this one to the last recurring slot, closing the gap between the
+  // friendly count check above and this write.
+  let updateWhere = 'id = ?';
+  if (convertingToRecurring) {
+    updateWhere += ` AND (SELECT COUNT(*) FROM events WHERE guild_id = ? AND status != 'cancelled' AND is_recurring = 1) < ?`;
+    values.push(guildId, LIMITS.MAX_RECURRING_EVENTS_PER_GUILD);
+  }
+
   // Invitee resolution (and possible rejection -- F-05) happens before any
   // statement is queued, same reasoning as createEventWithInvites: a request
   // that's going to fail validation shouldn't partially apply first.
@@ -508,7 +597,7 @@ export async function updateEvent(
   // atomic -- a single request editing both, say, the schedule and the poll
   // options can't leave the poll options replaced but the schedule untouched.
   const statements: D1PreparedStatement[] = [
-    env.DB.prepare(`UPDATE events SET ${setClauses.join(', ')} WHERE id = ?`).bind(...values),
+    env.DB.prepare(`UPDATE events SET ${setClauses.join(', ')} WHERE ${updateWhere}`).bind(...values),
   ];
 
   if (input.isRecurring !== undefined) {
@@ -520,7 +609,12 @@ export async function updateEvent(
           `INSERT INTO event_recurrence_rules
              (event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
               duration_minutes, end_type, end_date, end_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           -- Guarded on the event actually being recurring right now, rather
+           -- than assumed: if the UPDATE above lost the race for the last
+           -- recurring slot, this must not insert a rule for an event that's
+           -- still non-recurring.
+           WHERE EXISTS (SELECT 1 FROM events WHERE id = ? AND is_recurring = 1)`,
         ).bind(
           eventId,
           r.freq,
@@ -533,6 +627,7 @@ export async function updateEvent(
           r.endType,
           r.endDate ?? null,
           r.endCount ?? null,
+          eventId,
         ),
       );
     }
@@ -598,5 +693,13 @@ export async function updateEvent(
     statements.push(...(await replaceInviteStatements(env, eventId, invitees)));
   }
 
-  await env.DB.batch(statements);
+  const results = await env.DB.batch(statements);
+
+  // The event is known to exist (the caller already loaded it), so zero
+  // changes on this specific statement only happens when the recurring-quota
+  // guard tripped -- a concurrent conversion took the last slot after the
+  // friendly check above but before this write.
+  if (convertingToRecurring && results[0].meta.changes === 0) {
+    throw new ValidationError('This server has reached its limit of recurring events');
+  }
 }

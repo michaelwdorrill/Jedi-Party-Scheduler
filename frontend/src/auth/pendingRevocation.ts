@@ -10,11 +10,21 @@ import { API_BASE_URL } from '../api/client';
 // So the token is parked here *before* it's discarded, and stays parked until
 // the server confirms the session is gone. Retries happen on app start and
 // whenever the browser comes back online.
+//
+// The queue holds a *set* of tokens, not one slot. An earlier version stored
+// a single {token, queuedAt} object: a second failed logout (a different
+// session -- e.g. a stale tab, or logging out then back in and out again
+// before the first retry lands) silently overwrote the first, and even
+// without that, a retry that read the queue before a second logout wrote to
+// it would still unconditionally clear() the whole key on success, deleting
+// the second token's entry along with the first's. Both failure modes are
+// closed by keying on the token itself: enqueue only adds, and a completed
+// revocation only ever removes its own entry.
 
-const PENDING_KEY = 'jps_pending_revocation';
+const PENDING_KEY = 'jps_pending_revocations';
 
-// Past the session's own absolute lifetime there is nothing left to revoke,
-// so a stored token that old is dropped rather than retried forever.
+// Past a session's own absolute lifetime there is nothing left to revoke, so
+// an entry that old is dropped rather than retried forever.
 const MAX_PENDING_AGE_MS = 8 * 24 * 60 * 60 * 1000;
 
 interface PendingRevocation {
@@ -22,29 +32,45 @@ interface PendingRevocation {
   queuedAt: number;
 }
 
-function read(): PendingRevocation | null {
+function readAll(): PendingRevocation[] {
   try {
     const raw = localStorage.getItem(PENDING_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as PendingRevocation;
-    if (typeof parsed?.token !== 'string' || typeof parsed?.queuedAt !== 'number') return null;
-    return parsed;
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (p): p is PendingRevocation => typeof p?.token === 'string' && typeof p?.queuedAt === 'number',
+    );
   } catch {
-    return null;
+    return [];
   }
 }
 
-function clear(): void {
-  localStorage.removeItem(PENDING_KEY);
-}
-
-export function queueRevocation(token: string): void {
+// Returns whether the write actually took effect -- a full or blocked
+// storage quota throws here, and the caller needs to know the entry is NOT
+// durably queued rather than silently proceeding as if it were.
+function writeAll(entries: PendingRevocation[]): boolean {
   try {
-    localStorage.setItem(PENDING_KEY, JSON.stringify({ token, queuedAt: Date.now() } satisfies PendingRevocation));
+    if (entries.length === 0) localStorage.removeItem(PENDING_KEY);
+    else localStorage.setItem(PENDING_KEY, JSON.stringify(entries));
+    return true;
   } catch {
-    // Storage full or blocked. Nothing useful to do here -- the caller still
-    // attempts the revocation immediately; this only costs us the retry.
+    return false;
   }
+}
+
+function enqueue(token: string): boolean {
+  const entries = readAll();
+  if (!entries.some((e) => e.token === token)) entries.push({ token, queuedAt: Date.now() });
+  return writeAll(entries);
+}
+
+// Removes only this specific token's entry. Never a blanket clear -- that's
+// exactly the race described above.
+function removeToken(token: string): void {
+  const entries = readAll();
+  const next = entries.filter((e) => e.token !== token);
+  if (next.length !== entries.length) writeAll(next);
 }
 
 // Attempts the revocation with a specific token. `keepalive` lets the request
@@ -66,26 +92,38 @@ async function revoke(token: string): Promise<boolean> {
   }
 }
 
+export interface LogoutOutcome {
+  // The server confirmed the session is gone.
+  confirmed: boolean;
+  // Only meaningful when !confirmed: whether the token was durably recorded
+  // for retry. False means storage itself failed (full or blocked) -- there
+  // is no record of this logout anywhere, and the caller must say so rather
+  // than imply it'll be handled automatically later.
+  queued: boolean;
+}
+
 // Revokes now if possible, and durably records the attempt so it can be
-// retried if not. Returns whether the session is confirmed revoked, so the UI
-// can be honest about it rather than always claiming success.
-export async function revokeOrQueue(token: string): Promise<boolean> {
-  queueRevocation(token);
+// retried if not. The queue write happens before the network attempt so a
+// tab closing mid-request still leaves a durable record.
+export async function revokeOrQueue(token: string): Promise<LogoutOutcome> {
+  const queued = enqueue(token);
   if (await revoke(token)) {
-    clear();
-    return true;
+    removeToken(token);
+    return { confirmed: true, queued: false };
   }
-  return false;
+  return { confirmed: false, queued };
 }
 
 export async function retryPendingRevocation(): Promise<void> {
-  const pending = read();
-  if (!pending) return;
-  if (Date.now() - pending.queuedAt > MAX_PENDING_AGE_MS) {
-    clear();
-    return;
+  const entries = readAll();
+  const now = Date.now();
+  for (const entry of entries) {
+    if (now - entry.queuedAt > MAX_PENDING_AGE_MS) {
+      removeToken(entry.token);
+      continue;
+    }
+    if (await revoke(entry.token)) removeToken(entry.token);
   }
-  if (await revoke(pending.token)) clear();
 }
 
 // Wired up once at startup: retry immediately, then again whenever the

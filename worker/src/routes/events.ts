@@ -179,7 +179,7 @@ eventRoutes.patch('/:eventId', async (c) => {
   if (!event) return c.text('Not found', 404);
 
   const body = await readJsonBody<Partial<EventWriteInput>>(c);
-  await updateEvent(c.env, eventId, event.guild_id, body);
+  await updateEvent(c.env, eventId, event.guild_id, body, !!event.is_recurring);
   return c.json({ ok: true });
 });
 

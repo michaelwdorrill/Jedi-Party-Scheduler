@@ -166,8 +166,22 @@ function boundContent(content: string): string {
     : content;
 }
 
+// Comfortably below the notification outbox's 5-minute lease (see
+// lib/outbox.ts's LEASE_MS): the whole point of the lease is that a second
+// invocation can safely reclaim a row once it expires, but that's only true
+// if a first invocation can't still be mid-flight when it does. An unbounded
+// fetch could hang past the lease and let both invocations' sends reach
+// Discord. Two fetches (channel open + message send) both bounded by this
+// keeps the worst case for one sendBotDm call well under the lease even if
+// both hang.
+export const DISCORD_FETCH_TIMEOUT_MS = 20_000;
+
 // Opens (or reuses) a DM channel with the given user and sends `content` via
 // the bot. Returns enough info for the caller to decide whether to retry.
+// Never throws for a network-level failure (including a timeout) -- those
+// come back as the same shape a 5xx would, since to a caller deciding
+// whether to retry, "Discord didn't answer" and "Discord errored" mean the
+// same thing.
 export async function sendBotDm(
   botToken: string,
   recipientUserId: string,
@@ -177,14 +191,20 @@ export async function sendBotDm(
   let channelId = existingChannelId ?? null;
 
   if (!channelId) {
-    const channelRes = await fetch(`${API_BASE}/users/@me/channels`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bot ${botToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ recipient_id: recipientUserId }),
-    });
+    let channelRes: Response;
+    try {
+      channelRes = await fetch(`${API_BASE}/users/@me/channels`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bot ${botToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ recipient_id: recipientUserId }),
+        signal: AbortSignal.timeout(DISCORD_FETCH_TIMEOUT_MS),
+      });
+    } catch {
+      return { result: { ok: false, status: 0 }, channelId: null };
+    }
     if (!channelRes.ok) {
       return { result: { ok: false, status: channelRes.status }, channelId: null };
     }
@@ -192,17 +212,23 @@ export async function sendBotDm(
     channelId = channel.id;
   }
 
-  const messageRes = await fetch(`${API_BASE}/channels/${channelId}/messages`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bot ${botToken}`,
-      'Content-Type': 'application/json',
-    },
-    // allowed_mentions suppresses @everyone/@here/user/role pings that could
-    // otherwise be smuggled in through a user-controlled event/group/channel
-    // name and fired off by the trusted bot account.
-    body: JSON.stringify({ content: boundContent(content), allowed_mentions: { parse: [] } }),
-  });
+  let messageRes: Response;
+  try {
+    messageRes = await fetch(`${API_BASE}/channels/${channelId}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bot ${botToken}`,
+        'Content-Type': 'application/json',
+      },
+      // allowed_mentions suppresses @everyone/@here/user/role pings that
+      // could otherwise be smuggled in through a user-controlled
+      // event/group/channel name and fired off by the trusted bot account.
+      body: JSON.stringify({ content: boundContent(content), allowed_mentions: { parse: [] } }),
+      signal: AbortSignal.timeout(DISCORD_FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    return { result: { ok: false, status: 0 }, channelId };
+  }
 
   if (messageRes.status === 429) {
     // Discord reports the wait in the JSON body's `retry_after` (seconds), and

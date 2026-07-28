@@ -39,6 +39,24 @@ function validatePersonalEventInput(body: Partial<PersonalEventInput>): void {
   }
 }
 
+// Create requires an actually-usable event, not just individually-valid
+// fields -- validatePersonalEventInput above only checks fields that are
+// *present*, which is correct for PATCH (a partial update) but let POST
+// accept `{}` (an empty body reached an unconditional `body.title.trim()`
+// below and threw an unhandled TypeError -> 500, not a controlled 400) or a
+// `{title, timezone}`-only body that created an active, non-recurring event
+// with no start or end time at all -- a row nothing could ever display
+// meaningfully.
+function assertCompletePersonalEventShape(body: Partial<PersonalEventInput>): void {
+  assertString(body.title, 'title', LIMITS.TITLE);
+  assertTimezone(body.timezone, 'timezone');
+  if (body.isRecurring) {
+    if (!body.recurrence) throw new ValidationError('recurrence is required when isRecurring is true');
+  } else if (body.startAt == null || body.endAt == null) {
+    throw new ValidationError('startAt and endAt are required for a non-recurring personal event');
+  }
+}
+
 export const personalRoutes = new Hono<AppEnv>();
 
 interface PersonalEventInput {
@@ -88,7 +106,7 @@ personalRoutes.post('/', async (c) => {
   const userId = c.get('userId');
   const body = await readJsonBody<PersonalEventInput>(c);
   validatePersonalEventInput(body);
-  if (body.isRecurring && !body.recurrence) throw new ValidationError('recurrence is required when isRecurring is true');
+  assertCompletePersonalEventShape(body);
 
   const { results: countRows } = await c.env.DB.prepare(
     `SELECT COUNT(*) as n FROM personal_events WHERE user_id = ? AND status = 'active'`,
