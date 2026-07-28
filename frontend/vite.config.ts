@@ -1,9 +1,11 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// GitHub Pages project sites are served from /<repo-name>/, so the base path
-// must match the repo name for built asset URLs to resolve correctly.
+// A GitHub Pages project site is normally served from /<repo-name>/, but a
+// custom domain (see public/CNAME) is served from the domain's root instead
+// -- the base path has to match wherever the site actually lands, or every
+// built asset URL 404s.
 export default defineConfig({
   plugins: [react()],
-  base: '/Jedi-Party-Scheduler/',
+  base: '/',
 });

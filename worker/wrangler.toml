@@ -12,7 +12,7 @@ account_id = "f22e4f3ece3f69c4bd0da97be4f7a3b6"
 # `wrangler secret put` and never committed.
 [vars]
 DISCORD_CLIENT_ID = "1531128508728737812"
-FRONTEND_URL = "https://michaelwdorrill.github.io/Jedi-Party-Scheduler"
+FRONTEND_URL = "https://uncleowen.space"
 OWNER_DISCORD_ID = "346042183486537730"
 
 [[d1_databases]]
