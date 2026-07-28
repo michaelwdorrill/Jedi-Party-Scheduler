@@ -84,15 +84,13 @@ needs: editing Workers scripts and editing D1 databases.
    $env:CLOUDFLARE_API_TOKEN = "paste-your-token-here"
    $env:CLOUDFLARE_ACCOUNT_ID = "paste-your-account-id-here"
    ```
-   These only last for the current PowerShell window. If you'd rather not
-   retype them every session, set them permanently with `setx` instead (open
-   a **new** terminal afterward for it to take effect):
-   ```powershell
-   setx CLOUDFLARE_API_TOKEN "paste-your-token-here"
-   setx CLOUDFLARE_ACCOUNT_ID "paste-your-account-id-here"
-   ```
-   On macOS/Linux, use `export CLOUDFLARE_API_TOKEN=...` (add to your shell
-   profile to persist it).
+   These only last for the current PowerShell window. To persist them, see
+   **Working with more than one Cloudflare account** below — don't `setx`
+   `CLOUDFLARE_API_TOKEN` directly if you have (or will have) a second
+   account, because there is only one of that variable and whichever account
+   owns it becomes a silent default for every project on the machine.
+
+   On macOS/Linux, use `export CLOUDFLARE_API_TOKEN=...`.
 6. Open `worker/wrangler.toml` and replace `account_id = "REPLACE_ME"` near
    the top with your real account ID too (belt-and-suspenders with the env
    var — this avoids Wrangler needing to *list* your accounts, which the
@@ -129,7 +127,13 @@ needs: editing Workers scripts and editing D1 databases.
    0007_notification_outbox.sql
    0008_backfill_notification_outbox.sql
    0009_notification_leases.sql
+   0010_cron_cursors.sql
+   0011_keyset_cron_cursors.sql
    ```
+   (This list has drifted before. `worker/migrations/` is the source of
+   truth — `npm run db:migrate:remote -- --from=<file>` reads the directory,
+   so it applies everything from that file onward whether or not the file is
+   named here.)
 10. Set the three secrets (you'll be prompted to paste each value):
    ```
    npx wrangler secret put DISCORD_CLIENT_SECRET
@@ -169,6 +173,109 @@ needs: editing Workers scripts and editing D1 databases.
     (Or insert directly: `npx wrangler d1 execute jedi-party-scheduler-db --remote --command "INSERT INTO guilds (id, name, is_active, added_at) VALUES ('<id>', 'Jedi Party', 1, <unix ms>);"`.)
     Log out and back in afterward so your membership cache picks up the
     newly allow-listed server (guild membership is re-synced on every login).
+
+### Working with more than one Cloudflare account
+
+Wrangler reads exactly one set of credentials: `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID` if they are set, otherwise whatever `wrangler login`
+last stored in `~/.wrangler/config/default.toml`. Both are machine-wide
+singletons, so with two accounts the question is never "am I authenticated?"
+but "authenticated as *whom*, right now?"
+
+Rather than swapping the single default back and forth, give each account its
+own permanent pair and copy the right one into the variables Wrangler reads.
+
+**Once per account** (PowerShell; `setx` writes it permanently):
+
+```powershell
+setx CF_TOKEN_UNCLEOWEN  "token-for-the-uncle-owen-account"
+setx CF_ACCOUNT_UNCLEOWEN "f22e4f3ece3f69c4bd0da97be4f7a3b6"
+
+setx CF_TOKEN_HOMEBASE   "token-for-the-home-base-account"
+setx CF_ACCOUNT_HOMEBASE "4423ae7ab29989bc318c47c9a9723608"
+```
+
+A third account is two more variables and no other changes.
+
+**Naming rule: one pair per Cloudflare *account*, named for what the account
+is for — never for the email that owns it, and never for an individual
+project.** `homebase` is a shared account holding several projects
+(auth/SSO plus its tenant apps); every one of them uses
+`CF_TOKEN_HOMEBASE`, not a token of its own. `uncleowen` is this project's
+own account, used only here. A new personal tool added to Home Base reuses
+`CF_TOKEN_HOMEBASE` — it does not get a new pair. A genuinely new Cloudflare
+account (a different outward-facing project, say) gets its own pair, named
+for that account's purpose.
+
+This repo can't write to another project's files, so propagating the
+convention there is manual: drop something like this into that project's
+`CLAUDE.md` —
+
+```markdown
+## Cloudflare credentials
+
+This project deploys into the **<account-name>** Cloudflare account.
+Run `Use-CF <account-name>` before any `wrangler` command — never rely on
+an ambient/default login, since this machine holds credentials for more
+than one Cloudflare account. `Use-CF` and the `CF_TOKEN_*`/`CF_ACCOUNT_*`
+variables are defined in the PowerShell profile, not in any one repo.
+```
+
+**Once, in your PowerShell profile** (`notepad $PROFILE`):
+
+```powershell
+function Use-CF {
+    param([Parameter(Mandatory)][string]$Account)
+
+    $key   = $Account.ToUpper()
+    $token = [Environment]::GetEnvironmentVariable("CF_TOKEN_$key", 'User')
+    $id    = [Environment]::GetEnvironmentVariable("CF_ACCOUNT_$key", 'User')
+
+    if (-not $token -or -not $id) {
+        Write-Host "No stored credentials for '$Account'." -ForegroundColor Red
+        Write-Host "Expected CF_TOKEN_$key and CF_ACCOUNT_$key."
+        return
+    }
+
+    $env:CLOUDFLARE_API_TOKEN  = $token
+    $env:CLOUDFLARE_ACCOUNT_ID = $id
+    Write-Host "Cloudflare: $Account ($id)" -ForegroundColor Green
+
+    # If this directory is a Worker project, check it belongs to that account.
+    $toml = Join-Path (Get-Location) 'wrangler.toml'
+    if (Test-Path $toml) {
+        $m = Select-String -Path $toml -Pattern '^\s*account_id\s*=\s*"([^"]+)"' |
+             Select-Object -First 1
+        if ($m -and $m.Matches[0].Groups[1].Value -ne $id) {
+            Write-Host ("WARNING: wrangler.toml here belongs to account " +
+                        $m.Matches[0].Groups[1].Value + ", not this one.") -ForegroundColor Yellow
+        }
+    }
+}
+```
+
+It reads the persisted values directly rather than through `$env:`, so a
+`setx` takes effect immediately without opening a new terminal.
+
+**Every session, before any `wrangler` command:**
+
+```powershell
+Use-CF uncleowen
+```
+
+This project only ever uses `uncleowen` — it is a single, standalone
+Cloudflare account with nothing else deployed to it.
+
+Finally, run `npx wrangler logout` once. That removes the stored OAuth
+credentials, which exist only as a fallback — and a fallback is precisely
+what makes a wrong-account command succeed quietly instead of failing. With
+no default, forgetting `Use-CF` is an error rather than a deploy into
+somebody else's account.
+
+The `account_id` pinned in each project's `wrangler.toml` is the backstop: if
+the active credentials don't match it, Wrangler refuses with
+`Authentication error [code: 10000]` rather than touching the wrong
+database. That error almost always means "wrong `Use-CF`", not "bad token".
 
 ## 3. GitHub Pages (frontend)
 
