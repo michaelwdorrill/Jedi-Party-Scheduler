@@ -368,14 +368,16 @@ npx wrangler d1 execute jedi-party-scheduler-db --remote --command "DELETE FROM 
 Everyone signs in again once. Do this *after* the Worker's `FRONTEND_URL` is
 updated and deployed, so the fresh logins land on the right origin.
 
-### Optional: auto-deploy the Worker from GitHub Actions
+### Auto-deploy the Worker from GitHub Actions
 
-By default you deploy the Worker yourself with `npm run deploy` whenever
-`worker/` changes. If you'd rather have CI do it, uncomment the job in
-`.github/workflows/deploy-worker.yml` and add two repo secrets:
+`.github/workflows/deploy-worker.yml` deploys the Worker on every push to
+`main` that touches `worker/`, once two repo secrets are set:
 `CLOUDFLARE_API_TOKEN` (the same scoped token from step 2.3 works — it
 already has the Workers Scripts:Edit permission this needs) and
-`CLOUDFLARE_ACCOUNT_ID` (the same value from step 2.4).
+`CLOUDFLARE_ACCOUNT_ID` (the same value from step 2.4). It runs the
+typecheck and test suite first and only deploys if both pass. Without those
+secrets set, the workflow's `Deploy` step fails — deploy with `npm run
+deploy` by hand instead until they're added.
 
 ## Running the tests
 
