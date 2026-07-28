@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession, revokeSession } from '../src/lib/sessions';
-import { MAX_BODY_BYTES } from '../src/lib/validate';
+import { LIMITS, MAX_BODY_BYTES } from '../src/lib/validate';
 import {
   DAY_MS,
   HOUR_MS,
@@ -244,11 +244,11 @@ describe('object visibility', () => {
 });
 
 describe('scheduling assistant', () => {
-  // MAX_FREE_BUSY_USERS + the guild ID is 101 bound parameters, so a
-  // fully-populated request used to fail outright.
-  it('accepts the full 100-user maximum', async () => {
+  // Free/busy cost is a product (users x events x occurrences), so its
+  // maximum is deliberately much smaller than other list limits.
+  it('accepts the full configured user maximum', async () => {
     const { db, env, headers } = await seedSignedInUser();
-    const userIds = ids('friend', 100);
+    const userIds = ids('friend', LIMITS.MAX_FREE_BUSY_USERS);
     for (const id of userIds) {
       await seedUser(db, id);
       await seedMembership(db, id, 'guild-1');
@@ -257,14 +257,102 @@ describe('scheduling assistant', () => {
 
     const res = await call(env, `/guilds/guild-1/free-busy?${range}&user_ids=${userIds.join(',')}`, { headers });
     expect(res.status).toBe(200);
-    expect((await res.json()) as unknown[]).toHaveLength(100);
+    expect((await res.json()) as unknown[]).toHaveLength(LIMITS.MAX_FREE_BUSY_USERS);
   });
 
   it('rejects more than the configured maximum', async () => {
     const { env, headers } = await seedSignedInUser();
     fetchStub = stubFetch([]);
 
-    const res = await call(env, `/guilds/guild-1/free-busy?${range}&user_ids=${ids('friend', 101).join(',')}`, { headers });
+    const res = await call(
+      env,
+      `/guilds/guild-1/free-busy?${range}&user_ids=${ids('friend', LIMITS.MAX_FREE_BUSY_USERS + 1).join(',')}`,
+      { headers },
+    );
     expect(res.status).toBe(400);
+  });
+
+  // Free/busy has its own, far shorter range cap than the calendar: a year
+  // of 25 people's recurring series is where the unbounded occurrence
+  // expansion came from.
+  it('rejects a range longer than the free/busy window even though the calendar would allow it', async () => {
+    const { env, headers } = await seedSignedInUser();
+    fetchStub = stubFetch([]);
+    const from = Date.now();
+    const to = from + LIMITS.MAX_FREE_BUSY_RANGE_MS + DAY_MS;
+
+    const res = await call(env, `/guilds/guild-1/free-busy?from=${from}&to=${to}&user_ids=friend-0`, { headers });
+    expect(res.status).toBe(400);
+  });
+});
+
+// A personal-event PATCH that touches the schedule has to leave a coherent
+// one behind. Per-field validation can't see this: every individual field in
+// `{isRecurring: true}` is valid, but the combination asks for a recurring
+// event with no rule, which the write path resolved by producing a
+// non-recurring event with no start or end time -- exactly the shape POST
+// refuses to create.
+describe('personal event schedule coherence', () => {
+  async function createOneOff(env: Env, headers: Record<string, string>): Promise<string> {
+    const res = await call(env, '/personal-events', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Dentist',
+        timezone: 'America/New_York',
+        startAt: Date.now() + HOUR_MS,
+        endAt: Date.now() + 2 * HOUR_MS,
+      }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json<{ id: string }>()).id;
+  }
+
+  async function patch(env: Env, headers: Record<string, string>, id: string, body: unknown): Promise<Response> {
+    return call(env, `/personal-events/${id}`, {
+      method: 'PATCH',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('rejects switching to recurring without a rule', async () => {
+    const { env, headers } = await seedSignedInUser();
+    const id = await createOneOff(env, headers);
+    expect((await patch(env, headers, id, { isRecurring: true })).status).toBe(400);
+  });
+
+  it('rejects switching to non-recurring without a complete time range', async () => {
+    const { env, headers } = await seedSignedInUser();
+    const id = await createOneOff(env, headers);
+    expect((await patch(env, headers, id, { isRecurring: false })).status).toBe(400);
+    expect((await patch(env, headers, id, { isRecurring: false, startAt: Date.now() })).status).toBe(400);
+  });
+
+  it('leaves the stored event untouched when a schedule edit is rejected', async () => {
+    const { db, env, headers } = await seedSignedInUser();
+    const id = await createOneOff(env, headers);
+    await patch(env, headers, id, { isRecurring: true });
+
+    const row = await db
+      .prepare(`SELECT is_recurring, start_at, end_at FROM personal_events WHERE id = ?`)
+      .bind(id)
+      .first<{ is_recurring: number; start_at: number | null; end_at: number | null }>();
+    expect(row?.is_recurring).toBe(0);
+    expect(row?.start_at).not.toBeNull();
+    expect(row?.end_at).not.toBeNull();
+  });
+
+  it('still allows a partial edit that does not touch the schedule', async () => {
+    const { db, env, headers } = await seedSignedInUser();
+    const id = await createOneOff(env, headers);
+    expect((await patch(env, headers, id, { title: 'Renamed' })).status).toBe(200);
+
+    const row = await db
+      .prepare(`SELECT title, start_at FROM personal_events WHERE id = ?`)
+      .bind(id)
+      .first<{ title: string; start_at: number | null }>();
+    expect(row?.title).toBe('Renamed');
+    expect(row?.start_at).not.toBeNull();
   });
 });

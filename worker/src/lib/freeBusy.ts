@@ -4,6 +4,7 @@ import type { EventRow } from './events';
 import { loadOverridesForEvents } from './events';
 import { expandOccurrencesForEvent, loadRecurrenceRulesForEvents } from './recurrence';
 import { expandPersonalOccurrencesForUsers } from './personalEvents';
+import { LIMITS } from './validate';
 
 // Deliberately opaque: a busy block carries *only* a time range. No title, no
 // game, no guild, no attendees, no event id -- nothing that would let a viewer
@@ -77,63 +78,103 @@ export async function computeBusyBlocksForUsers(
     rows.push(...organized, ...invited);
   }
 
-  const eventIds = [...new Set(rows.map((r) => r.id))];
+  // Collapse the per-(event, user) rows into one entry per *event*, carrying
+  // the set of requested users it's relevant to. This is the difference
+  // between work that scales with users x events and work that scales with
+  // events: an event shared by all 25 requested users appeared 25 times in
+  // `rows`, and the previous version expanded its recurrence 25 separate
+  // times to produce 25 identical occurrence lists.
+  const eventsById = new Map<string, EventRow>();
+  const usersByEvent = new Map<string, string[]>();
+  for (const row of rows) {
+    if (!eventsById.has(row.id)) {
+      eventsById.set(row.id, row);
+      usersByEvent.set(row.id, []);
+    }
+    const users = usersByEvent.get(row.id)!;
+    if (!users.includes(row.for_user)) users.push(row.for_user);
+  }
+
+  const eventIds = [...eventsById.keys()];
   const overridesByEvent = await loadOverridesForEvents(env, eventIds);
   const recurrenceRulesByEvent = await loadRecurrenceRulesForEvents(
     env,
-    rows.filter((r) => r.is_recurring).map((r) => r.id),
+    eventIds.filter((id) => eventsById.get(id)!.is_recurring),
   );
   const confirmedVotesByEvent = await loadConfirmedYesVotesForEvents(
     env,
-    rows.filter((r) => r.event_type === 'poll').map((r) => r.id),
+    eventIds.filter((id) => eventsById.get(id)!.event_type === 'poll'),
   );
 
-  for (const row of rows) {
-    const blocks = out.get(row.for_user);
-    if (!blocks) continue; // defensive; for_user is always one of userIds
+  // Every expanded occurrence, for every event and user, counts against one
+  // shared ceiling. The per-factor limits should keep a real request far
+  // below it -- this is the guarantee that no combination of them multiplies
+  // into unbounded work.
+  let budget = LIMITS.MAX_FREE_BUSY_OCCURRENCES;
+  const spend = (n: number): boolean => {
+    budget -= n;
+    return budget > 0;
+  };
 
-    if (row.event_type === 'poll') {
-      // Only slots that actually got confirmed AND that this user said yes to
-      // represent a real commitment. Open polls are not commitments.
-      for (const vote of confirmedVotesByEvent.get(row.id) ?? []) {
-        if (vote.user_id !== row.for_user) continue;
-        if (vote.start_at <= toMs && vote.end_at >= fromMs) {
-          blocks.push({ startAt: vote.start_at, endAt: vote.end_at });
-        }
+  for (const [eventId, event] of eventsById) {
+    const users = usersByEvent.get(eventId)!;
+
+    if (event.event_type === 'poll') {
+      // Only slots that actually got confirmed AND that a given user said yes
+      // to represent a real commitment. Open polls are not commitments.
+      for (const vote of confirmedVotesByEvent.get(eventId) ?? []) {
+        if (vote.start_at > toMs || vote.end_at < fromMs) continue;
+        const blocks = out.get(vote.user_id);
+        if (blocks) blocks.push({ startAt: vote.start_at, endAt: vote.end_at });
       }
       // A single_winner poll that resolved sets start_at/end_at on the event
       // itself, so fall through to pick that up too.
-      if (row.status !== 'resolved') continue;
+      if (event.status !== 'resolved') continue;
     }
 
-    if (!row.is_recurring) {
-      if (row.start_at != null && row.start_at <= toMs && (row.end_at ?? row.start_at) >= fromMs) {
-        blocks.push({ startAt: row.start_at, endAt: row.end_at ?? row.start_at });
+    if (!event.is_recurring) {
+      if (event.start_at != null && event.start_at <= toMs && (event.end_at ?? event.start_at) >= fromMs) {
+        for (const userId of users) {
+          out.get(userId)?.push({ startAt: event.start_at, endAt: event.end_at ?? event.start_at });
+        }
       }
       continue;
     }
 
+    // Expanded once, then attributed to every user it applies to.
     const expanded = await expandOccurrencesForEvent(
       env,
-      row,
+      event,
       fromMs,
       toMs,
-      overridesByEvent.get(row.id) ?? [],
-      recurrenceRulesByEvent.get(row.id),
+      overridesByEvent.get(eventId) ?? [],
+      recurrenceRulesByEvent.get(eventId),
     );
-    for (const occ of expanded) blocks.push({ startAt: occ.startAt, endAt: occ.endAt });
+    if (!spend(expanded.length * users.length)) {
+      console.warn(`free/busy occurrence budget exhausted; returning partial availability for ${userIds.length} user(s)`);
+      break;
+    }
+    for (const userId of users) {
+      const blocks = out.get(userId);
+      if (!blocks) continue;
+      for (const occ of expanded) blocks.push({ startAt: occ.startAt, endAt: occ.endAt });
+    }
   }
 
   // Only 'busy' personal events count as unavailable -- 'considering' is
   // explicitly a non-commitment (still open to being scheduled over) and
-  // 'free' is just a personal note.
-  const personalByUser = await expandPersonalOccurrencesForUsers(env, userIds, fromMs, toMs);
+  // 'free' is just a personal note. That filter is pushed down into the SQL
+  // rather than applied after expansion: previously every active personal
+  // event for every requested user was loaded and expanded, then most of the
+  // result was discarded here.
+  const personalByUser = await expandPersonalOccurrencesForUsers(env, userIds, fromMs, toMs, {
+    availability: 'busy',
+    maxOccurrences: Math.max(0, budget),
+  });
   for (const [userId, occurrences] of personalByUser) {
     const blocks = out.get(userId);
     if (!blocks) continue;
-    for (const occ of occurrences) {
-      if (occ.event.availability === 'busy') blocks.push({ startAt: occ.startAt, endAt: occ.endAt });
-    }
+    for (const occ of occurrences) blocks.push({ startAt: occ.startAt, endAt: occ.endAt });
   }
 
   for (const [userId, blocks] of out) out.set(userId, merge(blocks));

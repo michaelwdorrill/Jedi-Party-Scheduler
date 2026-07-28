@@ -202,8 +202,23 @@ export const LIMITS = {
   // set than the direct-array limits alone suggest.
   MAX_RESOLVED_INVITEES: 300,
   MAX_WINDOW_SUBMISSIONS: 300,
-  MAX_FREE_BUSY_USERS: 100,
-  MAX_QUERY_RANGE_MS: 366 * 24 * 60 * 60 * 1000, // ~1 year, for free-busy/calendar queries
+  // Deliberately much smaller than it was. Free/busy is the one endpoint
+  // whose cost is a *product* -- users x their events x occurrences in the
+  // window -- so every factor has to be small, not just bounded. Asking about
+  // 25 people at once already exceeds any real scheduling conversation.
+  MAX_FREE_BUSY_USERS: 25,
+  MAX_QUERY_RANGE_MS: 366 * 24 * 60 * 60 * 1000, // ~1 year, for calendar queries
+  // ...but free/busy gets its own, far tighter range. A calendar view of next
+  // year is one user's own events; a *year* of free/busy is 25 people's
+  // recurring series expanded day by day, which is where the millions of
+  // in-memory occurrence objects came from. Nobody schedules a game night
+  // ten months out.
+  MAX_FREE_BUSY_RANGE_MS: 62 * 24 * 60 * 60 * 1000, // ~2 months
+  // Hard ceiling on expanded occurrences for one free/busy request, across
+  // every user and event. The per-factor limits above should keep a real
+  // request orders of magnitude below this; it exists so no combination of
+  // them can ever be multiplied into an unbounded amount of work.
+  MAX_FREE_BUSY_OCCURRENCES: 20_000,
   MAX_WINDOW_SPAN_MS: 60 * 24 * 60 * 60 * 1000, // 60 days
   MIN_WINDOW_BLOCK_MINUTES: 30,
   MAX_WINDOW_BLOCK_MINUTES: 14 * 24 * 60, // 2 weeks -- generous upper bound
@@ -226,6 +241,14 @@ export const LIMITS = {
   MAX_EVENTS_PER_ORGANIZER_PER_GUILD: 300,
   MAX_RECURRING_EVENTS_PER_GUILD: 100,
   MAX_GROUPS_PER_GUILD: 100,
+  // Counts *every* event row, cancelled ones included. The active quotas
+  // above deliberately exclude cancelled events so a guild that tidies up
+  // isn't punished for it -- but that also means create-then-cancel is
+  // unlimited, and cancelled rows still occupy the database (and, until the
+  // 90-day purge reaches them, still get read). This is the backstop that
+  // makes the cycle finite: generous enough that no honest guild will meet
+  // it, low enough that churn can't outrun the purge.
+  MAX_TOTAL_EVENT_ROWS_PER_GUILD: 2000,
   // Per-occurrence cancels/moves on one recurring series. A series can run for
   // years, but nobody needs to individually override a thousand of its days.
   MAX_OVERRIDES_PER_EVENT: 500,

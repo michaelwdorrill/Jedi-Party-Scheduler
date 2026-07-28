@@ -31,10 +31,13 @@ those require your own credentials. Do these steps yourself, in order.
    requires both before an app can be verified, and its Developer Terms
    require users to have an accessible way to ask for their data to be
    modified or deleted. These pages ship with the app:
-   - Terms of Service URL:
-     `https://<your-username>.github.io/Jedi-Party-Scheduler/#/terms`
-   - Privacy Policy URL:
-     `https://<your-username>.github.io/Jedi-Party-Scheduler/#/privacy`
+   - Terms of Service URL: `https://uncleowen.space/#/terms`
+   - Privacy Policy URL: `https://uncleowen.space/#/privacy`
+
+   If you have not set up the custom domain yet (section 4), use the default
+   Pages URL for now -- `https://<your-username>.github.io/Jedi-Party-Scheduler/#/terms`
+   and `.../#/privacy` -- and come back and change these once the domain is
+   live. Discord does not re-check them, so a stale link here stays stale.
 
    **Before publishing them**, open `frontend/src/lib/legal.ts` and replace
    `REPLACE_WITH_YOUR_CONTACT_EMAIL` with an address you actually monitor.
@@ -140,9 +143,12 @@ needs: editing Workers scripts and editing D1 databases.
    API token from step 3 — no extra permission needed for it.
 11. Edit the `[vars]` block in `worker/wrangler.toml`:
    - `DISCORD_CLIENT_ID`: the Client ID from step 1.2.
-   - `FRONTEND_URL`: your GitHub Pages URL, e.g.
-     `https://michaelwdorrill.github.io/Jedi-Party-Scheduler` (no trailing
-     slash).
+   - `FRONTEND_URL`: the site's public URL, no trailing slash. With the
+     custom domain that is `https://uncleowen.space`; without one it is
+     `https://<your-username>.github.io/Jedi-Party-Scheduler`. This has to
+     match what browsers actually use -- it is where OAuth redirects land and
+     what every DM's event link points at, so a stale value sends people to a
+     dead page after login.
    - `OWNER_DISCORD_ID`: your own Discord user ID (enable Developer Mode,
      right-click your own name → **Copy User ID**). This is who's allowed to
      call the `/admin/*` endpoints to manage the server allow-list.
@@ -176,7 +182,84 @@ needs: editing Workers scripts and editing D1 databases.
    Actions tab) — `.github/workflows/deploy-pages.yml` builds `frontend/`
    and publishes it.
 4. Visit `https://<your-username>.github.io/Jedi-Party-Scheduler/` and log
-   in with Discord.
+   in with Discord. (Once section 4's custom domain is live, that becomes
+   `https://uncleowen.space/`.)
+
+## 4. Custom domain (optional, but this install uses one)
+
+The site is served at `https://uncleowen.space`. Moving from the default
+`*.github.io/Jedi-Party-Scheduler/` path to a domain root is not just a DNS
+change -- three other things have to move with it or the site breaks in ways
+that look unrelated.
+
+### 4.1 Why `frontend/public/CNAME` is not enough
+
+The usual GitHub Pages advice is "commit a `CNAME` file". That advice assumes
+Pages is publishing from a branch. This repo publishes from a **GitHub Actions
+workflow**, and in that mode the custom domain is configuration stored in the
+repository settings -- the `CNAME` file is not what sets it.
+
+The file is still committed, and still needed: each Actions deploy replaces
+the published site wholesale, and without `CNAME` in the build output the
+domain setting can be cleared on deploy. So you need **both**: the repo
+setting (4.3) and the file (already present at `frontend/public/CNAME`).
+
+### 4.2 DNS at your registrar
+
+For an apex domain like `uncleowen.space`, add four A records and one CNAME:
+
+| Type  | Host  | Value                                    |
+|-------|-------|------------------------------------------|
+| A     | `@`   | `185.199.108.153`                        |
+| A     | `@`   | `185.199.109.153`                        |
+| A     | `@`   | `185.199.110.153`                        |
+| A     | `@`   | `185.199.111.153`                        |
+| CNAME | `www` | `<your-username>.github.io.`             |
+
+On Namecheap these go under **Domain List → Manage → Advanced DNS**. Delete
+the default "parking page" URL-redirect record first -- if it stays, it
+shadows the A records and you get the registrar's placeholder instead of the
+site. Propagation is usually minutes, occasionally an hour.
+
+### 4.3 Repo settings
+
+**Settings → Pages → Custom domain**: enter `uncleowen.space` and save. Wait
+for "DNS check successful", then tick **Enforce HTTPS** (it is greyed out
+until the certificate is issued, which can take up to an hour).
+
+Optionally, **Settings → Pages → verified domains** lets you verify ownership
+so nobody else can point their Pages site at your domain if it ever lapses.
+
+### 4.4 The two things that break if you skip them
+
+1. **Vite's `base` must be `/`.** On the default Pages URL the site is served
+   from `/Jedi-Party-Scheduler/`, so `frontend/vite.config.ts` set `base` to
+   match. On a custom domain the site is served from the **root**, and that
+   `base` makes every asset URL point at a path that does not exist -- the
+   page loads, every script 404s, and you get a pure white screen with no
+   error visible unless you open DevTools. `base` is now `'/'`; if you ever
+   revert to the `github.io` URL, it has to go back.
+
+2. **`FRONTEND_URL` in `worker/wrangler.toml` must match**, and the Worker
+   must be redeployed (`npm run deploy`) after changing it. It is where the
+   OAuth callback redirects to and what every notification DM links to. A
+   mismatch means logging in dumps you on the old URL.
+
+### 4.5 Revoke sessions at cutover
+
+Sessions issued before the cutover were stored in the *old* origin's
+`localStorage`, which the browser keys per origin -- they are not readable
+from the new domain, so everyone is signed out anyway. What matters is the
+server side: those sessions are still live and revocable until they expire.
+Clear them so the only sessions in existence are ones issued against the
+domain you are actually running:
+
+```
+npx wrangler d1 execute jedi-party-scheduler-db --remote --command "DELETE FROM sessions;"
+```
+
+Everyone signs in again once. Do this *after* the Worker's `FRONTEND_URL` is
+updated and deployed, so the fresh logins land on the right origin.
 
 ### Optional: auto-deploy the Worker from GitHub Actions
 
@@ -252,16 +335,48 @@ at every one of its own configured maxima:
 
 - a calendar request for the maximum 300 active events (100 of them
   recurring, up to 200 as multi-winner polls with confirmed options);
-- a free/busy request for the maximum 100 users, each with a recurring
+- a free/busy request for the maximum 25 users, each with a recurring
   event; and
-- the cron's membership-revalidation sweep at its configured 50-row tick.
+- a cron tick for an event at the maximum 300 invitees.
 
-`worker/test/pass4.test.ts` asserts this with an actual query counter (see
-`worker/test/d1shim.ts`'s `queryCount`), not just that the request succeeds —
-run `npm test` in `worker/` to see it pass. If you raise any of the `LIMITS`
-in `worker/src/lib/validate.ts` significantly, re-run that test file and
-check the counts still clear 50; if they don't, either lower the limit back
-down or move to the Paid plan and raise the budget those tests check against.
+`worker/test/pass4.test.ts` and `worker/test/pass5.test.ts` assert this with
+an actual query counter (see `worker/test/d1shim.ts`'s `queryCount`), not just
+that the request succeeds — run `npm test` in `worker/` to see them pass. If
+you raise any of the `LIMITS` in `worker/src/lib/validate.ts` significantly,
+re-run those files and check the counts still clear 50; if they don't, either
+lower the limit back down or move to the Paid plan.
+
+### The cron tick, and what `WORKERS_PLAN` actually changes
+
+Interactive requests fit inside 50 queries at every configured maximum. The
+**cron sweep cannot always**, and it is important to be clear about why: it
+is not one expensive query, it is that a tick's total work is a *product* of
+limits that are each individually fine. One event at 300 invitees needs 300
+DMs; at two Discord calls and two or three statements apiece, that is an
+order of magnitude past what one Free-plan invocation is allowed, before the
+other eleven sweeps have run at all.
+
+So the tick takes an explicit allowance (`worker/src/cron/budget.ts`), spends
+it, and stops cleanly when it runs out. Whatever it did not get to stays
+pending in the outbox and the next tick — fifteen minutes later, with a fresh
+allowance — resumes from a stored cursor. Nothing is dropped; it is delivered
+more slowly.
+
+`WORKERS_PLAN` in `worker/wrangler.toml` tells the budget which allowance it
+actually has. **It does not change your plan — it describes it.** Set it to
+`"paid"` only if the Cloudflare account really is on Workers Paid. Claiming
+Paid on a Free account means the tick budgets for twenty times the allowance
+it has and gets killed mid-flight by the platform instead of stopping
+cleanly; claiming Free on a Paid account just makes notifications slower than
+they need to be.
+
+Rough throughput on the Free plan: **~13 DMs per tick, so ~50/hour**, once
+recipients' DM channels are cached (the first DM to a given person costs an
+extra Discord call and an extra statement). That is ample for a friend group.
+It is *not* ample for a 300-invitee event needing an hour's notice — those
+notifications will take several hours to go out. If that matters, move the
+account to Workers Paid and set `WORKERS_PLAN = "paid"`, which raises the
+per-invocation allowance to 1,000 and the tick to a few hundred DMs.
 
 Current numbers: https://developers.cloudflare.com/d1/platform/limits/
 

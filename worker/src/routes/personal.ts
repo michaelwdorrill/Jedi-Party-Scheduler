@@ -50,6 +50,14 @@ function validatePersonalEventInput(body: Partial<PersonalEventInput>): void {
 function assertCompletePersonalEventShape(body: Partial<PersonalEventInput>): void {
   assertString(body.title, 'title', LIMITS.TITLE);
   assertTimezone(body.timezone, 'timezone');
+  assertCoherentSchedule(body);
+}
+
+// A personal event is either recurring with a rule, or one-off with both a
+// start and an end. Shared by POST (which always checks it) and by PATCH
+// (which checks it whenever the request touches the schedule at all), so the
+// two paths cannot disagree about what a valid event looks like.
+function assertCoherentSchedule(body: Partial<PersonalEventInput>): void {
   if (body.isRecurring) {
     if (!body.recurrence) throw new ValidationError('recurrence is required when isRecurring is true');
   } else if (body.startAt == null || body.endAt == null) {
@@ -183,7 +191,16 @@ personalRoutes.patch('/:id', async (c) => {
   // Same pattern as guild events: isRecurring being present is what marks this
   // as a full schedule edit, so partial updates (e.g. just renaming) never
   // clobber the timing fields.
+  //
+  // But a schedule edit has to leave a *coherent* schedule behind, and the
+  // per-field validation above cannot see that: it only checks fields that
+  // are present. `{isRecurring: true}` with no recurrence fell through to
+  // `r === undefined` and wrote is_recurring = 0 with start_at and end_at
+  // nulled -- an active event with no time at all, which is precisely the
+  // shape POST refuses to create. So the same completeness check applies
+  // here, against the schedule this PATCH is actually asking for.
   if (body.isRecurring !== undefined) {
+    assertCoherentSchedule(body);
     add('is_recurring', r ? 1 : 0);
     add('start_at', r ? null : (body.startAt ?? null));
     add('end_at', r ? null : (body.endAt ?? null));
