@@ -191,11 +191,35 @@ own permanent pair and copy the right one into the variables Wrangler reads.
 setx CF_TOKEN_UNCLEOWEN  "token-for-the-uncle-owen-account"
 setx CF_ACCOUNT_UNCLEOWEN "f22e4f3ece3f69c4bd0da97be4f7a3b6"
 
-setx CF_TOKEN_TGATMMAI   "token-for-the-tgatmmai-account"
-setx CF_ACCOUNT_TGATMMAI  "4423ae7ab29989bc318c47c9a9723608"
+setx CF_TOKEN_HOMEBASE   "token-for-the-home-base-account"
+setx CF_ACCOUNT_HOMEBASE "4423ae7ab29989bc318c47c9a9723608"
 ```
 
 A third account is two more variables and no other changes.
+
+**Naming rule: one pair per Cloudflare *account*, named for what the account
+is for — never for the email that owns it, and never for an individual
+project.** `homebase` is a shared account holding several projects
+(auth/SSO plus its tenant apps); every one of them uses
+`CF_TOKEN_HOMEBASE`, not a token of its own. `uncleowen` is this project's
+own account, used only here. A new personal tool added to Home Base reuses
+`CF_TOKEN_HOMEBASE` — it does not get a new pair. A genuinely new Cloudflare
+account (a different outward-facing project, say) gets its own pair, named
+for that account's purpose.
+
+This repo can't write to another project's files, so propagating the
+convention there is manual: drop something like this into that project's
+`CLAUDE.md` —
+
+```markdown
+## Cloudflare credentials
+
+This project deploys into the **<account-name>** Cloudflare account.
+Run `Use-CF <account-name>` before any `wrangler` command — never rely on
+an ambient/default login, since this machine holds credentials for more
+than one Cloudflare account. `Use-CF` and the `CF_TOKEN_*`/`CF_ACCOUNT_*`
+variables are defined in the PowerShell profile, not in any one repo.
+```
 
 **Once, in your PowerShell profile** (`notepad $PROFILE`):
 
@@ -238,6 +262,9 @@ It reads the persisted values directly rather than through `$env:`, so a
 ```powershell
 Use-CF uncleowen
 ```
+
+This project only ever uses `uncleowen` — it is a single, standalone
+Cloudflare account with nothing else deployed to it.
 
 Finally, run `npx wrangler logout` once. That removes the stored OAuth
 credentials, which exist only as a fallback — and a fallback is precisely
