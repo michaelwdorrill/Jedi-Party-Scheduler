@@ -58,6 +58,17 @@ const RECURRING_PAGE_SIZE = 50;
 // reason the recurring scan is.
 const SINGLE_EVENT_PAGE_SIZE = 100;
 
+// A handful of sweeps below scan a table with no per-guild or per-tick
+// bound at all -- "every recently closed poll", "every confirmed
+// multi-winner option", "every group" -- across every guild the Worker
+// serves. Without a LIMIT, a busy multi-guild install can make one of these
+// `.all()` calls read and serialize an unbounded result set into Worker
+// memory *before* the loop below ever consults the budget: the query costs
+// "one query" no matter how many thousands of rows it returns. Capping each
+// at this ceiling, and charging one query for it up front, keeps the read
+// itself inside the same accounting the per-row work already goes through.
+const GLOBAL_SCAN_LIMIT = 200;
+
 // A resolved/cancelled poll's notification obligations are done within a
 // handful of cron ticks (the outbox already dedupes and backs off), so
 // there's no reason to keep re-selecting and re-scanning that row every 15
@@ -393,16 +404,36 @@ async function sweepReminders(env: Env, budget: TickBudget): Promise<void> {
       stoppedEarly = true;
       break;
     }
+    // Whether every recipient this event currently owes a reminder to was
+    // reached, not just the prefix this tick could afford. A page capped at
+    // `limit` and a `limit` of zero both mean "more may be pending, this
+    // tick just couldn't find out" -- either way the cursor must not pass
+    // this event, or a large event's un-sent tail (287 of 300 recipients, in
+    // the reported case) gets skipped past and isn't revisited until the
+    // whole scan wraps back around, roughly a day later at this cadence,
+    // possibly after the reminder's own window has expired.
+    let recipientsSettled = true;
     try {
       const reminder = reminderFor(event.start_at!);
       if (reminder) {
-        const pending = await pendingRecipients(env, event, reminder.type, '', budget.deliveriesAffordable);
+        const limit = budget.deliveriesAffordable;
+        const pending = limit > 0 ? await pendingRecipients(env, event, reminder.type, '', limit) : [];
         await notifyPending(env, budget, pending, event.id, reminder.type, '', (user) =>
           `"${event.title}" ${reminder.render(user)}.\n${eventLink(env, event.id)}`,
         );
+        // `limit` is an optimistic upper bound (it assumes the cheap cached-
+        // channel cost for every recipient), so a real send can exhaust the
+        // budget partway through `pending` even though `pending.length` came
+        // in under `limit`. If that happened, some of `pending` never got a
+        // delivery attempt, so the event is not actually settled either.
+        recipientsSettled = limit > 0 && pending.length < limit && !budget.exhausted;
       }
     } catch (err) {
       console.error(`sweepReminders (single) failed for event ${event.id}:`, err);
+    }
+    if (!recipientsSettled) {
+      stoppedEarly = true;
+      break;
     }
     // Recorded even when the event needed no reminder: it *was* processed,
     // and leaving it out would make the next tick start from it again.
@@ -482,6 +513,19 @@ async function forEachRecurringPage(
       return;
     }
 
+    // Each page runs two more scalable reads beyond the page SELECT itself
+    // -- occurrence overrides and recurrence rules -- and both were
+    // previously free as far as the budget was concerned. A page charged one
+    // query but spent three, so twelve pages (600 recurring events at the
+    // configured per-guild cap) actually cost 36 D1 queries while the budget
+    // believed it had spent 12. Charged here, before either preload runs, so
+    // an exhausted tick stops rather than running work it can't afford and
+    // only noticing afterward.
+    if (!budget.trySpend(2)) {
+      await writeCursorKey(env, cursorName, afterId);
+      return;
+    }
+
     try {
       const pageIds = page.map((e) => e.id);
       const overridesByEvent = await loadOverridesForEvents(env, pageIds);
@@ -495,6 +539,20 @@ async function forEachRecurringPage(
           await handle(event, overridesByEvent.get(event.id) ?? [], rulesByEvent.get(event.id));
         } catch (err) {
           console.error(`recurring sweep failed for event ${event.id}:`, err);
+        }
+        // `handle` can itself run out of budget partway through an event's
+        // occurrences/recipients (a recurring event can carry the same
+        // hundreds-of-invitees fanout a single event can) and simply stop,
+        // the same way notifyPending/notifyEach do. If it left the tick
+        // exhausted, this event cannot be assumed done -- advancing past it
+        // anyway is exactly the single-event cursor bug this budget check
+        // exists to avoid, just for the recurring scan. Not advancing means
+        // the next tick resumes on this same event with a fresh allowance;
+        // whichever recipients already got a notification_log row this pass
+        // are excluded from it the next time around.
+        if (budget.exhausted) {
+          await writeCursorKey(env, cursorName, afterId);
+          return;
         }
         afterId = event.id;
       }
@@ -528,13 +586,14 @@ async function sweepPollDeadlines(env: Env, budget: TickBudget): Promise<void> {
 // deadline sweep above -- notifyOnce's dedupe makes it safe to re-scan all
 // of them every tick rather than track "which ones are new".
 async function sweepSingleWinnerPollNotifications(env: Env, budget: TickBudget): Promise<void> {
-  if (budget.exhausted) return;
+  if (!budget.trySpend(1)) return;
   const { results: polls } = await env.DB.prepare(
     `SELECT * FROM events
      WHERE event_type = 'poll' AND poll_resolution_mode = 'single_winner' AND status IN ('resolved','cancelled')
-       AND updated_at >= ?`,
+       AND updated_at >= ?
+     LIMIT ?`,
   )
-    .bind(terminalHistoryHotCutoff())
+    .bind(terminalHistoryHotCutoff(), GLOBAL_SCAN_LIMIT)
     .all<EventRow>();
 
   for (const event of polls) {
@@ -557,13 +616,14 @@ async function sweepSingleWinnerPollNotifications(env: Env, budget: TickBudget):
 // while the event stays active), so this one is safe to drive off "closed
 // this tick" the same way sweepPollDeadlines is a one-shot state change.
 async function sweepMultiWinnerPollClosedNotifications(env: Env, budget: TickBudget): Promise<void> {
-  if (budget.exhausted) return;
+  if (!budget.trySpend(1)) return;
   const { results: polls } = await env.DB.prepare(
     `SELECT * FROM events
      WHERE event_type = 'poll' AND poll_resolution_mode = 'multi_winner' AND status IN ('resolved','cancelled')
-       AND updated_at >= ?`,
+       AND updated_at >= ?
+     LIMIT ?`,
   )
-    .bind(terminalHistoryHotCutoff())
+    .bind(terminalHistoryHotCutoff(), GLOBAL_SCAN_LIMIT)
     .all<EventRow>();
 
   for (const event of polls) {
@@ -594,13 +654,16 @@ async function sweepMultiWinnerPollClosedNotifications(env: Env, budget: TickBud
 // (checked synchronously in the vote route), independent of the deadline.
 // This sweep notifies just that day's yes-voters, as soon as we notice.
 async function sweepConfirmedMultiWinnerOptions(env: Env, budget: TickBudget): Promise<void> {
-  if (budget.exhausted) return;
+  if (!budget.trySpend(1)) return;
   const { results } = await env.DB.prepare(
     `SELECT epo.id as option_id, epo.event_id, epo.start_at, epo.end_at, e.title, e.guild_id
      FROM event_poll_options epo
      JOIN events e ON e.id = epo.event_id
-     WHERE e.poll_resolution_mode = 'multi_winner' AND epo.confirmed_at IS NOT NULL`,
-  ).all<{ option_id: string; event_id: string; start_at: number; end_at: number; title: string; guild_id: string }>();
+     WHERE e.poll_resolution_mode = 'multi_winner' AND epo.confirmed_at IS NOT NULL
+     LIMIT ?`,
+  )
+    .bind(GLOBAL_SCAN_LIMIT)
+    .all<{ option_id: string; event_id: string; start_at: number; end_at: number; title: string; guild_id: string }>();
 
   for (const opt of results) {
     if (!budget.trySpend(SCAN_COST_PER_EVENT)) return;
@@ -636,16 +699,17 @@ async function sweepConfirmedMultiWinnerOptions(env: Env, budget: TickBudget): P
 // haven't cast a single vote (options mode) or submitted availability
 // (window mode) yet -- people who already responded don't need a nudge.
 async function sweepPollDeadlineReminders(env: Env, budget: TickBudget): Promise<void> {
-  if (budget.exhausted) return;
+  if (!budget.trySpend(1)) return;
   const now = Date.now();
   const windowEnd = now + 24 * HOUR_MS;
 
   const { results: polls } = await env.DB.prepare(
     `SELECT * FROM events
      WHERE event_type = 'poll' AND status = 'active'
-       AND poll_deadline_at IS NOT NULL AND poll_deadline_at >= ? AND poll_deadline_at <= ?`,
+       AND poll_deadline_at IS NOT NULL AND poll_deadline_at >= ? AND poll_deadline_at <= ?
+     LIMIT ?`,
   )
-    .bind(now, windowEnd)
+    .bind(now, windowEnd, GLOBAL_SCAN_LIMIT)
     .all<EventRow>();
 
   for (const poll of polls) {
@@ -698,16 +762,17 @@ const VOICE_INVITE_LEAD_MS = 10 * 60 * 1000;
 // the winning poll option / window availability covering the resolved time),
 // never the full invite list.
 async function sweepVoiceChannelInvites(env: Env, budget: TickBudget): Promise<void> {
-  if (budget.exhausted) return;
+  if (!budget.trySpend(1)) return;
   const now = Date.now();
   const windowEnd = now + VOICE_INVITE_LEAD_MS;
 
   const { results: fixedTimeEvents } = await env.DB.prepare(
     `SELECT * FROM events
      WHERE voice_channel_id IS NOT NULL AND is_recurring = 0 AND status IN ('active','resolved')
-       AND start_at IS NOT NULL AND start_at >= ? AND start_at <= ?`,
+       AND start_at IS NOT NULL AND start_at >= ? AND start_at <= ?
+     LIMIT ?`,
   )
-    .bind(now, windowEnd)
+    .bind(now, windowEnd, GLOBAL_SCAN_LIMIT)
     .all<EventRow>();
 
   for (const event of fixedTimeEvents) {
@@ -742,14 +807,17 @@ async function sweepVoiceChannelInvites(env: Env, budget: TickBudget): Promise<v
     },
   );
 
-  if (budget.exhausted) return;
+  if (!budget.trySpend(1)) return;
 
   // multi_winner polls confirm each day independently, so each confirmed
   // option has its own attendee list (whoever voted yes on that day).
   const { results: multiWinnerPolls } = await env.DB.prepare(
     `SELECT * FROM events
-     WHERE voice_channel_id IS NOT NULL AND event_type = 'poll' AND poll_resolution_mode = 'multi_winner'`,
-  ).all<EventRow>();
+     WHERE voice_channel_id IS NOT NULL AND event_type = 'poll' AND poll_resolution_mode = 'multi_winner'
+     LIMIT ?`,
+  )
+    .bind(GLOBAL_SCAN_LIMIT)
+    .all<EventRow>();
 
   for (const poll of multiWinnerPolls) {
     if (!budget.trySpend(1)) return;
@@ -784,11 +852,13 @@ interface GroupIdleRow {
 // member to plan something. Fires once per idle episode (dedup keyed on the
 // group's last known event time), not on every 15-minute tick.
 async function sweepIdleGroups(env: Env, budget: TickBudget): Promise<void> {
-  if (budget.exhausted) return;
+  if (!budget.trySpend(1)) return;
   const now = Date.now();
   const { results: groups } = await env.DB.prepare(
-    `SELECT id, idle_reminder_days FROM groups`,
-  ).all<GroupIdleRow>();
+    `SELECT id, idle_reminder_days FROM groups LIMIT ?`,
+  )
+    .bind(GLOBAL_SCAN_LIMIT)
+    .all<GroupIdleRow>();
 
   for (const group of groups) {
     if (!budget.trySpend(SCAN_COST_PER_EVENT + 1)) return;

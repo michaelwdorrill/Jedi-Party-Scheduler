@@ -105,6 +105,9 @@ export async function computeBusyBlocksForUsers(
   const confirmedVotesByEvent = await loadConfirmedYesVotesForEvents(
     env,
     eventIds.filter((id) => eventsById.get(id)!.event_type === 'poll'),
+    userIds,
+    fromMs,
+    toMs,
   );
 
   // Every expanded occurrence, for every event and user, counts against one
@@ -136,9 +139,14 @@ export async function computeBusyBlocksForUsers(
 
     if (event.event_type === 'poll') {
       // Only slots that actually got confirmed AND that a given user said yes
-      // to represent a real commitment. Open polls are not commitments.
-      for (const vote of confirmedVotesByEvent.get(eventId) ?? []) {
-        if (vote.start_at > toMs || vote.end_at < fromMs) continue;
+      // to represent a real commitment. Open polls are not commitments. The
+      // loader already filtered these to the requested users and the
+      // requested range, so what's here is exactly the work this request is
+      // charged for -- not every guild member's vote on every confirmed
+      // option, which is what made this path bypass the shared ceiling.
+      const votes = confirmedVotesByEvent.get(eventId) ?? [];
+      spend(votes.length);
+      for (const vote of votes) {
         const blocks = out.get(vote.user_id);
         if (blocks) blocks.push({ startAt: vote.start_at, endAt: vote.end_at });
       }
@@ -149,6 +157,12 @@ export async function computeBusyBlocksForUsers(
 
     if (!event.is_recurring) {
       if (event.start_at != null && event.start_at <= toMs && (event.end_at ?? event.start_at) >= fromMs) {
+        // A non-recurring event contributes one block per relevant requested
+        // user -- the same "occurrence x user" cost a recurring event's
+        // expansion is charged below, so it has to spend from the same
+        // ceiling rather than being free just because there's nothing to
+        // expand.
+        spend(users.length);
         for (const userId of users) {
           out.get(userId)?.push({ startAt: event.start_at, endAt: event.end_at ?? event.start_at });
         }
@@ -201,23 +215,38 @@ interface ConfirmedVoteRow {
 }
 
 // Bulk "who confirmed yes on a locked-in poll option" lookup, chunked by
-// event id. Filtering by event id alone (rather than also by user id) keeps
-// this to one query per <=80-event chunk regardless of how many users were
-// requested -- a poll's own voter count is small, so reading every voter for
-// these events and filtering to the requested users in memory is cheap.
+// event id.
+//
+// Filtered in SQL by the requested user IDs and the requested time range, not
+// just by event ID. A confirmed multi-winner option can carry every guild
+// member's vote -- up to the configured 300 invitees -- and the caller only
+// ever wants the up-to-25 users it asked about. Reading every voter and
+// discarding the rest in memory meant a maximal poll topology (17 polls x 50
+// confirmed options x 300 voters) loaded 255,000 rows before any filtering,
+// and the discarded rows never touched the occurrence budget at all -- so the
+// bypass was both a memory/row-volume problem and a budget-accounting one.
 async function loadConfirmedYesVotesForEvents(
   env: Env,
   eventIds: string[],
+  userIds: string[],
+  fromMs: number,
+  toMs: number,
 ): Promise<Map<string, ConfirmedVoteRow[]>> {
   const map = new Map<string, ConfirmedVoteRow[]>();
-  for (const chunk of chunkIds(eventIds)) {
+  if (eventIds.length === 0 || userIds.length === 0) return map;
+  // Reserve room for the requested-user list and the two range bounds
+  // alongside the chunked event IDs, so this never risks D1's per-statement
+  // bound-parameter ceiling even at the maximum 25 requested users.
+  for (const chunk of chunkIds(eventIds, userIds.length + 2)) {
     const { results } = await env.DB.prepare(
       `SELECT o.event_id, v.user_id, o.start_at, o.end_at
        FROM event_poll_options o
        JOIN event_poll_votes v ON v.option_id = o.id
-       WHERE o.event_id IN (${placeholders(chunk.length)}) AND o.confirmed_at IS NOT NULL AND v.vote = 'yes'`,
+       WHERE o.event_id IN (${placeholders(chunk.length)}) AND o.confirmed_at IS NOT NULL AND v.vote = 'yes'
+         AND v.user_id IN (${placeholders(userIds.length)})
+         AND o.start_at <= ? AND o.end_at >= ?`,
     )
-      .bind(...chunk)
+      .bind(...chunk, ...userIds, toMs, fromMs)
       .all<ConfirmedVoteRow>();
     for (const row of results) {
       if (!map.has(row.event_id)) map.set(row.event_id, []);

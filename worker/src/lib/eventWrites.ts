@@ -75,35 +75,24 @@ async function resolveInviteeUserIds(
   userIds: string[],
   groupIds: string[],
 ): Promise<ResolvedInvitee[]> {
-  const out = new Map<string, ResolvedInvitee>();
-
-  if (userIds.length > 0) {
-    // Direct invitees are organizer-chosen IDs -- validate every one is a
-    // current active member of this guild and reject the whole request if
-    // not, rather than silently inviting (and DM-notifying) an outsider.
-    const active = await filterActiveGuildMembers(env, guildId, userIds);
-    const invalid = userIds.filter((id) => !active.has(id));
-    if (invalid.length > 0) {
-      throw new ValidationError('One or more invited users are not current members of this server');
-    }
-    for (const userId of userIds) {
-      out.set(userId, { userId, invitedVia: 'individual', sourceGroupId: null });
-    }
-  }
+  // `source` is `null` for a directly-chosen invitee and the winning group ID
+  // for a group-derived one. Built up front, before any membership check
+  // runs, so direct and group-derived candidates go through
+  // filterActiveGuildMembers exactly once as a single combined set rather
+  // than twice. Each call can spend up to MAX_LIVE_REVALIDATIONS_PER_REQUEST
+  // live Discord checks (and the D1 writeback for their results) on its
+  // own -- two calls at the configured maxima (100 direct + 200 group
+  // invitees, both with 20 stale rows) doubled that cost for no reason, since
+  // nothing about the check itself differs between the two sources.
+  const source = new Map<string, string | null>();
+  for (const userId of userIds) source.set(userId, null);
 
   if (groupIds.length > 0) {
-    // One roster query per chunk of groups, not one per group -- and one
-    // membership filter over the combined candidate set, not one per group.
-    //
-    // The old shape cost (1 roster + ceil(members/80) membership chunks) per
-    // group. At the configured maxima -- 50 groups of 200 members -- that is
-    // 200 D1 statements for a single request, four times the Free plan's
-    // whole per-invocation allowance. The 300-resolved-invitee cap did not
-    // help: 50 groups can hold the *same* 200 members, so the deduplicated
-    // result stays legal while every one of those queries still runs.
-    //
-    // Deduplication now happens before the membership check rather than
-    // after, so a user in twenty of the requested groups is verified once.
+    // One roster query per chunk of groups, not one per group. The old shape
+    // cost (1 roster + ceil(members/80) membership chunks) per group. At the
+    // configured maxima -- 50 groups of 200 members -- that is 200 D1
+    // statements for a single request, four times the Free plan's whole
+    // per-invocation allowance.
     const rosters: { user_id: string; group_id: string }[] = [];
     for (const chunk of chunkIds(groupIds, 1)) {
       const { results } = await env.DB.prepare(
@@ -117,31 +106,44 @@ async function resolveInviteeUserIds(
     }
 
     // First group that named a user wins as the attribution source, matching
-    // the previous iteration order.
-    const sourceByUser = new Map<string, string>();
+    // the previous iteration order. A direct invitee (already in `source`
+    // with a `null` source) is never reattributed to a group.
     for (const row of rosters) {
-      if (!out.has(row.user_id) && !sourceByUser.has(row.user_id)) sourceByUser.set(row.user_id, row.group_id);
+      if (!source.has(row.user_id)) source.set(row.user_id, row.group_id);
     }
+  }
 
-    // Admission check before the membership work, not after it. The cap is on
-    // the resolved list, and the candidate set can only shrink from here
-    // (membership filtering removes people), so a candidate set already over
-    // the cap can never come back under it -- there is no reason to pay for
-    // verifying it first.
-    if (out.size + sourceByUser.size > LIMITS.MAX_RESOLVED_INVITEES) {
-      throw new ValidationError(`Resolved invite list is too large (max ${LIMITS.MAX_RESOLVED_INVITEES})`);
-    }
+  // Admission check before the membership work, not after it. The cap is on
+  // the resolved list, and the candidate set can only shrink from here
+  // (membership filtering removes people), so a candidate set already over
+  // the cap can never come back under it -- there is no reason to pay for
+  // verifying it first.
+  if (source.size > LIMITS.MAX_RESOLVED_INVITEES) {
+    throw new ValidationError(`Resolved invite list is too large (max ${LIMITS.MAX_RESOLVED_INVITEES})`);
+  }
 
-    // Group-derived invitees can drift out of guild membership over time
-    // without anyone editing the group -- filter those out rather than
-    // reject, since the organizer didn't choose them individually.
-    const candidates = [...sourceByUser.keys()];
-    const active = await filterActiveGuildMembers(env, guildId, candidates);
-    for (const userId of candidates) {
-      if (active.has(userId)) {
-        out.set(userId, { userId, invitedVia: 'group', sourceGroupId: sourceByUser.get(userId)! });
-      }
-    }
+  const active = await filterActiveGuildMembers(env, guildId, [...source.keys()]);
+
+  // Direct invitees are organizer-chosen IDs -- validate every one is a
+  // current active member of this guild and reject the whole request if not,
+  // rather than silently inviting (and DM-notifying) an outsider.
+  const invalidDirect = userIds.filter((id) => !active.has(id));
+  if (invalidDirect.length > 0) {
+    throw new ValidationError('One or more invited users are not current members of this server');
+  }
+
+  // Group-derived invitees can drift out of guild membership over time
+  // without anyone editing the group -- filter those out rather than reject,
+  // since the organizer didn't choose them individually.
+  const out = new Map<string, ResolvedInvitee>();
+  for (const [userId, groupId] of source) {
+    if (!active.has(userId)) continue;
+    out.set(
+      userId,
+      groupId === null
+        ? { userId, invitedVia: 'individual', sourceGroupId: null }
+        : { userId, invitedVia: 'group', sourceGroupId: groupId },
+    );
   }
 
   if (out.size > LIMITS.MAX_RESOLVED_INVITEES) {
@@ -359,11 +361,17 @@ const INVITE_COLUMNS = ['id', 'event_id', 'user_id', 'invited_via', 'source_grou
 // key and abort the whole batch with an opaque error instead of the intended
 // no-op plus friendly quota message. Update paths pass false -- their parent
 // is already known to exist, and the extra EXISTS would just be noise.
+// `extraGuard` additionally conditions a guarded write on more than the
+// parent existing -- the recurring-conversion PATCH path uses it to require
+// `is_recurring = 1`, so a quota claim that failed earlier in the very same
+// batch (see updateEvent) makes the invite writes a no-op too, not just the
+// event row itself.
 function inviteStatements(
   env: Env,
   eventId: string,
   invitees: ResolvedInvitee[],
   guarded: boolean,
+  extraGuard = '',
 ): D1PreparedStatement[] {
   const now = Date.now();
   const conflict = 'ON CONFLICT(event_id, user_id) DO NOTHING';
@@ -385,7 +393,7 @@ function inviteStatements(
       ).bind(...values);
     }
     return env.DB.prepare(
-      conditionalRowsSql('event_invites', INVITE_COLUMNS, chunk.length, 'events', conflict),
+      conditionalRowsSql('event_invites', INVITE_COLUMNS, chunk.length, 'events', conflict, extraGuard),
     ).bind(...values, eventId);
   });
 }
@@ -432,10 +440,16 @@ function pollOptionStatements(
 // current rows and computing the removals turns it into a positive IN list,
 // which chunks correctly -- and is usually empty, since most edits add people
 // rather than remove them.
+// `guard`, when passed, additionally conditions both the removals and the
+// additions on that SQL fragment holding for this event row -- used by the
+// recurring-conversion PATCH path so a failed quota claim earlier in the
+// same batch leaves invite membership untouched too, not just the event's
+// own columns.
 async function replaceInviteStatements(
   env: Env,
   eventId: string,
   invitees: ResolvedInvitee[],
+  guard: string | null = null,
 ): Promise<D1PreparedStatement[]> {
   const { results: current } = await env.DB.prepare(
     `SELECT user_id FROM event_invites WHERE event_id = ?`,
@@ -447,14 +461,23 @@ async function replaceInviteStatements(
   const remove = current.map((r) => r.user_id).filter((id) => !keep.has(id));
 
   const statements: D1PreparedStatement[] = [];
-  for (const chunk of chunkIds(remove, 1)) {
-    statements.push(
-      env.DB.prepare(
-        `DELETE FROM event_invites WHERE event_id = ? AND user_id IN (${placeholders(chunk.length)})`,
-      ).bind(eventId, ...chunk),
-    );
+  for (const chunk of chunkIds(remove, guard ? 2 : 1)) {
+    if (guard) {
+      statements.push(
+        env.DB.prepare(
+          `DELETE FROM event_invites WHERE event_id = ? AND user_id IN (${placeholders(chunk.length)})
+           AND EXISTS (SELECT 1 FROM events WHERE id = ? AND ${guard})`,
+        ).bind(eventId, ...chunk, eventId),
+      );
+    } else {
+      statements.push(
+        env.DB.prepare(
+          `DELETE FROM event_invites WHERE event_id = ? AND user_id IN (${placeholders(chunk.length)})`,
+        ).bind(eventId, ...chunk),
+      );
+    }
   }
-  statements.push(...inviteStatements(env, eventId, invitees, false));
+  statements.push(...inviteStatements(env, eventId, invitees, !!guard, guard ? ` AND ${guard}` : ''));
   return statements;
 }
 
@@ -672,6 +695,28 @@ export async function updateEvent(
 
   values.push(eventId);
 
+  // The recurring-slot admission check, folded directly into the main
+  // UPDATE's WHERE clause rather than claimed as an earlier, separately
+  // committed statement. A standalone claim statement can succeed and then
+  // never reach the batch below -- a thrown validation error, a Discord
+  // lookup that times out, a D1 read failure -- leaving the event marked
+  // recurring with its old one-off schedule, no recurrence rule, none of the
+  // requested edit applied, and a quota slot spent by a request that
+  // reported failure. Worse, if the Worker is terminated in that exact gap,
+  // no catch block ever runs to hand the slot back.
+  //
+  // Guarding the UPDATE itself removes the gap entirely: the claim and the
+  // edit are the same statement, inside the same D1 batch (one transaction)
+  // as everything else the PATCH touches. `results[0].meta.changes === 0`
+  // after the batch is how a failed claim is detected -- and because it's
+  // inside the transaction, nothing else in the batch needs a separate
+  // rollback path either.
+  const quotaGuardSql = convertingToRecurring
+    ? ` AND is_recurring = 0
+        AND (SELECT COUNT(*) FROM events WHERE guild_id = ? AND status != 'cancelled' AND is_recurring = 1) < ?`
+    : '';
+  const quotaGuardParams = convertingToRecurring ? [guildId, LIMITS.MAX_RECURRING_EVENTS_PER_GUILD] : [];
+
   // Invitee resolution (and possible rejection -- F-05) happens before any
   // statement is queued, same reasoning as createEventWithInvites: a request
   // that's going to fail validation shouldn't partially apply first.
@@ -684,7 +729,10 @@ export async function updateEvent(
   // atomic -- a single request editing both, say, the schedule and the poll
   // options can't leave the poll options replaced but the schedule untouched.
   const statements: D1PreparedStatement[] = [
-    env.DB.prepare(`UPDATE events SET ${setClauses.join(', ')} WHERE id = ?`).bind(...values),
+    env.DB.prepare(`UPDATE events SET ${setClauses.join(', ')} WHERE id = ?${quotaGuardSql}`).bind(
+      ...values,
+      ...quotaGuardParams,
+    ),
   ];
 
   if (input.isRecurring !== undefined) {
@@ -769,62 +817,24 @@ export async function updateEvent(
   }
 
   if (invitees) {
-    statements.push(...(await replaceInviteStatements(env, eventId, invitees)));
+    // Guarded on `is_recurring = 1` when this PATCH is also converting the
+    // event to recurring, so a tripped quota guard on the main UPDATE above
+    // (see quotaGuardSql) leaves invite membership untouched in the same
+    // batch, not just the event row itself -- matching what throwing before
+    // ever building a batch used to guarantee.
+    statements.push(
+      ...(await replaceInviteStatements(env, eventId, invitees, convertingToRecurring ? 'is_recurring = 1' : null)),
+    );
   }
 
-  // The recurring-slot claim, taken here and nowhere earlier.
-  //
-  // It has to be its own statement rather than a guard inside the batch,
-  // because the batch's other statements -- new invitees, replaced poll
-  // options, window availability -- are not conditioned on it, so a guard
-  // that failed inside the batch would still commit all of those and then
-  // report failure.
-  //
-  // But taking it early was its own bug: everything above can throw
-  // (a target who is not a guild member, Discord temporarily unverifiable,
-  // more stale memberships than one request can revalidate, a D1 read
-  // failure), and every one of those exits the function without reaching the
-  // try/catch below. The claim would already be committed, leaving the event
-  // marked recurring, with its old one-off start/end still on it, no
-  // recurrence rule, none of the requested edit applied -- and a quota slot
-  // consumed by a request that returned an error.
-  //
-  // So it goes last: after all validation, all resolution, and all statement
-  // construction. The only thing that can still fail after this point is the
-  // batch itself, which is exactly the failure the compensating update below
-  // covers.
-  if (convertingToRecurring) {
-    const claimed = await env.DB.prepare(
-      `UPDATE events SET is_recurring = 1, updated_at = ?
-       WHERE id = ? AND is_recurring = 0
-         AND (SELECT COUNT(*) FROM events WHERE guild_id = ? AND status != 'cancelled' AND is_recurring = 1) < ?`,
-    )
-      .bind(now, eventId, guildId, LIMITS.MAX_RECURRING_EVENTS_PER_GUILD)
-      .run();
-    if (claimed.meta.changes === 0) {
-      throw new ValidationError('This server has reached its limit of recurring events');
-    }
-  }
-
-  try {
-    await env.DB.batch(statements);
-  } catch (err) {
-    // The batch is atomic, so nothing in it applied -- but the recurring-slot
-    // claim above happened outside it and did. Hand the slot back so a failed
-    // edit leaves the event exactly as it was found.
-    //
-    // Guarded on `updated_at = now`, which is the value the claim itself
-    // wrote: it acts as a version token, so if another request has edited
-    // this event in between, its change is not silently reverted. An
-    // unconditional `SET is_recurring = 0` would clobber a concurrent
-    // legitimate conversion.
-    if (convertingToRecurring) {
-      await env.DB.prepare(
-        `UPDATE events SET is_recurring = 0 WHERE id = ? AND is_recurring = 1 AND updated_at = ?`,
-      )
-        .bind(eventId, now)
-        .run();
-    }
-    throw err;
+  // One batch, one transaction: the quota admission check lives in the main
+  // UPDATE's WHERE clause above, not as an earlier separately committed
+  // statement, so there is no window between "slot claimed" and "batch
+  // applied" for a thrown error or a killed Worker to land in. If the guard
+  // tripped, every statement in this batch -- including the ones above --
+  // affected zero rows, so the failed request has changed nothing at all.
+  const results = await env.DB.batch(statements);
+  if (convertingToRecurring && results[0].meta.changes === 0) {
+    throw new ValidationError('This server has reached its limit of recurring events');
   }
 }

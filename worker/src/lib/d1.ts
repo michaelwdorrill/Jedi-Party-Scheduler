@@ -92,15 +92,20 @@ export function conditionalRowsSql(
   rowCount: number,
   guardTable: string,
   onConflict = '',
+  extraGuard = '',
 ): string {
   const arms = Array.from({ length: rowCount }, (_, i) =>
     i === 0
       ? `SELECT ${columns.map((c) => `? AS ${c}`).join(', ')}`
       : `SELECT ${columns.map(() => '?').join(', ')}`,
   ).join(' UNION ALL ');
+  // `extraGuard` lets a caller condition the write on more than the parent
+  // row's mere existence -- e.g. an UPDATE-path guard where the parent
+  // always exists, but a sibling admission check (a quota claim taken
+  // earlier in the same batch) must also have succeeded.
   return `INSERT INTO ${table} (${columns.join(', ')})
      SELECT * FROM (${arms})
-     WHERE EXISTS (SELECT 1 FROM ${guardTable} WHERE id = ?)
+     WHERE EXISTS (SELECT 1 FROM ${guardTable} WHERE id = ?${extraGuard})
      ${onConflict}`;
 }
 
