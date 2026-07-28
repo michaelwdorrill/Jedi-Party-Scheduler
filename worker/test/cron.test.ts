@@ -255,6 +255,77 @@ describe('recurring sweep resilience', () => {
     expect(previous).toBe(40);
   });
 
+  // F-04-C / F-14 from the Pass 7 review: a single event's recipient list can
+  // be larger than one tick can afford, and the fix under test is that the
+  // event-level cursor must not step past an event until every recipient it
+  // currently owes a reminder to has one -- not just the prefix one tick
+  // could reach. The old behaviour sent ~13 of an event's 300 recipients,
+  // recorded the whole event as "processed", and moved on to the next one;
+  // the stranded 287 weren't revisited until the scan wrapped back around,
+  // roughly a day later at this cadence, likely after their window expired.
+  it('drains one event before letting the cursor reach the next, even with many recipients each', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+
+    const eventIds = ['ev-0', 'ev-1', 'ev-2'];
+    const invitedPerEvent = 20;
+    // pendingRecipients also includes the organizer as an implicit recipient
+    // (they get reminded about their own event too), so the true per-event
+    // total is one more than the invite list.
+    const totalPerEvent = invitedPerEvent + 1;
+
+    for (const [i, eventId] of eventIds.entries()) {
+      // Staggered by a minute each so ORDER BY start_at is deterministic,
+      // and all inside the same reminder_1h bucket.
+      await seedEvent(db, { id: eventId, organizerId: 'organizer', startAt: Date.now() + 30 * 60_000 + i * 60_000 });
+      for (let u = 0; u < invitedPerEvent; u++) {
+        const userId = `${eventId}-u${u}`;
+        await seedUser(db, userId);
+        await seedMembership(db, userId, 'guild-1');
+        await seedInvite(db, eventId, userId);
+      }
+    }
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    const notifiedCount = async (eventId: string): Promise<number> => {
+      const row = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM notification_log
+           WHERE event_id = ? AND notification_type = 'reminder_1h' AND delivered_at IS NOT NULL`,
+        )
+        .bind(eventId)
+        .first<{ n: number }>();
+      return row?.n ?? 0;
+    };
+
+    for (let tick = 0; tick < 30; tick++) {
+      await runReminderSweep(env);
+
+      // The invariant under test: as long as an earlier event (by start_at)
+      // still has an un-notified recipient, no later event may have been
+      // touched at all. A cursor that skips ahead after only a partial send
+      // would show a later event with deliveries while an earlier one is
+      // still incomplete.
+      for (let i = 0; i < eventIds.length - 1; i++) {
+        const earlierDone = (await notifiedCount(eventIds[i])) === totalPerEvent;
+        if (!earlierDone) {
+          for (let j = i + 1; j < eventIds.length; j++) {
+            expect(await notifiedCount(eventIds[j])).toBe(0);
+          }
+        }
+      }
+    }
+
+    // And every recipient of every event was eventually reached -- the
+    // backlog was worked off completely, not just nibbled at the front.
+    for (const eventId of eventIds) {
+      expect(await notifiedCount(eventId)).toBe(totalPerEvent);
+    }
+  });
+
   it('keeps going when one event has an unusable recurrence rule', async () => {
     const { db, env } = setup();
     await seedGuild(db);

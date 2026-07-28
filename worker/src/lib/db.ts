@@ -223,23 +223,45 @@ export async function filterActiveGuildMembers(env: Env, guildId: string, userId
     );
   }
 
+  // Discord lookups still happen one at a time -- each is a distinct outbound
+  // subrequest with no batch form -- but the D1 writeback for the results
+  // does not need to be. Collecting outcomes and writing them back in
+  // set-based chunks turns up to MAX_LIVE_REVALIDATIONS_PER_REQUEST individual
+  // UPDATE statements into at most two, regardless of how many rows were
+  // revalidated.
+  const confirmed: string[] = [];
+  const departed: string[] = [];
   for (const row of stale) {
     const status = await checkGuildMembership(env.DISCORD_BOT_TOKEN, guildId, row.user_id);
     if (status === 'member') {
-      await env.DB.prepare(`UPDATE user_guild_membership SET verified_at = ? WHERE user_id = ? AND guild_id = ?`)
-        .bind(Date.now(), row.user_id, guildId)
-        .run();
+      confirmed.push(row.user_id);
       active.add(row.user_id);
     } else if (status === 'not_member') {
-      await env.DB.prepare(
-        `UPDATE user_guild_membership SET is_member = 0, verified_at = ? WHERE user_id = ? AND guild_id = ?`,
-      )
-        .bind(Date.now(), row.user_id, guildId)
-        .run();
+      departed.push(row.user_id);
     } else if (now - row.verified_at <= MEMBERSHIP_GRACE_MS) {
       active.add(row.user_id);
     }
   }
+
+  const writeNow = Date.now();
+  const writes: D1PreparedStatement[] = [];
+  for (const chunk of chunkIds(confirmed, 1)) {
+    writes.push(
+      env.DB.prepare(
+        `UPDATE user_guild_membership SET verified_at = ?
+         WHERE guild_id = ? AND user_id IN (${placeholders(chunk.length)})`,
+      ).bind(writeNow, guildId, ...chunk),
+    );
+  }
+  for (const chunk of chunkIds(departed, 1)) {
+    writes.push(
+      env.DB.prepare(
+        `UPDATE user_guild_membership SET is_member = 0, verified_at = ?
+         WHERE guild_id = ? AND user_id IN (${placeholders(chunk.length)})`,
+      ).bind(writeNow, guildId, ...chunk),
+    );
+  }
+  if (writes.length > 0) await env.DB.batch(writes);
 
   return active;
 }
