@@ -39,14 +39,17 @@ function membershipListCutoff(): number {
   return Date.now() - MEMBERSHIP_GRACE_MS;
 }
 
-function parseRangeQuery(c: { req: { query: (k: string) => string | undefined } }): { from: number; to: number } {
+function parseRangeQuery(
+  c: { req: { query: (k: string) => string | undefined } },
+  maxRangeMs: number = LIMITS.MAX_QUERY_RANGE_MS,
+): { from: number; to: number } {
   const from = Number(c.req.query('from'));
   const to = Number(c.req.query('to'));
   if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) {
     throw new ValidationError('from and to (unix ms) are required');
   }
   if (to <= from) throw new ValidationError('to must be after from');
-  if (to - from > LIMITS.MAX_QUERY_RANGE_MS) throw new ValidationError('from/to range is too large');
+  if (to - from > maxRangeMs) throw new ValidationError('from/to range is too large');
   return { from, to };
 }
 
@@ -65,7 +68,10 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
   const guildId = c.req.param('guildId');
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
-  const { from, to } = parseRangeQuery(c);
+  // Deliberately a much shorter window than the calendar's: free/busy cost is
+  // users x events x occurrences, so the range is one of the factors that has
+  // to stay small rather than merely finite.
+  const { from, to } = parseRangeQuery(c, LIMITS.MAX_FREE_BUSY_RANGE_MS);
 
   const requested = assertStringArray(
     (c.req.query('user_ids') ?? '')
@@ -253,7 +259,14 @@ guildRoutes.get('/:guildId/events', async (c) => {
        ON mw.event_id = e.id AND mw.confirmed_at IS NOT NULL AND mw.start_at <= ? AND mw.end_at >= ?
      WHERE e.guild_id = ? AND (e.organizer_id = ? OR i.user_id IS NOT NULL)
        AND (
-         e.is_recurring = 1
+         -- Only *active* recurring series. A cancelled series has no
+         -- occurrences to show, but this branch used to admit it before any
+         -- status check, so every cancelled recurring event a guild had ever
+         -- created was reloaded and re-expanded on every calendar view until
+         -- the 90-day purge eventually reached it -- and cancelled rows are
+         -- exempt from the active-event quota, so they could be created far
+         -- faster than they were purged.
+         (e.is_recurring = 1 AND e.status = 'active')
          OR (e.event_type = 'poll' AND e.poll_resolution_mode = 'multi_winner' AND (e.status = 'active' OR mw.id IS NOT NULL))
          OR (
            e.event_type = 'poll' AND e.poll_resolution_mode != 'multi_winner' AND e.status != 'resolved'

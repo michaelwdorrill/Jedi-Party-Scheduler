@@ -21,11 +21,21 @@ export const DEFAULT_CHUNK_BUDGET = 80;
 // within the per-statement parameter budget. Returns an empty array for an
 // empty input, so callers can `for (const chunk of chunkIds(ids))` without a
 // separate emptiness check -- the loop body simply never runs.
+//
+// Deliberately de-duplicates first. Every caller passes a list of row
+// identifiers where a repeat is meaningless to the query but not free: a
+// caller that collects IDs from a join (e.g. free/busy, which sees one row
+// per event *per relevant user*) can hand over the same event ID dozens of
+// times, and without this the chunker faithfully turns those duplicates into
+// real extra queries -- 100 users sharing 100 events became 125 recurrence
+// queries instead of 2. Normalising here rather than at each call site means
+// a future loader can't reintroduce that by forgetting to.
 export function chunkIds<T>(ids: readonly T[], reserved = 0): T[][] {
   const size = Math.max(1, Math.min(DEFAULT_CHUNK_BUDGET, D1_MAX_BIND_PARAMS - reserved) );
+  const unique = [...new Set(ids)];
   const out: T[][] = [];
-  for (let i = 0; i < ids.length; i += size) {
-    out.push(ids.slice(i, i + size) as T[]);
+  for (let i = 0; i < unique.length; i += size) {
+    out.push(unique.slice(i, i + size) as T[]);
   }
   return out;
 }

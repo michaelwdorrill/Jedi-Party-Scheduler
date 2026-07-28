@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { deliverThroughOutbox, LEASE_MS, type DmRecipient } from '../src/lib/outbox';
+import { deliverThroughOutbox, reapExhaustedDeliveries, LEASE_MS, type DmRecipient } from '../src/lib/outbox';
 import { DISCORD_FETCH_TIMEOUT_MS, sendBotDm } from '../src/lib/discord';
 import {
   DM_CHANNEL_RULE,
@@ -226,9 +226,32 @@ describe('deliverThroughOutbox', () => {
       await db.prepare(`UPDATE notification_log SET next_attempt_at = NULL WHERE user_id = ?`).bind('u1').run();
     }
 
+    // Attempts stop on their own -- the claim excludes a row that has used up
+    // its budget -- but marking it terminal is the reaper's job now, so that
+    // the delivery path never pays to read a row it isn't going to claim.
+    expect(countSends(fetchStub)).toBeLessThanOrEqual(8);
+    expect((await logRow(db))?.failed_at).toBeNull();
+
+    await reapExhaustedDeliveries(env);
+
     const row = await logRow(db);
     expect(row?.failed_at).not.toBeNull();
+    expect(row?.delivered_at).toBeNull();
     expect(countSends(fetchStub)).toBeLessThanOrEqual(8);
+  });
+
+  it('the reaper leaves rows that still have attempts left alone', async () => {
+    const { db, env } = await seedOutboxFixture();
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(503)]);
+
+    await deliverThroughOutbox(env, 'notification_log', KEY, recipient, 'hi');
+    await reapExhaustedDeliveries(env);
+
+    // One failed attempt out of eight is a row that should still be retried,
+    // not one to give up on.
+    const row = await logRow(db);
+    expect(row?.failed_at).toBeNull();
+    expect(row?.delivered_at).toBeNull();
   });
 
   it('does not let an unexpired lease be stolen', async () => {

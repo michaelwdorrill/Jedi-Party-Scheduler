@@ -12,12 +12,12 @@ import { newId } from './ids';
 // introduced the mirror-image problem: a pending row is retryable, and two
 // ticks racing on the same pending row would both send it.
 //
-// So each attempt takes a *lease*: the claimant writes its own token, reads
-// it back, and only proceeds if what came back is its own. Two callers can
-// both satisfy the UPDATE's WHERE clause and both see changes = 1 -- last
-// write wins -- but only one of them can read its own token back afterwards.
-// The lease expires on its own so a worker that dies mid-send doesn't strand
-// the row forever.
+// So each attempt takes a *lease*, taken by the single upsert in claim()
+// below. Because the whole claim is one statement, exclusion comes from the
+// database serialising it rather than from a read-back check: the loser's
+// WHERE clause no longer matches, so it returns nothing and leaves without
+// sending. The lease expires on its own so a worker that dies mid-send
+// doesn't strand the row forever.
 
 export interface DmRecipient {
   id: string;
@@ -38,120 +38,141 @@ const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000;
 // A notification that hasn't got through after this many tries isn't going to.
 // Spread across the doubling backoff above, this spans roughly a day and a
 // half before the row is marked permanently failed.
-const MAX_DELIVERY_ATTEMPTS = 8;
+export const MAX_DELIVERY_ATTEMPTS = 8;
 
 function backoffFor(attempt: number): number {
   return Math.min(BASE_BACKOFF_MS * 2 ** Math.max(0, attempt - 1), MAX_BACKOFF_MS);
 }
 
-interface OutboxRow {
-  id: string;
-  delivered_at: number | null;
-  failed_at: number | null;
-  attempt_count: number;
-  claimed_until: number | null;
-  next_attempt_at: number | null;
-}
-
 // The set of columns that uniquely identify one logical notification. Both
-// tables' UNIQUE constraints are exactly these columns, which is what makes
-// the INSERT below a safe claim: a concurrent inserter loses on the
-// constraint rather than creating a duplicate.
+// tables' UNIQUE constraints are exactly these columns, which is what lets
+// claim() below be a single upsert: a concurrent claimant collides on the
+// constraint and takes the DO UPDATE branch rather than creating a duplicate.
 export type OutboxKey = Record<string, string | number>;
 
+export type OutboxTable = 'notification_log' | 'group_nudge_log';
+
+// Takes the lease in one statement.
+//
+// This used to be three or four: SELECT the row, INSERT or UPDATE it, then
+// SELECT again to check whose token survived. That was correct but it cost
+// two D1 queries for *every candidate considered*, including the great
+// majority that are already delivered and get rejected. At an event's
+// 300-invitee maximum that was ~600 queries in a cron tick whose Free-plan
+// allowance is fifty -- and the delivery budget could not prevent it, because
+// the spend happened before the budget was consulted.
+//
+// The upsert collapses all of it. The ON CONFLICT branch's WHERE clause is
+// exactly the old sequence of rejection checks -- terminal, backing off,
+// leased elsewhere, out of attempts -- so a row that fails any of them is
+// simply not updated and RETURNING yields nothing. Winning the race and
+// learning that you won are now the same operation, which also removes the
+// read-back window the old version needed to paper over.
+//
 // `table` and the key column names are compile-time constants from this
 // codebase -- never request data -- so interpolating them is not an injection
 // surface. Every *value* is still bound.
 async function claim(
   env: Env,
-  table: string,
+  table: OutboxTable,
   key: OutboxKey,
   token: string,
 ): Promise<{ id: string; attempt: number } | null> {
   const columns = Object.keys(key);
   const values = Object.values(key);
-  const where = columns.map((col) => `${col} = ?`).join(' AND ');
   const now = Date.now();
 
-  const existing = await env.DB.prepare(
-    `SELECT id, delivered_at, failed_at, attempt_count, claimed_until, next_attempt_at
-     FROM ${table} WHERE ${where}`,
+  const { results } = await env.DB.prepare(
+    `INSERT INTO ${table} (id, ${columns.join(', ')}, sent_at, attempt_count, claim_token, claimed_until)
+     VALUES (?, ${columns.map(() => '?').join(', ')}, ?, 1, ?, ?)
+     ON CONFLICT(${columns.join(', ')}) DO UPDATE SET
+       claim_token = excluded.claim_token,
+       claimed_until = excluded.claimed_until,
+       sent_at = excluded.sent_at,
+       attempt_count = ${table}.attempt_count + 1,
+       next_attempt_at = NULL
+     WHERE ${table}.delivered_at IS NULL
+       AND ${table}.failed_at IS NULL
+       AND ${table}.attempt_count < ?
+       AND (${table}.claimed_until IS NULL OR ${table}.claimed_until < ?)
+       AND (${table}.next_attempt_at IS NULL OR ${table}.next_attempt_at <= ?)
+     RETURNING id, attempt_count`,
   )
-    .bind(...values)
-    .first<OutboxRow>();
+    .bind(newId(), ...values, now, token, now + LEASE_MS, MAX_DELIVERY_ATTEMPTS, now, now)
+    .all<{ id: string; attempt_count: number }>();
 
-  if (!existing) {
-    const id = newId();
-    try {
-      await env.DB.prepare(
-        `INSERT INTO ${table} (id, ${columns.join(', ')}, sent_at, attempt_count, claim_token, claimed_until)
-         VALUES (?, ${columns.map(() => '?').join(', ')}, ?, 1, ?, ?)`,
-      )
-        .bind(id, ...values, now, token, now + LEASE_MS)
-        .run();
-      return { id, attempt: 1 };
-    } catch (err) {
-      // A UNIQUE violation means a concurrent invocation inserted the same
-      // claim between our SELECT and this INSERT -- that one owns the
-      // attempt. Any other failure (D1 outage, schema drift, a bug) must not
-      // be swallowed the same way.
-      const message = (err as Error).message ?? '';
-      if (message.includes('UNIQUE constraint failed')) return null;
-      console.error(`outbox insert failed for ${table} ${JSON.stringify(key)}:`, err);
-      throw err;
+  const row = results[0];
+  return row ? { id: row.id, attempt: row.attempt_count } : null;
+}
+
+// Rows that have used up MAX_DELIVERY_ATTEMPTS stop being claimable (the
+// WHERE above excludes them) but nothing in the delivery path marks them
+// terminal any more, since that path no longer reads a row it isn't going to
+// claim. One sweep per tick settles them instead -- two statements for the
+// whole backlog rather than one per exhausted row per tick.
+export async function reapExhaustedDeliveries(env: Env): Promise<void> {
+  const now = Date.now();
+  for (const table of ['notification_log', 'group_nudge_log'] as const) {
+    const res = await env.DB.prepare(
+      `UPDATE ${table} SET failed_at = ?, claim_token = NULL, claimed_until = NULL
+       WHERE delivered_at IS NULL AND failed_at IS NULL AND attempt_count >= ?
+         AND (claimed_until IS NULL OR claimed_until < ?)`,
+    )
+      .bind(now, MAX_DELIVERY_ATTEMPTS, now)
+      .run();
+    if (res.meta.changes > 0) {
+      console.warn(`outbox gave up on ${res.meta.changes} ${table} row(s) after ${MAX_DELIVERY_ATTEMPTS} attempts`);
     }
   }
+}
 
-  if (existing.delivered_at != null || existing.failed_at != null) return null; // terminal
-  if (existing.next_attempt_at != null && existing.next_attempt_at > now) return null; // backing off
-  if (existing.claimed_until != null && existing.claimed_until > now) return null; // in flight elsewhere
-
-  if (existing.attempt_count >= MAX_DELIVERY_ATTEMPTS) {
-    console.warn(`outbox giving up on ${table} ${JSON.stringify(key)} after ${existing.attempt_count} attempts`);
-    await env.DB.prepare(
-      `UPDATE ${table} SET failed_at = ?, claim_token = NULL, claimed_until = NULL WHERE id = ?`,
-    )
-      .bind(now, existing.id)
-      .run();
-    return null;
-  }
-
-  const claimed = await env.DB.prepare(
-    `UPDATE ${table}
-     SET claim_token = ?, claimed_until = ?, sent_at = ?, attempt_count = attempt_count + 1, next_attempt_at = NULL
-     WHERE id = ? AND delivered_at IS NULL AND failed_at IS NULL
-       AND (claimed_until IS NULL OR claimed_until < ?)`,
-  )
-    .bind(token, now + LEASE_MS, now, existing.id, now)
-    .run();
-  if (claimed.meta.changes === 0) return null;
-
-  // The UPDATE alone is not exclusive: two invocations can both pass that
-  // WHERE clause and both be told they changed a row. Reading the token back
-  // is what settles it -- whoever's token survived owns the attempt, and the
-  // other one leaves without sending.
-  const owner = await env.DB.prepare(`SELECT claim_token, attempt_count FROM ${table} WHERE id = ?`)
-    .bind(existing.id)
-    .first<{ claim_token: string | null; attempt_count: number }>();
-  if (!owner || owner.claim_token !== token) return null;
-
-  return { id: existing.id, attempt: owner.attempt_count };
+// Structural, so this module doesn't depend on the cron's budget type -- the
+// outbox doesn't care where the allowance comes from, only whether there is
+// one left.
+export interface DeliveryBudget {
+  tryDelivery(cachedChannel?: boolean): boolean;
+  readonly exhausted: boolean;
 }
 
 // Sends one DM through the outbox, at most once. Returns true if the message
 // reached Discord on this call.
 export async function deliverThroughOutbox(
   env: Env,
-  table: 'notification_log' | 'group_nudge_log',
+  table: OutboxTable,
   key: OutboxKey,
   recipient: DmRecipient,
   content: string,
+  budget?: DeliveryBudget,
 ): Promise<boolean> {
   if (!recipient.notifications_enabled) return false;
+
+  // Free, and checked first: an exhausted tick must not spend a query
+  // claiming something it has already established it cannot send. The old
+  // ordering charged the budget only after the claim, which meant every
+  // remaining candidate still cost a statement or two apiece after the tick
+  // had run out -- the exact overspend the budget exists to prevent.
+  if (budget?.exhausted) return false;
 
   const token = newId();
   const held = await claim(env, table, key, token);
   if (!held) return false;
+
+  // The charge itself still happens after the claim: `exhausted` above is the
+  // cheapest-case test, and a recipient with no cached DM channel costs more
+  // than that. Rejection here is rare and is not the loop's stop condition --
+  // callers watch `exhausted` for that.
+  if (budget && !budget.tryDelivery(recipient.dm_channel_id != null)) {
+    // Hand the row back exactly as it was found: releasing the lease lets the
+    // next tick claim it, and refunding the attempt keeps a deferral from
+    // counting against MAX_DELIVERY_ATTEMPTS -- nothing was tried.
+    await env.DB.prepare(
+      `UPDATE ${table} SET claimed_until = NULL, claim_token = NULL, attempt_count = attempt_count - 1
+       WHERE id = ? AND claim_token = ?`,
+    )
+      .bind(held.id, token)
+      .run();
+    return false;
+  }
 
   const { result, channelId } = await sendBotDm(
     env.DISCORD_BOT_TOKEN,

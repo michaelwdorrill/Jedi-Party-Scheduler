@@ -15,7 +15,7 @@ export function clearToken(): void {
 // Decodes the JWT payload without verifying it (verification happens
 // server-side on every request); used only to read `exp` for a client-side
 // "should we bother sending this token" check.
-export function decodeTokenPayload(token: string): { sub: string; exp: number } | null {
+export function decodeTokenPayload(token: string): { sub: string; exp: number; sid?: string } | null {
   try {
     const [, payload] = token.split('.');
     return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));

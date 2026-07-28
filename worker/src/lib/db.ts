@@ -33,9 +33,9 @@ export const MEMBERSHIP_GRACE_MS = 24 * 60 * 60 * 1000;
 // stale rows live, but a request must not be able to trigger an unbounded
 // number of outbound Discord calls -- an organizer submitting 300 resolved
 // invitees would otherwise mean 300 sequential REST lookups inside one
-// request. Beyond this many, remaining stale rows fall back to the same grace
-// window used everywhere else; the cron sweep keeps them fresh in the
-// background regardless.
+// request. A request needing more live checks than this is refused as
+// temporarily unverifiable rather than served from cache: see
+// filterActiveGuildMembers for why that direction is the only safe one here.
 const MAX_LIVE_REVALIDATIONS_PER_REQUEST = 20;
 
 export interface UserRow {
@@ -210,11 +210,20 @@ export async function filterActiveGuildMembers(env: Env, guildId: string, userId
   // whose cached answer is least trustworthy.
   stale.sort((a, b) => a.verified_at - b.verified_at);
 
-  for (const [index, row] of stale.entries()) {
-    if (index >= MAX_LIVE_REVALIDATIONS_PER_REQUEST) {
-      if (now - row.verified_at <= MEMBERSHIP_GRACE_MS) active.add(row.user_id);
-      continue;
-    }
+  // More stale targets than this request can afford to verify. Every caller
+  // of this function is about to *grant* something -- add someone to a
+  // roster, invite them to a private event, DM them its title -- so silently
+  // treating "we ran out of budget before checking this one" as "confirmed
+  // current member" is the one interpretation that isn't available. Refusing
+  // is retryable: the background sweep is continuously refreshing the oldest
+  // rows, so the same request a few minutes later will have fewer to check.
+  if (stale.length > MAX_LIVE_REVALIDATIONS_PER_REQUEST) {
+    throw new MembershipUnavailableError(
+      `${stale.length} of the selected members need re-checking with Discord, which is more than one request can do at once`,
+    );
+  }
+
+  for (const row of stale) {
     const status = await checkGuildMembership(env.DISCORD_BOT_TOKEN, guildId, row.user_id);
     if (status === 'member') {
       await env.DB.prepare(`UPDATE user_guild_membership SET verified_at = ? WHERE user_id = ? AND guild_id = ?`)
@@ -321,11 +330,11 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
   const organisedEvents = `SELECT id FROM events WHERE organizer_id = ?`;
   const ownedGroups = `SELECT id FROM groups WHERE created_by = ?`;
 
-  // Explicit child deletes rather than relying on ON DELETE CASCADE, since D1
-  // only enforces cascades when the foreign_keys pragma is on and we'd rather
-  // not depend on that for a correctness-critical erasure path. Ordered
-  // children-before-parents throughout so the batch also succeeds when that
-  // pragma *is* on.
+  // Explicit child deletes rather than relying on ON DELETE CASCADE. D1 does
+  // enforce foreign keys, but not every child here has a cascade declared,
+  // and spelling out the order makes the erasure guarantee reviewable rather
+  // than inferred from a dozen table definitions. Children before parents
+  // throughout, which is also what keeps the batch valid under enforcement.
   await env.DB.batch([
     // Events this user organised: they own that content, and the invitees'
     // copies are meaningless without it, so it goes outright.
@@ -460,7 +469,15 @@ function rowValuesPlaceholder(n: number): string {
 // tick was already 51 D1 queries on its own, before any other cron work ran.
 //
 // Returns how many rows it revalidated, for the caller to log.
-export async function revalidateStaleMemberships(env: Env, limit: number): Promise<number> {
+export interface MembershipCheckBudget {
+  tryMembershipCheck(): boolean;
+}
+
+export async function revalidateStaleMemberships(
+  env: Env,
+  limit: number,
+  budget?: MembershipCheckBudget,
+): Promise<number> {
   const cutoff = Date.now() - MEMBERSHIP_FRESHNESS_MS;
   const { results } = await env.DB.prepare(
     `SELECT m.user_id, m.guild_id, m.verified_at FROM user_guild_membership m
@@ -477,6 +494,14 @@ export async function revalidateStaleMemberships(env: Env, limit: number): Promi
   let checked = 0;
 
   for (const row of results) {
+    // Each check is an outbound Discord call, and the tick has a finite
+    // allowance shared with the DM sends that follow. Refreshing the cache
+    // matters, but not more than actually delivering the notifications that
+    // cache exists to serve -- so this yields rather than spending the whole
+    // budget before the first DM. The rows it skips are simply still stale
+    // next tick, which is what the grace window already accounts for.
+    if (budget && !budget.tryMembershipCheck()) break;
+
     const status = await checkGuildMembership(env.DISCORD_BOT_TOKEN, row.guild_id, row.user_id);
     if (status === 'member') {
       confirmed.push([row.user_id, row.guild_id]);

@@ -19,6 +19,7 @@ import {
 } from './helpers';
 import type { Env } from '../src/env';
 import { D1_FREE_PLAN_QUERY_BUDGET } from './d1shim';
+import { LIMITS } from '../src/lib/validate';
 
 let fetchStub: FetchStub | null = null;
 afterEach(() => {
@@ -439,7 +440,7 @@ describe('D1 query budget at configured maxima (O-02)', () => {
     expect(db.queryCount).toBeLessThan(D1_FREE_PLAN_QUERY_BUDGET);
   });
 
-  it('a full free/busy request (max users, each with a recurring event) stays within the Free-plan query budget', async () => {
+  it('a full free/busy request (max users, each with their own recurring event) stays within the Free-plan query budget', async () => {
     const { db, env } = setup();
     await seedGuild(db);
     await seedUser(db, 'caller');
@@ -448,7 +449,7 @@ describe('D1 query budget at configured maxima (O-02)', () => {
 
     const now = Date.now();
     const dateStr = new Date(now).toISOString().slice(0, 10);
-    const userIds = ids('friend', 100);
+    const userIds = ids('friend', LIMITS.MAX_FREE_BUSY_USERS);
     for (const id of userIds) {
       await seedUser(db, id);
       await seedMembership(db, id, 'guild-1');

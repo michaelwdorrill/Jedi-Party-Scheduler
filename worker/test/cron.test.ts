@@ -169,8 +169,14 @@ describe('recurring sweep resilience', () => {
   // R6 from the review reproductions: the override preload ran once for every
   // recurring event in the database, outside the per-event try/catch, so past
   // ~100 events it failed before a single reminder was processed.
+  // Runs on the Paid plan deliberately. What this test exists to catch is the
+  // preload failure -- which showed up as *zero* events processed -- and that
+  // needs a tick whose allowance can actually reach all 150. On the Free
+  // plan's fifty queries per invocation no correct implementation can, and
+  // asserting otherwise would just be asserting that the budget is broken.
+  // The Free-plan behaviour (defer, then resume) is the test below.
   it('processes well past 100 recurring events', async () => {
-    const { db, env } = setup();
+    const { db, env } = setup('paid');
     await seedGuild(db);
     await seedUser(db, 'organizer');
     await seedMembership(db, 'organizer', 'guild-1');
@@ -198,6 +204,55 @@ describe('recurring sweep resilience', () => {
       .prepare(`SELECT COUNT(DISTINCT event_id) AS n FROM notification_log WHERE notification_type LIKE 'reminder%'`)
       .first<{ n: number }>();
     expect(row?.n).toBe(150);
+  });
+
+  // The Free plan cannot get through 150 recurring events in one invocation,
+  // so the question is not whether it defers but whether deferral loses
+  // anything. It must not: each tick has to make forward progress, and the
+  // events it didn't reach have to still be reachable on the next one.
+  it('works through a backlog across ticks on the Free plan', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+
+    const startsIn30Min = new Date(Date.now() + 30 * 60_000);
+    const startTime = `${String(startsIn30Min.getUTCHours()).padStart(2, '0')}:${String(startsIn30Min.getUTCMinutes()).padStart(2, '0')}`;
+
+    for (const id of ids('rec', 40)) {
+      await seedEvent(db, { id, organizerId: 'organizer', isRecurring: 1, startAt: null, endAt: null });
+      await db.prepare(`UPDATE events SET timezone = 'UTC' WHERE id = ?`).bind(id).run();
+      await db.prepare(
+        `INSERT INTO event_recurrence_rules (event_id, freq, interval, start_date, start_time, duration_minutes, end_type)
+         VALUES (?, 'DAILY', 1, ?, ?, 60, 'never')`,
+      )
+        .bind(id, startsIn30Min.toISOString().slice(0, 10), startTime)
+        .run();
+    }
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    const covered = async (): Promise<number> => {
+      const row = await db
+        .prepare(`SELECT COUNT(DISTINCT event_id) AS n FROM notification_log WHERE notification_type LIKE 'reminder%'`)
+        .first<{ n: number }>();
+      return row?.n ?? 0;
+    };
+
+    let previous = 0;
+    for (let tick = 0; tick < 20; tick++) {
+      db.resetQueryCount();
+      await runReminderSweep(env);
+      // Every tick stays inside the platform ceiling...
+      expect(db.queryCount).toBeLessThan(50);
+      const now = await covered();
+      // ...and never goes backwards.
+      expect(now).toBeGreaterThanOrEqual(previous);
+      previous = now;
+    }
+
+    // And the backlog is genuinely worked off, not just nibbled at.
+    expect(previous).toBe(40);
   });
 
   it('keeps going when one event has an unusable recurrence rule', async () => {

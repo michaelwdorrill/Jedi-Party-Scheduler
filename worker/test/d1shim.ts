@@ -13,10 +13,12 @@ import { join } from 'node:path';
 // shim enforces the ceiling itself, which makes "does this query stay inside
 // D1's limits?" an assertion rather than a code review question.
 //
-// Foreign keys are ON, which plain D1 leaves off. That's deliberate too:
-// account deletion's statement ordering is only meaningful if something
-// actually checks it, and a test that can't fail on a dangling reference
-// wouldn't have caught the sessions-FK bug that shipped.
+// Foreign keys are ON because D1 enforces them by default, so a test runtime
+// that left them off would be *more* permissive than production -- account
+// deletion's statement ordering is only meaningful if something actually
+// checks it, and a test that can't fail on a dangling reference wouldn't
+// have caught the sessions-FK bug that shipped.
+// https://developers.cloudflare.com/d1/sql-api/foreign-keys/
 
 export const D1_MAX_BIND_PARAMS = 100;
 

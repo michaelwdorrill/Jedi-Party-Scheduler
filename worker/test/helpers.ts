@@ -10,9 +10,10 @@ export interface TestContext {
   env: Env;
 }
 
-export function makeEnv(db: ShimDatabase): Env {
+export function makeEnv(db: ShimDatabase, plan: 'free' | 'paid' = 'free'): Env {
   return {
     DB: db as unknown as D1Database,
+    WORKERS_PLAN: plan,
     DISCORD_CLIENT_ID: 'client-id',
     DISCORD_CLIENT_SECRET: 'client-secret',
     DISCORD_BOT_TOKEN: 'bot-token',
@@ -22,9 +23,9 @@ export function makeEnv(db: ShimDatabase): Env {
   } as Env;
 }
 
-export function setup(): TestContext {
+export function setup(plan: 'free' | 'paid' = 'free'): TestContext {
   const db = createTestDb();
-  return { db, env: makeEnv(db) };
+  return { db, env: makeEnv(db, plan) };
 }
 
 // ---------------------------------------------------------------------------

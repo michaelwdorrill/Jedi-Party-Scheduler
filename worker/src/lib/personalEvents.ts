@@ -162,30 +162,62 @@ export async function expandPersonalOccurrences(
 // separate rules table), so unlike guild events there was never a per-event
 // recurrence query here -- only the per-user *event list* query needed
 // bulking, which this does with one chunked IN query for the whole request.
+export interface BulkPersonalOptions {
+  // Restrict to one availability class. Free/busy only ever uses 'busy', and
+  // pushing that into SQL rather than filtering after expansion is the
+  // difference between loading a user's genuinely blocking commitments and
+  // loading (and expanding) every personal note they've ever written.
+  availability?: PersonalEventRow['availability'];
+  // Hard ceiling on expanded occurrences across all users, so a set of
+  // individually-legal recurring rules can't multiply into unbounded work.
+  maxOccurrences?: number;
+}
+
 export async function expandPersonalOccurrencesForUsers(
   env: Env,
   userIds: string[],
   fromMs: number,
   toMs: number,
+  options: BulkPersonalOptions = {},
 ): Promise<Map<string, PersonalOccurrence[]>> {
   const out = new Map<string, PersonalOccurrence[]>();
   if (userIds.length === 0) return out;
 
+  // Both filters below are in SQL rather than applied to the loaded rows: a
+  // one-off event outside the requested window can never contribute an
+  // occurrence to it, so loading it (and paying for its overrides, and
+  // running it through the expander) is pure waste. Recurring rows have to be
+  // loaded regardless -- whether they land in the window is only knowable
+  // after expansion.
   const events: PersonalEventRow[] = [];
-  for (const chunk of chunkIds(userIds)) {
+  for (const chunk of chunkIds(userIds, 3)) {
     const { results } = await env.DB.prepare(
-      `SELECT * FROM personal_events WHERE status = 'active' AND user_id IN (${placeholders(chunk.length)})`,
+      `SELECT * FROM personal_events
+       WHERE status = 'active'
+         AND user_id IN (${placeholders(chunk.length)})
+         ${options.availability ? 'AND availability = ?' : ''}
+         AND (
+           is_recurring = 1
+           OR (start_at IS NOT NULL AND start_at <= ? AND COALESCE(end_at, start_at) >= ?)
+         )`,
     )
-      .bind(...chunk)
+      .bind(...chunk, ...(options.availability ? [options.availability] : []), toMs, fromMs)
       .all<PersonalEventRow>();
     events.push(...results);
   }
   if (events.length === 0) return out;
 
   const overridesById = await loadOverrides(env, events.map((e) => e.id));
+  let remaining = options.maxOccurrences ?? Number.POSITIVE_INFINITY;
+
   for (const event of events) {
     const occurrences = expandPersonalEventRow(event, fromMs, toMs, overridesById.get(event.id) ?? []);
     if (occurrences.length === 0) continue;
+    remaining -= occurrences.length;
+    if (remaining <= 0) {
+      console.warn('personal-event occurrence budget exhausted; returning partial availability');
+      break;
+    }
     if (!out.has(event.user_id)) out.set(event.user_id, []);
     out.get(event.user_id)!.push(...occurrences);
   }

@@ -213,7 +213,11 @@ describe('filterActiveGuildMembers', () => {
     expect((await filterActiveGuildMembers(env, 'guild-1', userIds)).size).toBe(300);
   });
 
-  it('bounds how many live Discord checks one request can trigger', async () => {
+  // The budget bounds outbound calls, but what it must NOT do is turn
+  // "didn't get checked" into "confirmed member" -- every caller of this is
+  // about to grant access or trigger a private DM. Refusing is retryable;
+  // guessing is not correctable.
+  it('refuses rather than guessing when more targets are stale than one request can verify', async () => {
     const { db, env } = setup();
     await seedGuild(db);
     const userIds = ids('u', 100);
@@ -223,10 +227,25 @@ describe('filterActiveGuildMembers', () => {
     }
     fetchStub = stubFetch([membershipRule(200)]);
 
-    await filterActiveGuildMembers(env, 'guild-1', userIds);
-    // Far fewer than one call per target: the rest fall back to the grace
-    // window, and the cron sweep refreshes them in the background.
-    expect(fetchStub.calls.length).toBeLessThanOrEqual(20);
+    await expect(filterActiveGuildMembers(env, 'guild-1', userIds)).rejects.toBeInstanceOf(
+      MembershipUnavailableError,
+    );
+    // And it refuses *before* spending the outbound budget it can't finish.
+    expect(fetchStub.calls.length).toBe(0);
+  });
+
+  it('still live-checks a stale list small enough to verify in one request', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    const userIds = ids('u', 5);
+    for (const id of userIds) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1', { verifiedAgoMs: 2 * HOUR_MS });
+    }
+    fetchStub = stubFetch([membershipRule(200)]);
+
+    expect((await filterActiveGuildMembers(env, 'guild-1', userIds)).size).toBe(5);
+    expect(fetchStub.calls.length).toBe(5);
   });
 });
 

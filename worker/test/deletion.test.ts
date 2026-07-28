@@ -3,11 +3,11 @@ import { deleteUserCompletely } from '../src/lib/db';
 import { createSession } from '../src/lib/sessions';
 import { countRows, DAY_MS, seedEvent, seedGuild, seedInvite, seedMembership, seedUser, setup } from './helpers';
 
-// Foreign keys are ON in the test harness (see d1shim.ts). D1 leaves them off,
-// but running with them on is what makes these tests capable of catching an
-// ordering mistake -- the sessions-FK bug that shipped in an earlier pass was
-// exactly this shape, and a test that can't fail on a dangling reference
-// would have passed straight over it.
+// Foreign keys are ON in the test harness (see d1shim.ts), matching D1's own
+// default. That's what makes these tests capable of catching an ordering
+// mistake -- the sessions-FK bug that shipped in an earlier pass was exactly
+// this shape, and a runtime that couldn't fail on a dangling reference would
+// have passed straight over it.
 describe('deleteUserCompletely', () => {
   async function seedFullAccount() {
     const ctx = setup();

@@ -28,9 +28,18 @@ its own short-lived JWT (HS256, `worker/src/lib/jwt.ts`, signed with a
 secret only the Worker knows) and redirects back to the frontend with that
 JWT in the URL hash fragment. The frontend stores it in `localStorage` and
 sends it as a bearer token on every request — not a cookie, since the
-frontend (`*.github.io`) and backend (`*.workers.dev`) are different
-origins, which would make any cookie third-party and subject to browser
-cookie-blocking.
+frontend (`uncleowen.space`, served by GitHub Pages) and backend
+(`*.workers.dev`) are different origins, which would make any cookie
+third-party and subject to browser cookie-blocking. Moving the frontend to a
+custom domain did not change this: the two halves are still cross-origin, so
+the bearer token remains the right call. It would only stop applying if the
+Worker were served from a subdomain of the same site (e.g. `api.uncleowen.space`
+via a Cloudflare route), which would make a first-party cookie possible.
+
+The JWT is short-lived and the session behind it is revocable server-side
+(`sessions` table), so logout is a real revocation rather than just deleting
+the client's copy — see `frontend/src/auth/pendingRevocation.ts` for the
+queue that retries a revocation whose request never landed.
 
 "Which Discord servers can this user see" is answered once at login (and
 on every login) by calling Discord's
@@ -107,10 +116,56 @@ never just hang open forever.
 
 A single Cloudflare Cron Trigger (`*/15 * * * *`,
 `worker/src/cron/reminders.ts`) does everything: resolves past-deadline
-polls, sends "you've been invited" DMs for invites that haven't been
-notified yet, and sends 24h/1h reminders for anything starting soon
-(expanding recurring events just for the next 24h to check). It always
-inserts into `notification_log` before attempting the Discord DM send —
-that insert succeeding (not the DM succeeding) is what "sent" means, so a
-DM that fails (e.g. the user has DMs closed) is logged as attempted and
-won't be retried indefinitely.
+polls, sends "you've been invited" DMs, sends 24h/1h reminders for anything
+starting soon (expanding recurring events just for the next 24h to check),
+nudges idle groups, and prunes expired history.
+
+### Delivery is an outbox, not a log
+
+`notification_log` (and `group_nudge_log` for group nudges) is a **leased
+outbox**, not a record of intent — see `worker/src/lib/outbox.ts`. Each row
+carries `delivered_at` / `failed_at` / `attempt_count` / `next_attempt_at`
+and a `claim_token` + `claimed_until` lease.
+
+A sender takes the lease with a single `INSERT … ON CONFLICT DO UPDATE …
+WHERE … RETURNING` statement. Because the whole claim is one statement,
+exclusion comes from the database serialising it: two overlapping ticks
+cannot both send the same DM, because the loser's `WHERE` no longer matches
+and it gets no row back. The lease expires on its own, so a Worker that dies
+mid-send doesn't strand the row.
+
+Only a confirmed Discord response writes `delivered_at`. A 429 or 5xx sets
+`next_attempt_at` with exponential backoff; a permanent 4xx (DMs closed, bot
+removed) sets `failed_at`. A row that exhausts `MAX_DELIVERY_ATTEMPTS` stops
+being claimable and is settled by a per-tick reaper.
+
+### The tick has a budget, and a cursor
+
+Cloudflare caps **both** D1 queries and outbound subrequests per invocation
+(50 each on Free, 1,000 on Paid). The cron's cost is not one expensive query
+— it is a *product* of individually-reasonable limits: one event at the
+300-invitee maximum wants 300 DMs, which is well past a Free invocation's
+allowance before the other eleven sweeps have run.
+
+Two mechanisms keep that bounded:
+
+- **`worker/src/cron/budget.ts`** gives the tick an explicit allowance and
+  charges it for both the deliveries it makes *and* the scanning it does to
+  find them. When it runs out, sweeps stop cleanly. Stopping early is a
+  delay; being killed mid-flight by the platform is a lost or duplicated DM.
+- **`worker/src/cron/cursor.ts`** (table added in migration 0010) records how
+  far each scan got. Without it a budget-limited tick would rescan the same
+  prefix every fifteen minutes and never reach anything past it — deferral
+  would be starvation. The cursor is an offset into a deterministically
+  ordered scan, so it is a fairness mechanism, not a correctness one:
+  correctness comes from the outbox, which won't send twice however many
+  times a sweep revisits an event.
+
+Recipient queries fold the "already settled?" check into the query that
+fetches them (`pendingRecipients`), so an event whose notifications are all
+delivered costs one query and returns nothing, rather than one query per
+participant to rediscover there is nothing to do.
+
+`WORKERS_PLAN` in `worker/wrangler.toml` tells the budget which allowance it
+has. It *describes* the account's plan; it does not change it. See
+`docs/SETUP.md` for the throughput this implies.
