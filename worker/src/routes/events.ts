@@ -87,36 +87,84 @@ eventRoutes.get('/:eventId', async (c) => {
       .bind(eventId)
       .all<{ id: string; start_at: number; end_at: number; display_order: number; confirmed_at: number | null }>();
 
-    pollOptions = [];
-    for (const opt of options) {
-      const { results: votes } = await c.env.DB.prepare(
-        `SELECT ev.user_id, ev.vote, u.username, u.global_name FROM event_poll_votes ev
-         JOIN users u ON u.id = ev.user_id WHERE ev.option_id = ?`,
+    // Three fixed queries for the whole option set, not one per option.
+    //
+    // The old shape issued a vote query per option, so a poll at the
+    // configured 50-option maximum cost 50 statements here -- on top of the
+    // session, event, membership, invite and option-list reads, that is 55
+    // for one page view, past the Free plan's entire 50-statement
+    // per-invocation allowance. `getOptionTallies()` was fixed for this in an
+    // earlier pass, but this route never used it and kept its own loop.
+    //
+    // Split into three rather than folded into one join because row volume
+    // matters as much as statement count here: "every vote on every option"
+    // is options x invitees, which at the configured maxima (50 x 300) is
+    // 15,000 rows to compute counts from. Each query below returns only what
+    // the response actually carries -- at most 3 rows per option for the
+    // tallies, one per option for the viewer's own votes, and named users
+    // only for options that are actually confirmed.
+    const [{ results: tallyRows }, { results: myVoteRows }, { results: confirmedRows }] = await Promise.all([
+      c.env.DB.prepare(
+        `SELECT ev.option_id, ev.vote, COUNT(*) AS n FROM event_poll_votes ev
+         JOIN event_poll_options o ON o.id = ev.option_id
+         WHERE o.event_id = ? GROUP BY ev.option_id, ev.vote`,
       )
-        .bind(opt.id)
-        .all<{ user_id: string; vote: string; username: string; global_name: string | null }>();
+        .bind(eventId)
+        .all<{ option_id: string; vote: string; n: number }>(),
+      c.env.DB.prepare(
+        `SELECT ev.option_id, ev.vote FROM event_poll_votes ev
+         JOIN event_poll_options o ON o.id = ev.option_id
+         WHERE o.event_id = ? AND ev.user_id = ?`,
+      )
+        .bind(eventId, userId)
+        .all<{ option_id: string; vote: string }>(),
+      // Only confirmed options display their attendee list, so the join
+      // filters on confirmed_at rather than loading every yes-voter and
+      // discarding most of them.
+      c.env.DB.prepare(
+        `SELECT ev.option_id, ev.user_id, u.username, u.global_name FROM event_poll_votes ev
+         JOIN event_poll_options o ON o.id = ev.option_id
+         JOIN users u ON u.id = ev.user_id
+         WHERE o.event_id = ? AND o.confirmed_at IS NOT NULL AND ev.vote = 'yes'
+         ORDER BY u.username`,
+      )
+        .bind(eventId)
+        .all<{ option_id: string; user_id: string; username: string; global_name: string | null }>(),
+    ]);
 
-      const tally = { yes: 0, no: 0, maybe: 0 };
-      let myVote: string | null = null;
-      const confirmedUsers: { userId: string; username: string; globalName: string | null }[] = [];
-      for (const v of votes) {
-        tally[v.vote as 'yes' | 'no' | 'maybe']++;
-        if (v.user_id === userId) myVote = v.vote;
-        if (v.vote === 'yes' && opt.confirmed_at) {
-          confirmedUsers.push({ userId: v.user_id, username: v.username, globalName: v.global_name });
-        }
+    const talliesByOption = new Map<string, { yes: number; no: number; maybe: number }>();
+    for (const row of tallyRows) {
+      let tally = talliesByOption.get(row.option_id);
+      if (!tally) {
+        tally = { yes: 0, no: 0, maybe: 0 };
+        talliesByOption.set(row.option_id, tally);
       }
-      pollOptions.push({
-        id: opt.id,
-        startAt: opt.start_at,
-        endAt: opt.end_at,
-        displayOrder: opt.display_order,
-        confirmedAt: opt.confirmed_at,
-        confirmedUsers,
-        tally,
-        myVote,
+      tally[row.vote as 'yes' | 'no' | 'maybe'] = row.n;
+    }
+
+    const myVoteByOption = new Map<string, string>();
+    for (const row of myVoteRows) myVoteByOption.set(row.option_id, row.vote);
+
+    const confirmedByOption = new Map<string, { userId: string; username: string; globalName: string | null }[]>();
+    for (const row of confirmedRows) {
+      if (!confirmedByOption.has(row.option_id)) confirmedByOption.set(row.option_id, []);
+      confirmedByOption.get(row.option_id)!.push({
+        userId: row.user_id,
+        username: row.username,
+        globalName: row.global_name,
       });
     }
+
+    pollOptions = options.map((opt) => ({
+      id: opt.id,
+      startAt: opt.start_at,
+      endAt: opt.end_at,
+      displayOrder: opt.display_order,
+      confirmedAt: opt.confirmed_at,
+      confirmedUsers: confirmedByOption.get(opt.id) ?? [],
+      tally: talliesByOption.get(opt.id) ?? { yes: 0, no: 0, maybe: 0 },
+      myVote: myVoteByOption.get(opt.id) ?? null,
+    }));
   }
 
   return c.json({

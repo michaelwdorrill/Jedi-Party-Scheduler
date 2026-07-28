@@ -228,11 +228,34 @@ const RESOLUTION_COST_PER_POLL = 3;
 // attempted. Anything not reached stays expired and is picked up next tick.
 const MAX_POLLS_RESOLVED_PER_INVOCATION = 25;
 
+// After this many consecutive failures a poll is considered stuck: still
+// retried on every pass, but ordered behind every healthy poll so it cannot
+// hold a place in the page. Three is enough to ride out transient D1 or
+// Discord trouble without letting a genuinely broken row settle in.
+const POLL_RESOLUTION_DEAD_LETTER_AFTER = 3;
+
 export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): Promise<string[]> {
   const now = Date.now();
+  // Ordered by failure count first, then by deadline.
+  //
+  // A poll that fails to resolve stays 'active' and stays past its deadline,
+  // so it matches this predicate again on the very next tick -- in the same
+  // position, because the ordering was purely by deadline. Twenty-five
+  // deterministically failing rows therefore filled the page forever and no
+  // poll behind them was ever selected again. The per-row try/catch below
+  // isolates failures *within* the page; nothing was getting anything *past*
+  // it.
+  //
+  // Sorting by failure count fixes that without abandoning the broken rows:
+  // a poll that has failed repeatedly sinks behind everything healthy, so
+  // later due polls enter the page, while the stuck row is still picked up
+  // on every pass that has room for it. Deliberately not "cancel the poll
+  // after N failures" -- an internal error is not a product decision, and
+  // silently cancelling someone's event because a query misbehaved is worse
+  // than resolving it late.
   const { results: events } = await env.DB.prepare(
     `SELECT * FROM events WHERE event_type = 'poll' AND status = 'active' AND poll_deadline_at <= ?
-     ORDER BY poll_deadline_at, id
+     ORDER BY poll_resolution_failures, poll_deadline_at, id
      LIMIT ?`,
   )
     .bind(now, MAX_POLLS_RESOLVED_PER_INVOCATION)
@@ -287,6 +310,25 @@ export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): P
       // from resolving the rest -- it'll be retried (still 'active' and past
       // its deadline) on the next tick rather than silently blocking others.
       console.error(`resolvePastDeadlinePolls failed for event ${event.id}:`, err);
+      // Counted so the ordering above can deprioritise it. Best-effort: if
+      // this write itself fails there is nothing useful left to do, and
+      // swallowing it keeps one broken row from turning into a thrown sweep.
+      try {
+        const failures = (event.poll_resolution_failures ?? 0) + 1;
+        await env.DB.prepare(
+          `UPDATE events SET poll_resolution_failures = poll_resolution_failures + 1 WHERE id = ?`,
+        )
+          .bind(event.id)
+          .run();
+        if (failures === POLL_RESOLUTION_DEAD_LETTER_AFTER) {
+          console.error(
+            `Poll ${event.id} has failed to resolve ${failures} times and is now deprioritised behind healthy polls. ` +
+              `Investigate: SELECT * FROM events WHERE poll_resolution_failures >= ${POLL_RESOLUTION_DEAD_LETTER_AFTER};`,
+          );
+        }
+      } catch (countErr) {
+        console.error(`Could not record resolution failure for event ${event.id}:`, countErr);
+      }
     }
   }
   return resolvedEventIds;

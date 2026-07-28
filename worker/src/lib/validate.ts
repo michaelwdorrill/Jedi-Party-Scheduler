@@ -219,6 +219,24 @@ export const LIMITS = {
   // request orders of magnitude below this; it exists so no combination of
   // them can ever be multiplied into an unbounded amount of work.
   MAX_FREE_BUSY_OCCURRENCES: 20_000,
+  // The same idea applied to *input* rather than output.
+  //
+  // MAX_FREE_BUSY_OCCURRENCES bounds the work a request produces, but it can
+  // only be consulted once the source events have already been read -- and
+  // reading them is itself unbounded work. Every other quota in this file is
+  // per guild, and one user can be an active member of many guilds, so
+  // "300 events" becomes 4,200 the moment someone is in fourteen of them.
+  // Those events then get an override lookup each, one query per 80, which
+  // crosses the Free plan's whole 50-query allowance before the occurrence
+  // ceiling has anything to say -- and it does so even when every one of
+  // those events falls outside the requested window and would expand to
+  // nothing at all.
+  //
+  // So the source set is capped and range-filtered in SQL before any of it
+  // is materialised. Exceeding this rejects with the same 422 an over-budget
+  // expansion does: "ask about a shorter window" is recoverable advice, and
+  // is far more honest than a 500 from the platform mid-request.
+  MAX_FREE_BUSY_SOURCE_EVENTS: 400,
   MAX_WINDOW_SPAN_MS: 60 * 24 * 60 * 60 * 1000, // 60 days
   MIN_WINDOW_BLOCK_MINUTES: 30,
   MAX_WINDOW_BLOCK_MINUTES: 14 * 24 * 60, // 2 weeks -- generous upper bound

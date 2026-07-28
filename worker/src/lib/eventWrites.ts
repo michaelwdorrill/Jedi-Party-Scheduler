@@ -248,17 +248,34 @@ function validateEventWriteInput(input: Partial<EventWriteInput>, requireComplet
 // with no candidates and no deadline (a poll that can never resolve and that
 // the deadline sweep will re-examine on every tick forever). Both were
 // storable, and both left rows that only ever made sense to delete.
+// The two coherent shapes a single event's schedule can have: a series with a
+// recurrence rule, or a one-off with a concrete start and end. Never both,
+// never neither.
+//
+// Shared by create and PATCH deliberately. PATCH validates the fields present
+// in its delta, which is necessary but not sufficient -- `{isRecurring: true}`
+// on its own is a *valid delta* made of valid fields, and applying it set
+// is_recurring = 1, nulled start_at/end_at, deleted the old recurrence rule
+// and inserted no new one, storing a series with no definition of when it
+// recurs. Every reader downstream then has to cope with a shape the create
+// path would have rejected outright: the calendar expands nothing, free/busy
+// silently contributes no blocks for it, and the cron sweeps skip it. A
+// partial update still has to leave a complete object behind.
+function assertCompleteScheduleShape(input: Partial<EventWriteInput>): void {
+  if (input.isRecurring) {
+    if (!input.recurrence) throw new ValidationError('recurrence is required when isRecurring is true');
+  } else if (input.startAt == null || input.endAt == null) {
+    throw new ValidationError('startAt and endAt are required for a non-recurring event');
+  }
+}
+
 function assertCompleteEventShape(input: Partial<EventWriteInput>): void {
   assertString(input.title, 'title', LIMITS.TITLE);
   assertTimezone(input.timezone, 'timezone');
   const eventType = assertOneOf(input.eventType, 'eventType', ['single', 'poll'] as const);
 
   if (eventType === 'single') {
-    if (input.isRecurring) {
-      if (!input.recurrence) throw new ValidationError('recurrence is required when isRecurring is true');
-    } else if (input.startAt == null || input.endAt == null) {
-      throw new ValidationError('startAt and endAt are required for a non-recurring event');
-    }
+    assertCompleteScheduleShape(input);
     return;
   }
 
@@ -403,11 +420,16 @@ const POLL_OPTION_COLUMNS = ['id', 'event_id', 'start_at', 'end_at', 'display_or
 // Same reasoning as inviteStatements: one statement per option turned a
 // 50-option poll -- the configured maximum -- into 51 statements before a
 // single invite, past the Free plan's whole per-invocation allowance.
+// `extraGuard` narrows the parent condition beyond mere existence, the same
+// way inviteStatements' does -- the recurring-conversion PATCH passes
+// `is_recurring = 1` so replacement options are written only if that
+// conversion's quota admission actually applied.
 function pollOptionStatements(
   env: Env,
   eventId: string,
   options: readonly { startAt: number; endAt: number }[],
   guarded: boolean,
+  extraGuard = '',
 ): D1PreparedStatement[] {
   let order = 0;
   const rows = options.map((opt) => [newId(), eventId, opt.startAt, opt.endAt, order++]);
@@ -420,7 +442,7 @@ function pollOptionStatements(
       ).bind(...values);
     }
     return env.DB.prepare(
-      conditionalRowsSql('event_poll_options', POLL_OPTION_COLUMNS, chunk.length, 'events'),
+      conditionalRowsSql('event_poll_options', POLL_OPTION_COLUMNS, chunk.length, 'events', '', extraGuard),
     ).bind(...values, eventId);
   });
 }
@@ -684,7 +706,13 @@ export async function updateEvent(
   // isRecurring is the signal that this request is a full single-event
   // schedule edit (the frontend always sends it alongside startAt/endAt or
   // recurrence); only then do we touch start_at/end_at/is_recurring.
+  //
+  // Because this branch rewrites the whole schedule, the delta has to carry a
+  // complete one -- the same rule create is held to. Validating only the
+  // fields that happen to be present would accept `{isRecurring: true}` with
+  // no rule and store a series that never occurs.
   if (input.isRecurring !== undefined) {
+    assertCompleteScheduleShape(input);
     setClauses.push('is_recurring = ?', 'start_at = ?', 'end_at = ?');
     if (input.isRecurring) {
       values.push(1, null, null);
@@ -735,8 +763,32 @@ export async function updateEvent(
     ),
   ];
 
+  // Every sibling statement below is conditioned on the admission above
+  // having actually applied.
+  //
+  // This is the part the previous pass got wrong. Moving the quota claim into
+  // the batch closed the crash window, but the comment that replaced it --
+  // "if the guard tripped, every statement in this batch affected zero rows"
+  // -- was simply false: only the main UPDATE carried the guard. The poll and
+  // window statements were unconditional, so a conversion that lost the
+  // recurring-quota race committed replaced poll options, wiped votes and
+  // rewrote poll fields, and *then* reported failure to the caller. A batch
+  // being transactional does not help when every statement in it succeeds;
+  // the rollback never fires because nothing errored.
+  //
+  // `is_recurring = 1` is the observable proof the admission won, since the
+  // guard only lets the main UPDATE through when the row was non-recurring
+  // and the guild was under its cap. When this PATCH is not a conversion
+  // there is no admission to lose and the statements stay unconditional.
+  const siblingGuard = convertingToRecurring
+    ? ` AND EXISTS (SELECT 1 FROM events WHERE id = ? AND is_recurring = 1)`
+    : '';
+  const guardBinds = convertingToRecurring ? [eventId] : [];
+  const guardedStatement = (sql: string, ...binds: unknown[]): D1PreparedStatement =>
+    env.DB.prepare(`${sql}${siblingGuard}`).bind(...binds, ...guardBinds);
+
   if (input.isRecurring !== undefined) {
-    statements.push(env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id = ?`).bind(eventId));
+    statements.push(guardedStatement(`DELETE FROM event_recurrence_rules WHERE event_id = ?`, eventId));
     if (input.isRecurring && input.recurrence) {
       const r = input.recurrence;
       statements.push(
@@ -773,19 +825,27 @@ export async function updateEvent(
     // has started is an edge case, not the common path.
     const { pollMode, pollResolutionMode } = normalizePollModes(input);
     statements.push(
-      env.DB.prepare(
+      guardedStatement(
         `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id = ?)`,
-      ).bind(eventId),
-      env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id = ?`).bind(eventId),
+        eventId,
+      ),
+      guardedStatement(`DELETE FROM event_poll_options WHERE event_id = ?`, eventId),
     );
-    statements.push(...pollOptionStatements(env, eventId, input.pollOptions, false));
     statements.push(
-      env.DB.prepare(
+      ...pollOptionStatements(
+        env,
+        eventId,
+        input.pollOptions,
+        convertingToRecurring,
+        convertingToRecurring ? ' AND is_recurring = 1' : '',
+      ),
+    );
+    statements.push(
+      guardedStatement(
         `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
            poll_mode = ?, poll_resolution_mode = ?, window_start_at = NULL, window_end_at = NULL,
            window_block_minutes = NULL
          WHERE id = ?`,
-      ).bind(
         input.pollStrategy ?? null,
         input.pollThresholdCount ?? null,
         input.pollDeadlineAt ?? null,
@@ -798,13 +858,12 @@ export async function updateEvent(
 
   if (input.windowStartAt !== undefined) {
     statements.push(
-      env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id = ?`).bind(eventId),
-      env.DB.prepare(
+      guardedStatement(`DELETE FROM event_window_availability WHERE event_id = ?`, eventId),
+      guardedStatement(
         `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
            poll_mode = 'window', poll_resolution_mode = 'single_winner',
            window_start_at = ?, window_end_at = ?, window_block_minutes = ?
          WHERE id = ?`,
-      ).bind(
         input.pollStrategy ?? null,
         input.pollThresholdCount ?? null,
         input.pollDeadlineAt ?? null,
@@ -830,9 +889,20 @@ export async function updateEvent(
   // One batch, one transaction: the quota admission check lives in the main
   // UPDATE's WHERE clause above, not as an earlier separately committed
   // statement, so there is no window between "slot claimed" and "batch
-  // applied" for a thrown error or a killed Worker to land in. If the guard
-  // tripped, every statement in this batch -- including the ones above --
-  // affected zero rows, so the failed request has changed nothing at all.
+  // applied" for a thrown error or a killed Worker to land in.
+  //
+  // On a conversion, every statement in the batch carries the same
+  // `is_recurring = 1` condition, so a tripped guard makes all of them
+  // no-ops and the failed request changes nothing observable. That is
+  // enforced statement by statement -- via `guardedStatement`,
+  // `pollOptionStatements`' extraGuard and `replaceInviteStatements`' guard
+  // -- and not a property of batch() itself: batch() rolls back on *error*,
+  // and a statement that legitimately matches zero rows is not an error. An
+  // earlier version of this comment claimed the guarantee while only the
+  // main UPDATE actually carried the guard, which is precisely how the
+  // quota-losing PATCH ended up replacing poll options before reporting
+  // failure. If a new sibling statement is added below, it needs the guard
+  // too.
   const results = await env.DB.batch(statements);
   if (convertingToRecurring && results[0].meta.changes === 0) {
     throw new ValidationError('This server has reached its limit of recurring events');

@@ -58,53 +58,106 @@ export async function computeBusyBlocksForUsers(
   // of one per user; `for_user` records which requested user this row is
   // relevant to -- an event can appear once per relevant user (e.g. once for
   // the organizer and once per invitee among the requested set).
-  const rows: (EventRow & ForUserRow)[] = [];
-  for (const chunk of chunkIds(userIds)) {
+  // Only events that can actually contribute a block are read.
+  //
+  // The filter has three arms because three different things decide whether
+  // an event overlaps the window, and only one of them is the event's own
+  // start/end:
+  //
+  //   recurring   the rule decides; start_at is NULL on these, so they have
+  //               to be expanded before anything can be ruled out.
+  //   poll        a confirmed option's time decides, which lives on the
+  //               option row, not the event.
+  //   otherwise   the event's own start/end overlapping the window, which is
+  //               exactly the test that used to be applied in memory, after
+  //               the row had already been read, deduplicated, and had its
+  //               occurrence overrides looked up.
+  //
+  // That last case is the one that mattered: a user in fourteen guilds with
+  // 300 per-guild-valid events each brought back 4,200 rows and 53 override
+  // queries for events a year outside the requested window, every one of
+  // which was then discarded for spending zero occurrences.
+  const inRange = `(e.is_recurring = 1 OR e.event_type = 'poll'
+       OR (e.start_at IS NOT NULL AND e.start_at <= ? AND COALESCE(e.end_at, e.start_at) >= ?))`;
+  // Relevance is read narrow -- (event id, user id) pairs only -- and the
+  // event rows themselves are fetched afterwards, once per distinct event.
+  //
+  // The obvious shape, selecting `e.*` from the invite join directly, returns
+  // one full event row per (event, user) pair: an event shared by all 25
+  // requested users comes back 25 times, and only the first copy is ever
+  // used. That is also why the limit below cannot go on such a query --
+  // truncating it drops *relevance links*, not events, so the request would
+  // quietly compute a correct-looking answer for a subset of the people it
+  // was asked about. F-13's rule applies here as much as to expansion: an
+  // omitted commitment is indistinguishable from free time, so this either
+  // reads everything it needs or refuses.
+  //
+  // With ids only, the limit is safe to detect against: if the request were
+  // within the cap, at most cap x (users in chunk) pairs could match, so
+  // coming back with more than that means it is over -- no truncation
+  // ambiguity either way.
+  const pairLimit = (LIMITS.MAX_FREE_BUSY_SOURCE_EVENTS + 1) * userIds.length;
+  const usersByEvent = new Map<string, string[]>();
+  let overflowed = false;
+
+  for (const chunk of chunkIds(userIds, 3)) {
     const ph = placeholders(chunk.length);
     const [{ results: organized }, { results: invited }] = await Promise.all([
       env.DB.prepare(
-        `SELECT e.*, e.organizer_id AS for_user FROM events e
-         WHERE e.status IN ('active','resolved') AND e.organizer_id IN (${ph})`,
+        `SELECT e.id AS event_id, e.organizer_id AS for_user FROM events e
+         WHERE e.status IN ('active','resolved') AND e.organizer_id IN (${ph}) AND ${inRange}
+         LIMIT ?`,
       )
-        .bind(...chunk)
-        .all<EventRow & ForUserRow>(),
+        .bind(...chunk, toMs, fromMs, pairLimit)
+        .all<{ event_id: string } & ForUserRow>(),
       env.DB.prepare(
-        `SELECT e.*, ei.user_id AS for_user FROM event_invites ei
+        `SELECT ei.event_id, ei.user_id AS for_user FROM event_invites ei
          JOIN events e ON e.id = ei.event_id
-         WHERE e.status IN ('active','resolved') AND ei.rsvp_status != 'declined' AND ei.user_id IN (${ph})`,
+         WHERE e.status IN ('active','resolved') AND ei.rsvp_status != 'declined'
+           AND ei.user_id IN (${ph}) AND ${inRange}
+         LIMIT ?`,
       )
-        .bind(...chunk)
-        .all<EventRow & ForUserRow>(),
+        .bind(...chunk, toMs, fromMs, pairLimit)
+        .all<{ event_id: string } & ForUserRow>(),
     ]);
-    rows.push(...organized, ...invited);
-  }
-
-  // Collapse the per-(event, user) rows into one entry per *event*, carrying
-  // the set of requested users it's relevant to. This is the difference
-  // between work that scales with users x events and work that scales with
-  // events: an event shared by all 25 requested users appeared 25 times in
-  // `rows`, and the previous version expanded its recurrence 25 separate
-  // times to produce 25 identical occurrence lists.
-  const eventsById = new Map<string, EventRow>();
-  const usersByEvent = new Map<string, string[]>();
-  for (const row of rows) {
-    if (!eventsById.has(row.id)) {
-      eventsById.set(row.id, row);
-      usersByEvent.set(row.id, []);
+    if (organized.length >= pairLimit || invited.length >= pairLimit) overflowed = true;
+    for (const row of [...organized, ...invited]) {
+      let users = usersByEvent.get(row.event_id);
+      if (!users) {
+        users = [];
+        usersByEvent.set(row.event_id, users);
+      }
+      if (!users.includes(row.for_user)) users.push(row.for_user);
     }
-    const users = usersByEvent.get(row.id)!;
-    if (!users.includes(row.for_user)) users.push(row.for_user);
   }
 
-  const eventIds = [...eventsById.keys()];
-  const overridesByEvent = await loadOverridesForEvents(env, eventIds);
-  const recurrenceRulesByEvent = await loadRecurrenceRulesForEvents(
-    env,
-    eventIds.filter((id) => eventsById.get(id)!.is_recurring),
-  );
+  // Input admission, before a single per-event lookup runs. Every other quota
+  // in the app is per guild and one user can be in many guilds, so this is
+  // the only thing standing between "valid in each of fourteen servers" and
+  // an unaffordable request.
+  if (overflowed || usersByEvent.size > LIMITS.MAX_FREE_BUSY_SOURCE_EVENTS) throw new FreeBusyTooLargeError();
+
+  const eventsById = new Map<string, EventRow>();
+  for (const chunk of chunkIds([...usersByEvent.keys()])) {
+    const { results } = await env.DB.prepare(
+      `SELECT * FROM events WHERE id IN (${placeholders(chunk.length)})`,
+    )
+      .bind(...chunk)
+      .all<EventRow>();
+    for (const row of results) eventsById.set(row.id, row);
+  }
+
+  const recurringIds = [...eventsById.keys()].filter((id) => eventsById.get(id)!.is_recurring);
+  // Overrides are per-occurrence exceptions to a recurrence rule, so only a
+  // recurring event can have one. Loading them for every visible event meant
+  // a request's override cost scaled with its whole event list instead of
+  // just the part that expands -- the dominant cost in the multi-guild case,
+  // and pure waste in every case.
+  const overridesByEvent = await loadOverridesForEvents(env, recurringIds);
+  const recurrenceRulesByEvent = await loadRecurrenceRulesForEvents(env, recurringIds);
   const confirmedVotesByEvent = await loadConfirmedYesVotesForEvents(
     env,
-    eventIds.filter((id) => eventsById.get(id)!.event_type === 'poll'),
+    [...eventsById.keys()].filter((id) => eventsById.get(id)!.event_type === 'poll'),
     userIds,
     fromMs,
     toMs,
