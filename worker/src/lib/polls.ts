@@ -13,36 +13,61 @@ interface OptionTally {
   confirmedAt: number | null;
 }
 
+// One query, not one per option.
+//
+// This used to load the options and then run an aggregate vote query for each
+// one. At the configured MAX_POLL_OPTIONS of 50 that is 51 D1 statements, and
+// the Free plan allows 50 per invocation -- so a poll built entirely within
+// its own configured limits could not be read at all, before authentication
+// and session queries were even counted. Every caller was affected: the poll
+// GET route, the threshold check on each vote, and the cron deadline sweep.
+//
+// The LEFT JOIN keeps options with no votes yet (an INNER JOIN would silently
+// drop them), and grouping by vote gives one row per (option, vote) pair to
+// fold into the tallies below.
 export async function getOptionTallies(env: Env, eventId: string): Promise<OptionTally[]> {
-  const { results: options } = await env.DB.prepare(
-    `SELECT id, display_order, start_at, end_at, confirmed_at FROM event_poll_options
-     WHERE event_id = ? ORDER BY display_order`,
+  const { results } = await env.DB.prepare(
+    `SELECT o.id, o.display_order, o.start_at, o.end_at, o.confirmed_at,
+            v.vote, COUNT(v.user_id) AS n
+     FROM event_poll_options o
+     LEFT JOIN event_poll_votes v ON v.option_id = o.id
+     WHERE o.event_id = ?
+     GROUP BY o.id, v.vote
+     ORDER BY o.display_order`,
   )
     .bind(eventId)
-    .all<{ id: string; display_order: number; start_at: number; end_at: number; confirmed_at: number | null }>();
+    .all<{
+      id: string;
+      display_order: number;
+      start_at: number;
+      end_at: number;
+      confirmed_at: number | null;
+      vote: string | null;
+      n: number;
+    }>();
 
-  const tallies: OptionTally[] = [];
-  for (const opt of options) {
-    const { results: counts } = await env.DB.prepare(
-      `SELECT vote, COUNT(*) as n FROM event_poll_votes WHERE option_id = ? GROUP BY vote`,
-    )
-      .bind(opt.id)
-      .all<{ vote: string; n: number }>();
-
-    const t: OptionTally = {
-      id: opt.id,
-      displayOrder: opt.display_order,
-      startAt: opt.start_at,
-      endAt: opt.end_at,
-      confirmedAt: opt.confirmed_at,
-      yes: 0,
-      no: 0,
-      maybe: 0,
-    };
-    for (const c of counts) t[c.vote as 'yes' | 'no' | 'maybe'] = c.n;
-    tallies.push(t);
+  const byId = new Map<string, OptionTally>();
+  for (const row of results) {
+    let t = byId.get(row.id);
+    if (!t) {
+      t = {
+        id: row.id,
+        displayOrder: row.display_order,
+        startAt: row.start_at,
+        endAt: row.end_at,
+        confirmedAt: row.confirmed_at,
+        yes: 0,
+        no: 0,
+        maybe: 0,
+      };
+      byId.set(row.id, t);
+    }
+    // vote is NULL for the LEFT JOIN's no-votes-yet row; COUNT(v.user_id)
+    // is 0 there, so there is nothing to add.
+    if (row.vote === 'yes' || row.vote === 'no' || row.vote === 'maybe') t[row.vote] = row.n;
   }
-  return tallies;
+  // Map preserves insertion order, which the ORDER BY above made display order.
+  return [...byId.values()];
 }
 
 // Compare-and-set: only transitions an event that's still 'active'. Two
@@ -186,16 +211,36 @@ export async function checkWindowThresholdAndResolve(env: Env, event: EventRow):
 }
 
 // Called from the cron sweep for polls whose deadline has passed.
-export async function resolvePastDeadlinePolls(env: Env): Promise<string[]> {
+// Structural so this module doesn't depend on the cron's budget type.
+export interface WorkBudget {
+  trySpend(queries: number): boolean;
+}
+
+// What resolving one poll costs: reading its tallies or window submissions,
+// plus the state transition. Charged up front so the sweep stops walking
+// polls once the tick can no longer afford one.
+const RESOLUTION_COST_PER_POLL = 3;
+
+// How many expired polls one invocation will look at. Previously unbounded:
+// every expired active poll in the database was loaded and resolved in a
+// single pass, ahead of the budgeted notification work, so a backlog of them
+// could consume the tick's entire D1 allowance before a single reminder was
+// attempted. Anything not reached stays expired and is picked up next tick.
+const MAX_POLLS_RESOLVED_PER_INVOCATION = 25;
+
+export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): Promise<string[]> {
   const now = Date.now();
   const { results: events } = await env.DB.prepare(
-    `SELECT * FROM events WHERE event_type = 'poll' AND status = 'active' AND poll_deadline_at <= ?`,
+    `SELECT * FROM events WHERE event_type = 'poll' AND status = 'active' AND poll_deadline_at <= ?
+     ORDER BY poll_deadline_at, id
+     LIMIT ?`,
   )
-    .bind(now)
+    .bind(now, MAX_POLLS_RESOLVED_PER_INVOCATION)
     .all<EventRow>();
 
   const resolvedEventIds: string[] = [];
   for (const event of events) {
+    if (budget && !budget.trySpend(RESOLUTION_COST_PER_POLL)) break;
     try {
       if (event.poll_resolution_mode === 'multi_winner') {
         // Unconfirmed options are simply dropped (never voted on again); any

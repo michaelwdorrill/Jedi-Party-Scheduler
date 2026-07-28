@@ -1,0 +1,36 @@
+-- Replaces the OFFSET cursor added in 0010 with a keyset cursor.
+--
+-- 0010 stored "how many rows the last tick got through" and resumed with
+-- OFFSET. That is only correct if the result set is stable between ticks, and
+-- the reminder scans' result set is explicitly not: their predicate is
+--
+--   start_at >= now AND start_at <= now + 24h
+--
+-- which moves every tick. Rows already scanned drop off the front as they
+-- begin, so a stored OFFSET of 30 no longer points just past the thirtieth
+-- row -- it points past the thirtieth row of a *shorter* list, skipping rows
+-- that were never scanned at all. Those rows are due reminders, and they can
+-- pass their start time before the cursor ever wraps around to them. Nothing
+-- downstream recovers that: the outbox can only retry a notification that was
+-- created, and one for an event the sweep never visited never existed.
+--
+-- A second, simpler bug had the same effect: the wrap condition compared the
+-- number of rows processed against the size of the *page*, not the size of
+-- the full result set, so a tick that got through one whole page concluded it
+-- had reached the end and reset to zero. With 150 matching rows and a
+-- 100-row page, rows 101-150 were never reached on any tick.
+--
+-- A keyset cursor has neither problem. It stores the last key actually
+-- processed and resumes strictly after it, so rows vanishing from the front
+-- of the window cannot shift it, and "did I reach the end?" is answered by
+-- getting back a short page rather than inferred from a full one.
+--
+-- Stored as text because the key is composite: '<start_at>:<id>' for the
+-- single-event scan, and plain '<id>' for the recurring scans. NULL means
+-- "start from the beginning", which is also what a completed pass resets to.
+ALTER TABLE cron_cursors ADD COLUMN cursor_key TEXT;
+
+-- The OFFSET values left over from 0010 mean nothing to a keyset scan, and
+-- interpreting them as keys would be worse than starting over. One full pass
+-- from the beginning costs a few ticks and is correct.
+UPDATE cron_cursors SET position = 0, cursor_key = NULL;

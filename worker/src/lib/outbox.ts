@@ -130,7 +130,12 @@ export async function reapExhaustedDeliveries(env: Env): Promise<void> {
 // outbox doesn't care where the allowance comes from, only whether there is
 // one left.
 export interface DeliveryBudget {
-  tryDelivery(cachedChannel?: boolean): boolean;
+  // Reserves one delivery's full cost up front. False means this tick cannot
+  // afford it, and the caller must not spend anything on it.
+  reserveDelivery(cachedChannel: boolean): boolean;
+  // Returns a reservation whose delivery never happened, less the single
+  // statement the claim attempt itself cost.
+  refundUnsentDelivery(cachedChannel: boolean): void;
   readonly exhausted: boolean;
 }
 
@@ -146,31 +151,36 @@ export async function deliverThroughOutbox(
 ): Promise<boolean> {
   if (!recipient.notifications_enabled) return false;
 
-  // Free, and checked first: an exhausted tick must not spend a query
-  // claiming something it has already established it cannot send. The old
-  // ordering charged the budget only after the claim, which meant every
-  // remaining candidate still cost a statement or two apiece after the tick
-  // had run out -- the exact overspend the budget exists to prevent.
-  if (budget?.exhausted) return false;
+  const cached = recipient.dm_channel_id != null;
+
+  // Reserved *before* the claim, for this recipient's actual cost.
+  //
+  // The previous ordering asked `budget.exhausted` first and only charged
+  // after claiming. `exhausted` is the cheapest-case test -- one subrequest,
+  // two statements, the cost of a recipient whose DM channel is already
+  // cached -- so with two statements left it reported "not exhausted" while
+  // an uncached recipient actually needed three. The claim then ran (one real
+  // statement), the charge was refused, and releasing the claim ran another.
+  // The budget never moved, so a loop holding a list of uncached recipients
+  // repeated that pair indefinitely: two unaccounted statements per recipient,
+  // spent by the very mechanism meant to stop spending.
+  //
+  // Reserving first means a delivery this tick cannot afford costs nothing at
+  // all.
+  if (budget && !budget.reserveDelivery(cached)) return false;
 
   const token = newId();
   const held = await claim(env, table, key, token);
-  if (!held) return false;
-
-  // The charge itself still happens after the claim: `exhausted` above is the
-  // cheapest-case test, and a recipient with no cached DM channel costs more
-  // than that. Rejection here is rare and is not the loop's stop condition --
-  // callers watch `exhausted` for that.
-  if (budget && !budget.tryDelivery(recipient.dm_channel_id != null)) {
-    // Hand the row back exactly as it was found: releasing the lease lets the
-    // next tick claim it, and refunding the attempt keeps a deferral from
-    // counting against MAX_DELIVERY_ATTEMPTS -- nothing was tried.
-    await env.DB.prepare(
-      `UPDATE ${table} SET claimed_until = NULL, claim_token = NULL, attempt_count = attempt_count - 1
-       WHERE id = ? AND claim_token = ?`,
-    )
-      .bind(held.id, token)
-      .run();
+  if (!held) {
+    // Nothing to send: already delivered, still backing off, or another
+    // invocation won the claim. Give back what was reserved, less the one
+    // statement the claim attempt actually cost.
+    //
+    // The refund is what makes reserve-before-claim safe. A tick re-scans far
+    // more notifications than it sends, and charging full price for each
+    // settled row it looks at would let a large delivered backlog exhaust the
+    // allowance without a single DM going out.
+    budget?.refundUnsentDelivery(cached);
     return false;
   }
 

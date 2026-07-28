@@ -4,7 +4,7 @@ import type { EventRow } from './events';
 import { loadOverridesForEvents } from './events';
 import { expandOccurrencesForEvent, loadRecurrenceRulesForEvents } from './recurrence';
 import { expandPersonalOccurrencesForUsers } from './personalEvents';
-import { LIMITS } from './validate';
+import { FreeBusyTooLargeError, LIMITS } from './validate';
 
 // Deliberately opaque: a busy block carries *only* a time range. No title, no
 // game, no guild, no attendees, no event id -- nothing that would let a viewer
@@ -34,14 +34,15 @@ interface ForUserRow {
   for_user: string;
 }
 
-// Computes busy blocks for every user in `userIds` at once. The route this
-// serves allows up to 100 requested users, and the previous version computed
-// each one independently -- roughly six D1 queries per user, so a
-// full-sized, entirely valid request reached several hundred to several
-// thousand queries in one Worker invocation, far past Cloudflare's
-// per-invocation query budget on any plan. This does the same work with a
-// handful of chunked, set-based queries regardless of how many users are
-// requested.
+// Computes busy blocks for every user in `userIds` at once, in a handful of
+// chunked, set-based queries regardless of how many are requested.
+//
+// The original version computed each user independently -- roughly six D1
+// queries each -- so a full-sized, entirely valid request reached several
+// hundred queries in one Worker invocation, far past Cloudflare's
+// per-invocation budget on any plan. See LIMITS.MAX_FREE_BUSY_USERS for the
+// current cap; it was lowered from 100 to 25 once the *expansion* cost, not
+// just the query count, was accounted for.
 export async function computeBusyBlocksForUsers(
   env: Env,
   userIds: string[],
@@ -110,10 +111,24 @@ export async function computeBusyBlocksForUsers(
   // shared ceiling. The per-factor limits should keep a real request far
   // below it -- this is the guarantee that no combination of them multiplies
   // into unbounded work.
+  //
+  // Exceeding it *refuses the request*. It used to log a warning, break, and
+  // return what it had as an ordinary 200 -- but the response shape is a list
+  // of busy blocks, so an omitted commitment is indistinguishable from
+  // genuine free time. That turned a work limit into a wrong answer: the
+  // caller would be told someone is available at a time the database says
+  // they are busy, and would schedule over it. Which commitments went missing
+  // depended on map iteration order, so it was not even reproducible.
+  //
+  // A refusal is recoverable -- ask for fewer users or a shorter range -- and
+  // it is the one outcome that never asserts something false.
   let budget = LIMITS.MAX_FREE_BUSY_OCCURRENCES;
-  const spend = (n: number): boolean => {
+  const spend = (n: number): void => {
+    // `n > budget`, not `>=`: a request that lands exactly on the ceiling has
+    // not exceeded it. The old `budget > 0` test rejected the exact-budget
+    // case as if it had.
+    if (n > budget) throw new FreeBusyTooLargeError();
     budget -= n;
-    return budget > 0;
   };
 
   for (const [eventId, event] of eventsById) {
@@ -150,10 +165,7 @@ export async function computeBusyBlocksForUsers(
       overridesByEvent.get(eventId) ?? [],
       recurrenceRulesByEvent.get(eventId),
     );
-    if (!spend(expanded.length * users.length)) {
-      console.warn(`free/busy occurrence budget exhausted; returning partial availability for ${userIds.length} user(s)`);
-      break;
-    }
+    spend(expanded.length * users.length);
     for (const userId of users) {
       const blocks = out.get(userId);
       if (!blocks) continue;

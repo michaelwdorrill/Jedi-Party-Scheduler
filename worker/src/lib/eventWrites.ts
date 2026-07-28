@@ -1,5 +1,5 @@
 import type { Env } from '../env';
-import { chunkIds, chunkRows, placeholders } from './d1';
+import { chunkIds, chunkRows, conditionalRowsSql, placeholders } from './d1';
 import { filterActiveGuildMembers } from './db';
 import { newId } from './ids';
 import {
@@ -91,21 +91,55 @@ async function resolveInviteeUserIds(
     }
   }
 
-  for (const groupId of groupIds) {
-    const { results } = await env.DB.prepare(
-      `SELECT gm.user_id FROM group_members gm
-       JOIN groups g ON g.id = gm.group_id
-       WHERE gm.group_id = ? AND g.guild_id = ?`,
-    )
-      .bind(groupId, guildId)
-      .all<{ user_id: string }>();
+  if (groupIds.length > 0) {
+    // One roster query per chunk of groups, not one per group -- and one
+    // membership filter over the combined candidate set, not one per group.
+    //
+    // The old shape cost (1 roster + ceil(members/80) membership chunks) per
+    // group. At the configured maxima -- 50 groups of 200 members -- that is
+    // 200 D1 statements for a single request, four times the Free plan's
+    // whole per-invocation allowance. The 300-resolved-invitee cap did not
+    // help: 50 groups can hold the *same* 200 members, so the deduplicated
+    // result stays legal while every one of those queries still runs.
+    //
+    // Deduplication now happens before the membership check rather than
+    // after, so a user in twenty of the requested groups is verified once.
+    const rosters: { user_id: string; group_id: string }[] = [];
+    for (const chunk of chunkIds(groupIds, 1)) {
+      const { results } = await env.DB.prepare(
+        `SELECT gm.user_id, gm.group_id FROM group_members gm
+         JOIN groups g ON g.id = gm.group_id
+         WHERE gm.group_id IN (${placeholders(chunk.length)}) AND g.guild_id = ?`,
+      )
+        .bind(...chunk, guildId)
+        .all<{ user_id: string; group_id: string }>();
+      rosters.push(...results);
+    }
+
+    // First group that named a user wins as the attribution source, matching
+    // the previous iteration order.
+    const sourceByUser = new Map<string, string>();
+    for (const row of rosters) {
+      if (!out.has(row.user_id) && !sourceByUser.has(row.user_id)) sourceByUser.set(row.user_id, row.group_id);
+    }
+
+    // Admission check before the membership work, not after it. The cap is on
+    // the resolved list, and the candidate set can only shrink from here
+    // (membership filtering removes people), so a candidate set already over
+    // the cap can never come back under it -- there is no reason to pay for
+    // verifying it first.
+    if (out.size + sourceByUser.size > LIMITS.MAX_RESOLVED_INVITEES) {
+      throw new ValidationError(`Resolved invite list is too large (max ${LIMITS.MAX_RESOLVED_INVITEES})`);
+    }
+
     // Group-derived invitees can drift out of guild membership over time
     // without anyone editing the group -- filter those out rather than
     // reject, since the organizer didn't choose them individually.
-    const active = await filterActiveGuildMembers(env, guildId, results.map((r) => r.user_id));
-    for (const row of results) {
-      if (active.has(row.user_id) && !out.has(row.user_id)) {
-        out.set(row.user_id, { userId: row.user_id, invitedVia: 'group', sourceGroupId: groupId });
+    const candidates = [...sourceByUser.keys()];
+    const active = await filterActiveGuildMembers(env, guildId, candidates);
+    for (const userId of candidates) {
+      if (active.has(userId)) {
+        out.set(userId, { userId, invitedVia: 'group', sourceGroupId: sourceByUser.get(userId)! });
       }
     }
   }
@@ -317,17 +351,70 @@ function eventQuotaGuardParams(guildId: string, organizerId: string, includeRecu
 // resolve to MAX_RESOLVED_INVITEES people, and a batch of that many separate
 // statements pushes against D1's per-invocation query limit for no reason.
 // ON CONFLICT DO NOTHING is what preserves an existing invitee's RSVP.
-function inviteStatements(env: Env, eventId: string, invitees: ResolvedInvitee[]): D1PreparedStatement[] {
+const INVITE_COLUMNS = ['id', 'event_id', 'user_id', 'invited_via', 'source_group_id', 'rsvp_status', 'invited_at'] as const;
+
+// `guarded` conditions every row on the parent event existing, which the
+// create path needs: its parent insert carries a quota guard that can write
+// zero rows, and unconditional children would then violate the event foreign
+// key and abort the whole batch with an opaque error instead of the intended
+// no-op plus friendly quota message. Update paths pass false -- their parent
+// is already known to exist, and the extra EXISTS would just be noise.
+function inviteStatements(
+  env: Env,
+  eventId: string,
+  invitees: ResolvedInvitee[],
+  guarded: boolean,
+): D1PreparedStatement[] {
   const now = Date.now();
-  return chunkRows(invitees, 6).map((chunk) =>
-    env.DB.prepare(
-      `INSERT INTO event_invites (id, event_id, user_id, invited_via, source_group_id, rsvp_status, invited_at)
-       VALUES ${chunk.map(() => `(?, ?, ?, ?, ?, 'pending', ?)`).join(', ')}
-       ON CONFLICT(event_id, user_id) DO NOTHING`,
-    ).bind(
-      ...chunk.flatMap((invitee) => [newId(), eventId, invitee.userId, invitee.invitedVia, invitee.sourceGroupId, now]),
-    ),
-  );
+  const conflict = 'ON CONFLICT(event_id, user_id) DO NOTHING';
+  return chunkRows(invitees, INVITE_COLUMNS.length, guarded ? 1 : 0).map((chunk) => {
+    const values = chunk.flatMap((invitee) => [
+      newId(),
+      eventId,
+      invitee.userId,
+      invitee.invitedVia,
+      invitee.sourceGroupId,
+      'pending',
+      now,
+    ]);
+    if (!guarded) {
+      return env.DB.prepare(
+        `INSERT INTO event_invites (${INVITE_COLUMNS.join(', ')})
+         VALUES ${chunk.map(() => `(${INVITE_COLUMNS.map(() => '?').join(', ')})`).join(', ')}
+         ${conflict}`,
+      ).bind(...values);
+    }
+    return env.DB.prepare(
+      conditionalRowsSql('event_invites', INVITE_COLUMNS, chunk.length, 'events', conflict),
+    ).bind(...values, eventId);
+  });
+}
+
+const POLL_OPTION_COLUMNS = ['id', 'event_id', 'start_at', 'end_at', 'display_order'] as const;
+
+// Same reasoning as inviteStatements: one statement per option turned a
+// 50-option poll -- the configured maximum -- into 51 statements before a
+// single invite, past the Free plan's whole per-invocation allowance.
+function pollOptionStatements(
+  env: Env,
+  eventId: string,
+  options: readonly { startAt: number; endAt: number }[],
+  guarded: boolean,
+): D1PreparedStatement[] {
+  let order = 0;
+  const rows = options.map((opt) => [newId(), eventId, opt.startAt, opt.endAt, order++]);
+  return chunkRows(rows, POLL_OPTION_COLUMNS.length, guarded ? 1 : 0).map((chunk) => {
+    const values = chunk.flat();
+    if (!guarded) {
+      return env.DB.prepare(
+        `INSERT INTO event_poll_options (${POLL_OPTION_COLUMNS.join(', ')})
+         VALUES ${chunk.map(() => `(${POLL_OPTION_COLUMNS.map(() => '?').join(', ')})`).join(', ')}`,
+      ).bind(...values);
+    }
+    return env.DB.prepare(
+      conditionalRowsSql('event_poll_options', POLL_OPTION_COLUMNS, chunk.length, 'events'),
+    ).bind(...values, eventId);
+  });
 }
 
 // Full replacement: also removes invite rows for anyone NOT in the
@@ -367,7 +454,7 @@ async function replaceInviteStatements(
       ).bind(eventId, ...chunk),
     );
   }
-  statements.push(...inviteStatements(env, eventId, invitees));
+  statements.push(...inviteStatements(env, eventId, invitees, false));
   return statements;
 }
 
@@ -385,7 +472,7 @@ export async function addInvitesToEvent(
   assertStringArray(groupIds, 'groupIds', LIMITS.MAX_GROUP_IDS, 64);
   const invitees = await resolveInviteeUserIds(env, guildId, userIds, groupIds);
   if (invitees.length === 0) return;
-  await env.DB.batch(inviteStatements(env, eventId, invitees));
+  await env.DB.batch(inviteStatements(env, eventId, invitees, false));
 }
 
 export async function createEventWithInvites(
@@ -495,19 +582,10 @@ export async function createEventWithInvites(
   }
 
   if (input.eventType === 'poll' && pollMode === 'options' && input.pollOptions) {
-    let order = 0;
-    for (const opt of input.pollOptions) {
-      statements.push(
-        env.DB.prepare(
-          `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order)
-           SELECT ?, ?, ?, ?, ?
-           WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)`,
-        ).bind(newId(), eventId, opt.startAt, opt.endAt, order++, eventId),
-      );
-    }
+    statements.push(...pollOptionStatements(env, eventId, input.pollOptions, true));
   }
 
-  statements.push(...inviteStatements(env, eventId, invitees));
+  statements.push(...inviteStatements(env, eventId, invitees, true));
 
   const results = await env.DB.batch(statements);
 
@@ -548,22 +626,10 @@ export async function updateEvent(
   // then reported failure. An edit that says it failed must not have changed
   // anything.
   //
-  // Doing it here means the losing request stops before a single other
-  // statement is queued. The winning request holds the slot for the rest of
-  // this function, and the catch below gives it back if the batch fails.
+  // The claim itself is taken further down, immediately before the batch --
+  // see the comment there. Everything between here and that point must be
+  // free to throw without having changed anything.
   const convertingToRecurring = input.isRecurring === true && !wasRecurring;
-  if (convertingToRecurring) {
-    const claimed = await env.DB.prepare(
-      `UPDATE events SET is_recurring = 1, updated_at = ?
-       WHERE id = ? AND is_recurring = 0
-         AND (SELECT COUNT(*) FROM events WHERE guild_id = ? AND status != 'cancelled' AND is_recurring = 1) < ?`,
-    )
-      .bind(now, eventId, guildId, LIMITS.MAX_RECURRING_EVENTS_PER_GUILD)
-      .run();
-    if (claimed.meta.changes === 0) {
-      throw new ValidationError('This server has reached its limit of recurring events');
-    }
-  }
 
   // Build the SET clause only from fields the caller actually included --
   // e.g. POST /events/:id/invites calls this with just `{ invites }`, and
@@ -664,14 +730,7 @@ export async function updateEvent(
       ).bind(eventId),
       env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id = ?`).bind(eventId),
     );
-    let order = 0;
-    for (const opt of input.pollOptions) {
-      statements.push(
-        env.DB.prepare(
-          `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order) VALUES (?, ?, ?, ?, ?)`,
-        ).bind(newId(), eventId, opt.startAt, opt.endAt, order++),
-      );
-    }
+    statements.push(...pollOptionStatements(env, eventId, input.pollOptions, false));
     statements.push(
       env.DB.prepare(
         `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
@@ -713,15 +772,58 @@ export async function updateEvent(
     statements.push(...(await replaceInviteStatements(env, eventId, invitees)));
   }
 
+  // The recurring-slot claim, taken here and nowhere earlier.
+  //
+  // It has to be its own statement rather than a guard inside the batch,
+  // because the batch's other statements -- new invitees, replaced poll
+  // options, window availability -- are not conditioned on it, so a guard
+  // that failed inside the batch would still commit all of those and then
+  // report failure.
+  //
+  // But taking it early was its own bug: everything above can throw
+  // (a target who is not a guild member, Discord temporarily unverifiable,
+  // more stale memberships than one request can revalidate, a D1 read
+  // failure), and every one of those exits the function without reaching the
+  // try/catch below. The claim would already be committed, leaving the event
+  // marked recurring, with its old one-off start/end still on it, no
+  // recurrence rule, none of the requested edit applied -- and a quota slot
+  // consumed by a request that returned an error.
+  //
+  // So it goes last: after all validation, all resolution, and all statement
+  // construction. The only thing that can still fail after this point is the
+  // batch itself, which is exactly the failure the compensating update below
+  // covers.
+  if (convertingToRecurring) {
+    const claimed = await env.DB.prepare(
+      `UPDATE events SET is_recurring = 1, updated_at = ?
+       WHERE id = ? AND is_recurring = 0
+         AND (SELECT COUNT(*) FROM events WHERE guild_id = ? AND status != 'cancelled' AND is_recurring = 1) < ?`,
+    )
+      .bind(now, eventId, guildId, LIMITS.MAX_RECURRING_EVENTS_PER_GUILD)
+      .run();
+    if (claimed.meta.changes === 0) {
+      throw new ValidationError('This server has reached its limit of recurring events');
+    }
+  }
+
   try {
     await env.DB.batch(statements);
   } catch (err) {
     // The batch is atomic, so nothing in it applied -- but the recurring-slot
     // claim above happened outside it and did. Hand the slot back so a failed
-    // edit leaves the event exactly as it was found, rather than converted to
-    // a series with none of the rest of the edit applied.
+    // edit leaves the event exactly as it was found.
+    //
+    // Guarded on `updated_at = now`, which is the value the claim itself
+    // wrote: it acts as a version token, so if another request has edited
+    // this event in between, its change is not silently reverted. An
+    // unconditional `SET is_recurring = 0` would clobber a concurrent
+    // legitimate conversion.
     if (convertingToRecurring) {
-      await env.DB.prepare(`UPDATE events SET is_recurring = 0 WHERE id = ?`).bind(eventId).run();
+      await env.DB.prepare(
+        `UPDATE events SET is_recurring = 0 WHERE id = ? AND is_recurring = 1 AND updated_at = ?`,
+      )
+        .bind(eventId, now)
+        .run();
     }
     throw err;
   }

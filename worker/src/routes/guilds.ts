@@ -84,9 +84,11 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
   );
   if (requested.length === 0) return c.json([]);
 
-  // MAX_FREE_BUSY_USERS is 100, which with the guild ID would be 101 bound
-  // parameters -- past D1's per-statement ceiling, so a fully-populated
-  // scheduling assistant request would have failed outright. The freshness
+  // Chunked because the requested-user list plus the guild id can exceed
+  // D1's 100-bound-parameter ceiling -- at the original cap of 100 users it
+  // did so exactly, and a fully-populated scheduling assistant request failed
+  // outright. Chunking keeps that correct independently of where the cap
+  // sits today. The freshness
   // cutoff matters here too: a target whose membership hasn't been confirmed
   // within the grace window is treated the same as someone who left --
   // otherwise a departed member could remain visible here indefinitely even

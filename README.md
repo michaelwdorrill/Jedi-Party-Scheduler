@@ -30,7 +30,8 @@ create/RSVP to gaming sessions with your friends.
 ## Local development
 
 ```bash
-# Worker (needs Node 18+)
+# Worker (needs Node 22+ -- the pinned Wrangler declares engines >=22, and
+# the test harness uses the built-in node:sqlite module)
 cd worker
 npm install
 npm run dev

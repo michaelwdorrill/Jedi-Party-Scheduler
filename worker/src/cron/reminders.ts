@@ -10,7 +10,13 @@ import { MEMBERSHIP_GRACE_MS, revalidateStaleMemberships } from '../lib/db';
 import { deliverThroughOutbox, MAX_DELIVERY_ATTEMPTS, reapExhaustedDeliveries, type DmRecipient } from '../lib/outbox';
 import { chunkIds, placeholders } from '../lib/d1';
 import { planFrom, TickBudget } from './budget';
-import { readCursor, writeCursor, type CursorName } from './cursor';
+import {
+  decodeEventKey,
+  encodeEventKey,
+  readCursorKey,
+  writeCursorKey,
+  type CursorName,
+} from './cursor';
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -77,6 +83,10 @@ const TERMINAL_HISTORY_RETENTION_MS = 90 * DAY_MS;
 // exists) is worked off gradually across ticks rather than in one large
 // batch.
 const TERMINAL_HISTORY_PURGE_BATCH_SIZE = 100;
+
+// Delete statements issued per chunk of purged event ids -- one per child
+// table plus the parent. Kept next to the batch below so the two stay in step.
+const PURGE_STATEMENTS_PER_CHUNK = 8;
 
 type NotificationType =
   | 'invite'
@@ -334,17 +344,30 @@ async function sweepReminders(env: Env, budget: TickBudget): Promise<void> {
   const windowEnd = now + 24 * HOUR_MS;
 
   // Ordered by start time so the most urgent reminders are attempted first,
-  // and resumed from a cursor so a backlog larger than one tick's allowance
-  // rotates instead of the same prefix winning every tick forever.
-  const singleStart = await readCursor(env, 'reminders_single');
+  // and resumed from a keyset cursor so a backlog larger than one tick's
+  // allowance rotates instead of the same prefix winning every tick forever.
+  //
+  // The comparison is spelled out rather than written as a row-value
+  // `(start_at, id) > (?, ?)` so it does not depend on the SQLite build
+  // supporting row values.
+  const after = decodeEventKey(await readCursorKey(env, 'reminders_single'));
   const { results: singleEvents } = await env.DB.prepare(
     `SELECT * FROM events
      WHERE is_recurring = 0 AND status IN ('active','resolved')
        AND start_at IS NOT NULL AND start_at >= ? AND start_at <= ?
+       AND (? IS NULL OR start_at > ? OR (start_at = ? AND id > ?))
      ORDER BY start_at, id
-     LIMIT ? OFFSET ?`,
+     LIMIT ?`,
   )
-    .bind(now, windowEnd, SINGLE_EVENT_PAGE_SIZE, singleStart)
+    .bind(
+      now,
+      windowEnd,
+      after ? 1 : null,
+      after?.startAt ?? 0,
+      after?.startAt ?? 0,
+      after?.id ?? '',
+      SINGLE_EVENT_PAGE_SIZE,
+    )
     .all<EventRow>();
 
   // Mutually exclusive, deliberately. These used to both fire for an event
@@ -363,24 +386,36 @@ async function sweepReminders(env: Env, budget: TickBudget): Promise<void> {
     return null;
   };
 
-  let scanned = 0;
+  let lastKey: string | null = null;
+  let stoppedEarly = false;
   for (const event of singleEvents) {
-    if (!budget.trySpend(SCAN_COST_PER_EVENT)) break;
-    scanned++;
+    if (!budget.trySpend(SCAN_COST_PER_EVENT)) {
+      stoppedEarly = true;
+      break;
+    }
     try {
       const reminder = reminderFor(event.start_at!);
-      if (!reminder) continue;
-      const pending = await pendingRecipients(env, event, reminder.type, '', budget.deliveriesAffordable);
-      await notifyPending(env, budget, pending, event.id, reminder.type, '', (user) =>
-        `"${event.title}" ${reminder.render(user)}.\n${eventLink(env, event.id)}`,
-      );
+      if (reminder) {
+        const pending = await pendingRecipients(env, event, reminder.type, '', budget.deliveriesAffordable);
+        await notifyPending(env, budget, pending, event.id, reminder.type, '', (user) =>
+          `"${event.title}" ${reminder.render(user)}.\n${eventLink(env, event.id)}`,
+        );
+      }
     } catch (err) {
       console.error(`sweepReminders (single) failed for event ${event.id}:`, err);
     }
+    // Recorded even when the event needed no reminder: it *was* processed,
+    // and leaving it out would make the next tick start from it again.
+    lastKey = encodeEventKey({ startAt: event.start_at!, id: event.id });
   }
-  // Wrap to the start once the whole scan has been covered, so the next tick
-  // begins a fresh pass rather than running off the end.
-  await writeCursor(env, 'reminders_single', scanned < singleEvents.length ? singleStart + scanned : 0);
+
+  // A short page means the scan reached the end of the result set, so the
+  // next tick starts a fresh pass. A full page proves nothing either way --
+  // inferring the end from it is what made the old cursor reset to zero and
+  // never reach anything past the first page -- so the cursor simply stays at
+  // the last key processed and the following tick continues from there.
+  const reachedEnd = !stoppedEarly && singleEvents.length < SINGLE_EVENT_PAGE_SIZE;
+  await writeCursorKey(env, 'reminders_single', reachedEnd ? null : lastKey);
 
   await forEachRecurringPage(env, budget, 'reminders_recurring', `SELECT * FROM events WHERE is_recurring = 1 AND status = 'active'`, async (event, overrides, rule) => {
     const occurrences = await expandOccurrencesForEvent(env, event, now, windowEnd, overrides, rule);
@@ -421,24 +456,29 @@ async function forEachRecurringPage(
   // zero every time, and once there are more recurring events than one tick's
   // allowance covers, everything past that prefix is never reached at all --
   // deferral turns into permanent starvation. See migration 0010.
-  const start = await readCursor(env, cursorName);
-  let offset = start;
+  // Keyset, not OFFSET: these scans' result sets change between ticks as
+  // events are created, cancelled or purged, and an offset counted against
+  // one tick's set points somewhere else in the next one's. Resuming after
+  // the last id actually processed is stable under all of that.
+  let afterId = await readCursorKey(env, cursorName);
 
   for (;;) {
     // Paging itself costs a query per page, so an exhausted tick stops
     // walking rather than reading pages it can't act on.
     if (!budget.trySpend(1)) {
-      await writeCursor(env, cursorName, offset);
+      await writeCursorKey(env, cursorName, afterId);
       return;
     }
-    const { results: page } = await env.DB.prepare(`${sql} ORDER BY id LIMIT ? OFFSET ?`)
-      .bind(RECURRING_PAGE_SIZE, offset)
+    const { results: page } = await env.DB.prepare(
+      `${sql} AND (? IS NULL OR id > ?) ORDER BY id LIMIT ?`,
+    )
+      .bind(afterId, afterId ?? '', RECURRING_PAGE_SIZE)
       .all<EventRow>();
     // End of the scan: wrap so the next tick starts a fresh pass. Reaching
-    // here from a non-zero start is normal -- the pass simply began partway
+    // here from a non-null cursor is normal -- the pass simply began partway
     // through and the following one will cover what it skipped.
     if (page.length === 0) {
-      await writeCursor(env, cursorName, 0);
+      await writeCursorKey(env, cursorName, null);
       return;
     }
 
@@ -448,7 +488,7 @@ async function forEachRecurringPage(
       const rulesByEvent = await loadRecurrenceRulesForEvents(env, pageIds);
       for (const event of page) {
         if (budget.exhausted) {
-          await writeCursor(env, cursorName, offset);
+          await writeCursorKey(env, cursorName, afterId);
           return;
         }
         try {
@@ -456,15 +496,18 @@ async function forEachRecurringPage(
         } catch (err) {
           console.error(`recurring sweep failed for event ${event.id}:`, err);
         }
-        offset++;
+        afterId = event.id;
       }
     } catch (err) {
-      console.error(`recurring sweep failed for page at offset ${offset}:`, err);
-      offset += page.length;
+      // The page's own preloads failed, so no event on it was processed.
+      // Skip past it rather than retrying it forever -- the next pass will
+      // come back around to these events.
+      console.error(`recurring sweep failed for page after id ${afterId}:`, err);
+      afterId = page[page.length - 1].id;
     }
 
     if (page.length < RECURRING_PAGE_SIZE) {
-      await writeCursor(env, cursorName, 0);
+      await writeCursorKey(env, cursorName, null);
       return;
     }
   }
@@ -476,8 +519,8 @@ async function forEachRecurringPage(
 // resolves -- single_winner/window polls often resolve synchronously the
 // moment a vote crosses the threshold, well before any deadline, and that
 // path needs to be notified too, not just the deadline-driven one.
-async function sweepPollDeadlines(env: Env): Promise<void> {
-  await resolvePastDeadlinePolls(env);
+async function sweepPollDeadlines(env: Env, budget: TickBudget): Promise<void> {
+  await resolvePastDeadlinePolls(env, budget);
 }
 
 // Covers every resolved/cancelled single_winner (incl. window-mode) poll,
@@ -841,7 +884,7 @@ async function sweepIdleGroups(env: Env, budget: TickBudget): Promise<void> {
 // Bounded to one batch of TERMINAL_HISTORY_PURGE_BATCH_SIZE events per tick,
 // same reasoning as the recurring-event paging above: a backlog gets worked
 // off gradually across ticks rather than in one unbounded sweep.
-async function sweepPurgeTerminalHistory(env: Env): Promise<void> {
+async function sweepPurgeTerminalHistory(env: Env, budget: TickBudget): Promise<void> {
   const cutoff = Date.now() - TERMINAL_HISTORY_RETENTION_MS;
   const { results: candidates } = await env.DB.prepare(
     `SELECT id FROM events
@@ -853,19 +896,33 @@ async function sweepPurgeTerminalHistory(env: Env): Promise<void> {
     .all<{ id: string }>();
   if (candidates.length === 0) return;
 
+  // Charged, not reserved for. This sweep's cost scales with how much
+  // terminal history is waiting -- eight delete statements per chunk of ids,
+  // so a full batch is another sixteen statements on top of an already-spent
+  // tick. Reserving that permanently would take it away from notifications on
+  // every tick, including the overwhelming majority where there is nothing to
+  // purge at all.
+  //
+  // Charging it means a tick that has spent its allowance sending DMs simply
+  // doesn't purge this time. Deleting ninety-day-old cancelled events is the
+  // least urgent thing the cron does; it can wait for a quieter tick.
+  const chunks = chunkIds(candidates.map((c) => c.id));
+  if (!budget.trySpend(chunks.length * PURGE_STATEMENTS_PER_CHUNK)) {
+    console.log('Skipping terminal-history purge this tick; the allowance went to notifications.');
+    return;
+  }
+
   // Deletes are scoped to these specific, already-selected ids (chunked
   // below D1's parameter ceiling) rather than repeating the SELECT above as
   // a subquery in each statement -- plain DELETE doesn't support ORDER
   // BY/LIMIT directly, and re-running an unordered version of the same
   // predicate per statement would risk each one matching a slightly
   // different set if a row's state changed between them.
-  const eventIds = candidates.map((c) => c.id);
-
   // Same child-first, id-scoped shape as deleteUserCompletely: D1 doesn't
   // enforce these foreign keys, so the children are deleted explicitly
   // rather than relied on to cascade.
   const statements: D1PreparedStatement[] = [];
-  for (const chunk of chunkIds(eventIds)) {
+  for (const chunk of chunks) {
     const ph = placeholders(chunk.length);
     statements.push(
       env.DB.prepare(
@@ -926,7 +983,7 @@ export async function runReminderSweep(env: Env): Promise<void> {
   const budget = new TickBudget(planFrom(env.WORKERS_PLAN));
 
   await runIsolated('membershipRevalidation', () => sweepMembershipRevalidation(env, budget));
-  await runIsolated('pollDeadlines', () => sweepPollDeadlines(env));
+  await runIsolated('pollDeadlines', () => sweepPollDeadlines(env, budget));
   await runIsolated('singleWinnerPollNotifications', () => sweepSingleWinnerPollNotifications(env, budget));
   await runIsolated('multiWinnerPollClosedNotifications', () => sweepMultiWinnerPollClosedNotifications(env, budget));
   await runIsolated('confirmedMultiWinnerOptions', () => sweepConfirmedMultiWinnerOptions(env, budget));
@@ -936,7 +993,7 @@ export async function runReminderSweep(env: Env): Promise<void> {
   await runIsolated('voiceChannelInvites', () => sweepVoiceChannelInvites(env, budget));
   await runIsolated('idleGroups', () => sweepIdleGroups(env, budget));
   await runIsolated('pruneStaleSessions', () => pruneStaleSessions(env));
-  await runIsolated('purgeTerminalHistory', () => sweepPurgeTerminalHistory(env));
+  await runIsolated('purgeTerminalHistory', () => sweepPurgeTerminalHistory(env, budget));
   // Last, so it settles anything that used up its final attempt during this
   // tick rather than leaving it for the next one.
   await runIsolated('reapExhaustedDeliveries', () => reapExhaustedDeliveries(env));

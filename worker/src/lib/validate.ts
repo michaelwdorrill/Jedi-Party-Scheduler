@@ -263,6 +263,25 @@ export const LIMITS = {
 // is crossed instead of buffering an arbitrarily large body first.
 export const MAX_BODY_BYTES = 64 * 1024;
 
+// Thrown when a free/busy request's expansion work exceeds
+// MAX_FREE_BUSY_OCCURRENCES. Lives here rather than in freeBusy.ts so the
+// personal-event expander can throw it too without importing its caller.
+//
+// The router maps this to 422: the request is well-formed and authorized, and
+// retrying it unchanged will not help -- the caller has to ask for less. It is
+// deliberately NOT a partial 200. The response is a list of busy blocks, so an
+// omitted commitment is indistinguishable from genuine free time; answering
+// partially would tell the caller someone is available at a time the database
+// says they are busy.
+export class FreeBusyTooLargeError extends Error {
+  constructor() {
+    super(
+      'That free/busy request covers too many commitments to answer accurately. Select fewer people or a shorter date range.',
+    );
+    this.name = 'FreeBusyTooLargeError';
+  }
+}
+
 export class BodyTooLargeError extends Error {}
 
 export async function readJsonBody<T>(c: { req: { raw: Request } }): Promise<T> {
