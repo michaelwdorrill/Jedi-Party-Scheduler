@@ -31,6 +31,13 @@ import { decodeTokenPayload } from './tokenStorage';
 
 const KEY_PREFIX = 'jps_pending_revocation:';
 
+// The single-array key this replaced. A user whose logout failed under the
+// previous build has their token sitting here, and the per-key scan below
+// would never look at it -- so the moment they loaded the new frontend, a
+// session that was queued for revocation became unrevocable and simply lived
+// out its seven days. Migrated once at startup rather than left behind.
+const LEGACY_ARRAY_KEY = 'jps_pending_revocations';
+
 // Past a session's own absolute lifetime there is nothing left to revoke, so
 // an entry that old is dropped rather than retried forever.
 const MAX_PENDING_AGE_MS = 8 * 24 * 60 * 60 * 1000;
@@ -51,6 +58,63 @@ function keyFor(token: string): string {
   let hash = 5381;
   for (let i = 0; i < token.length; i++) hash = ((hash << 5) + hash + token.charCodeAt(i)) | 0;
   return `${KEY_PREFIX}h${(hash >>> 0).toString(36)}`;
+}
+
+// Copies any entries left by the previous single-array format into per-token
+// keys. The legacy key is removed only after every entry it held has been
+// durably written under its own key -- if storage fails partway (quota, a
+// blocked origin), the array stays put and the next startup tries again,
+// which is the outcome that cannot lose a token. Re-enqueueing one that was
+// already copied is harmless: the key is derived from the token, so it
+// overwrites itself rather than duplicating.
+function migrateLegacyQueue(): void {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(LEGACY_ARRAY_KEY);
+  } catch {
+    return;
+  }
+  if (!raw) return;
+
+  let entries: unknown;
+  try {
+    entries = JSON.parse(raw);
+  } catch {
+    // Unparseable: nothing can be recovered from it, so stop carrying it.
+    try {
+      localStorage.removeItem(LEGACY_ARRAY_KEY);
+    } catch {
+      /* storage unavailable; nothing further to try */
+    }
+    return;
+  }
+
+  const now = Date.now();
+  let allCopied = true;
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    // The old format stored {token, queuedAt}; tolerate a bare string too,
+    // since being generous here costs nothing and dropping a real token does.
+    const token = typeof entry === 'string' ? entry : (entry as PendingRevocation | null)?.token;
+    if (typeof token !== 'string' || token.length === 0) continue;
+    const queuedAt =
+      typeof entry === 'object' && entry !== null && typeof (entry as PendingRevocation).queuedAt === 'number'
+        ? (entry as PendingRevocation).queuedAt
+        : now;
+    if (now - queuedAt > MAX_PENDING_AGE_MS) continue; // past its session lifetime; nothing left to revoke
+    try {
+      localStorage.setItem(keyFor(token), JSON.stringify({ token, queuedAt } satisfies PendingRevocation));
+    } catch {
+      allCopied = false;
+    }
+  }
+
+  if (allCopied) {
+    try {
+      localStorage.removeItem(LEGACY_ARRAY_KEY);
+    } catch {
+      /* storage unavailable; the array stays and is retried next startup */
+    }
+  }
 }
 
 function readAll(): { key: string; entry: PendingRevocation }[] {
@@ -147,6 +211,9 @@ export async function revokeOrQueue(token: string): Promise<LogoutOutcome> {
 }
 
 export async function retryPendingRevocation(): Promise<void> {
+  // Run before the scan, so a queue inherited from the previous format is
+  // picked up on the very first retry rather than after some later event.
+  migrateLegacyQueue();
   const now = Date.now();
   for (const { key, entry } of readAll()) {
     if (now - entry.queuedAt > MAX_PENDING_AGE_MS) {

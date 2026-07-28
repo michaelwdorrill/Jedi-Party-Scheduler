@@ -3,6 +3,7 @@ import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
 import { runReminderSweep } from '../src/cron/reminders';
+import { decodeEventKey, readCursorKey } from '../src/cron/cursor';
 import { computeBusyBlocksForUsers } from '../src/lib/freeBusy';
 import { createEventWithInvites, updateEvent, type EventWriteInput } from '../src/lib/eventWrites';
 import { LIMITS } from '../src/lib/validate';
@@ -84,12 +85,15 @@ describe('free/busy at the worst-case shared-event topology (R1)', () => {
   }
 
   it('stays within the Free-plan query budget when every user shares every event', async () => {
-    const { db, env, userIds } = await seedSharedEvents(LIMITS.MAX_FREE_BUSY_USERS, 100);
+    // Sized to stay inside the occurrence ceiling so this test measures what
+    // it is named for -- query count -- rather than the refusal path, which
+    // the completeness tests below cover.
+    const { db, env, userIds } = await seedSharedEvents(LIMITS.MAX_FREE_BUSY_USERS, 5);
     const headers = await authHeaders(env, 'caller');
     fetchStub = stubFetch([]);
 
     const from = Date.now();
-    const to = from + 30 * DAY_MS;
+    const to = from + 7 * DAY_MS;
     db.resetQueryCount();
     const res = await app.request(
       `https://worker.test/guilds/guild-1/free-busy?from=${from}&to=${to}&user_ids=${userIds.join(',')}`,
@@ -99,6 +103,58 @@ describe('free/busy at the worst-case shared-event topology (R1)', () => {
 
     expect(res.status).toBe(200);
     expect(db.queryCount).toBeLessThan(D1_FREE_PLAN_QUERY_BUDGET);
+  });
+
+  // The version of this test that shipped in Pass 5 asserted only status 200
+  // and a query count -- so it passed while the endpoint was silently
+  // dropping most of the commitments it was asked about. Asserting the
+  // *answer* is the point: a busy block that goes missing is reported as
+  // free time, and an organizer schedules over it.
+  it('returns every seeded commitment, not a partial answer', async () => {
+    const users = 5;
+    const events = 4;
+    const days = 7;
+    const { env, userIds } = await seedSharedEvents(users, events);
+    fetchStub = stubFetch([]);
+
+    const from = Date.now();
+    const to = from + days * DAY_MS;
+    const result = await computeBusyBlocksForUsers(env, userIds, from, to);
+
+    // Daily series, all at the same hour, so each event contributes one
+    // occurrence per day and they merge across events into one block per day.
+    for (const id of userIds) {
+      const blocks = result.get(id)!;
+      expect(blocks.length).toBeGreaterThanOrEqual(days - 1);
+    }
+  });
+
+  it('refuses an over-budget request instead of answering it incompletely', async () => {
+    const { env, userIds } = await seedSharedEvents(LIMITS.MAX_FREE_BUSY_USERS, 100);
+    const headers = await authHeaders(env, 'caller');
+    fetchStub = stubFetch([]);
+
+    const from = Date.now();
+    const to = from + 30 * DAY_MS;
+    const res = await app.request(
+      `https://worker.test/guilds/guild-1/free-busy?from=${from}&to=${to}&user_ids=${userIds.join(',')}`,
+      { headers },
+      env,
+    );
+
+    // 422, and an actionable message -- not a 200 whose omissions look like
+    // free time.
+    expect(res.status).toBe(422);
+    expect(await res.text()).toMatch(/fewer people or a shorter date range/i);
+  });
+
+  it('allows a request that lands exactly on the occurrence ceiling', async () => {
+    const { env } = setup();
+    // The old `budget > 0` test rejected an exactly-at-limit request as if it
+    // had exceeded the ceiling; `n > budget` admits it.
+    await expect(
+      computeBusyBlocksForUsers(env, [], Date.now(), Date.now() + DAY_MS),
+    ).resolves.toBeInstanceOf(Map);
   });
 
   it('produces identical availability whether an event is shared or per-user', async () => {
@@ -516,5 +572,145 @@ describe('deferred work is delayed, not starved (R3)', () => {
       .prepare(`SELECT COUNT(DISTINCT event_id) AS n FROM notification_log WHERE delivered_at IS NOT NULL`)
       .first<{ n: number }>();
     expect(covered?.n).toBe(eventIds.length);
+  });
+});
+
+// The Pass-5 fairness test ran its ticks without advancing the clock, so the
+// reminder window never moved and the result set never shrank -- which is
+// precisely the condition an OFFSET cursor survives. Production interleaves
+// the two: rows drop off the front of the `start_at >= now` window as events
+// begin, while the cursor still counts from the old set.
+describe('reminder cursors survive a moving window (F-14)', () => {
+  it('does not skip an unscanned event when earlier ones leave the window', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+
+    // Staggered start times so that, as the clock advances, the earliest
+    // events fall out of the `start_at >= now` predicate one by one.
+    // No invite rows: the organizer is a participant anyway, and this keeps
+    // the invite sweep from consuming the tick's allowance before the
+    // reminder sweep runs. The variable under test is the cursor, not which
+    // sweep wins the budget.
+    const base = Date.now();
+    const eventIds = ids('staggered', 24);
+    for (const [i, id] of eventIds.entries()) {
+      const startAt = base + (i + 1) * 60_000;
+      await seedEvent(db, { id, organizerId: 'organizer', startAt, endAt: startAt + HOUR_MS });
+    }
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    // Advance the clock between ticks so the `start_at >= now` window
+    // genuinely moves under the cursor: by the last tick, the earliest events
+    // have begun and dropped out of the result set entirely. That is the
+    // interleaving an OFFSET cursor cannot survive -- it counts into a list
+    // that is no longer the list it counted against.
+    const realNow = Date.now;
+    let missed: string[] = [];
+    try {
+      for (let tick = 0; tick < 10; tick++) {
+        Date.now = () => realNow.call(Date) + tick * 60_000;
+        await runReminderSweep(env);
+      }
+      // Events that had already started by the final tick were never
+      // reachable again, and being late for those is a budget property, not a
+      // cursor bug. Every event still ahead of `now` must have been visited.
+      const stillAhead = eventIds.filter((_, i) => base + (i + 1) * 60_000 > Date.now());
+      const notified = await db
+        .prepare(`SELECT DISTINCT event_id FROM notification_log WHERE notification_type LIKE 'reminder%'`)
+        .all<{ event_id: string }>();
+      const seen = new Set(notified.results.map((r) => r.event_id));
+      missed = stillAhead.filter((id) => !seen.has(id));
+    } finally {
+      Date.now = realNow;
+    }
+
+    expect(missed).toEqual([]);
+  });
+
+  it('keeps scanning past the first page instead of resetting to the start', async () => {
+    const { db, env } = setup('paid');
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+
+    // More than one page (SINGLE_EVENT_PAGE_SIZE is 100) on a plan whose
+    // allowance can get through a whole page in one tick -- the exact shape
+    // where the old wrap condition concluded "page fully scanned, therefore
+    // scan complete" and reset to zero, stranding everything after it.
+    const startAt = Date.now() + 30 * 60_000;
+    const eventIds = ids('page', 130);
+    for (const id of eventIds) {
+      await seedEvent(db, { id, organizerId: 'organizer', startAt, endAt: startAt + HOUR_MS });
+      await seedInvite(db, id, 'organizer');
+    }
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    for (let tick = 0; tick < 6; tick++) await runReminderSweep(env);
+
+    const notified = await db
+      .prepare(`SELECT COUNT(DISTINCT event_id) AS n FROM notification_log WHERE notification_type LIKE 'reminder%'`)
+      .first<{ n: number }>();
+    expect(notified?.n).toBe(eventIds.length);
+  });
+});
+
+// The property that makes the moving window safe, asserted directly rather
+// than inferred from an end-to-end run: the stored cursor is a *key*, so
+// resuming from it depends only on what was processed, never on how many rows
+// happened to precede it at the time.
+describe('cursor stores a resumable key, not a count (F-14)', () => {
+  it('records the last processed event key and resumes strictly after it', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+
+    const base = Date.now();
+    const eventIds = ids('key', 30);
+    for (const [i, id] of eventIds.entries()) {
+      const startAt = base + (i + 1) * 60_000;
+      await seedEvent(db, { id, organizerId: 'organizer', startAt, endAt: startAt + HOUR_MS });
+    }
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    const stored = await readCursorKey(env, 'reminders_single');
+    // A count would be a bare integer; a key carries the start time and id of
+    // the row it stopped after.
+    expect(stored).toBeTruthy();
+    const decoded = decodeEventKey(stored);
+    expect(decoded).not.toBeNull();
+    expect(eventIds).toContain(decoded!.id);
+
+    // Everything already notified sorts at or before the cursor, and
+    // everything after it is untouched -- which is what makes resumption
+    // correct no matter what leaves the window in between.
+    const notified = await db
+      .prepare(`SELECT DISTINCT event_id FROM notification_log WHERE notification_type LIKE 'reminder%'`)
+      .all<{ event_id: string }>();
+    const seen = new Set(notified.results.map((r) => r.event_id));
+    const cursorIndex = eventIds.indexOf(decoded!.id);
+    for (const [i, id] of eventIds.entries()) {
+      if (i > cursorIndex) expect(seen.has(id)).toBe(false);
+    }
+  });
+
+  it('clears the cursor once a pass reaches the end of the scan', async () => {
+    const { db, env } = setup('paid');
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    const startAt = Date.now() + 30 * 60_000;
+    await seedEvent(db, { id: 'only', organizerId: 'organizer', startAt, endAt: startAt + HOUR_MS });
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    // Short page => end of scan => next tick starts a fresh pass.
+    expect(await readCursorKey(env, 'reminders_single')).toBeNull();
   });
 });

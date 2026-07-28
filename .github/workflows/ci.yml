@@ -62,3 +62,11 @@ jobs:
       - name: Build
         working-directory: frontend
         run: npm run build
+
+      # The frontend holds one piece of genuinely security-relevant logic --
+      # the pending logout revocation queue, which is what makes "log out"
+      # mean the session is actually revoked rather than just forgotten
+      # locally. It gets tested rather than only typechecked.
+      - name: Test
+        working-directory: frontend
+        run: npm test

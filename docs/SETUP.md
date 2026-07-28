@@ -336,8 +336,27 @@ at every one of its own configured maxima:
 - a calendar request for the maximum 300 active events (100 of them
   recurring, up to 200 as multi-winner polls with confirmed options);
 - a free/busy request for the maximum 25 users, each with a recurring
-  event; and
-- a cron tick for an event at the maximum 300 invitees.
+  event;
+- a 50-option poll — creating it, reading it, voting on it, editing its
+  options, and resolving it at its deadline;
+- an invite naming 50 groups of 200 overlapping members; and
+- a cron tick for an event at the maximum 300 invitees, including one whose
+  terminal-history purge queue is full.
+
+### When free/busy refuses instead of answering
+
+The scheduling assistant has one more limit that behaves differently from the
+rest: a ceiling on how many *occurrences* it will expand for a single request
+(`MAX_FREE_BUSY_OCCURRENCES`). Its factors multiply — people × events ×
+occurrences each — so a request can be inside every individual limit and still
+be far too large.
+
+Past that ceiling the endpoint returns **422** and asks for fewer people or a
+shorter range. It deliberately does not answer partially. The response is a
+list of busy blocks, so a commitment left out of it is indistinguishable from
+genuine free time — a partial answer would tell you someone is free at a time
+the database says they are busy, and you would schedule over it. A refusal you
+can act on is better than a confident wrong answer.
 
 `worker/test/pass4.test.ts` and `worker/test/pass5.test.ts` assert this with
 an actual query counter (see `worker/test/d1shim.ts`'s `queryCount`), not just
@@ -372,7 +391,9 @@ they need to be.
 
 Rough throughput on the Free plan: **~13 DMs per tick, so ~50/hour**, once
 recipients' DM channels are cached (the first DM to a given person costs an
-extra Discord call and an extra statement). That is ample for a friend group.
+extra Discord call and an extra statement). Maintenance work — resolving
+expired polls, purging 90-day-old history — draws on the same allowance and
+yields to notifications, so on a busy tick it simply waits for a quieter one. That is ample for a friend group.
 It is *not* ample for a 300-invitee event needing an hour's notice — those
 notifications will take several hours to go out. If that matters, move the
 account to Workers Paid and set `WORKERS_PLAN = "paid"`, which raises the

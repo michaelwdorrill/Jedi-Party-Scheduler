@@ -81,9 +81,11 @@ See `worker/migrations/0001_init.sql` for the full schema. The short version:
 instead of a fixed `start_at`/`end_at`; `event_invites` tracks who's invited
 and their RSVP; polls get candidate slots in `event_poll_options` with votes
 in `event_poll_votes`; and `notification_log` is what prevents the reminder
-cron from DMing someone twice for the same thing (its `UNIQUE` constraint is
-the actual dedupe mechanism — the code inserts the log row *before*
-attempting delivery, so a duplicate insert means "already handled, skip").
+cron from DMing someone twice for the same thing. Its `UNIQUE` constraint is
+what makes the claim safe, but the row is no longer a record of *intent* —
+see "Delivery is an outbox, not a log" below for what its columns actually
+mean and why "we wrote the row" and "the DM arrived" had to stop being the
+same fact.
 
 ## Recurring events
 
@@ -153,18 +155,33 @@ Two mechanisms keep that bounded:
   charges it for both the deliveries it makes *and* the scanning it does to
   find them. When it runs out, sweeps stop cleanly. Stopping early is a
   delay; being killed mid-flight by the platform is a lost or duplicated DM.
-- **`worker/src/cron/cursor.ts`** (table added in migration 0010) records how
-  far each scan got. Without it a budget-limited tick would rescan the same
-  prefix every fifteen minutes and never reach anything past it — deferral
-  would be starvation. The cursor is an offset into a deterministically
-  ordered scan, so it is a fairness mechanism, not a correctness one:
-  correctness comes from the outbox, which won't send twice however many
-  times a sweep revisits an event.
+- **`worker/src/cron/cursor.ts`** (table added in 0010, made keyset in 0011)
+  records how far each scan got. Without it a budget-limited tick would
+  rescan the same prefix every fifteen minutes and never reach anything past
+  it — deferral would be starvation.
+
+  The cursor stores the last *key* processed, not a count. That distinction
+  matters because the reminder scans' predicate (`start_at >= now`) moves
+  every tick: rows drop off the front as events begin, so an offset counted
+  against one tick's result set points somewhere else in the next one's, and
+  the rows it skips are due reminders nothing downstream recovers. Resuming
+  after a key is stable under that. End-of-scan is detected by getting back a
+  short page, never inferred from a full one.
+
+  It remains a fairness mechanism, not a correctness one: correctness comes
+  from the outbox, which won't send twice however many times a sweep revisits
+  an event.
 
 Recipient queries fold the "already settled?" check into the query that
 fetches them (`pendingRecipients`), so an event whose notifications are all
 delivered costs one query and returns nothing, rather than one query per
 participant to rediscover there is nothing to do.
+
+Everything whose cost scales with stored data draws on the same allowance —
+notification delivery, per-event scanning, expired-poll resolution, and the
+terminal-history purge. Only the genuinely fixed per-tick sweeps are reserved
+for. Maintenance yields to notifications, so a busy tick defers the purge to a
+quieter one rather than pushing the invocation past its ceiling.
 
 `WORKERS_PLAN` in `worker/wrangler.toml` tells the budget which allowance it
 has. It *describes* the account's plan; it does not change it. See

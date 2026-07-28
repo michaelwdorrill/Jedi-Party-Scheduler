@@ -62,6 +62,48 @@ export function chunkRows<T>(rows: readonly T[], paramsPerRow: number, reserved 
   return out;
 }
 
+// Builds the SQL for a multi-row INSERT whose rows are written only if a
+// guard row exists, as `INSERT ... SELECT * FROM (VALUES-ish) WHERE EXISTS`.
+//
+// Two requirements meet here, and neither shape satisfies both on its own:
+//
+//   multi-row VALUES      keeps a 300-invitee or 50-option write from
+//                         becoming one D1 statement per row, which alone
+//                         exceeds the Free plan's 50-statement invocation
+//                         ceiling.
+//   WHERE EXISTS on the   makes every child conditional on the guarded parent
+//   parent event          insert having actually happened. Without it, a
+//                         create that loses the quota race sends its children
+//                         at a parent that was never written -- and since D1
+//                         enforces foreign keys, that aborts the batch with an
+//                         opaque FK error instead of the intended clean no-op
+//                         and friendly quota message.
+//
+// `VALUES (...)` cannot carry a WHERE, so the rows are expressed as a
+// UNION ALL of single-row SELECTs and filtered as a subquery. The first arm
+// names the columns so the subquery's shape is explicit.
+//
+// The trailing WHERE is also what makes an `ON CONFLICT` suffix parse: SQLite
+// requires an INSERT ... SELECT upsert to have a WHERE clause, so the parser
+// can tell the conflict target from the selected rows.
+export function conditionalRowsSql(
+  table: string,
+  columns: readonly string[],
+  rowCount: number,
+  guardTable: string,
+  onConflict = '',
+): string {
+  const arms = Array.from({ length: rowCount }, (_, i) =>
+    i === 0
+      ? `SELECT ${columns.map((c) => `? AS ${c}`).join(', ')}`
+      : `SELECT ${columns.map(() => '?').join(', ')}`,
+  ).join(' UNION ALL ');
+  return `INSERT INTO ${table} (${columns.join(', ')})
+     SELECT * FROM (${arms})
+     WHERE EXISTS (SELECT 1 FROM ${guardTable} WHERE id = ?)
+     ${onConflict}`;
+}
+
 // Runs `fn` once per chunk and concatenates the results. The chunks run
 // sequentially rather than in parallel: D1 also caps how many queries a
 // single Worker invocation may issue, and a fan-out here would multiply that

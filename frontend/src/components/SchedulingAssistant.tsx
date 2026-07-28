@@ -27,6 +27,10 @@ export default function SchedulingAssistant({
 }) {
   const [entries, setEntries] = useState<FreeBusyEntry[]>([]);
   const [loading, setLoading] = useState(false);
+  // A failed lookup must never fall through to rendering the previous
+  // answer. Everything this strip shows is "who is free", so stale or empty
+  // bars read as "everyone is available" -- the one wrong thing it can say.
+  const [error, setError] = useState<string | null>(null);
 
   const dayStart = DateTime.fromISO(date, { zone }).startOf('day').plus({ hours: dayStartHour });
   const dayEnd = DateTime.fromISO(date, { zone }).startOf('day').plus({ hours: dayEndHour });
@@ -38,11 +42,22 @@ export default function SchedulingAssistant({
       return;
     }
     setLoading(true);
+    setError(null);
     api
       .get<FreeBusyEntry[]>(
         `/guilds/${guildId}/free-busy?from=${dayStart.toMillis()}&to=${dayEnd.toMillis()}&user_ids=${userIds.join(',')}`,
       )
-      .then(setEntries)
+      .then((next) => {
+        setEntries(next);
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        // The server refuses rather than answering partially when a request
+        // covers too much to expand accurately, so say so instead of
+        // silently showing nothing.
+        setEntries([]);
+        setError(err instanceof Error ? err.message : 'Could not load availability.');
+      })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [guildId, userIds.join(','), date, zone]);
@@ -70,6 +85,15 @@ export default function SchedulingAssistant({
       e.visible &&
       e.busy.some((b) => b.startAt < proposedEnd && b.endAt > proposedStart),
   );
+
+  if (error) {
+    return (
+      <div className="rounded border border-amber-700/50 bg-amber-950/40 p-3 text-sm text-amber-200">
+        <p className="font-medium">Couldn't check availability</p>
+        <p className="mt-1 text-amber-300/90">{error}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-2">

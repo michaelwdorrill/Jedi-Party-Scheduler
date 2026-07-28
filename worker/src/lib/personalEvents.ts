@@ -1,6 +1,7 @@
 import type { Env } from '../env';
 import { chunkIds, placeholders } from './d1';
 import { expandOccurrences, type ExpandedOccurrence, type OccurrenceOverride } from './recurrence';
+import { FreeBusyTooLargeError } from './validate';
 
 export interface PersonalEventRow {
   id: string;
@@ -213,11 +214,12 @@ export async function expandPersonalOccurrencesForUsers(
   for (const event of events) {
     const occurrences = expandPersonalEventRow(event, fromMs, toMs, overridesById.get(event.id) ?? []);
     if (occurrences.length === 0) continue;
+    // Same reasoning as the guild-event budget in freeBusy.ts: dropping
+    // occurrences here would report a personal commitment the user explicitly
+    // marked 'busy' as free time. Refuse instead. `>` not `>=` so a request
+    // that lands exactly on the ceiling is allowed.
+    if (occurrences.length > remaining) throw new FreeBusyTooLargeError();
     remaining -= occurrences.length;
-    if (remaining <= 0) {
-      console.warn('personal-event occurrence budget exhausted; returning partial availability');
-      break;
-    }
     if (!out.has(event.user_id)) out.set(event.user_id, []);
     out.get(event.user_id)!.push(...occurrences);
   }

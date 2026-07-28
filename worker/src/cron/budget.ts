@@ -70,19 +70,33 @@ export class TickBudget {
     this.queries = Math.max(0, queries - RESERVED_QUERIES);
   }
 
-  // Reserves one delivery attempt. `cachedChannel` says whether this
-  // recipient's DM channel id is already known, which decides both how many
-  // Discord calls and how many statements the attempt will take.
+  // Reserves one delivery attempt, in full and before anything is spent on
+  // it. `cachedChannel` says whether this recipient's DM channel id is
+  // already known, which decides both how many Discord calls and how many
+  // statements the attempt will take.
   //
   // Returns false when the tick can no longer afford it, which is the
   // caller's signal to stop -- not to skip this item and try the next, since
   // the next costs at least as much.
-  tryDelivery(cachedChannel = false): boolean {
+  reserveDelivery(cachedChannel: boolean): boolean {
     const cost = cachedChannel ? COST_CACHED : COST_UNCACHED;
     if (this.subrequests < cost.subrequests || this.queries < cost.queries) return false;
     this.subrequests -= cost.subrequests;
     this.queries -= cost.queries;
     return true;
+  }
+
+  // Returns a reservation for a delivery that never happened -- the row was
+  // already settled, backing off, or claimed elsewhere. One statement is kept
+  // back because the claim attempt that discovered this really did run.
+  //
+  // Without the refund, reserving before claiming would make every settled
+  // row a tick merely *looks* at cost as much as a real send, and a large
+  // delivered backlog would exhaust the allowance without a DM going out.
+  refundUnsentDelivery(cachedChannel: boolean): void {
+    const cost = cachedChannel ? COST_CACHED : COST_UNCACHED;
+    this.subrequests += cost.subrequests;
+    this.queries += cost.queries - 1;
   }
 
   // Charges queries the tick spends looking for work, as opposed to doing it:
