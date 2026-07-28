@@ -1,5 +1,5 @@
 import type { Env } from '../env';
-import { chunkIds, placeholders } from './d1';
+import { chunkIds, chunkRows, placeholders } from './d1';
 import { checkGuildMembership } from './discord';
 import { revokeAllSessionsForUser } from './sessions';
 
@@ -248,16 +248,20 @@ export async function listUserGuilds(env: Env, userId: string) {
 }
 
 // "Friends" = other users who have also logged into this app and share the
-// given guild with the requesting user.
+// given guild with the requesting user. Requires a membership confirmed
+// within the grace window, same as every other listing/target query -- a row
+// that has drifted past it is not evidence the person is still around, and
+// this is a way to learn about and select them (as an invite/group target)
+// just as much as any of those other checks are.
 export async function listFriends(env: Env, userId: string, guildId: string) {
   const { results } = await env.DB.prepare(
     `SELECT u.id, u.username, u.global_name, u.avatar_hash, u.timezone, u.notifications_enabled
      FROM users u
      JOIN user_guild_membership m ON m.user_id = u.id
-     WHERE m.guild_id = ? AND m.is_member = 1 AND u.id != ?
+     WHERE m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ? AND u.id != ?
      ORDER BY u.username`,
   )
-    .bind(guildId, userId)
+    .bind(guildId, Date.now() - MEMBERSHIP_GRACE_MS, userId)
     .all<UserRow>();
   return results.map(mapFriend);
 }
@@ -433,12 +437,27 @@ interface StaleMembershipRow {
   verified_at: number;
 }
 
+// `WHERE (a, b) IN (VALUES (?,?), (?,?), ...)` -- SQLite's row-value IN,
+// supported since 3.15. This is what lets many (user_id, guild_id) pairs be
+// updated in one statement despite the table's key being composite, so a
+// bulk revalidation result isn't forced back into one UPDATE per row.
+function rowValuesPlaceholder(n: number): string {
+  return new Array(n).fill('(?,?)').join(',');
+}
+
 // Background revalidation, driven by the cron sweep. Interactive requests
 // refresh their *own* membership on the way through, but the notification
 // jobs have no such trigger: they DM people who may not have opened the app
 // in weeks, and they can't afford a live Discord call per recipient per tick.
 // This keeps the cache fresh for everyone from one bounded batch instead, so
 // the cron recipient queries can safely filter on verified_at alone.
+//
+// The live Discord checks still happen one at a time (they're outbound
+// fetches, not D1 queries, so they don't count against the invocation
+// budget), but the results are collected and written back in a small,
+// fixed number of set-based statements instead of one D1 UPDATE per row --
+// at the previous one-row-per-statement rate, 50 confirmed rows in a single
+// tick was already 51 D1 queries on its own, before any other cron work ran.
 //
 // Returns how many rows it revalidated, for the caller to log.
 export async function revalidateStaleMemberships(env: Env, limit: number): Promise<number> {
@@ -453,19 +472,16 @@ export async function revalidateStaleMemberships(env: Env, limit: number): Promi
     .bind(cutoff, limit)
     .all<StaleMembershipRow>();
 
+  const confirmed: [string, string][] = [];
+  const departed: [string, string][] = [];
   let checked = 0;
+
   for (const row of results) {
     const status = await checkGuildMembership(env.DISCORD_BOT_TOKEN, row.guild_id, row.user_id);
     if (status === 'member') {
-      await env.DB.prepare(`UPDATE user_guild_membership SET verified_at = ? WHERE user_id = ? AND guild_id = ?`)
-        .bind(Date.now(), row.user_id, row.guild_id)
-        .run();
+      confirmed.push([row.user_id, row.guild_id]);
     } else if (status === 'not_member') {
-      await env.DB.prepare(
-        `UPDATE user_guild_membership SET is_member = 0, verified_at = ? WHERE user_id = ? AND guild_id = ?`,
-      )
-        .bind(Date.now(), row.user_id, row.guild_id)
-        .run();
+      departed.push([row.user_id, row.guild_id]);
     } else if (status === 'bot_unauthorized') {
       // Every subsequent check this tick would fail the same way, and each
       // one costs a round trip. Stop and let the next tick retry.
@@ -473,5 +489,24 @@ export async function revalidateStaleMemberships(env: Env, limit: number): Promi
     }
     checked++;
   }
+
+  const now = Date.now();
+  const statements: D1PreparedStatement[] = [];
+  for (const chunk of chunkRows(confirmed, 2, 1)) {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE user_guild_membership SET verified_at = ? WHERE (user_id, guild_id) IN (VALUES ${rowValuesPlaceholder(chunk.length)})`,
+      ).bind(now, ...chunk.flat()),
+    );
+  }
+  for (const chunk of chunkRows(departed, 2, 1)) {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE user_guild_membership SET is_member = 0, verified_at = ? WHERE (user_id, guild_id) IN (VALUES ${rowValuesPlaceholder(chunk.length)})`,
+      ).bind(now, ...chunk.flat()),
+    );
+  }
+  if (statements.length > 0) await env.DB.batch(statements);
+
   return checked;
 }

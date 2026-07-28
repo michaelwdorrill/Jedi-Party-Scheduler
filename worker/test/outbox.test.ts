@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { deliverThroughOutbox, type DmRecipient } from '../src/lib/outbox';
+import { deliverThroughOutbox, LEASE_MS, type DmRecipient } from '../src/lib/outbox';
+import { DISCORD_FETCH_TIMEOUT_MS, sendBotDm } from '../src/lib/discord';
 import {
   DM_CHANNEL_RULE,
   dmSendRule,
@@ -146,6 +147,32 @@ describe('deliverThroughOutbox', () => {
     await deliverThroughOutbox(env, 'notification_log', KEY, recipient, 'hi');
 
     expect(countSends(fetchStub)).toBe(1);
+  });
+
+  // R9 from the review reproductions: an unbounded fetch could still be
+  // in-flight when the lease expires, letting a second invocation reclaim
+  // and re-send. The fix is bounding both Discord fetches well under the
+  // lease -- this is the invariant that makes that fix actually hold.
+  it('keeps the Discord fetch timeout comfortably shorter than the outbox lease', () => {
+    expect(DISCORD_FETCH_TIMEOUT_MS * 2).toBeLessThan(LEASE_MS);
+  });
+
+  it('treats a network failure (not just an HTTP error) as retryable, not a thrown exception', async () => {
+    const { db, env } = await seedOutboxFixture();
+    fetchStub = stubFetch([DM_CHANNEL_RULE, { match: '/messages', status: 0, networkError: true }]);
+
+    await expect(deliverThroughOutbox(env, 'notification_log', KEY, recipient, 'hi')).resolves.toBe(false);
+
+    const row = await logRow(db);
+    expect(row?.delivered_at).toBeNull();
+    expect(row?.failed_at).toBeNull();
+    expect(row!.next_attempt_at!).toBeGreaterThan(Date.now());
+  });
+
+  it('sendBotDm itself never throws for a network failure -- it reports status 0', async () => {
+    fetchStub = stubFetch([{ match: '/users/@me/channels', status: 0, networkError: true }]);
+    const { result } = await sendBotDm('bot-token', 'u1', 'hi', null);
+    expect(result).toEqual({ ok: false, status: 0 });
   });
 
   it('retries once the backoff has elapsed', async () => {

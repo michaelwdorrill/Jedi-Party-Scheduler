@@ -1,5 +1,6 @@
 import { DateTime } from 'luxon';
 import type { Env } from '../env';
+import { chunkIds, placeholders } from './d1';
 import type { EventRow, OverrideRow } from './events';
 
 // Shape-agnostic recurrence rule. Guild events store this in
@@ -153,50 +154,83 @@ export function expandOccurrences(
   return results;
 }
 
-// Loads a guild event's rule from event_recurrence_rules and expands it.
+interface RecurrenceRuleRow {
+  event_id: string;
+  freq: 'DAILY' | 'WEEKLY' | 'MONTHLY';
+  interval: number;
+  by_weekday: string | null;
+  by_month_day: number | null;
+  start_date: string;
+  start_time: string;
+  duration_minutes: number;
+  end_type: 'never' | 'on_date' | 'after_count';
+  end_date: string | null;
+  end_count: number | null;
+}
+
+function mapRuleRow(row: RecurrenceRuleRow): RecurrenceRule {
+  return {
+    freq: row.freq,
+    interval: row.interval,
+    byWeekday: row.by_weekday,
+    byMonthDay: row.by_month_day,
+    startDate: row.start_date,
+    startTime: row.start_time,
+    durationMinutes: row.duration_minutes,
+    endType: row.end_type,
+    endDate: row.end_date,
+    endCount: row.end_count,
+  };
+}
+
+// Bulk-loads recurrence rules for many events in one chunked pass, so a
+// caller expanding a whole page of recurring events (the guild calendar,
+// free/busy, a cron page) issues a handful of queries instead of one per
+// event -- that per-event query was the single largest contributor to a
+// valid, in-quota calendar request crossing D1's per-invocation query limit.
+export async function loadRecurrenceRulesForEvents(
+  env: Env,
+  eventIds: string[],
+): Promise<Map<string, RecurrenceRule>> {
+  const map = new Map<string, RecurrenceRule>();
+  for (const chunk of chunkIds(eventIds)) {
+    const { results } = await env.DB.prepare(
+      `SELECT event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
+              duration_minutes, end_type, end_date, end_count
+       FROM event_recurrence_rules WHERE event_id IN (${placeholders(chunk.length)})`,
+    )
+      .bind(...chunk)
+      .all<RecurrenceRuleRow>();
+    for (const row of results) map.set(row.event_id, mapRuleRow(row));
+  }
+  return map;
+}
+
+// Expands a guild event's occurrences. Pass `preloadedRule` (from
+// loadRecurrenceRulesForEvents) whenever expanding more than one event in the
+// same request -- omitting it falls back to a per-event query, which is fine
+// for the handful of call sites that only ever handle one event at a time
+// (e.g. validating a single occurrence-cancel request) but must not be used
+// in a loop over a whole event list.
 export async function expandOccurrencesForEvent(
   env: Env,
   event: EventRow,
   windowFromMs: number,
   windowToMs: number,
   overrides: OverrideRow[],
+  preloadedRule?: RecurrenceRule,
 ): Promise<ExpandedOccurrence[]> {
-  const row = await env.DB.prepare(
-    `SELECT freq, interval, by_weekday, by_month_day, start_date, start_time,
-            duration_minutes, end_type, end_date, end_count
-     FROM event_recurrence_rules WHERE event_id = ?`,
-  )
-    .bind(event.id)
-    .first<{
-      freq: 'DAILY' | 'WEEKLY' | 'MONTHLY';
-      interval: number;
-      by_weekday: string | null;
-      by_month_day: number | null;
-      start_date: string;
-      start_time: string;
-      duration_minutes: number;
-      end_type: 'never' | 'on_date' | 'after_count';
-      end_date: string | null;
-      end_count: number | null;
-    }>();
-  if (!row) return [];
+  const rule =
+    preloadedRule ??
+    (await env.DB.prepare(
+      `SELECT event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
+              duration_minutes, end_type, end_date, end_count
+       FROM event_recurrence_rules WHERE event_id = ?`,
+    )
+      .bind(event.id)
+      .first<RecurrenceRuleRow>()
+      .then((row) => (row ? mapRuleRow(row) : null)));
+  if (!rule) return [];
 
-  return expandOccurrences(
-    {
-      freq: row.freq,
-      interval: row.interval,
-      byWeekday: row.by_weekday,
-      byMonthDay: row.by_month_day,
-      startDate: row.start_date,
-      startTime: row.start_time,
-      durationMinutes: row.duration_minutes,
-      endType: row.end_type,
-      endDate: row.end_date,
-      endCount: row.end_count,
-    },
-    event.timezone,
-    windowFromMs,
-    windowToMs,
-    overrides,
-  );
+  return expandOccurrences(rule, event.timezone, windowFromMs, windowToMs, overrides);
 }

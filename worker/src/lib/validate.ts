@@ -217,7 +217,12 @@ export const LIMITS = {
   // use into a durable availability problem -- every member's calendar loads
   // and expands the whole visible set, and the cron walks all of it every 15
   // minutes. Generous for a friend group, finite for everyone else.
-  MAX_ACTIVE_EVENTS_PER_GUILD: 1000,
+  // Chosen so the guild calendar's worst-case query count (every visible
+  // event, chunked in groups of 80, across the overrides/RSVP/primary-group/
+  // recurrence-rule/confirmed-poll-option helpers) stays comfortably inside
+  // Cloudflare D1's 50-query Free-plan budget per Worker invocation, not just
+  // the 1000-query Paid budget. Still enormous headroom for a friend group.
+  MAX_ACTIVE_EVENTS_PER_GUILD: 300,
   MAX_EVENTS_PER_ORGANIZER_PER_GUILD: 300,
   MAX_RECURRING_EVENTS_PER_GUILD: 100,
   MAX_GROUPS_PER_GUILD: 100,

@@ -131,3 +131,34 @@ export async function loadPrimaryGroupForEvents(
   }
   return map;
 }
+
+export interface ConfirmedPollOptionRow {
+  id: string;
+  event_id: string;
+  start_at: number;
+  end_at: number;
+}
+
+// Bulk-loads confirmed options for many multi-winner polls at once. Loading
+// this per-poll (one query per poll in the visible list) was the other half
+// of the calendar route's N+1 -- a guild with many multi-winner polls paid
+// one query per poll on every single calendar load regardless of date range.
+export async function loadConfirmedOptionsForEvents(
+  env: Env,
+  eventIds: string[],
+): Promise<Map<string, ConfirmedPollOptionRow[]>> {
+  const map = new Map<string, ConfirmedPollOptionRow[]>();
+  for (const chunk of chunkIds(eventIds)) {
+    const { results } = await env.DB.prepare(
+      `SELECT id, event_id, start_at, end_at FROM event_poll_options
+       WHERE event_id IN (${placeholders(chunk.length)}) AND confirmed_at IS NOT NULL`,
+    )
+      .bind(...chunk)
+      .all<ConfirmedPollOptionRow>();
+    for (const row of results) {
+      if (!map.has(row.event_id)) map.set(row.event_id, []);
+      map.get(row.event_id)!.push(row);
+    }
+  }
+  return map;
+}

@@ -29,7 +29,7 @@ export interface DmRecipient {
 // How long one invocation owns an in-flight attempt. Comfortably longer than
 // a DM round trip, comfortably shorter than the 15-minute cron interval, so a
 // crashed invocation's rows are reclaimable by the following tick.
-const LEASE_MS = 5 * 60 * 1000;
+export const LEASE_MS = 5 * 60 * 1000;
 
 // First retry lands on the next cron tick; each subsequent one doubles.
 const BASE_BACKOFF_MS = 5 * 60 * 1000;
@@ -167,12 +167,23 @@ export async function deliverThroughOutbox(
   // mid-send (and was reclaimed by another invocation) can't have its result
   // overwritten by the invocation that lost it.
   if (result.ok) {
-    await env.DB.prepare(
+    // Discord has genuinely accepted the message at this point -- that part
+    // can't be undone. What this checks is narrower: whether *this*
+    // invocation still owned the row when it went to record that. With the
+    // fetch timeout above now comfortably inside the lease, losing this race
+    // shouldn't happen in practice, but the check costs nothing and means
+    // the return value never claims ownership it didn't actually have --
+    // a losing invocation logs the anomaly instead of silently reporting
+    // success as if its bookkeeping were authoritative.
+    const write = await env.DB.prepare(
       `UPDATE ${table} SET delivered_at = ?, claim_token = NULL, claimed_until = NULL, next_attempt_at = NULL
        WHERE id = ? AND claim_token = ?`,
     )
       .bind(Date.now(), held.id, token)
       .run();
+    if (write.meta.changes === 0) {
+      console.warn(`outbox lease lost after a successful send for ${table} ${JSON.stringify(key)} -- delivered, but this invocation's claim had already expired`);
+    }
     return true;
   }
 

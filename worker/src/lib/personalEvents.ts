@@ -84,6 +84,53 @@ export interface PersonalOccurrence extends ExpandedOccurrence {
   occurrenceId: string;
 }
 
+// Pure: expands one already-loaded row. No DB access, so both the
+// single-user and bulk multi-user paths below share this rather than
+// duplicating the recurring/non-recurring branching.
+function expandPersonalEventRow(
+  event: PersonalEventRow,
+  fromMs: number,
+  toMs: number,
+  overrides: OccurrenceOverride[],
+): PersonalOccurrence[] {
+  if (!event.is_recurring) {
+    if (event.start_at != null && event.start_at <= toMs && (event.end_at ?? event.start_at) >= fromMs) {
+      return [
+        {
+          event,
+          occurrenceId: event.id,
+          date: new Date(event.start_at).toISOString().slice(0, 10),
+          startAt: event.start_at,
+          endAt: event.end_at ?? event.start_at,
+        },
+      ];
+    }
+    return [];
+  }
+
+  if (!event.freq || !event.rule_start_date || !event.rule_start_time || event.duration_minutes == null) return [];
+
+  const expanded = expandOccurrences(
+    {
+      freq: event.freq,
+      interval: event.interval ?? 1,
+      byWeekday: event.by_weekday,
+      byMonthDay: event.by_month_day,
+      startDate: event.rule_start_date,
+      startTime: event.rule_start_time,
+      durationMinutes: event.duration_minutes,
+      endType: event.end_type ?? 'never',
+      endDate: event.rule_end_date,
+      endCount: event.end_count,
+    },
+    event.timezone,
+    fromMs,
+    toMs,
+    overrides,
+  );
+  return expanded.map((occ) => ({ event, occurrenceId: `${event.id}::${occ.date}`, ...occ }));
+}
+
 // Expands every active personal event for `userId` into concrete occurrences
 // overlapping the window -- one-off events pass through, recurring ones go
 // through the shared recurrence expander.
@@ -102,45 +149,45 @@ export async function expandPersonalOccurrences(
 
   const overridesById = await loadOverrides(env, events.map((e) => e.id));
   const out: PersonalOccurrence[] = [];
-
   for (const event of events) {
-    if (!event.is_recurring) {
-      if (event.start_at != null && event.start_at <= toMs && (event.end_at ?? event.start_at) >= fromMs) {
-        out.push({
-          event,
-          occurrenceId: event.id,
-          date: new Date(event.start_at).toISOString().slice(0, 10),
-          startAt: event.start_at,
-          endAt: event.end_at ?? event.start_at,
-        });
-      }
-      continue;
-    }
-
-    if (!event.freq || !event.rule_start_date || !event.rule_start_time || event.duration_minutes == null) continue;
-
-    const expanded = expandOccurrences(
-      {
-        freq: event.freq,
-        interval: event.interval ?? 1,
-        byWeekday: event.by_weekday,
-        byMonthDay: event.by_month_day,
-        startDate: event.rule_start_date,
-        startTime: event.rule_start_time,
-        durationMinutes: event.duration_minutes,
-        endType: event.end_type ?? 'never',
-        endDate: event.rule_end_date,
-        endCount: event.end_count,
-      },
-      event.timezone,
-      fromMs,
-      toMs,
-      overridesById.get(event.id) ?? [],
-    );
-    for (const occ of expanded) {
-      out.push({ event, occurrenceId: `${event.id}::${occ.date}`, ...occ });
-    }
+    out.push(...expandPersonalEventRow(event, fromMs, toMs, overridesById.get(event.id) ?? []));
   }
+  return out;
+}
 
+// Same expansion, but for many users in one pass -- used by the free/busy
+// scheduling assistant, which previously ran expandPersonalOccurrences()
+// (one events query + one chunked overrides query) once per requested user.
+// Personal events store their recurrence rule inline on the row itself (no
+// separate rules table), so unlike guild events there was never a per-event
+// recurrence query here -- only the per-user *event list* query needed
+// bulking, which this does with one chunked IN query for the whole request.
+export async function expandPersonalOccurrencesForUsers(
+  env: Env,
+  userIds: string[],
+  fromMs: number,
+  toMs: number,
+): Promise<Map<string, PersonalOccurrence[]>> {
+  const out = new Map<string, PersonalOccurrence[]>();
+  if (userIds.length === 0) return out;
+
+  const events: PersonalEventRow[] = [];
+  for (const chunk of chunkIds(userIds)) {
+    const { results } = await env.DB.prepare(
+      `SELECT * FROM personal_events WHERE status = 'active' AND user_id IN (${placeholders(chunk.length)})`,
+    )
+      .bind(...chunk)
+      .all<PersonalEventRow>();
+    events.push(...results);
+  }
+  if (events.length === 0) return out;
+
+  const overridesById = await loadOverrides(env, events.map((e) => e.id));
+  for (const event of events) {
+    const occurrences = expandPersonalEventRow(event, fromMs, toMs, overridesById.get(event.id) ?? []);
+    if (occurrences.length === 0) continue;
+    if (!out.has(event.user_id)) out.set(event.user_id, []);
+    out.get(event.user_id)!.push(...occurrences);
+  }
   return out;
 }

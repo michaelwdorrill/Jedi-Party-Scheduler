@@ -8,8 +8,10 @@ import { getConfirmedAttendeeIds } from '../lib/attendance';
 import { pruneStaleSessions } from '../lib/sessions';
 import { MEMBERSHIP_GRACE_MS, revalidateStaleMemberships } from '../lib/db';
 import { deliverThroughOutbox, type DmRecipient } from '../lib/outbox';
+import { chunkIds, placeholders } from '../lib/d1';
 
 const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 
 type ParticipantRow = DmRecipient;
 
@@ -39,6 +41,32 @@ const MEMBERSHIP_REVALIDATIONS_PER_TICK = 50;
 // enough to fail, it took the entire recurring sweep down with it before a
 // single reminder was processed.
 const RECURRING_PAGE_SIZE = 50;
+
+// A resolved/cancelled poll's notification obligations are done within a
+// handful of cron ticks (the outbox already dedupes and backs off), so
+// there's no reason to keep re-selecting and re-scanning that row every 15
+// minutes for the rest of its life. Bounding these sweeps by recency is a
+// read-time throttle; TERMINAL_HISTORY_RETENTION_MS below is what actually
+// reclaims the storage once nobody could plausibly still need the row.
+const TERMINAL_HISTORY_HOT_WINDOW_MS = 3 * DAY_MS;
+
+function terminalHistoryHotCutoff(): number {
+  return Date.now() - TERMINAL_HISTORY_HOT_WINDOW_MS;
+}
+
+// How long a cancelled event or a resolved/cancelled poll is kept at all.
+// Past this, every calendar load and cron tick for the rest of the guild's
+// life would otherwise keep paying a small, permanent tax for history nobody
+// asked to see again -- this is the part of F-04 that a read-time filter
+// alone can't fix, since the rows are still there to be (mis-)counted by
+// anything that isn't careful.
+const TERMINAL_HISTORY_RETENTION_MS = 90 * DAY_MS;
+
+// Bounds how many terminal events one tick will purge, so a backlog (e.g.
+// right after this feature ships, against however much history already
+// exists) is worked off gradually across ticks rather than in one large
+// batch.
+const TERMINAL_HISTORY_PURGE_BATCH_SIZE = 100;
 
 type NotificationType =
   | 'invite'
@@ -254,8 +282,11 @@ async function sweepPollDeadlines(env: Env): Promise<void> {
 async function sweepSingleWinnerPollNotifications(env: Env): Promise<void> {
   const { results: polls } = await env.DB.prepare(
     `SELECT * FROM events
-     WHERE event_type = 'poll' AND poll_resolution_mode = 'single_winner' AND status IN ('resolved','cancelled')`,
-  ).all<EventRow>();
+     WHERE event_type = 'poll' AND poll_resolution_mode = 'single_winner' AND status IN ('resolved','cancelled')
+       AND updated_at >= ?`,
+  )
+    .bind(terminalHistoryHotCutoff())
+    .all<EventRow>();
 
   for (const event of polls) {
     try {
@@ -280,8 +311,11 @@ async function sweepSingleWinnerPollNotifications(env: Env): Promise<void> {
 async function sweepMultiWinnerPollClosedNotifications(env: Env): Promise<void> {
   const { results: polls } = await env.DB.prepare(
     `SELECT * FROM events
-     WHERE event_type = 'poll' AND poll_resolution_mode = 'multi_winner' AND status IN ('resolved','cancelled')`,
-  ).all<EventRow>();
+     WHERE event_type = 'poll' AND poll_resolution_mode = 'multi_winner' AND status IN ('resolved','cancelled')
+       AND updated_at >= ?`,
+  )
+    .bind(terminalHistoryHotCutoff())
+    .all<EventRow>();
 
   for (const event of polls) {
     try {
@@ -581,6 +615,60 @@ async function sweepIdleGroups(env: Env): Promise<void> {
   }
 }
 
+// Permanently deletes terminal history once nobody could plausibly still
+// need it: cancelled events (any type) and resolved/cancelled polls,
+// TERMINAL_HISTORY_RETENTION_MS after their last update. This is what
+// actually reclaims the storage and stops these rows counting against any
+// future scan at all -- the hot-window filters on the sweeps above only stop
+// re-scanning recent terminal rows, they don't remove old ones.
+//
+// Bounded to one batch of TERMINAL_HISTORY_PURGE_BATCH_SIZE events per tick,
+// same reasoning as the recurring-event paging above: a backlog gets worked
+// off gradually across ticks rather than in one unbounded sweep.
+async function sweepPurgeTerminalHistory(env: Env): Promise<void> {
+  const cutoff = Date.now() - TERMINAL_HISTORY_RETENTION_MS;
+  const { results: candidates } = await env.DB.prepare(
+    `SELECT id FROM events
+     WHERE updated_at < ? AND (status = 'cancelled' OR (event_type = 'poll' AND status = 'resolved'))
+     ORDER BY updated_at ASC
+     LIMIT ?`,
+  )
+    .bind(cutoff, TERMINAL_HISTORY_PURGE_BATCH_SIZE)
+    .all<{ id: string }>();
+  if (candidates.length === 0) return;
+
+  // Deletes are scoped to these specific, already-selected ids (chunked
+  // below D1's parameter ceiling) rather than repeating the SELECT above as
+  // a subquery in each statement -- plain DELETE doesn't support ORDER
+  // BY/LIMIT directly, and re-running an unordered version of the same
+  // predicate per statement would risk each one matching a slightly
+  // different set if a row's state changed between them.
+  const eventIds = candidates.map((c) => c.id);
+
+  // Same child-first, id-scoped shape as deleteUserCompletely: D1 doesn't
+  // enforce these foreign keys, so the children are deleted explicitly
+  // rather than relied on to cascade.
+  const statements: D1PreparedStatement[] = [];
+  for (const chunk of chunkIds(eventIds)) {
+    const ph = placeholders(chunk.length);
+    statements.push(
+      env.DB.prepare(
+        `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id IN (${ph}))`,
+      ).bind(...chunk),
+      env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id IN (${ph})`).bind(...chunk),
+      env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id IN (${ph})`).bind(...chunk),
+      env.DB.prepare(`DELETE FROM event_invites WHERE event_id IN (${ph})`).bind(...chunk),
+      env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id IN (${ph})`).bind(...chunk),
+      env.DB.prepare(`DELETE FROM event_occurrence_overrides WHERE event_id IN (${ph})`).bind(...chunk),
+      env.DB.prepare(`DELETE FROM notification_log WHERE event_id IN (${ph})`).bind(...chunk),
+      env.DB.prepare(`DELETE FROM events WHERE id IN (${ph})`).bind(...chunk),
+    );
+  }
+  await env.DB.batch(statements);
+
+  console.log(`Purged ${candidates.length} terminal event(s) older than ${TERMINAL_HISTORY_RETENTION_MS / DAY_MS} days.`);
+}
+
 // Keeps the membership cache fresh enough for every recipient query above to
 // filter on verified_at alone. Without this the cron would face a choice
 // between one live Discord call per recipient per tick (unaffordable) and
@@ -624,4 +712,5 @@ export async function runReminderSweep(env: Env): Promise<void> {
   await runIsolated('voiceChannelInvites', () => sweepVoiceChannelInvites(env));
   await runIsolated('idleGroups', () => sweepIdleGroups(env));
   await runIsolated('pruneStaleSessions', () => pruneStaleSessions(env));
+  await runIsolated('purgeTerminalHistory', () => sweepPurgeTerminalHistory(env));
 }

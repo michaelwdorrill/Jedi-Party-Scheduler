@@ -1,13 +1,19 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import { chunkIds, chunkRows, placeholders } from '../lib/d1';
-import { filterActiveGuildMembers, isGuildMember, listUserGuilds } from '../lib/db';
+import { filterActiveGuildMembers, isGuildMember, listUserGuilds, MEMBERSHIP_GRACE_MS } from '../lib/db';
 import { newId } from '../lib/ids';
-import { expandOccurrencesForEvent } from '../lib/recurrence';
+import { expandOccurrencesForEvent, loadRecurrenceRulesForEvents } from '../lib/recurrence';
 import type { EventRow } from '../lib/events';
-import { mapOccurrence, loadOverridesForEvents, loadMyRsvpForEvents, loadPrimaryGroupForEvents } from '../lib/events';
+import {
+  mapOccurrence,
+  loadOverridesForEvents,
+  loadMyRsvpForEvents,
+  loadPrimaryGroupForEvents,
+  loadConfirmedOptionsForEvents,
+} from '../lib/events';
 import { createEventWithInvites, type EventWriteInput } from '../lib/eventWrites';
-import { computeBusyBlocks } from '../lib/freeBusy';
+import { computeBusyBlocksForUsers } from '../lib/freeBusy';
 import { expandPersonalOccurrences } from '../lib/personalEvents';
 import { fetchGuildVoiceChannels } from '../lib/discord';
 import {
@@ -21,6 +27,17 @@ import {
 } from '../lib/validate';
 
 export const guildRoutes = new Hono<AppEnv>();
+
+// Same grace window used for interactive access and cron recipients (see
+// lib/db.ts) -- a listing/target query is a way to learn about or select a
+// user just as surely as an invite is, so it gets the same staleness bound.
+// Without this, listFriends()/free-busy targets could keep showing someone
+// as present indefinitely if the background revalidation sweep never got to
+// their row, even though that same person would be denied if they tried to
+// use the app themselves.
+function membershipListCutoff(): number {
+  return Date.now() - MEMBERSHIP_GRACE_MS;
+}
 
 function parseRangeQuery(c: { req: { query: (k: string) => string | undefined } }): { from: number; to: number } {
   const from = Number(c.req.query('from'));
@@ -63,18 +80,25 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
 
   // MAX_FREE_BUSY_USERS is 100, which with the guild ID would be 101 bound
   // parameters -- past D1's per-statement ceiling, so a fully-populated
-  // scheduling assistant request would have failed outright.
+  // scheduling assistant request would have failed outright. The freshness
+  // cutoff matters here too: a target whose membership hasn't been confirmed
+  // within the grace window is treated the same as someone who left --
+  // otherwise a departed member could remain visible here indefinitely even
+  // though they can no longer authenticate into the guild themselves.
   const members: { id: string; username: string; global_name: string | null; free_busy_visible: number }[] = [];
-  for (const chunk of chunkIds(requested, 1)) {
+  for (const chunk of chunkIds(requested, 2)) {
     const { results } = await c.env.DB.prepare(
       `SELECT u.id, u.username, u.global_name, u.free_busy_visible
        FROM users u JOIN user_guild_membership m ON m.user_id = u.id
-       WHERE m.guild_id = ? AND m.is_member = 1 AND u.id IN (${placeholders(chunk.length)})`,
+       WHERE m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ? AND u.id IN (${placeholders(chunk.length)})`,
     )
-      .bind(guildId, ...chunk)
+      .bind(guildId, membershipListCutoff(), ...chunk)
       .all<{ id: string; username: string; global_name: string | null; free_busy_visible: number }>();
     members.push(...results);
   }
+
+  const visibleIds = members.filter((m) => !!m.free_busy_visible || m.id === userId).map((m) => m.id);
+  const busyByUser = await computeBusyBlocksForUsers(c.env, visibleIds, from, to);
 
   const out = [];
   for (const member of members) {
@@ -84,7 +108,7 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
       username: member.username,
       globalName: member.global_name,
       visible,
-      busy: visible ? await computeBusyBlocks(c.env, member.id, from, to) : [],
+      busy: visible ? (busyByUser.get(member.id) ?? []) : [],
     });
   }
   return c.json(out);
@@ -204,37 +228,66 @@ guildRoutes.get('/:guildId/events', async (c) => {
   // Without that second filter this loaded every event the user had ever been
   // part of on every calendar view, then discarded almost all of them after
   // expansion, so the cost of viewing one month grew with the guild's entire
-  // history. Recurring events and open polls are unfiltered because whether
-  // they fall in the window isn't a property of a stored timestamp: a series
-  // has to be expanded to find out, and a multi-winner poll's confirmed days
-  // live in a separate table.
+  // history. Recurring events are unfiltered because whether they fall in the
+  // window isn't a property of a stored timestamp -- a series has to be
+  // expanded to find out.
+  //
+  // Polls used to get the same unconditional pass as recurring events, on
+  // the theory that an open poll's eventual date is unknown ahead of time.
+  // That's true for a poll that hasn't resolved yet, but a poll that HAS
+  // resolved (single_winner) already has a real start_at and belongs under
+  // the ordinary date-range branch below, not a blanket "load every poll
+  // ever created" exemption -- a guild's entire history of old, resolved,
+  // and cancelled polls was otherwise reloaded and discarded on every single
+  // calendar view, forever, regardless of how old they were. So:
+  //   - a still-open (non-multi_winner) poll is included only if its
+  //     deadline actually falls in the requested window;
+  //   - a multi_winner poll is included only if it's still open, or has a
+  //     confirmed day landing in the window (`mw` below); and
+  //   - a resolved single_winner poll falls through to the ordinary
+  //     start_at-range branch, exactly like a fixed-time event.
   const { results: events } = await c.env.DB.prepare(
     `SELECT DISTINCT e.* FROM events e
      LEFT JOIN event_invites i ON i.event_id = e.id AND i.user_id = ?
+     LEFT JOIN event_poll_options mw
+       ON mw.event_id = e.id AND mw.confirmed_at IS NOT NULL AND mw.start_at <= ? AND mw.end_at >= ?
      WHERE e.guild_id = ? AND (e.organizer_id = ? OR i.user_id IS NOT NULL)
        AND (
          e.is_recurring = 1
-         OR e.event_type = 'poll'
+         OR (e.event_type = 'poll' AND e.poll_resolution_mode = 'multi_winner' AND (e.status = 'active' OR mw.id IS NOT NULL))
+         OR (
+           e.event_type = 'poll' AND e.poll_resolution_mode != 'multi_winner' AND e.status != 'resolved'
+           AND e.poll_deadline_at IS NOT NULL AND e.poll_deadline_at BETWEEN ? AND ?
+         )
          OR (e.start_at IS NOT NULL AND e.start_at <= ? AND COALESCE(e.end_at, e.start_at) >= ?)
        )`,
   )
-    .bind(userId, guildId, userId, to, from)
+    .bind(userId, to, from, guildId, userId, from, to, to, from)
     .all<EventRow>();
 
-  const overridesByEvent = await loadOverridesForEvents(c.env, events.map((e) => e.id));
-  const rsvpByEvent = await loadMyRsvpForEvents(c.env, events.map((e) => e.id), userId);
-  const groupByEvent = await loadPrimaryGroupForEvents(c.env, events.map((e) => e.id));
+  const eventIds = events.map((e) => e.id);
+  const overridesByEvent = await loadOverridesForEvents(c.env, eventIds);
+  const rsvpByEvent = await loadMyRsvpForEvents(c.env, eventIds, userId);
+  const groupByEvent = await loadPrimaryGroupForEvents(c.env, eventIds);
+  // Both bulk-loaded once for the whole visible list rather than once per
+  // recurring event / per multi-winner poll -- previously the two largest
+  // contributors to this route's query count scaling with how many events a
+  // user could see, instead of staying roughly fixed per request.
+  const recurrenceRulesByEvent = await loadRecurrenceRulesForEvents(
+    c.env,
+    events.filter((e) => e.is_recurring).map((e) => e.id),
+  );
+  const confirmedOptionsByEvent = await loadConfirmedOptionsForEvents(
+    c.env,
+    events.filter((e) => e.event_type === 'poll' && e.poll_resolution_mode === 'multi_winner').map((e) => e.id),
+  );
 
   const occurrences = [];
   for (const event of events) {
     if (event.event_type === 'poll' && event.poll_resolution_mode === 'multi_winner') {
       // Each independently-confirmed day is its own occurrence, and stays on
       // the calendar even after the parent poll stops accepting new votes.
-      const { results: confirmedOptions } = await c.env.DB.prepare(
-        `SELECT id, start_at, end_at FROM event_poll_options WHERE event_id = ? AND confirmed_at IS NOT NULL`,
-      )
-        .bind(event.id)
-        .all<{ id: string; start_at: number; end_at: number }>();
+      const confirmedOptions = confirmedOptionsByEvent.get(event.id) ?? [];
       for (const opt of confirmedOptions) {
         if (opt.start_at <= to && opt.end_at >= from) {
           occurrences.push(
@@ -271,6 +324,7 @@ guildRoutes.get('/:guildId/events', async (c) => {
       from,
       to,
       overridesByEvent.get(event.id) ?? [],
+      recurrenceRulesByEvent.get(event.id),
     );
     for (const occ of expanded) {
       occurrences.push(
