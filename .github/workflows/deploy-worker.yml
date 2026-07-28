@@ -1,11 +1,6 @@
-# Optional: auto-deploy the Cloudflare Worker on push, instead of running
-# `npm run deploy` by hand from worker/. Disabled by default (see the `if:`
-# guard below) until you've added the two repo secrets it needs:
-#   - CLOUDFLARE_API_TOKEN   (dash.cloudflare.com -> My Profile -> API Tokens,
-#                             "Edit Cloudflare Workers" template is enough)
-#   - CLOUDFLARE_ACCOUNT_ID  (right sidebar of the Cloudflare dashboard)
-# Once both secrets exist, change `if: false` below to `if: true` (or delete
-# the line) to turn this on. See docs/SETUP.md for the full checklist.
+# Auto-deploys the Cloudflare Worker on push to main, using the
+# CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID repo secrets. See
+# docs/SETUP.md for the full checklist.
 
 name: Deploy Worker
 
@@ -19,7 +14,6 @@ on:
 
 jobs:
   deploy:
-    if: false # flip to true once CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID secrets are set
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
