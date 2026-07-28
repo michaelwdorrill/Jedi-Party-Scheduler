@@ -1,0 +1,41 @@
+-- Two Pass-8 findings, both variations on "a bounded page is not the same as
+-- guaranteed progress".
+--
+-- 1. The global cron scans (confirmed multi-winner options, closed-poll
+--    notifications, deadline reminders, voice invitations, idle groups) were
+--    given a LIMIT in the previous pass so they could no longer read an
+--    unbounded multi-guild result set into Worker memory. But a LIMIT with no
+--    cursor bounds one read without advancing anything: the same ORDER BY
+--    returns the same prefix every tick, forever. With 201 eligible confirmed
+--    options and a limit of 200, the 201st is selected on no tick ever --
+--    delivering or permanently failing a notification does not remove its row
+--    from the seed predicate, so the prefix keeps winning.
+--
+--    Those scans now keyset-cursor through the same ordering, reusing the
+--    cron_cursors table from 0010/0011. No schema change is needed for that
+--    (the rows are created on demand by name), but the cursor bookkeeping is
+--    now batched across sweeps -- see cron/cursor.ts -- because one read plus
+--    one write per sweep would have added ~14 fixed queries to every tick,
+--    well past the reserve the budget sets aside for fixed work.
+--
+-- 2. Deadline resolution has the mirror-image problem, and a cursor is the
+--    wrong fix for it. resolvePastDeadlinePolls() takes the 25 oldest expired
+--    active polls. A poll that fails to resolve stays active and stays
+--    expired, so it is selected again next tick, in the same position. Twenty
+--    five deterministically failing rows therefore keep every later due poll
+--    out of the page indefinitely -- the per-row try/catch isolates failures
+--    within the page but cannot get anything past it.
+--
+--    Skipping those rows with a cursor would be wrong: they are polls that
+--    genuinely still need resolving, and a cursor pass would leave them
+--    unresolved with nothing recording why. Instead each failed attempt is
+--    counted here, and the selection orders by failure count first. A row
+--    that keeps failing sinks behind healthy work rather than blocking it,
+--    is still retried on every pass, and is greppable by operators
+--    (`WHERE poll_resolution_failures >= 3`) instead of failing invisibly.
+ALTER TABLE events ADD COLUMN poll_resolution_failures INTEGER NOT NULL DEFAULT 0;
+
+-- Matches the deadline sweep's ORDER BY so the failure-deprioritised
+-- selection stays an index scan rather than a sort over every expired poll.
+CREATE INDEX IF NOT EXISTS idx_events_poll_deadline_progress
+  ON events (status, event_type, poll_resolution_failures, poll_deadline_at, id);

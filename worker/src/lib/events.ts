@@ -16,6 +16,12 @@ export interface EventRow {
   poll_strategy: 'threshold' | 'most_votes' | null;
   poll_threshold_count: number | null;
   poll_deadline_at: number | null;
+  // Consecutive failed deadline-resolution attempts. Read by the deadline
+  // sweep's ordering so a persistently failing poll cannot hold a place in
+  // the page ahead of healthy ones -- see migration 0012. Optional because
+  // rows selected before this column existed (and some narrower test
+  // fixtures) will not carry it.
+  poll_resolution_failures?: number;
   resolved_option_id: string | null;
   poll_mode: 'options' | 'window';
   poll_resolution_mode: 'single_winner' | 'multi_winner';

@@ -129,6 +129,7 @@ needs: editing Workers scripts and editing D1 databases.
    0009_notification_leases.sql
    0010_cron_cursors.sql
    0011_keyset_cron_cursors.sql
+   0012_scan_progress_and_poll_failures.sql
    ```
    (This list has drifted before. `worker/migrations/` is the source of
    truth — `npm run db:migrate:remote -- --from=<file>` reads the directory,
@@ -467,12 +468,25 @@ genuine free time — a partial answer would tell you someone is free at a time
 the database says they are busy, and you would schedule over it. A refusal you
 can act on is better than a confident wrong answer.
 
-`worker/test/pass4.test.ts` and `worker/test/pass5.test.ts` assert this with
-an actual query counter (see `worker/test/d1shim.ts`'s `queryCount`), not just
-that the request succeeds — run `npm test` in `worker/` to see them pass. If
-you raise any of the `LIMITS` in `worker/src/lib/validate.ts` significantly,
-re-run those files and check the counts still clear 50; if they don't, either
-lower the limit back down or move to the Paid plan.
+The `pass4`–`pass8` test files in `worker/test/` assert this with an actual
+query counter (see `worker/test/d1shim.ts`'s `queryCount`), not just that the
+request succeeds — run `npm test` in `worker/` to see them pass. If you raise
+any of the `LIMITS` in `worker/src/lib/validate.ts` significantly, re-run
+those files and check the counts still clear 50; if they don't, either lower
+the limit back down or move to the Paid plan.
+
+Two of those limits exist specifically because everything else in this file
+is a *per-guild* quota, and one user can be in many guilds:
+
+- `MAX_FREE_BUSY_SOURCE_EVENTS` caps how many events one free/busy request
+  will read before it does any work on them. Without it, "300 events" is a
+  fine per-server number that becomes 4,200 for someone in fourteen servers.
+- `MAX_RESOLVED_INVITEES` does the same for an invite list assembled from
+  overlapping groups.
+
+Both reject with a 422 and a message rather than truncating. A free/busy
+answer missing a commitment reads as free time, which is the one outcome
+worth failing a request to avoid.
 
 ### The cron tick, and what `WORKERS_PLAN` actually changes
 
