@@ -7,8 +7,9 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
-    "db:migrate:local": "node scripts/migrate.mjs --local",
-    "db:migrate:remote": "node scripts/migrate.mjs --remote",
+    "db:migrate:local": "wrangler d1 migrations apply jedi-party-scheduler-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply jedi-party-scheduler-db --remote",
+    "db:migrate:status": "wrangler d1 migrations list jedi-party-scheduler-db --remote",
     "test": "vitest run",
     "test:watch": "vitest"
   },

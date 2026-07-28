@@ -26,6 +26,12 @@ WORKERS_PLAN = "free"
 binding = "DB"
 database_name = "jedi-party-scheduler-db"
 database_id = "0f106451-de8f-4623-be4a-86cbf407d58b"
+# Wrangler applies these in filename order and records each one it has run in
+# a `d1_migrations` table on the database itself, so re-running only applies
+# what is new. That tracking is what lets CI migrate automatically on deploy;
+# the hand-rolled script this replaced re-ran whatever you pointed it at and
+# left you to remember where you'd got to.
+migrations_dir = "migrations"
 
 # Runs the reminder/poll-resolution sweep every 15 minutes.
 [triggers]
