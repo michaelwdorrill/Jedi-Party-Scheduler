@@ -182,6 +182,14 @@ eventRoutes.get('/:eventId', async (c) => {
     endAt: event.end_at,
     isRecurring: !!event.is_recurring,
     organizerId: event.organizer_id,
+    // The optimistic-concurrency token the client must send back on PATCH
+    // (F-08-B). Without it, PATCH had no way to tell "the row I'm about to
+    // edit is still the one I loaded" from "someone else changed it after I
+    // loaded it, and my edit is about to silently overwrite theirs" -- the
+    // route re-read the row immediately before calling updateEvent, so the
+    // server-observed revision was always current by construction, and the
+    // guard it built compared that fresh read to itself.
+    revision: event.revision ?? 0,
     myRsvpStatus:
       inviteRows.find((i) => i.user_id === userId)?.rsvp_status ?? null,
     pollStrategy: event.poll_strategy,

@@ -3,6 +3,7 @@ import { chunkIds, chunkRows, D1_MAX_BIND_PARAMS } from '../src/lib/d1';
 import { loadMyRsvpForEvents, loadOverridesForEvents, loadPrimaryGroupForEvents } from '../src/lib/events';
 import { expandPersonalOccurrences } from '../src/lib/personalEvents';
 import { createEventWithInvites, updateEvent } from '../src/lib/eventWrites';
+import { LIMITS } from '../src/lib/validate';
 import { TooManyParametersError } from './d1shim';
 import {
   DAY_MS,
@@ -150,8 +151,8 @@ describe('invite writes at the configured maxima', () => {
     endAt: Date.now() + DAY_MS + 3600_000,
   };
 
-  it('creates an event with the full 100-invitee maximum', async () => {
-    const { db, env, userIds } = await seedGuildWithMembers(100);
+  it('creates an event with the full MAX_INVITEES maximum', async () => {
+    const { db, env, userIds } = await seedGuildWithMembers(LIMITS.MAX_INVITEES);
     fetchStub = stubFetch([]);
 
     const eventId = await createEventWithInvites(env, 'guild-1', 'organizer', {
@@ -162,7 +163,7 @@ describe('invite writes at the configured maxima', () => {
     const row = await db.prepare(`SELECT COUNT(*) AS n FROM event_invites WHERE event_id = ?`)
       .bind(eventId)
       .first<{ n: number }>();
-    expect(row?.n).toBe(100);
+    expect(row?.n).toBe(LIMITS.MAX_INVITEES);
   });
 
   // The replacement path used to build `NOT IN (...every invitee...)`, which
@@ -170,14 +171,15 @@ describe('invite writes at the configured maxima', () => {
   // read-then-diff, so what gets chunked is the removal list. Reaching those
   // sizes means going through groups, which is also how a real organizer
   // would: nobody hand-picks two hundred people.
-  it('replaces a 200-person group invite list without a NOT IN blowup', async () => {
-    const { db, env, userIds } = await seedGuildWithMembers(400);
+  it('replaces a full-group invite list without a NOT IN blowup', async () => {
+    const groupSize = LIMITS.MAX_GROUP_MEMBERS;
+    const { db, env, userIds } = await seedGuildWithMembers(groupSize * 2);
     fetchStub = stubFetch([]);
 
     const now = Date.now();
     for (const [groupId, members] of [
-      ['grp-a', userIds.slice(0, 200)],
-      ['grp-b', userIds.slice(200, 400)],
+      ['grp-a', userIds.slice(0, groupSize)],
+      ['grp-b', userIds.slice(groupSize, groupSize * 2)],
     ] as const) {
       await db.prepare(
         `INSERT INTO groups (id, guild_id, name, idle_reminder_days, created_by, created_at) VALUES (?, ?, ?, 2, ?, ?)`,
@@ -197,7 +199,7 @@ describe('invite writes at the configured maxima', () => {
     });
     expect(
       (await db.prepare(`SELECT COUNT(*) AS n FROM event_invites WHERE event_id = ?`).bind(eventId).first<{ n: number }>())?.n,
-    ).toBe(200);
+    ).toBe(groupSize);
 
     await updateEvent(env, eventId, 'guild-1', { invites: { userIds: [], groupIds: ['grp-b'] } }, await loadEventRow(db, eventId));
 
@@ -205,9 +207,9 @@ describe('invite writes at the configured maxima', () => {
       .bind(eventId)
       .all<{ user_id: string }>();
     // True replacement: group A's members are gone, group B's are in.
-    expect(remaining.results).toHaveLength(200);
+    expect(remaining.results).toHaveLength(groupSize);
     expect(remaining.results.some((r) => r.user_id === 'u-0')).toBe(false);
-    expect(remaining.results.some((r) => r.user_id === 'u-250')).toBe(true);
+    expect(remaining.results.some((r) => r.user_id === `u-${groupSize + 5}`)).toBe(true);
   });
 
   it('preserves an existing invitee\'s RSVP through a replacement', async () => {

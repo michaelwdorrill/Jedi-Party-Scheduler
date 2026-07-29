@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { DateTime } from 'luxon';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import InviteePicker from '../components/InviteePicker';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
@@ -84,6 +84,12 @@ export default function EventFormPage() {
   const [voiceChannels, setVoiceChannels] = useState<VoiceChannel[]>([]);
   const [voiceChannelId, setVoiceChannelId] = useState('');
 
+  // The revision this form was loaded at (F-08-B). Sent back unchanged on
+  // PATCH so the server can tell this edit apart from one built on top of a
+  // since-superseded read, rather than the two of them racing to overwrite
+  // each other's changes in whatever order their requests happen to land.
+  const [loadedRevision, setLoadedRevision] = useState<number | null>(null);
+
   useEffect(() => {
     if (!guildId) return;
     Promise.all([
@@ -112,6 +118,7 @@ export default function EventFormPage() {
       setTimezone(ev.timezone);
       setEventType(ev.eventType);
       setLoadedGuildId(ev.guildId);
+      setLoadedRevision(ev.revision);
       setVoiceChannelId(ev.voiceChannelId ?? '');
       setSelectedUserIds(
         ev.invites.filter((i) => i.invitedVia === 'individual').map((i) => i.userId),
@@ -278,7 +285,15 @@ export default function EventFormPage() {
       }
 
       if (isEdit) {
-        await api.patch(`/events/${eventId}`, body);
+        if (loadedRevision != null) body.revision = loadedRevision;
+        try {
+          await api.patch(`/events/${eventId}`, body);
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 409) {
+            throw new Error('This event was changed elsewhere while you were editing it. Reload the page to see the latest version before saving again.');
+          }
+          throw e;
+        }
         navigate(`/events/${eventId}`);
       } else {
         const created = await api.post<{ id: string }>(`/guilds/${guildId}/events`, body);

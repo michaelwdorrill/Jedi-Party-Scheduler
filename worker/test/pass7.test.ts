@@ -173,31 +173,36 @@ describe('free/busy multi-winner poll blocks are budgeted and requester-scoped (
 // one revalidation pass (sharing the request-wide stale-row cap) and writes
 // its results back in set-based chunks instead of per-row.
 describe('combined direct/group invitee resolution fits the Free-plan budget (F-04-B)', () => {
-  it('creates a max poll with max direct + max group invitees and permitted stale rows in both', async () => {
+  it('creates a max poll with max resolved invitees split across direct + group, some stale in both', async () => {
     const { db, env } = setup();
     await seedOrganizer(db);
 
-    // 100 direct invitees, 10 of them stale but within the grace window.
-    // Direct and group-derived candidates now share one combined
-    // revalidation pass (see resolveInviteeUserIds), so the request-wide
-    // cap on live checks is MAX_LIVE_REVALIDATIONS_PER_REQUEST (20) total,
-    // not per source -- split evenly here to exercise both sources at once
-    // while staying inside that shared budget.
-    const direct = ids('direct', LIMITS.MAX_INVITEES);
+    // MAX_RESOLVED_INVITEES now equals MAX_INVITEES (both 25 under the
+    // private-profile limits -- see PRIVATE_FREE_PROFILE in validate.ts), so
+    // "max direct invitees" and "max resolved invitees" are no longer two
+    // independent dimensions: 25 direct invitees alone already fills the
+    // resolved cap. What's still worth exercising in combination is direct
+    // and group-derived invitees *sharing* that one cap, with stale rows in
+    // both sources sharing the one combined revalidation pass (see
+    // resolveInviteeUserIds) -- MAX_LIVE_REVALIDATIONS_PER_REQUEST (20) is a
+    // request-wide budget, not per source.
+    const directCount = 10;
+    const groupOnlyCount = LIMITS.MAX_RESOLVED_INVITEES - directCount; // 15
+    const direct = ids('direct', directCount);
     for (const [i, id] of direct.entries()) {
       await seedUser(db, id);
       await seedMembership(db, id, 'guild-1', {
-        verifiedAgoMs: i < 10 ? MEMBERSHIP_FRESHNESS_MS + HOUR_MS : 0,
+        verifiedAgoMs: i < 5 ? MEMBERSHIP_FRESHNESS_MS + HOUR_MS : 0,
       });
     }
 
-    // 200 group-derived invitees (one group, at the per-group member cap),
-    // 10 of them stale but within the grace window.
-    const group = ids('group-member', 200);
+    // Group-derived invitees distinct from the direct set, so the resolved
+    // total lands exactly at MAX_RESOLVED_INVITEES.
+    const group = ids('group-member', groupOnlyCount);
     for (const [i, id] of group.entries()) {
       await seedUser(db, id);
       await seedMembership(db, id, 'guild-1', {
-        verifiedAgoMs: i < 10 ? MEMBERSHIP_FRESHNESS_MS + HOUR_MS : 0,
+        verifiedAgoMs: i < 5 ? MEMBERSHIP_FRESHNESS_MS + HOUR_MS : 0,
       });
     }
     await db.prepare(
