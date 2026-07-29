@@ -100,41 +100,27 @@ needs: editing Workers scripts and editing D1 databases.
 8. In `worker/wrangler.toml`, replace
    `REPLACE_ME_AFTER_WRANGLER_D1_CREATE` under `[[d1_databases]]` with that
    `database_id`.
-9. Apply the schema to the real (remote) database. On a **brand-new**
-   database, one command runs every migration in order:
+9. Apply the schema to the real (remote) database:
    ```
    npm run db:migrate:remote
    ```
-   Each migration only needs to be run once, ever. On a database that is
-   already partway up to date, run **only the new files** — the command above
-   would re-run everything from the beginning, and while several migrations
-   are safe to repeat, some are not. Either apply them one at a time:
+   Safe to run at any time, including repeatedly. Wrangler records every
+   migration it has applied in a `d1_migrations` table on the database
+   itself, so this only ever runs the files that are new to *that* database
+   — there is no list of filenames to keep in step with, and nothing to
+   remember about where you got to last time. To see what it would do
+   without doing it:
    ```
-   npx wrangler d1 execute jedi-party-scheduler-db --remote --file=./migrations/0009_notification_leases.sql
+   npm run db:migrate:status
    ```
-   ...or start from a given file with:
-   ```
-   npm run db:migrate:remote -- --from=0009_notification_leases.sql
-   ```
-   The full set, oldest first, is:
-   ```
-   0001_init.sql
-   0002_group_game.sql
-   0003_poll_modes_and_idle_groups.sql
-   0004_personal_events_and_free_busy.sql
-   0005_considering_and_voice_channels.sql
-   0006_sessions.sql
-   0007_notification_outbox.sql
-   0008_backfill_notification_outbox.sql
-   0009_notification_leases.sql
-   0010_cron_cursors.sql
-   0011_keyset_cron_cursors.sql
-   0012_scan_progress_and_poll_failures.sql
-   ```
-   (This list has drifted before. `worker/migrations/` is the source of
-   truth — `npm run db:migrate:remote -- --from=<file>` reads the directory,
-   so it applies everything from that file onward whether or not the file is
-   named here.)
+   `worker/migrations/` is the source of truth for what exists; the
+   `d1_migrations` table is the source of truth for what has run.
+
+   **This is also automated.** Once the repo secrets in
+   "Auto-deploy the Worker from GitHub Actions" (below) are set, every push
+   to `main` that touches `worker/` applies new migrations and then deploys.
+   You only need to run the command by hand for a database CI does not
+   deploy to, or to fix something up.
 10. Set the three secrets (you'll be prompted to paste each value):
    ```
    npx wrangler secret put DISCORD_CLIENT_SECRET
@@ -371,14 +357,25 @@ updated and deployed, so the fresh logins land on the right origin.
 
 ### Auto-deploy the Worker from GitHub Actions
 
-`.github/workflows/deploy-worker.yml` deploys the Worker on every push to
-`main` that touches `worker/`, once two repo secrets are set:
-`CLOUDFLARE_API_TOKEN` (the same scoped token from step 2.3 works — it
-already has the Workers Scripts:Edit permission this needs) and
-`CLOUDFLARE_ACCOUNT_ID` (the same value from step 2.4). It runs the
-typecheck and test suite first and only deploys if both pass. Without those
-secrets set, the workflow's `Deploy` step fails — deploy with `npm run
-deploy` by hand instead until they're added.
+`.github/workflows/deploy-worker.yml` runs on every push to `main` that
+touches `worker/`, once two repo secrets are set: `CLOUDFLARE_API_TOKEN`
+(the token from step 2.3 — it needs **D1:Edit** as well as Workers
+Scripts:Edit, since it now migrates too) and `CLOUDFLARE_ACCOUNT_ID` (the
+value from step 2.4). Set them at *Settings → Secrets and variables →
+Actions → New repository secret*; the names must match exactly.
+
+It typechecks, runs the test suite, applies any new D1 migrations, and only
+then deploys — so it stops before touching production if anything fails.
+Without those secrets the migrate step fails and nothing is deployed;
+until they're added, run `npm run db:migrate:remote` and `npm run deploy`
+by hand.
+
+Migrations run *before* the deploy, which means that for a few seconds the
+previously deployed Worker is running against the new schema. Keep
+migrations backwards-compatible with the currently live code — adding
+columns, tables and indexes is fine. To remove a column, ship one release
+that stops reading it and a later one that drops it, rather than relying on
+that window.
 
 ## Running the tests
 
