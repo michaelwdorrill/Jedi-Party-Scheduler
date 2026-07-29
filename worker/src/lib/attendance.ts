@@ -1,12 +1,28 @@
 import type { Env } from '../env';
 import { MEMBERSHIP_GRACE_MS } from './db';
 import type { EventRow } from './events';
+import {
+  PENDING_NOTIFICATION_JOIN,
+  PENDING_NOTIFICATION_WHERE,
+  pendingNotificationJoinBinds,
+  pendingNotificationWhereBinds,
+} from './outbox';
 
 export interface AttendeeRow {
   id: string;
   notifications_enabled: number;
   dm_channel_id: string | null;
   timezone: string;
+}
+
+// Identifies which notification the caller is about to send, so the queries
+// below can exclude anyone already settled for it in the same statement
+// rather than paying for a second, unbudgeted lookup afterwards. `limit`
+// bounds the returned rows to what the tick can actually afford to deliver.
+export interface PendingFor {
+  notificationType: string;
+  occurrenceDate: string;
+  limit: number;
 }
 
 // Same reasoning as reminders.ts's getEventParticipants: this runs inside the
@@ -22,7 +38,29 @@ function membershipJoin(idsSubquery: string): string {
           JOIN user_guild_membership m
             ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
           JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
-          WHERE u.id IN (${idsSubquery})`;
+          ${PENDING_NOTIFICATION_JOIN}
+          WHERE u.id IN (${idsSubquery})
+            AND ${PENDING_NOTIFICATION_WHERE}
+          ORDER BY u.id
+          LIMIT ?`;
+}
+
+// Bind order matches the SQL text above: guild/cutoff for the membership
+// join, then the notification key for the pending join, then the caller's own
+// id-subquery parameters, then the pending predicate's, then the limit.
+function attendeeBinds(
+  event: EventRow,
+  pending: PendingFor,
+  subqueryBinds: unknown[],
+): unknown[] {
+  return [
+    event.guild_id,
+    membershipCutoff(),
+    ...pendingNotificationJoinBinds(event.id, pending.notificationType, pending.occurrenceDate),
+    ...subqueryBinds,
+    ...pendingNotificationWhereBinds(),
+    pending.limit,
+  ];
 }
 
 function membershipCutoff(): number {
@@ -38,7 +76,10 @@ export async function getConfirmedAttendeeIds(
   env: Env,
   event: EventRow,
   optionId: string | null,
+  pending: PendingFor,
 ): Promise<AttendeeRow[]> {
+  if (pending.limit <= 0) return [];
+
   if (event.event_type === 'poll' && event.poll_mode === 'window') {
     // Window-mode resolution doesn't produce a real event_poll_options row
     // (resolved_option_id is the literal string 'window'), so "confirmed"
@@ -51,7 +92,7 @@ export async function getConfirmedAttendeeIds(
          UNION SELECT ?`,
       ),
     )
-      .bind(event.guild_id, membershipCutoff(), event.id, event.start_at, event.end_at, event.organizer_id)
+      .bind(...attendeeBinds(event, pending, [event.id, event.start_at, event.end_at, event.organizer_id]))
       .all<AttendeeRow>();
     return results;
   }
@@ -61,7 +102,7 @@ export async function getConfirmedAttendeeIds(
     const { results } = await env.DB.prepare(
       membershipJoin(`SELECT user_id FROM event_poll_votes WHERE option_id = ? AND vote = 'yes' UNION SELECT ?`),
     )
-      .bind(event.guild_id, membershipCutoff(), optionId, event.organizer_id)
+      .bind(...attendeeBinds(event, pending, [optionId, event.organizer_id]))
       .all<AttendeeRow>();
     return results;
   }
@@ -69,7 +110,7 @@ export async function getConfirmedAttendeeIds(
   const { results } = await env.DB.prepare(
     membershipJoin(`SELECT user_id FROM event_invites WHERE event_id = ? AND rsvp_status = 'accepted' UNION SELECT ?`),
   )
-    .bind(event.guild_id, membershipCutoff(), event.id, event.organizer_id)
+    .bind(...attendeeBinds(event, pending, [event.id, event.organizer_id]))
     .all<AttendeeRow>();
   return results;
 }

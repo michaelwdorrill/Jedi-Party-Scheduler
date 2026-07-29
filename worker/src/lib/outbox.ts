@@ -48,6 +48,51 @@ function backoffFor(attempt: number): number {
 // tables' UNIQUE constraints are exactly these columns, which is what lets
 // claim() below be a single upsert: a concurrent claimant collides on the
 // constraint and takes the DO UPDATE branch rather than creating a duplicate.
+// "Which of these users still needs this notification?", expressed as SQL
+// fragments a recipient query can splice in rather than as a second query.
+//
+// Asking separately is what the Pass 9 review measured as unbudgeted work:
+// every recipient source that could not answer the question itself issued a
+// follow-up `settledRecipients()` read, and those reads were never charged to
+// the tick's budget. Twenty of them took a valid tick from a modelled 50 to a
+// measured 69 D1 statements, past the Free plan's ceiling, while the budget
+// still reported it had stopped safely. Folding the filter into the source
+// query removes the statement rather than accounting for it, which is the
+// better of the two fixes -- and it makes the query's LIMIT mean "rows worth
+// acting on" instead of "rows, most of which may already be done".
+//
+// Splice `PENDING_NOTIFICATION_JOIN` after the recipient query's other joins
+// and `PENDING_NOTIFICATION_WHERE` into its WHERE clause. Bind order follows
+// SQL text order: the join's three parameters come at the point the join
+// appears, the where's three at the point the predicate appears. The
+// recipient table must be aliased `u`.
+export const PENDING_NOTIFICATION_JOIN = `
+  LEFT JOIN notification_log nl
+    ON nl.user_id = u.id AND nl.event_id = ?
+    AND nl.notification_type = ? AND nl.occurrence_date = ?`;
+
+export const PENDING_NOTIFICATION_WHERE = `
+  u.notifications_enabled = 1
+  AND (
+    nl.id IS NULL
+    OR (nl.delivered_at IS NULL AND nl.failed_at IS NULL
+        AND nl.attempt_count < ?
+        AND (nl.claimed_until IS NULL OR nl.claimed_until < ?)
+        AND (nl.next_attempt_at IS NULL OR nl.next_attempt_at <= ?))
+  )`;
+
+export function pendingNotificationJoinBinds(
+  eventId: string,
+  notificationType: string,
+  occurrenceDate: string,
+): unknown[] {
+  return [eventId, notificationType, occurrenceDate];
+}
+
+export function pendingNotificationWhereBinds(now = Date.now()): unknown[] {
+  return [MAX_DELIVERY_ATTEMPTS, now, now];
+}
+
 export type OutboxKey = Record<string, string | number>;
 
 export type OutboxTable = 'notification_log' | 'group_nudge_log';

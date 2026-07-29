@@ -13,6 +13,7 @@ import {
   dmSendRule,
   HOUR_MS,
   ids,
+  loadEventRow,
   membershipRule,
   seedGuild,
   seedMembership,
@@ -174,7 +175,7 @@ describe('a maximum-size option poll fits inside one Free-plan invocation', () =
     const eventId = await seedMaxPoll(env);
 
     db.resetQueryCount();
-    await updateEvent(env, eventId, 'guild-1', { pollOptions: maxOptions() } as Partial<EventWriteInput>);
+    await updateEvent(env, eventId, 'guild-1', { pollOptions: maxOptions() } as Partial<EventWriteInput>, await loadEventRow(db, eventId));
     expect(db.queryCount).toBeLessThan(D1_FREE_PLAN_QUERY_BUDGET);
   });
 
@@ -376,7 +377,7 @@ describe('a failed write leaves the event exactly as it was (F-08)', () => {
           },
           invites: { userIds: ['stranger'], groupIds: [] },
         } as unknown as Partial<EventWriteInput>,
-        false,
+        await loadEventRow(db, 'e1'),
       ),
     ).rejects.toThrow(/not current members/i);
 

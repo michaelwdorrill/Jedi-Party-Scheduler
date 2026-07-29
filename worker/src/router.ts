@@ -11,7 +11,7 @@ import { pollRoutes } from './routes/polls';
 import { personalRoutes } from './routes/personal';
 import { adminRoutes } from './routes/admin';
 import { MembershipUnavailableError } from './lib/db';
-import { BodyTooLargeError, FreeBusyTooLargeError, MAX_BODY_BYTES, ValidationError } from './lib/validate';
+import { BodyTooLargeError, ConflictError, FreeBusyTooLargeError, MAX_BODY_BYTES, ValidationError } from './lib/validate';
 
 export function buildApp() {
   const app = new Hono<AppEnv>();
@@ -44,6 +44,9 @@ export function buildApp() {
   app.onError((err, c) => {
     if (err instanceof BodyTooLargeError) return c.text(err.message, 413);
     if (err instanceof ValidationError) return c.text(err.message, 400);
+    // 409, not 400: the request was well-formed and authorized, it just
+    // raced someone else's edit. Retrying against fresh state is the fix.
+    if (err instanceof ConflictError) return c.text(err.message, 409);
     // 422, not 400: the request is syntactically valid and authorized. What
     // failed is that answering it accurately would cost more work than one
     // invocation is allowed -- so it is refused rather than answered wrongly.

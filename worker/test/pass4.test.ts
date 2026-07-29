@@ -9,6 +9,7 @@ import {
   DAY_MS,
   HOUR_MS,
   ids,
+  loadEventRow,
   seedEvent,
   seedGuild,
   seedMembership,
@@ -260,7 +261,7 @@ describe('recurring quota on PATCH (R6)', () => {
         targetId,
         'guild-1',
         { isRecurring: true, recurrence, startAt: undefined, endAt: undefined },
-        false,
+        await loadEventRow(db, targetId),
       ),
     ).rejects.toThrow(/recurring/);
 
@@ -281,7 +282,7 @@ describe('recurring quota on PATCH (R6)', () => {
     // Editing an already-recurring event's own schedule must still work even
     // though the guild is at capacity -- it isn't adding a new recurring row.
     await expect(
-      updateEvent(env, 'rec-0', 'guild-1', { isRecurring: true, recurrence, startAt: undefined, endAt: undefined }, true),
+      updateEvent(env, 'rec-0', 'guild-1', { isRecurring: true, recurrence, startAt: undefined, endAt: undefined }, await loadEventRow(db, 'rec-0')),
     ).resolves.toBeUndefined();
   });
 
@@ -310,7 +311,7 @@ describe('recurring quota on PATCH (R6)', () => {
         targetId,
         'guild-1',
         { isRecurring: true, recurrence, startAt: undefined, endAt: undefined },
-        false,
+        await loadEventRow(db, targetId),
       ),
     ).resolves.toBeUndefined();
 

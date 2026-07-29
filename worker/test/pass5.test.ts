@@ -14,6 +14,7 @@ import {
   dmSendRule,
   HOUR_MS,
   ids,
+  loadEventRow,
   membershipRule,
   seedEvent,
   seedGuild,
@@ -523,7 +524,7 @@ describe('quota guards are all-or-nothing (R6/R7)', () => {
           endAt: undefined,
           invites: { userIds: ['new-user'], groupIds: [] },
         },
-        false,
+        await loadEventRow(db, eventId),
       ),
     ).rejects.toThrow(/recurring/);
 

@@ -1,6 +1,7 @@
 import { vi } from 'vitest';
 import type { Env } from '../src/env';
 import { createTestDb, type ShimDatabase } from './d1shim';
+import type { EventRow } from '../src/lib/events';
 
 export const HOUR_MS = 60 * 60 * 1000;
 export const DAY_MS = 24 * HOUR_MS;
@@ -176,4 +177,13 @@ export async function countRows(db: ShimDatabase, table: string, where = '1=1', 
 
 export function ids(prefix: string, n: number): string[] {
   return Array.from({ length: n }, (_, i) => `${prefix}-${i}`);
+}
+
+// The stored event row, as updateEvent's callers pass it: the route loads and
+// authorizes the event first, and updateEvent needs it both for its revision
+// (the optimistic-concurrency token) and to validate the merged result.
+export async function loadEventRow(db: ShimDatabase, eventId: string): Promise<EventRow> {
+  const row = await db.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+  if (!row) throw new Error(`test fixture: no event ${eventId}`);
+  return row;
 }

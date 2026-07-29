@@ -52,13 +52,23 @@ export async function readCursorKey(env: Env, name: CursorName): Promise<string 
 
 // All of a tick's cursors, read once at the start and written once at the end.
 //
-// Batching is not an optimisation here, it is what makes cursoring the global
-// scans affordable at all. A read plus a write per sweep is two queries of
-// pure bookkeeping each; across the ten cursored sweeps that is twenty
-// statements of fixed overhead on a Free plan whose entire per-invocation
-// allowance is fifty, and it would come out of the same reserve the budget
-// sets aside for every other fixed cost. One SELECT and one batched upsert
-// keep the whole scheme at two.
+// Keeping this to two statements is what makes cursoring the global scans
+// affordable at all. A read plus a write per sweep is two statements of pure
+// bookkeeping each; across the ten cursored sweeps that is twenty statements
+// of fixed overhead on a Free plan whose entire per-invocation allowance is
+// fifty.
+//
+// The write is *one multi-row UPSERT*, not a batch of per-cursor statements.
+// That distinction is the correction from the Pass 9 review: an earlier
+// version of this class built one prepared statement per dirty cursor and
+// handed them to `DB.batch()`, and this comment claimed that made cursor
+// persistence cost two queries. It did not. A batch is a transaction around
+// n statements, not a way to turn n statements into one -- D1 counts each
+// statement in the batch against the per-invocation query limit, so a first
+// tick that dirtied all ten cursors really spent eleven, and the tick's
+// modelled cost understated its actual cost by nine.
+//
+// Ten cursors is thirty bound parameters, comfortably inside D1's hundred.
 //
 // Reads are served from the in-memory map after load, and writes are buffered
 // until flush(), so a sweep that advances its cursor several times within a
@@ -96,14 +106,16 @@ export class CursorStore {
   async flush(): Promise<void> {
     if (this.dirty.size === 0) return;
     const now = Date.now();
-    const statements = [...this.dirty].map((name) =>
-      this.env.DB.prepare(
-        `INSERT INTO cron_cursors (name, position, cursor_key, updated_at) VALUES (?, 0, ?, ?)
-         ON CONFLICT(name) DO UPDATE SET cursor_key = excluded.cursor_key, updated_at = excluded.updated_at`,
-      ).bind(name, this.keys.get(name) ?? null, now),
-    );
+    const names = [...this.dirty];
+    const values = names.map(() => '(?, 0, ?, ?)').join(', ');
+    const binds = names.flatMap((name) => [name, this.keys.get(name) ?? null, now]);
     this.dirty.clear();
-    await this.env.DB.batch(statements);
+    await this.env.DB.prepare(
+      `INSERT INTO cron_cursors (name, position, cursor_key, updated_at) VALUES ${values}
+       ON CONFLICT(name) DO UPDATE SET cursor_key = excluded.cursor_key, updated_at = excluded.updated_at`,
+    )
+      .bind(...binds)
+      .run();
   }
 }
 

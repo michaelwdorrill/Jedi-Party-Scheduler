@@ -33,6 +33,10 @@ export interface EventRow {
   voice_channel_name: string | null;
   created_at: number;
   updated_at: number;
+  // Optimistic-concurrency token, bumped by every successful updateEvent.
+  // Optional because narrower test fixtures and rows selected before
+  // migration 0013 will not carry it; treated as 0 when absent.
+  revision?: number;
 }
 
 export interface OverrideRow {

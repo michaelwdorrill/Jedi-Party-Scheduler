@@ -302,6 +302,17 @@ export class FreeBusyTooLargeError extends Error {
 
 export class BodyTooLargeError extends Error {}
 
+// The caller's read of the object is out of date: someone else changed it
+// between their read and their write. Distinct from ValidationError because
+// nothing about the request is malformed -- retrying it against fresh state is
+// the correct response, which is what 409 tells a client.
+export class ConflictError extends Error {
+  constructor(message = 'This event was changed by someone else -- reload and try again') {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}
+
 export async function readJsonBody<T>(c: { req: { raw: Request } }): Promise<T> {
   const body = c.req.raw.body;
   if (!body) return {} as T;
