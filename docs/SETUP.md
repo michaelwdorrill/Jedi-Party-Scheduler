@@ -208,7 +208,24 @@ than one Cloudflare account. `Use-CF` and the `CF_TOKEN_*`/`CF_ACCOUNT_*`
 variables are defined in the PowerShell profile, not in any one repo.
 ```
 
-**Once, in your PowerShell profile** (`notepad $PROFILE`):
+**Once, in your PowerShell profile.** This step is easy to skip past without
+noticing — `Use-CF` is not a real PowerShell cmdlet, it only exists once the
+function below is actually saved into your profile and that profile has been
+reloaded. Check first:
+
+```powershell
+Get-Command Use-CF -ErrorAction SilentlyContinue
+```
+
+Nothing printed means it isn't defined yet. Open the profile and add the
+function:
+
+```powershell
+notepad $PROFILE
+```
+
+(If `$PROFILE` doesn't exist yet, `notepad` will offer to create it — accept
+that.)
 
 ```powershell
 function Use-CF {
@@ -242,7 +259,15 @@ function Use-CF {
 ```
 
 It reads the persisted values directly rather than through `$env:`, so a
-`setx` takes effect immediately without opening a new terminal.
+`setx` takes effect immediately without opening a new terminal. The function
+itself does need one of the two below before it's usable in your current
+shell, since saving `$PROFILE` doesn't re-run it:
+
+```powershell
+. $PROFILE          # reload the profile in this window, or...
+```
+...or just close and reopen the terminal. Confirm it worked with the same
+`Get-Command Use-CF` check from above — it should now print the function.
 
 **Every session, before any `wrangler` command:**
 
@@ -260,9 +285,16 @@ no default, forgetting `Use-CF` is an error rather than a deploy into
 somebody else's account.
 
 The `account_id` pinned in each project's `wrangler.toml` is the backstop: if
-the active credentials don't match it, Wrangler refuses with
-`Authentication error [code: 10000]` rather than touching the wrong
-database. That error almost always means "wrong `Use-CF`", not "bad token".
+the active credentials don't match it, Wrangler refuses rather than touching
+the wrong database. The exact error varies by command and isn't one fixed
+code — `wrangler deploy` tends to say `Authentication error [code: 10000]`,
+while `wrangler d1 execute`/`d1 migrations` against a database outside the
+current account has been observed to say `The given account is not valid or
+is not authorized to access this service [code: 7403]`. Both mean the same
+thing here: the active account doesn't own the resource you're pointing at.
+If you hit either, the fix is the same — re-run `Use-CF <account-name>` for
+the account that actually owns it (check `npx wrangler whoami`'s Account ID
+against the `account_id` in `wrangler.toml`) — not "get a new token".
 
 ## 3. GitHub Pages (frontend)
 
