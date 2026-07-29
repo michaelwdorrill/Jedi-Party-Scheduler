@@ -14,6 +14,7 @@ import {
   dmSendRule,
   HOUR_MS,
   ids,
+  loadEventRow,
   membershipRule,
   seedEvent,
   seedGuild,
@@ -270,30 +271,35 @@ describe('a permanently failing deadline prefix cannot starve later polls (F-04-
 
 // R4. The previous pass moved the recurring quota claim into the batch, which
 // closed the crash window but left every sibling statement unconditional --
-// so a conversion that lost the quota race still replaced the poll options
-// and then reported failure. batch() rolls back on error, and a statement
-// matching zero rows is not an error.
+// so a conversion that lost the quota race still replaced child rows and then
+// reported failure. batch() rolls back on error, and a statement matching
+// zero rows is not an error.
+//
+// Uses invite siblings rather than poll siblings: a poll can no longer be
+// made recurring at all (see the cross-mode tests below), so the original
+// combination is now rejected before it reaches the batch.
 describe('a quota-losing recurring conversion mutates nothing (F-08)', () => {
-  it('leaves poll options, votes and poll fields exactly as they were', async () => {
+  it('leaves the event and its invite list exactly as they were', async () => {
     const { db, env } = setup();
     await seedGuild(db);
     await seedUser(db, 'organizer');
     await seedMembership(db, 'organizer', 'guild-1');
+    for (const id of ['keep', 'added']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
 
     // Fill the guild's recurring quota so the conversion below must lose.
     for (let i = 0; i < LIMITS.MAX_RECURRING_EVENTS_PER_GUILD; i++) {
       await seedEvent(db, { id: `rec-${i}`, organizerId: 'organizer', isRecurring: 1, startAt: null, endAt: null });
     }
 
-    await seedPoll(db, 'target', { resolutionMode: 'single_winner', deadlineAt: Date.now() + DAY_MS });
-    await seedOption(db, 'old-option', 'target', 0);
-    await db.prepare(`INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES (?, ?, 'yes', ?)`)
-      .bind('old-option', 'organizer', Date.now())
-      .run();
+    await seedEvent(db, { id: 'target', organizerId: 'organizer' });
+    await seedInvite(db, 'target', 'keep');
 
     const before = await db
-      .prepare(`SELECT is_recurring, poll_strategy, poll_deadline_at FROM events WHERE id = 'target'`)
-      .first<{ is_recurring: number; poll_strategy: string | null; poll_deadline_at: number | null }>();
+      .prepare(`SELECT is_recurring, start_at, end_at, revision FROM events WHERE id = 'target'`)
+      .first<{ is_recurring: number; start_at: number | null; end_at: number | null; revision: number }>();
 
     fetchStub = stubFetch([membershipRule(200)]);
     await expect(
@@ -315,29 +321,23 @@ describe('a quota-losing recurring conversion mutates nothing (F-08)', () => {
             endDate: null,
             endCount: null,
           },
-          // The siblings that used to commit regardless.
-          pollStrategy: 'most_votes',
-          pollDeadlineAt: Date.now() + 2 * DAY_MS,
-          pollOptions: [{ startAt: Date.now() + 9 * DAY_MS, endAt: Date.now() + 9 * DAY_MS + HOUR_MS }],
+          // The sibling writes that used to commit regardless: this would
+          // drop 'keep' from the invite list and add 'added'.
+          invites: { userIds: ['added'], groupIds: [] },
         } as Partial<EventWriteInput>,
-        false,
+        await loadEventRow(db, 'target'),
       ),
     ).rejects.toThrow(/limit of recurring events/i);
 
     const after = await db
-      .prepare(`SELECT is_recurring, poll_strategy, poll_deadline_at FROM events WHERE id = 'target'`)
-      .first<{ is_recurring: number; poll_strategy: string | null; poll_deadline_at: number | null }>();
+      .prepare(`SELECT is_recurring, start_at, end_at, revision FROM events WHERE id = 'target'`)
+      .first<{ is_recurring: number; start_at: number | null; end_at: number | null; revision: number }>();
     expect(after).toEqual(before);
 
-    const options = await db
-      .prepare(`SELECT id FROM event_poll_options WHERE event_id = 'target'`)
-      .all<{ id: string }>();
-    expect(options.results.map((o) => o.id)).toEqual(['old-option']);
-
-    const votes = await db
-      .prepare(`SELECT COUNT(*) AS n FROM event_poll_votes WHERE option_id = 'old-option'`)
-      .first<{ n: number }>();
-    expect(votes?.n).toBe(1);
+    const invites = await db
+      .prepare(`SELECT user_id FROM event_invites WHERE event_id = 'target' ORDER BY user_id`)
+      .all<{ user_id: string }>();
+    expect(invites.results.map((i) => i.user_id)).toEqual(['keep']);
 
     const rules = await db
       .prepare(`SELECT COUNT(*) AS n FROM event_recurrence_rules WHERE event_id = 'target'`)
@@ -358,7 +358,7 @@ describe('a partial schedule PATCH cannot store an incoherent event (F-08)', () 
     await seedEvent(db, { id: 'single', organizerId: 'organizer' });
 
     await expect(
-      updateEvent(env, 'single', 'guild-1', { isRecurring: true } as Partial<EventWriteInput>, false),
+      updateEvent(env, 'single', 'guild-1', { isRecurring: true } as Partial<EventWriteInput>, await loadEventRow(db, 'single')),
     ).rejects.toThrow(/recurrence is required/i);
 
     const row = await db
@@ -376,7 +376,7 @@ describe('a partial schedule PATCH cannot store an incoherent event (F-08)', () 
     await seedEvent(db, { id: 'series', organizerId: 'organizer', isRecurring: 1, startAt: null, endAt: null });
 
     await expect(
-      updateEvent(env, 'series', 'guild-1', { isRecurring: false } as Partial<EventWriteInput>, true),
+      updateEvent(env, 'series', 'guild-1', { isRecurring: false } as Partial<EventWriteInput>, await loadEventRow(db, 'series')),
     ).rejects.toThrow(/startAt and endAt are required/i);
 
     const row = await db.prepare(`SELECT is_recurring FROM events WHERE id = 'series'`).first<{ is_recurring: number }>();

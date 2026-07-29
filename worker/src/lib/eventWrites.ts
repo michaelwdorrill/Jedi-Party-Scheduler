@@ -1,6 +1,7 @@
 import type { Env } from '../env';
 import { chunkIds, chunkRows, conditionalRowsSql, placeholders } from './d1';
 import { filterActiveGuildMembers } from './db';
+import type { EventRow } from './events';
 import { newId } from './ids';
 import {
   assertBoolean,
@@ -12,6 +13,7 @@ import {
   assertStringArray,
   assertTimeRange,
   assertTimezone,
+  ConflictError,
   LIMITS,
   ValidationError,
 } from './validate';
@@ -269,6 +271,58 @@ function assertCompleteScheduleShape(input: Partial<EventWriteInput>): void {
   }
 }
 
+// Validates the event a PATCH would *leave behind*, not the delta it carries.
+//
+// Field-by-field validation of a delta is necessary but not sufficient, and
+// the gap is not hypothetical: every field in `{pollStrategy: 'threshold',
+// pollThresholdCount: 2, pollOptions: [...]}` is individually valid, and
+// applying it to a plain single event stored poll state on a row that is not
+// a poll. Likewise `{isRecurring: true, recurrence: {...}}` applied to a poll
+// produced a poll with a recurrence rule and null one-off timestamps. Neither
+// shape is reachable through create, so nothing downstream is written to
+// expect them -- the calendar, free/busy and the cron sweeps all branch on
+// `event_type` and `is_recurring` and quietly do the wrong thing with a row
+// that is both.
+//
+// The four shapes below are the whole supported set. Anything else is
+// rejected here rather than stored and coped with later.
+function assertCoherentMergedEvent(stored: EventRow, input: Partial<EventWriteInput>): void {
+  // event_type is immutable: a poll and a single event have different child
+  // tables and different resolution semantics, and nothing in the app offers
+  // to convert between them.
+  if (input.eventType !== undefined && input.eventType !== stored.event_type) {
+    throw new ValidationError('An event cannot change between a poll and a single event');
+  }
+
+  const isPoll = stored.event_type === 'poll';
+  const touchesPollState =
+    input.pollOptions !== undefined ||
+    input.pollStrategy !== undefined ||
+    input.pollThresholdCount !== undefined ||
+    input.pollDeadlineAt !== undefined ||
+    input.pollMode !== undefined ||
+    input.pollResolutionMode !== undefined ||
+    input.windowStartAt !== undefined ||
+    input.windowEndAt !== undefined ||
+    input.windowBlockMinutes !== undefined;
+
+  if (!isPoll && touchesPollState) {
+    throw new ValidationError('Poll settings cannot be set on an event that is not a poll');
+  }
+
+  // Recurrence belongs to single events. A recurring poll has no meaning
+  // here: the poll resolves to one concrete slot (or a set of confirmed
+  // ones), which is what a series would otherwise be generating.
+  if (isPoll && input.isRecurring === true) {
+    throw new ValidationError('A poll cannot be made recurring');
+  }
+
+  // The resulting schedule must still be one of the two coherent shapes.
+  // Only checked when this PATCH actually rewrites the schedule; an edit that
+  // only changes the title inherits whatever the stored row already had.
+  if (input.isRecurring !== undefined) assertCompleteScheduleShape(input);
+}
+
 function assertCompleteEventShape(input: Partial<EventWriteInput>): void {
   assertString(input.title, 'title', LIMITS.TITLE);
   assertTimezone(input.timezone, 'timezone');
@@ -388,8 +442,10 @@ function inviteStatements(
   eventId: string,
   invitees: ResolvedInvitee[],
   guarded: boolean,
-  extraGuard = '',
+  mutationToken: string | null = null,
 ): D1PreparedStatement[] {
+  const extraGuard = mutationToken === null ? '' : ' AND mutation_token = ?';
+  const extraBinds = mutationToken === null ? [] : [mutationToken];
   const now = Date.now();
   const conflict = 'ON CONFLICT(event_id, user_id) DO NOTHING';
   return chunkRows(invitees, INVITE_COLUMNS.length, guarded ? 1 : 0).map((chunk) => {
@@ -411,7 +467,7 @@ function inviteStatements(
     }
     return env.DB.prepare(
       conditionalRowsSql('event_invites', INVITE_COLUMNS, chunk.length, 'events', conflict, extraGuard),
-    ).bind(...values, eventId);
+    ).bind(...values, eventId, ...extraBinds);
   });
 }
 
@@ -429,8 +485,10 @@ function pollOptionStatements(
   eventId: string,
   options: readonly { startAt: number; endAt: number }[],
   guarded: boolean,
-  extraGuard = '',
+  mutationToken: string | null = null,
 ): D1PreparedStatement[] {
+  const extraGuard = mutationToken === null ? '' : ' AND mutation_token = ?';
+  const extraBinds = mutationToken === null ? [] : [mutationToken];
   let order = 0;
   const rows = options.map((opt) => [newId(), eventId, opt.startAt, opt.endAt, order++]);
   return chunkRows(rows, POLL_OPTION_COLUMNS.length, guarded ? 1 : 0).map((chunk) => {
@@ -443,7 +501,7 @@ function pollOptionStatements(
     }
     return env.DB.prepare(
       conditionalRowsSql('event_poll_options', POLL_OPTION_COLUMNS, chunk.length, 'events', '', extraGuard),
-    ).bind(...values, eventId);
+    ).bind(...values, eventId, ...extraBinds);
   });
 }
 
@@ -462,16 +520,14 @@ function pollOptionStatements(
 // current rows and computing the removals turns it into a positive IN list,
 // which chunks correctly -- and is usually empty, since most edits add people
 // rather than remove them.
-// `guard`, when passed, additionally conditions both the removals and the
-// additions on that SQL fragment holding for this event row -- used by the
-// recurring-conversion PATCH path so a failed quota claim earlier in the
-// same batch leaves invite membership untouched too, not just the event's
-// own columns.
+// `mutationToken`, when passed, conditions both the removals and the
+// additions on the event carrying that exact token, so a PATCH whose own main
+// UPDATE did not apply leaves invite membership untouched.
 async function replaceInviteStatements(
   env: Env,
   eventId: string,
   invitees: ResolvedInvitee[],
-  guard: string | null = null,
+  mutationToken: string | null = null,
 ): Promise<D1PreparedStatement[]> {
   const { results: current } = await env.DB.prepare(
     `SELECT user_id FROM event_invites WHERE event_id = ?`,
@@ -483,13 +539,13 @@ async function replaceInviteStatements(
   const remove = current.map((r) => r.user_id).filter((id) => !keep.has(id));
 
   const statements: D1PreparedStatement[] = [];
-  for (const chunk of chunkIds(remove, guard ? 2 : 1)) {
-    if (guard) {
+  for (const chunk of chunkIds(remove, mutationToken === null ? 1 : 3)) {
+    if (mutationToken !== null) {
       statements.push(
         env.DB.prepare(
           `DELETE FROM event_invites WHERE event_id = ? AND user_id IN (${placeholders(chunk.length)})
-           AND EXISTS (SELECT 1 FROM events WHERE id = ? AND ${guard})`,
-        ).bind(eventId, ...chunk, eventId),
+           AND EXISTS (SELECT 1 FROM events WHERE id = ? AND mutation_token = ?)`,
+        ).bind(eventId, ...chunk, eventId, mutationToken),
       );
     } else {
       statements.push(
@@ -499,7 +555,7 @@ async function replaceInviteStatements(
       );
     }
   }
-  statements.push(...inviteStatements(env, eventId, invitees, !!guard, guard ? ` AND ${guard}` : ''));
+  statements.push(...inviteStatements(env, eventId, invitees, mutationToken !== null, mutationToken));
   return statements;
 }
 
@@ -646,15 +702,38 @@ export async function createEventWithInvites(
   return eventId;
 }
 
+// `stored` is the event row the caller loaded and authorized against. It is
+// passed whole rather than as a `wasRecurring` boolean for two reasons: its
+// `revision` is the optimistic-concurrency token every statement below is
+// conditioned on, and merging the delta onto it is what lets the resulting
+// event be validated as a complete object rather than as a bag of
+// individually-valid fields.
 export async function updateEvent(
   env: Env,
   eventId: string,
   guildId: string,
   input: Partial<EventWriteInput>,
-  wasRecurring = false,
+  stored: EventRow,
 ): Promise<void> {
   validateEventWriteInput(input);
+  assertCoherentMergedEvent(stored, input);
   const now = Date.now();
+  const wasRecurring = !!stored.is_recurring;
+
+  // The caller's revision, and the one this request's own writes will produce.
+  //
+  // Every statement in the batch below is conditioned on `mutationToken`,
+  // which only exists on the row if *this* request's main UPDATE matched
+  // `revision = storedRevision` and stamped it. That is the difference from
+  // the previous state-based guard: `is_recurring = 1` is a condition any
+  // concurrent request can satisfy on your behalf, so a stale loser's
+  // siblings rode in on the winner's success.
+  const storedRevision = stored.revision ?? 0;
+  // Drawn fresh for this request. `revision + 1` would not do: it is derived
+  // from what the caller read, so two requests working from the same stale
+  // read compute the same value, and the loser's siblings would match the row
+  // the winner just wrote.
+  const mutationToken = newId();
 
   // createEventWithInvites checks this at write time; PATCH previously never
   // did, so an existing non-recurring event could be converted to recurring
@@ -707,12 +786,10 @@ export async function updateEvent(
   // schedule edit (the frontend always sends it alongside startAt/endAt or
   // recurrence); only then do we touch start_at/end_at/is_recurring.
   //
-  // Because this branch rewrites the whole schedule, the delta has to carry a
-  // complete one -- the same rule create is held to. Validating only the
-  // fields that happen to be present would accept `{isRecurring: true}` with
-  // no rule and store a series that never occurs.
+  // The schedule shape itself was already validated by
+  // assertCoherentMergedEvent above, against the stored event rather than the
+  // delta alone.
   if (input.isRecurring !== undefined) {
-    assertCompleteScheduleShape(input);
     setClauses.push('is_recurring = ?', 'start_at = ?', 'end_at = ?');
     if (input.isRecurring) {
       values.push(1, null, null);
@@ -757,33 +834,30 @@ export async function updateEvent(
   // atomic -- a single request editing both, say, the schedule and the poll
   // options can't leave the poll options replaced but the schedule untouched.
   const statements: D1PreparedStatement[] = [
-    env.DB.prepare(`UPDATE events SET ${setClauses.join(', ')} WHERE id = ?${quotaGuardSql}`).bind(
-      ...values,
-      ...quotaGuardParams,
-    ),
+    env.DB.prepare(
+      `UPDATE events SET ${setClauses.join(', ')}, revision = revision + 1, mutation_token = ?
+       WHERE id = ? AND revision = ?${quotaGuardSql}`,
+    ).bind(...values.slice(0, -1), mutationToken, values[values.length - 1], storedRevision, ...quotaGuardParams),
   ];
 
-  // Every sibling statement below is conditioned on the admission above
-  // having actually applied.
+  // Every sibling statement below is conditioned on this request's own main
+  // UPDATE having applied, by requiring the revision that UPDATE produces.
   //
-  // This is the part the previous pass got wrong. Moving the quota claim into
-  // the batch closed the crash window, but the comment that replaced it --
-  // "if the guard tripped, every statement in this batch affected zero rows"
-  // -- was simply false: only the main UPDATE carried the guard. The poll and
-  // window statements were unconditional, so a conversion that lost the
-  // recurring-quota race committed replaced poll options, wiped votes and
-  // rewrote poll fields, and *then* reported failure to the caller. A batch
-  // being transactional does not help when every statement in it succeeds;
-  // the rollback never fires because nothing errored.
+  // Two passes got this wrong in different ways. First the siblings carried
+  // no guard at all, so a conversion that lost the quota race replaced poll
+  // options and rewrote poll fields before reporting failure -- batch() rolls
+  // back on *error*, and a statement matching zero rows is not an error. Then
+  // they were guarded on `is_recurring = 1`, which fixed the sequential case
+  // but not the concurrent one: that condition is equally true when a
+  // *different* request just converted the event, so a stale loser's siblings
+  // still ran, on the back of the winner's success.
   //
-  // `is_recurring = 1` is the observable proof the admission won, since the
-  // guard only lets the main UPDATE through when the row was non-recurring
-  // and the guild was under its cap. When this PATCH is not a conversion
-  // there is no admission to lose and the statements stay unconditional.
-  const siblingGuard = convertingToRecurring
-    ? ` AND EXISTS (SELECT 1 FROM events WHERE id = ? AND is_recurring = 1)`
-    : '';
-  const guardBinds = convertingToRecurring ? [eventId] : [];
+  // `mutation_token = ?` cannot be satisfied by anyone else: the value is
+  // generated per request and only this request's own main UPDATE writes it.
+  // A derived token would not be enough -- see migration 0013 for why
+  // `revision + 1` fails exactly this test.
+  const siblingGuard = ` AND EXISTS (SELECT 1 FROM events WHERE id = ? AND mutation_token = ?)`;
+  const guardBinds = [eventId, mutationToken];
   const guardedStatement = (sql: string, ...binds: unknown[]): D1PreparedStatement =>
     env.DB.prepare(`${sql}${siblingGuard}`).bind(...binds, ...guardBinds);
 
@@ -797,10 +871,10 @@ export async function updateEvent(
              (event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
               duration_minutes, end_type, end_date, end_count)
            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-           -- Guarded on the event actually being recurring right now rather
-           -- than assumed, so a rule can never be attached to a row that
-           -- isn't a series.
-           WHERE EXISTS (SELECT 1 FROM events WHERE id = ? AND is_recurring = 1)`,
+           -- Same request-specific guard as every other sibling: the rule is
+           -- attached only if this request's own main UPDATE applied, which
+           -- also means the row really is a series now.
+           WHERE EXISTS (SELECT 1 FROM events WHERE id = ? AND mutation_token = ?)`,
         ).bind(
           eventId,
           r.freq,
@@ -814,6 +888,7 @@ export async function updateEvent(
           r.endDate ?? null,
           r.endCount ?? null,
           eventId,
+          mutationToken,
         ),
       );
     }
@@ -831,15 +906,7 @@ export async function updateEvent(
       ),
       guardedStatement(`DELETE FROM event_poll_options WHERE event_id = ?`, eventId),
     );
-    statements.push(
-      ...pollOptionStatements(
-        env,
-        eventId,
-        input.pollOptions,
-        convertingToRecurring,
-        convertingToRecurring ? ' AND is_recurring = 1' : '',
-      ),
-    );
+    statements.push(...pollOptionStatements(env, eventId, input.pollOptions, true, mutationToken));
     statements.push(
       guardedStatement(
         `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
@@ -876,35 +943,42 @@ export async function updateEvent(
   }
 
   if (invitees) {
-    // Guarded on `is_recurring = 1` when this PATCH is also converting the
-    // event to recurring, so a tripped quota guard on the main UPDATE above
-    // (see quotaGuardSql) leaves invite membership untouched in the same
-    // batch, not just the event row itself -- matching what throwing before
-    // ever building a batch used to guarantee.
-    statements.push(
-      ...(await replaceInviteStatements(env, eventId, invitees, convertingToRecurring ? 'is_recurring = 1' : null)),
-    );
+    statements.push(...(await replaceInviteStatements(env, eventId, invitees, mutationToken)));
   }
 
-  // One batch, one transaction: the quota admission check lives in the main
-  // UPDATE's WHERE clause above, not as an earlier separately committed
-  // statement, so there is no window between "slot claimed" and "batch
-  // applied" for a thrown error or a killed Worker to land in.
+  // One batch, one transaction: both admission checks -- the caller's
+  // revision and, on a conversion, the guild's recurring quota -- live in the
+  // main UPDATE's WHERE clause, so there is no window between "claimed" and
+  // "applied" for a thrown error or a killed Worker to land in.
   //
-  // On a conversion, every statement in the batch carries the same
-  // `is_recurring = 1` condition, so a tripped guard makes all of them
-  // no-ops and the failed request changes nothing observable. That is
-  // enforced statement by statement -- via `guardedStatement`,
-  // `pollOptionStatements`' extraGuard and `replaceInviteStatements`' guard
-  // -- and not a property of batch() itself: batch() rolls back on *error*,
-  // and a statement that legitimately matches zero rows is not an error. An
-  // earlier version of this comment claimed the guarantee while only the
-  // main UPDATE actually carried the guard, which is precisely how the
-  // quota-losing PATCH ended up replacing poll options before reporting
-  // failure. If a new sibling statement is added below, it needs the guard
-  // too.
+  // Every other statement in the batch requires this request's own
+  // `mutation_token`, which only its main UPDATE writes. So if the main
+  // UPDATE matched nothing, every sibling matches nothing too and the failed
+  // request changes nothing observable. That is enforced statement by
+  // statement -- via `guardedStatement`, `pollOptionStatements` and
+  // `replaceInviteStatements` -- and is *not* a property of batch() itself:
+  // batch() rolls back on an error, and a statement that legitimately matches
+  // zero rows is not an error. Two earlier versions of this code got that
+  // wrong in different ways (unguarded siblings, then siblings guarded on
+  // state a concurrent request could establish). If a new sibling statement
+  // is added above, it needs the same guard.
   const results = await env.DB.batch(statements);
-  if (convertingToRecurring && results[0].meta.changes === 0) {
+  if (results[0].meta.changes > 0) return;
+
+  // Nothing applied. Two different reasons, and they mean different things to
+  // the caller, so read the row once -- only on this failure path -- to say
+  // which. If the event is still at the revision we read, our own admission
+  // was the only thing that could have failed, which on a conversion means
+  // the quota; otherwise someone else has edited the event since.
+  const current = await env.DB.prepare(`SELECT revision, is_recurring FROM events WHERE id = ?`)
+    .bind(eventId)
+    .first<{ revision: number; is_recurring: number }>();
+
+  if (current && (current.revision ?? 0) !== storedRevision) throw new ConflictError();
+  if (convertingToRecurring) {
     throw new ValidationError('This server has reached its limit of recurring events');
   }
+  // The row is gone, or something else about it no longer matches. Either
+  // way the caller's copy is stale.
+  throw new ConflictError();
 }

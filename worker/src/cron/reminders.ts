@@ -7,7 +7,16 @@ import { resolvePastDeadlinePolls } from '../lib/polls';
 import { getConfirmedAttendeeIds } from '../lib/attendance';
 import { pruneStaleSessions } from '../lib/sessions';
 import { MEMBERSHIP_GRACE_MS, revalidateStaleMemberships } from '../lib/db';
-import { deliverThroughOutbox, MAX_DELIVERY_ATTEMPTS, reapExhaustedDeliveries, type DmRecipient } from '../lib/outbox';
+import {
+  deliverThroughOutbox,
+  MAX_DELIVERY_ATTEMPTS,
+  PENDING_NOTIFICATION_JOIN,
+  PENDING_NOTIFICATION_WHERE,
+  pendingNotificationJoinBinds,
+  pendingNotificationWhereBinds,
+  reapExhaustedDeliveries,
+  type DmRecipient,
+} from '../lib/outbox';
 import { chunkIds, placeholders } from '../lib/d1';
 import { planFrom, TickBudget } from './budget';
 import {
@@ -68,40 +77,54 @@ const SINGLE_EVENT_PAGE_SIZE = 100;
 // itself inside the same accounting the per-row work already goes through.
 const GLOBAL_SCAN_LIMIT = 200;
 
-// Reads one page of a global (multi-guild) scan, resuming from where the last
-// tick stopped.
+// `incomplete` means the row still has obligations this tick could not
+// discharge, so the cursor must not move past it. Returning nothing means the
+// row is finished (including "there was nothing to do for it").
+type RowOutcome = 'incomplete' | void;
+
+// Walks one page of a global (multi-guild) scan, resuming from where the last
+// tick stopped and committing progress only for rows it actually finished.
 //
-// The LIMIT alone was not enough, and the distinction matters: it bounds a
-// single read, but says nothing about which rows that read returns. With a
-// fixed ORDER BY and no cursor, every tick gets the identical prefix, so with
-// 201 eligible rows and a limit of 200 the 201st is selected on no tick, ever.
-// Nothing downstream rescues it either -- unlike the reminder scans, whose
-// predicate at least moves with the clock, these predicates ("confirmed",
-// "recently closed", "has a deadline in the next day") do not stop matching
-// once a notification has been delivered, so a settled row keeps its place in
-// the prefix and keeps crowding out the row behind it.
+// Two separate things are needed here and only one of them is a LIMIT.
 //
-// Cursoring the same ordering fixes that with no extra per-tick cost: each
-// page resumes strictly after the last id the previous one examined, and a
-// short page means the pass is done and the next tick starts over. Rows are
-// still revisited on the following pass, which is what the outbox's dedupe is
-// there to make free.
+// The LIMIT bounds a single read but says nothing about *which* rows come
+// back. With a fixed ORDER BY and no cursor, every tick got the identical
+// prefix, so with 201 eligible rows and a limit of 200 the 201st was selected
+// on no tick, ever. Unlike the reminder scans, whose predicate at least moves
+// with the clock, these predicates ("confirmed", "recently closed", "has a
+// deadline in the next day") keep matching after a notification is delivered,
+// so a settled row holds its place in the prefix indefinitely.
+//
+// The cursor fixes that, but only if it records work *completed* rather than
+// work *read*. The previous version advanced it to the last row of the page
+// the moment the page came back, before the caller had processed any of it --
+// so a tick with budget for one row of two hundred still persisted a cursor
+// past all two hundred. For a stable predicate that only means a wait for the
+// next pass; for a moving one it is permanent loss, because rows can fall out
+// of the window (`poll_deadline_at >= now`, `start_at >= now`) while the
+// cursor sits beyond them, and the eventual wrap does not bring them back.
+//
+// So the cursor moves one row at a time, after that row is done, and a page
+// only resets the cursor once every row in it has been handled. A row the
+// tick could not afford stays in front of the cursor and is the first thing
+// the next tick sees.
 //
 // `sql` must select an `id` column and carry its own WHERE clause; the keyset
 // predicate and ordering are appended here so every caller gets the same
 // shape.
-async function scanGlobalPage<T extends { id: string }>(
+async function forEachGlobalRow<T extends { id: string }>(
   env: Env,
   budget: TickBudget,
   cursors: CursorStore,
   cursorName: CursorName,
   sql: string,
   binds: unknown[],
+  handle: (row: T) => Promise<RowOutcome>,
   // The keyset column, qualified where the query joins more than one table
   // that has an `id`. The selected row must still expose it as `id`.
   idColumn = 'id',
-): Promise<T[]> {
-  if (!budget.trySpend(1)) return [];
+): Promise<void> {
+  if (!budget.trySpend(1)) return;
   const after = cursors.get(cursorName);
   const { results } = await env.DB.prepare(
     `${sql} AND (? IS NULL OR ${idColumn} > ?) ORDER BY ${idColumn} LIMIT ?`,
@@ -109,11 +132,29 @@ async function scanGlobalPage<T extends { id: string }>(
     .bind(...binds, after, after ?? '', GLOBAL_SCAN_LIMIT)
     .all<T>();
 
-  // A short page is the end of the pass: wrap so the next tick starts fresh.
-  // A full page proves nothing either way, so the cursor simply moves to the
-  // last row read and the next tick continues from there.
-  cursors.set(cursorName, results.length < GLOBAL_SCAN_LIMIT ? null : results[results.length - 1].id);
-  return results;
+  for (const row of results) {
+    if (!budget.trySpend(SCAN_COST_PER_EVENT)) return;
+    let outcome: RowOutcome;
+    try {
+      outcome = await handle(row);
+    } catch (err) {
+      // A row that throws is skipped rather than retried forever: the sweep
+      // advances past it so one malformed record cannot block the page, and
+      // the next pass around will come back to it.
+      console.error(`${cursorName} sweep failed for row ${row.id}:`, err);
+      cursors.set(cursorName, row.id);
+      continue;
+    }
+    // Either the handler said so, or it ran out mid-row. Either way this row
+    // is not finished, so the cursor stays in front of it.
+    if (outcome === 'incomplete' || budget.exhausted) return;
+    cursors.set(cursorName, row.id);
+  }
+
+  // Every row on the page was handled. A short page means that was the end of
+  // the scan, so wrap for the next tick; a full page means there is more
+  // behind it and the cursor already points at the right place.
+  if (results.length < GLOBAL_SCAN_LIMIT) cursors.set(cursorName, null);
 }
 
 // A resolved/cancelled poll's notification obligations are done within a
@@ -181,66 +222,10 @@ async function notifyOnce(
   );
 }
 
-// One query answers "which of these users has this notification already been
-// settled for?" for a whole recipient list at once.
-//
-// Without it, every recipient cost a claim() attempt whether or not anything
-// was sent -- and at an event's 300-invitee maximum, the great majority of
-// those are already delivered. The claim is cheap per row but there is no
-// bound on how many rows there are, so the tick's *total* was unbounded:
-// re-scanning a fully-delivered 300-invitee event cost hundreds of statements
-// every fifteen minutes, forever, to send nothing.
-//
-// This is purely a filter, never the correctness boundary. claim() still
-// re-checks each row under its lease, so a row that settles between this
-// query and the attempt is still handled correctly. The set only stops the
-// tick paying to ask a question it already has the answer to.
-async function settledRecipients(
-  env: Env,
-  eventId: string,
-  notificationType: NotificationType,
-  occurrenceDate: string,
-): Promise<Set<string>> {
-  const now = Date.now();
-  const { results } = await env.DB.prepare(
-    `SELECT user_id FROM notification_log
-     WHERE event_id = ? AND notification_type = ? AND occurrence_date = ?
-       AND (delivered_at IS NOT NULL OR failed_at IS NOT NULL
-            OR (claimed_until IS NOT NULL AND claimed_until > ?)
-            OR (next_attempt_at IS NOT NULL AND next_attempt_at > ?))`,
-  )
-    .bind(eventId, notificationType, occurrenceDate, now, now)
-    .all<{ user_id: string }>();
-  return new Set(results.map((r) => r.user_id));
-}
-
 // What one event costs a sweep before a single DM is sent. Charged up front
 // so the tick stops walking events once it can no longer afford to look at
 // one, rather than discovering that only when it tries to deliver.
 const SCAN_COST_PER_EVENT = 1;
-
-// Delivers one notification type to a list of recipients, skipping the ones
-// already settled and stopping the moment the tick can no longer afford a
-// send. Stopping rather than skipping is deliberate: the next recipient costs
-// at least as much as this one, so continuing the loop can only overspend.
-// Whatever is left is still pending, and the next tick resumes from there.
-async function notifyEach(
-  env: Env,
-  budget: TickBudget,
-  recipients: readonly ParticipantRow[],
-  eventId: string,
-  notificationType: NotificationType,
-  occurrenceDate: string,
-  message: (user: ParticipantRow) => string,
-): Promise<void> {
-  if (recipients.length === 0 || budget.exhausted) return;
-  const settled = await settledRecipients(env, eventId, notificationType, occurrenceDate);
-  for (const user of recipients) {
-    if (budget.exhausted) return;
-    if (settled.has(user.id)) continue;
-    await notifyOnce(env, budget, user, eventId, notificationType, occurrenceDate, message(user));
-  }
-}
 
 // The event participants who still need this particular notification.
 //
@@ -591,7 +576,7 @@ async function forEachRecurringPage(
         // `handle` can itself run out of budget partway through an event's
         // occurrences/recipients (a recurring event can carry the same
         // hundreds-of-invitees fanout a single event can) and simply stop,
-        // the same way notifyPending/notifyEach do. If it left the tick
+        // the same way notifyPending does. If it left the tick
         // exhausted, this event cannot be assumed done -- advancing past it
         // anyway is exactly the single-event cursor bug this budget check
         // exists to avoid, just for the recurring scan. Not advancing means
@@ -638,7 +623,7 @@ async function sweepSingleWinnerPollNotifications(
   budget: TickBudget,
   cursors: CursorStore,
 ): Promise<void> {
-  const polls = await scanGlobalPage<EventRow>(
+  await forEachGlobalRow<EventRow>(
     env,
     budget,
     cursors,
@@ -647,21 +632,20 @@ async function sweepSingleWinnerPollNotifications(
      WHERE event_type = 'poll' AND poll_resolution_mode = 'single_winner' AND status IN ('resolved','cancelled')
        AND updated_at >= ?`,
     [terminalHistoryHotCutoff()],
-  );
-
-  for (const event of polls) {
-    if (!budget.trySpend(SCAN_COST_PER_EVENT)) return;
-    try {
-      const pending = await pendingRecipients(env, event, 'poll_resolved', '', budget.deliveriesAffordable);
+    async (event) => {
+      const limit = budget.deliveriesAffordable;
+      const pending = await pendingRecipients(env, event, 'poll_resolved', '', limit);
       await notifyPending(env, budget, pending, event.id, 'poll_resolved', '', (user) =>
         event.status === 'resolved'
           ? `"${event.title}" is on! Time locked in: ${formatWhen(event.start_at!, user.timezone)}.\n${eventLink(env, event.id)}`
           : `"${event.title}" didn't get enough votes and was cancelled.`,
       );
-    } catch (err) {
-      console.error(`sweepSingleWinnerPollNotifications failed for event ${event.id}:`, err);
-    }
-  }
+      // A full page of recipients means there may be more behind it, and an
+      // exhausted budget means we stopped part-way through the ones we had.
+      // Either way this row is not finished.
+      if (pending.length >= limit || budget.exhausted) return 'incomplete';
+    },
+  );
 }
 
 // multi_winner events only ever transition out of 'active' via the deadline
@@ -673,7 +657,7 @@ async function sweepMultiWinnerPollClosedNotifications(
   budget: TickBudget,
   cursors: CursorStore,
 ): Promise<void> {
-  const polls = await scanGlobalPage<EventRow>(
+  await forEachGlobalRow<EventRow>(
     env,
     budget,
     cursors,
@@ -682,11 +666,8 @@ async function sweepMultiWinnerPollClosedNotifications(
      WHERE event_type = 'poll' AND poll_resolution_mode = 'multi_winner' AND status IN ('resolved','cancelled')
        AND updated_at >= ?`,
     [terminalHistoryHotCutoff()],
-  );
-
-  for (const event of polls) {
-    if (!budget.trySpend(SCAN_COST_PER_EVENT + 1)) return;
-    try {
+    async (event) => {
+      if (!budget.trySpend(1)) return 'incomplete';
       // Per-day confirmations are notified separately (as they happen, to
       // just that day's yes-voters) by sweepConfirmedMultiWinnerOptions --
       // this is just a "voting closed" note to everyone else invited.
@@ -696,16 +677,19 @@ async function sweepMultiWinnerPollClosedNotifications(
         .bind(event.id)
         .all<{ n: number }>();
       const n = confirmedCount[0]?.n ?? 0;
-      const pending = await pendingRecipients(env, event, 'poll_resolved', '', budget.deliveriesAffordable);
+      const limit = budget.deliveriesAffordable;
+      const pending = await pendingRecipients(env, event, 'poll_resolved', '', limit);
       const message =
         n > 0
           ? `Voting for "${event.title}" has closed. ${n} day(s) got confirmed -- check the event for details.\n${eventLink(env, event.id)}`
           : `"${event.title}" didn't get enough interest on any day and was cancelled.`;
       await notifyPending(env, budget, pending, event.id, 'poll_resolved', '', () => message);
-    } catch (err) {
-      console.error(`sweepMultiWinnerPollClosedNotifications failed for event ${event.id}:`, err);
-    }
-  }
+      // A full page of recipients means there may be more behind it, and an
+      // exhausted budget means we stopped part-way through the ones we had.
+      // Either way this row is not finished.
+      if (pending.length >= limit || budget.exhausted) return 'incomplete';
+    },
+  );
 }
 
 // Multi-winner polls confirm individual days as soon as they hit quorum
@@ -716,7 +700,7 @@ async function sweepConfirmedMultiWinnerOptions(
   budget: TickBudget,
   cursors: CursorStore,
 ): Promise<void> {
-  const results = await scanGlobalPage<{
+  await forEachGlobalRow<{
     id: string;
     event_id: string;
     start_at: number;
@@ -733,37 +717,45 @@ async function sweepConfirmedMultiWinnerOptions(
      JOIN events e ON e.id = epo.event_id
      WHERE e.poll_resolution_mode = 'multi_winner' AND epo.confirmed_at IS NOT NULL`,
     [],
-    'epo.id',
-  );
-
-  for (const opt of results) {
-    if (!budget.trySpend(SCAN_COST_PER_EVENT)) return;
-    try {
-      const { results: yesVoters } = await env.DB.prepare(
+    async (opt) => {
+      const limit = budget.deliveriesAffordable;
+      if (limit <= 0) return 'incomplete';
+      const { results: voters } = await env.DB.prepare(
         `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
          FROM event_poll_votes epv
          JOIN users u ON u.id = epv.user_id
          JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
          JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
-         WHERE epv.option_id = ? AND epv.vote = 'yes'`,
+         ${PENDING_NOTIFICATION_JOIN}
+         WHERE epv.option_id = ? AND epv.vote = 'yes'
+           AND ${PENDING_NOTIFICATION_WHERE}
+         ORDER BY u.id
+         LIMIT ?`,
       )
-        .bind(opt.guild_id, membershipCutoff(), opt.id)
+        .bind(
+          opt.guild_id,
+          membershipCutoff(),
+          ...pendingNotificationJoinBinds(opt.event_id, 'poll_resolved', opt.id),
+          opt.id,
+          ...pendingNotificationWhereBinds(),
+          limit,
+        )
         .all<ParticipantRow>();
 
-      await notifyEach(
+      await notifyPending(
         env,
         budget,
-        yesVoters,
+        voters,
         opt.event_id,
         'poll_resolved',
         opt.id,
         (user) =>
           `"${opt.title}" is on for ${formatWhen(opt.start_at, user.timezone)}! You're confirmed.\n${eventLink(env, opt.event_id)}`,
       );
-    } catch (err) {
-      console.error(`sweepConfirmedMultiWinnerOptions failed for option ${opt.id}:`, err);
-    }
-  }
+      if (voters.length >= limit || budget.exhausted) return 'incomplete';
+    },
+    'epo.id',
+  );
 }
 
 // Reminds invitees 24h before a poll's deadline, but only the ones who
@@ -773,7 +765,7 @@ async function sweepPollDeadlineReminders(env: Env, budget: TickBudget, cursors:
   const now = Date.now();
   const windowEnd = now + 24 * HOUR_MS;
 
-  const polls = await scanGlobalPage<EventRow>(
+  await forEachGlobalRow<EventRow>(
     env,
     budget,
     cursors,
@@ -782,11 +774,9 @@ async function sweepPollDeadlineReminders(env: Env, budget: TickBudget, cursors:
      WHERE event_type = 'poll' AND status = 'active'
        AND poll_deadline_at IS NOT NULL AND poll_deadline_at >= ? AND poll_deadline_at <= ?`,
     [now, windowEnd],
-  );
-
-  for (const poll of polls) {
-    if (!budget.trySpend(SCAN_COST_PER_EVENT)) return;
-    try {
+    async (poll) => {
+      const limit = budget.deliveriesAffordable;
+      if (limit <= 0) return 'incomplete';
       const hasVotedSubquery =
         poll.poll_mode === 'window'
           ? `SELECT 1 FROM event_window_availability WHERE event_id = ei.event_id AND user_id = ei.user_id`
@@ -799,12 +789,23 @@ async function sweepPollDeadlineReminders(env: Env, budget: TickBudget, cursors:
          JOIN users u ON u.id = ei.user_id
          JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
          JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
-         WHERE ei.event_id = ? AND NOT EXISTS (${hasVotedSubquery})`,
+         ${PENDING_NOTIFICATION_JOIN}
+         WHERE ei.event_id = ? AND NOT EXISTS (${hasVotedSubquery})
+           AND ${PENDING_NOTIFICATION_WHERE}
+         ORDER BY u.id
+         LIMIT ?`,
       )
-        .bind(poll.guild_id, membershipCutoff(), poll.id)
+        .bind(
+          poll.guild_id,
+          membershipCutoff(),
+          ...pendingNotificationJoinBinds(poll.id, 'poll_deadline_reminder', ''),
+          poll.id,
+          ...pendingNotificationWhereBinds(),
+          limit,
+        )
         .all<ParticipantRow>();
 
-      await notifyEach(
+      await notifyPending(
         env,
         budget,
         nonVoters,
@@ -813,10 +814,9 @@ async function sweepPollDeadlineReminders(env: Env, budget: TickBudget, cursors:
         '',
         () => `Voting for "${poll.title}" closes soon -- you haven't responded yet.\n${eventLink(env, poll.id)}`,
       );
-    } catch (err) {
-      console.error(`sweepPollDeadlineReminders failed for poll ${poll.id}:`, err);
-    }
-  }
+      if (nonVoters.length >= limit || budget.exhausted) return 'incomplete';
+    },
+  );
 }
 
 // Deep link into the specific voice channel. Discord bots have no API to
@@ -826,7 +826,23 @@ function voiceChannelLink(guildId: string, channelId: string): string {
   return `https://discord.com/channels/${guildId}/${channelId}`;
 }
 
-const VOICE_INVITE_LEAD_MS = 10 * 60 * 1000;
+// How far ahead the voice sweep looks for events about to start.
+//
+// This has to be *longer than the cron interval*, which it previously was
+// not: with a 15-minute trigger and a 10-minute window, an event starting 12
+// minutes after a tick was outside the window at that tick and already three
+// minutes into the past at the next one, where `start_at >= now` excluded it.
+// Every start time in that five-minute band was missed, deterministically, on
+// an idle database with the budget untouched -- a gap in the schedule's
+// arithmetic rather than a resource problem.
+//
+// A window at least as wide as the interval guarantees every future start is
+// caught by some tick; the extra margin over CRON_INTERVAL_MS absorbs late or
+// skipped invocations, which Cloudflare does not promise to avoid. The cost of
+// the wider window is only that a DM can arrive further ahead of the event;
+// the outbox's dedupe means it is still sent exactly once.
+const CRON_INTERVAL_MS = 15 * 60 * 1000;
+const VOICE_INVITE_LEAD_MS = CRON_INTERVAL_MS + 5 * 60 * 1000;
 
 // Nudges confirmed attendees toward the event's voice channel a few minutes
 // before it starts. Only fires for events where the organizer picked a
@@ -837,7 +853,7 @@ async function sweepVoiceChannelInvites(env: Env, budget: TickBudget, cursors: C
   const now = Date.now();
   const windowEnd = now + VOICE_INVITE_LEAD_MS;
 
-  const fixedTimeEvents = await scanGlobalPage<EventRow>(
+  await forEachGlobalRow<EventRow>(
     env,
     budget,
     cursors,
@@ -846,20 +862,21 @@ async function sweepVoiceChannelInvites(env: Env, budget: TickBudget, cursors: C
      WHERE voice_channel_id IS NOT NULL AND is_recurring = 0 AND status IN ('active','resolved')
        AND start_at IS NOT NULL AND start_at >= ? AND start_at <= ?`,
     [now, windowEnd],
-  );
-
-  for (const event of fixedTimeEvents) {
-    if (!budget.trySpend(SCAN_COST_PER_EVENT)) return;
-    try {
+    async (event) => {
+      const limit = budget.deliveriesAffordable;
+      if (limit <= 0) return 'incomplete';
       const optionId = event.event_type === 'poll' && event.poll_mode === 'options' ? event.resolved_option_id : null;
-      const attendees = await getConfirmedAttendeeIds(env, event, optionId);
-      await notifyEach(env, budget, attendees, event.id, 'voice_channel_invite', '', () =>
+      const attendees = await getConfirmedAttendeeIds(env, event, optionId, {
+        notificationType: 'voice_channel_invite',
+        occurrenceDate: '',
+        limit,
+      });
+      await notifyPending(env, budget, attendees, event.id, 'voice_channel_invite', '', () =>
         `"${event.title}" is starting soon -- join the "${event.voice_channel_name}" voice channel:\n${voiceChannelLink(event.guild_id, event.voice_channel_id!)}`,
       );
-    } catch (err) {
-      console.error(`sweepVoiceChannelInvites (fixed-time) failed for event ${event.id}:`, err);
-    }
-  }
+      if (attendees.length >= limit || budget.exhausted) return 'incomplete';
+    },
+  );
 
   await forEachRecurringPage(
     env,
@@ -871,10 +888,14 @@ async function sweepVoiceChannelInvites(env: Env, budget: TickBudget, cursors: C
       const occurrences = await expandOccurrencesForEvent(env, event, now, windowEnd, overrides, rule);
       if (occurrences.length === 0) return;
 
-      const attendees = await getConfirmedAttendeeIds(env, event, null);
       for (const occ of occurrences) {
         if (!budget.trySpend(SCAN_COST_PER_EVENT)) return;
-        await notifyEach(env, budget, attendees, event.id, 'voice_channel_invite', occ.date, () =>
+        const attendees = await getConfirmedAttendeeIds(env, event, null, {
+          notificationType: 'voice_channel_invite',
+          occurrenceDate: occ.date,
+          limit: budget.deliveriesAffordable,
+        });
+        await notifyPending(env, budget, attendees, event.id, 'voice_channel_invite', occ.date, () =>
           `"${event.title}" is starting soon -- join the "${event.voice_channel_name}" voice channel:\n${voiceChannelLink(event.guild_id, event.voice_channel_id!)}`,
         );
       }
@@ -883,7 +904,7 @@ async function sweepVoiceChannelInvites(env: Env, budget: TickBudget, cursors: C
 
   // multi_winner polls confirm each day independently, so each confirmed
   // option has its own attendee list (whoever voted yes on that day).
-  const multiWinnerPolls = await scanGlobalPage<EventRow>(
+  await forEachGlobalRow<EventRow>(
     env,
     budget,
     cursors,
@@ -891,11 +912,8 @@ async function sweepVoiceChannelInvites(env: Env, budget: TickBudget, cursors: C
     `SELECT * FROM events
      WHERE voice_channel_id IS NOT NULL AND event_type = 'poll' AND poll_resolution_mode = 'multi_winner'`,
     [],
-  );
-
-  for (const poll of multiWinnerPolls) {
-    if (!budget.trySpend(1)) return;
-    try {
+    async (poll) => {
+      if (!budget.trySpend(1)) return 'incomplete';
       const { results: options } = await env.DB.prepare(
         `SELECT id FROM event_poll_options
          WHERE event_id = ? AND confirmed_at IS NOT NULL AND start_at >= ? AND start_at <= ?`,
@@ -904,16 +922,20 @@ async function sweepVoiceChannelInvites(env: Env, budget: TickBudget, cursors: C
         .all<{ id: string }>();
 
       for (const opt of options) {
-        if (!budget.trySpend(SCAN_COST_PER_EVENT)) return;
-        const attendees = await getConfirmedAttendeeIds(env, poll, opt.id);
-        await notifyEach(env, budget, attendees, poll.id, 'voice_channel_invite', opt.id, () =>
+        const limit = budget.deliveriesAffordable;
+        if (limit <= 0) return 'incomplete';
+        const attendees = await getConfirmedAttendeeIds(env, poll, opt.id, {
+          notificationType: 'voice_channel_invite',
+          occurrenceDate: opt.id,
+          limit,
+        });
+        await notifyPending(env, budget, attendees, poll.id, 'voice_channel_invite', opt.id, () =>
           `"${poll.title}" is starting soon -- join the "${poll.voice_channel_name}" voice channel:\n${voiceChannelLink(poll.guild_id, poll.voice_channel_id!)}`,
         );
+        if (attendees.length >= limit || budget.exhausted) return 'incomplete';
       }
-    } catch (err) {
-      console.error(`sweepVoiceChannelInvites (multi-winner) failed for poll ${poll.id}:`, err);
-    }
-  }
+    },
+  );
 }
 
 interface GroupIdleRow {
@@ -927,18 +949,15 @@ interface GroupIdleRow {
 // group's last known event time), not on every 15-minute tick.
 async function sweepIdleGroups(env: Env, budget: TickBudget, cursors: CursorStore): Promise<void> {
   const now = Date.now();
-  const groups = await scanGlobalPage<GroupIdleRow>(
+  await forEachGlobalRow<GroupIdleRow>(
     env,
     budget,
     cursors,
     'idle_groups',
     `SELECT id, idle_reminder_days FROM groups WHERE 1 = 1`,
     [],
-  );
-
-  for (const group of groups) {
-    if (!budget.trySpend(SCAN_COST_PER_EVENT + 1)) return;
-    try {
+    async (group) => {
+      if (!budget.trySpend(1)) return 'incomplete';
       const { results: eventRows } = await env.DB.prepare(
         `SELECT DISTINCT e.start_at, e.end_at FROM events e
          JOIN event_invites ei ON ei.event_id = e.id
@@ -947,14 +966,14 @@ async function sweepIdleGroups(env: Env, budget: TickBudget, cursors: CursorStor
         .bind(group.id)
         .all<{ start_at: number; end_at: number }>();
 
-      if (eventRows.length === 0) continue; // never had an event -- not "idle", just new
+      if (eventRows.length === 0) return; // never had an event -- not "idle", just new
 
       const lastEventAt = Math.max(...eventRows.map((e) => e.end_at ?? e.start_at));
       const hasUpcoming = eventRows.some((e) => e.start_at > now);
-      if (hasUpcoming) continue;
+      if (hasUpcoming) return;
 
       const idleMs = group.idle_reminder_days * 24 * HOUR_MS;
-      if (now - lastEventAt < idleMs) continue;
+      if (now - lastEventAt < idleMs) return;
 
       const { results: members } = await env.DB.prepare(
         `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone, g.name as group_name
@@ -1014,10 +1033,9 @@ async function sweepIdleGroups(env: Env, budget: TickBudget, cursors: CursorStor
       )
         .bind(group.id, lastEventAt, now)
         .run();
-    } catch (err) {
-      console.error(`sweepIdleGroups failed for group ${group.id}:`, err);
-    }
-  }
+      if (budget.exhausted) return 'incomplete';
+    },
+  );
 }
 
 // Permanently deletes terminal history once nobody could plausibly still

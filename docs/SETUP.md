@@ -465,7 +465,7 @@ genuine free time — a partial answer would tell you someone is free at a time
 the database says they are busy, and you would schedule over it. A refusal you
 can act on is better than a confident wrong answer.
 
-The `pass4`–`pass8` test files in `worker/test/` assert this with an actual
+The `pass4`–`pass9` test files in `worker/test/` assert this with an actual
 query counter (see `worker/test/d1shim.ts`'s `queryCount`), not just that the
 request succeeds — run `npm test` in `worker/` to see them pass. If you raise
 any of the `LIMITS` in `worker/src/lib/validate.ts` significantly, re-run

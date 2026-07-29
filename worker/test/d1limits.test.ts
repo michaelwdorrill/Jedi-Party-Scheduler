@@ -7,6 +7,7 @@ import { TooManyParametersError } from './d1shim';
 import {
   DAY_MS,
   ids,
+  loadEventRow,
   seedEvent,
   seedGuild,
   seedInvite,
@@ -198,7 +199,7 @@ describe('invite writes at the configured maxima', () => {
       (await db.prepare(`SELECT COUNT(*) AS n FROM event_invites WHERE event_id = ?`).bind(eventId).first<{ n: number }>())?.n,
     ).toBe(200);
 
-    await updateEvent(env, eventId, 'guild-1', { invites: { userIds: [], groupIds: ['grp-b'] } });
+    await updateEvent(env, eventId, 'guild-1', { invites: { userIds: [], groupIds: ['grp-b'] } }, await loadEventRow(db, eventId));
 
     const remaining = await db.prepare(`SELECT user_id FROM event_invites WHERE event_id = ?`)
       .bind(eventId)
@@ -221,9 +222,13 @@ describe('invite writes at the configured maxima', () => {
       .bind(eventId, 'u-0')
       .run();
 
-    await updateEvent(env, eventId, 'guild-1', {
-      invites: { userIds: ['u-0', 'u-3'], groupIds: [] },
-    });
+    await updateEvent(
+      env,
+      eventId,
+      'guild-1',
+      { invites: { userIds: ['u-0', 'u-3'], groupIds: [] } },
+      await loadEventRow(db, eventId),
+    );
 
     const kept = await db.prepare(`SELECT rsvp_status FROM event_invites WHERE event_id = ? AND user_id = ?`)
       .bind(eventId, 'u-0')

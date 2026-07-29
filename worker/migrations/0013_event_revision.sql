@@ -1,0 +1,46 @@
+-- A per-event monotonic revision, used as an optimistic-concurrency token.
+--
+-- The Pass 9 review found that guarding a PATCH's sibling statements on
+-- resulting *state* is not the same as guarding them on *this request's*
+-- admission having succeeded. The recurring conversion guarded its siblings
+-- with `EXISTS (SELECT 1 FROM events WHERE id = ? AND is_recurring = 1)`,
+-- which is true whenever the event is recurring -- including when it became
+-- recurring because a different, concurrent request won the race a moment
+-- earlier. Two requests both reading `is_recurring = 0` therefore produced:
+-- request A commits its conversion; request B's guarded main UPDATE matches
+-- zero rows and B reports "this server has reached its limit of recurring
+-- events"; and B's siblings sail through the state-based guard on the back of
+-- A's success, replacing A's poll options, wiping its votes and rewriting its
+-- poll fields. A request that reported failure changed observable state.
+--
+-- A state predicate cannot distinguish those cases, because the state it
+-- checks is reachable by someone else. A token minted by the request's own
+-- successful write can: the main UPDATE requires `revision = <what the caller
+-- read>` and sets `revision = revision + 1`, and every sibling requires
+-- `revision = <that value + 1>`. Inside one D1 batch -- a single transaction
+-- -- no other writer can interleave, so the siblings run if and only if this
+-- request's own admission applied. A caller working from a stale read simply
+-- fails the predicate and changes nothing.
+--
+-- This also gives ordinary edits lost-update protection they did not have:
+-- two people editing the same event concurrently no longer silently
+-- last-write-wins, the second gets a 409 and can retry against fresh state.
+--
+-- Existing rows start at 0, which is what a client that has never seen a
+-- revision would read anyway.
+ALTER TABLE events ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+
+-- A random token the main UPDATE stamps on the row, and every sibling
+-- statement in the same batch requires.
+--
+-- The revision alone is not enough to identify *this* request's write, and
+-- the reason is worth stating because it is easy to get wrong: `revision + 1`
+-- is derived from the revision the caller read, so two requests working from
+-- the same stale read compute the *same* next value. The loser's main UPDATE
+-- correctly matches nothing (the row has moved on), but its siblings, if
+-- guarded on `revision = <that computed value>`, match the row the winner
+-- just wrote -- reproducing the same defect one level down.
+--
+-- A token drawn per request has no such relationship to what anyone read, so
+-- only the request that generated it can satisfy the guard.
+ALTER TABLE events ADD COLUMN mutation_token TEXT;
