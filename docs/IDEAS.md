@@ -48,3 +48,30 @@ custom domain (F-03) is sorted.
    functional, not designed. Wants pitches/options for making the whole
    platform look better (layout, color, typography, general polish) before
    or around release.
+
+9. **Pass 11 P2 backlog** (logged from the Pass 11 review, PR #16 baseline
+   `2eb6e677`; report's verdict was 0 P0/0 P1 -- release gate closed for the
+   private deployment, these are optional hardening, not blockers):
+   - **Notification delivery is best-effort, not guaranteed.** A recipient
+     past a tick's affordable budget prefix never gets an outbox row at all
+     (`claim()` -- the thing that creates the row -- is gated behind
+     `reserveDelivery()`), so the Pass 10 independent retry consumer has
+     nothing to find for them; this is a different gap from the one Pass 10
+     fixed (a row that *was* claimed and then failed). If reliable delivery
+     ever becomes a real product requirement, the fix is to materialize an
+     outbox row (or equivalent durable intent) for every eligible recipient
+     up front, decoupled from whether this tick can afford to attempt it
+     immediately.
+   - **Full event PATCH should require a client-observed `revision`.** The
+     official editor always sends one, but the API type still allows
+     omitting it, silently falling back to the old last-write-wins behavior
+     for any other/malformed client. Backlog fix: make `revision` required
+     on the full-PATCH route and return an explicit precondition error when
+     absent.
+   - **Some partial-PATCH combinations can still produce incoherent poll
+     state**, beyond the specific pollOptions-omission bug Pass 10 fixed --
+     e.g. threshold strategy submitted with no threshold, or window mode
+     combined with leftover option children. Backlog fix: merge the stored
+     scalar/child state with the proposed delta and validate exactly one
+     supported final poll mode, rather than validating the delta in
+     isolation.
