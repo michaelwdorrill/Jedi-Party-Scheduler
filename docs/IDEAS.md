@@ -48,3 +48,17 @@ custom domain (F-03) is sorted.
    functional, not designed. Wants pitches/options for making the whole
    platform look better (layout, color, typography, general polish) before
    or around release.
+
+9. **Self-service "add this bot to your server" link, gated by owner
+   approval.** A public page/link (distinct from the raw Discord OAuth bot-add
+   URL, which just adds the bot with no guardrail) that lets someone add the
+   bot to their own Discord server. If that server is already on the
+   allow-list, it just works. If it isn't, the request queues instead of
+   silently granting access, and the site owner gets an email to approve or
+   reject it before the server can actually use the app. Needs: an outbound
+   email path (nothing in the Worker sends email today — SETUP.md's contact
+   address is just a mailto link on the legal pages), a pending-request state
+   in D1 distinct from the existing `guilds` allow-list, and an approve/reject
+   action (email link with a signed token, or a page under `/admin`) that
+   feeds the same allow-list insert the manual `curl`/`wrangler d1 execute`
+   step in SETUP.md does today.
