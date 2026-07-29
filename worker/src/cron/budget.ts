@@ -12,9 +12,25 @@
 // sweep stops cleanly rather than being killed partway by the platform. That
 // matters because the outbox is resumable by construction: an undelivered
 // notification simply stays pending (or is never claimed), and the next tick
-// -- fifteen minutes later, with a fresh allowance -- picks up exactly where
-// this one stopped. Stopping early is a delay; being killed mid-flight is a
-// lost or duplicated DM.
+// -- fifteen minutes later, with a fresh allowance -- picks up close to where
+// this one stopped. Two qualifications on "close to", both deliberate:
+//
+//   - A row whose delivery emptied the last of the budget is still recorded
+//     as sent, but the cursor conservatively stays one key behind it rather
+//     than advancing past a row it can't prove is finished (see
+//     forEachGlobalRow and sweepReminders' `recipientsSettled`), so the next
+//     tick briefly re-examines it -- which the outbox dedupes for free.
+//   - "Picks up" means the row is *eventually* retried, not that the same
+//     sweep that first tried it is what finds it again. A retryable failure
+//     sets next_attempt_at, and by the time that's due the row's source
+//     event/poll/group may no longer match whatever window the sweep that
+//     originally sent it scans by. What actually guarantees the retry isn't
+//     stranded is the source-independent consumers (sweepDueNotificationRetries,
+//     sweepDueNudgeRetries) that scan the outbox tables directly by
+//     next_attempt_at instead of by source state -- see migration 0014.
+//
+// Stopping early is a delay; being killed mid-flight is a lost or duplicated
+// DM.
 //
 // The numbers come from the plan, since Free and Paid differ by more than an
 // order of magnitude. Defaults are the Free-plan figures: assuming the
@@ -28,10 +44,11 @@ const FREE_D1_QUERIES = 50;
 const PAID_SUBREQUESTS = 1000; // far higher in reality; kept conservative
 const PAID_D1_QUERIES = 1000;
 
-// Headroom left unspent for the sweeps' own bookkeeping: twelve sweeps each
+// Headroom left unspent for the sweeps' own bookkeeping: fourteen sweeps each
 // running one or more fixed queries (page reads, poll scans, the
-// terminal-history purge, session pruning, the give-up reaper) regardless of
-// how much user data exists.
+// terminal-history purge, session pruning, the give-up reaper, the two
+// source-independent retry consumers added for F-04-H2) regardless of how
+// much user data exists.
 //
 // This is an absolute count, not a fraction, because the overhead it covers
 // is roughly constant while the allowance it comes out of differs by a factor
@@ -39,10 +56,10 @@ const PAID_D1_QUERIES = 1000;
 // over-reserves enormously on Paid; twenty per cent of the Free plan's fifty
 // was ten, which was not enough to cover the overhead it existed for -- so
 // the sweeps overspent into the platform ceiling anyway.
-// Measured: a tick against an empty database spends 17 queries across its
-// twelve sweeps. Twenty leaves a little room for that to drift without
+// Measured: a tick against an empty database spends 21 queries across its
+// fourteen sweeps. Twenty-two leaves a little room for that to drift without
 // silently eating into the allowance the sweeps below draw on.
-const RESERVED_QUERIES = 20;
+const RESERVED_QUERIES = 22;
 const RESERVED_SUBREQUESTS = 4;
 
 // What one delivery attempt actually costs, which is not one number: the

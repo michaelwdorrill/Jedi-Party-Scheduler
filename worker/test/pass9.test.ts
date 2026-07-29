@@ -109,8 +109,8 @@ describe('a whole cron tick stays inside the Free-plan D1 ceiling (F-04-G1)', ()
     // RESERVED_QUERIES in cron/budget.ts is what the tick sets aside for
     // fixed work; an empty tick must fit inside it or the reserve is a
     // fiction and scans are eating the deliveries' allowance.
-    expect(firstTick).toBeLessThanOrEqual(20);
-    expect(secondTick).toBeLessThanOrEqual(20);
+    expect(firstTick).toBeLessThanOrEqual(22);
+    expect(secondTick).toBeLessThanOrEqual(22);
     // One flush statement, not ten: the ten fresh cursors cost the first tick
     // barely more than the second, which has none to write.
     expect(firstTick - secondTick).toBeLessThanOrEqual(2);

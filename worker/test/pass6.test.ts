@@ -195,11 +195,11 @@ describe('a maximum-size option poll fits inside one Free-plan invocation', () =
 // input: the deduplicated invite list stays under the 300 cap while every
 // per-group query still runs.
 describe('overlapping maximum groups resolve without one query per group', () => {
-  it('stays within the Free-plan budget for 50 groups sharing 200 members', async () => {
+  it('stays within the Free-plan budget for MAX_GROUP_IDS groups sharing MAX_GROUP_MEMBERS members', async () => {
     const { db, env } = setup();
     await seedOrganizer(db);
 
-    const members = ids('member', 200);
+    const members = ids('member', LIMITS.MAX_GROUP_MEMBERS);
     for (const id of members) {
       await seedUser(db, id);
       await seedMembership(db, id, 'guild-1');

@@ -147,6 +147,9 @@ export interface VoiceChannel {
 // Full detail as returned by GET /events/:eventId
 export interface EventDetail extends EventOccurrence {
   guildId: string;
+  // Optimistic-concurrency token: send this back unchanged on PATCH so the
+  // server can tell a stale edit from a current one (F-08-B).
+  revision: number;
   pollStrategy: PollStrategy | null;
   pollThresholdCount: number | null;
   pollMode: PollMode | null;

@@ -187,20 +187,47 @@ export function assertRecurrenceInput(value: unknown, name = 'recurrence'): Recu
 
 // Product-level limits, gathered in one place so they're easy to review and
 // tune together rather than scattered as magic numbers across route files.
+//
+// PRIVATE_FREE_PROFILE: after nine remediation passes chasing the D1/
+// subrequest cost of theoretical maxima (300 invitees, 50 poll options),
+// the product decision (Pass 10 review, "code review convergence and
+// product-fit protocol") is that this app is a small private tool, not a
+// general-purpose scheduler, and the constants below should say so rather
+// than keep being optimized toward numbers nobody using it needs:
+//
+//   supported active population:  ~25 users in a guild
+//   invitees per event:            25
+//   free/busy targets per request: 25 (MAX_FREE_BUSY_USERS, below)
+//   poll options per poll:         20
+//   group IDs per request:         10
+//
+// A request outside these limits is rejected before any mutation, the same
+// way an over-budget free/busy request already was -- this is a scope
+// decision, not merely "make the old ceiling cheaper to serve." Every one of
+// these has an explicit whole-tick/whole-route test at the values below (see
+// worker/test/pass10.test.ts) proving the platform-budget invariant holds at
+// the values the product actually supports, in addition to the individual
+// limits enforced here.
 export const LIMITS = {
   TITLE: 200,
   GAME: 100,
   GROUP_NAME: 100,
   DESCRIPTION: 2000,
   CHANNEL_NAME: 100,
-  MAX_INVITEES: 100,
-  MAX_GROUP_IDS: 50,
-  MAX_GROUP_MEMBERS: 200,
-  MAX_POLL_OPTIONS: 50,
-  // Applied *after* group expansion, not just to the input arrays -- up to 50
-  // groups x 200 members each could otherwise resolve to a far larger invite
-  // set than the direct-array limits alone suggest.
-  MAX_RESOLVED_INVITEES: 300,
+  MAX_INVITEES: 25,
+  MAX_GROUP_IDS: 10,
+  // A guild's whole active population is expected to be about this size --
+  // see PRIVATE_FREE_PROFILE above -- so a "group" is a way to name a subset
+  // of everyone, not a second, larger population of its own.
+  MAX_GROUP_MEMBERS: 25,
+  MAX_POLL_OPTIONS: 20,
+  // Applied *after* group expansion, not just to the input arrays. Now close
+  // to MAX_INVITEES rather than an order of magnitude above it: with guild
+  // population and group size both capped at 25, direct and group-derived
+  // invitees can never dedupe to more than the guild itself holds, so a
+  // materially larger ceiling here would only ever be reached by a guild
+  // outside the supported profile.
+  MAX_RESOLVED_INVITEES: 25,
   MAX_WINDOW_SUBMISSIONS: 300,
   // Deliberately much smaller than it was. Free/busy is the one endpoint
   // whose cost is a *product* -- users x their events x occurrences in the
@@ -271,6 +298,16 @@ export const LIMITS = {
   // years, but nobody needs to individually override a thousand of its days.
   MAX_OVERRIDES_PER_EVENT: 500,
   MAX_EVENT_DURATION_MS: 366 * 24 * 60 * 60 * 1000, // a year -- generous ceiling for e.g. long travel blocks
+
+  // The other half of PRIVATE_FREE_PROFILE, above. Not enforced as a reject
+  // anywhere -- guild membership is synced from Discord at login
+  // (lib/db.ts's syncGuildMembership), and refusing someone's login because
+  // their server happens to be large is not a request the app should be
+  // making. This exists so "supported" has one number: whole-tick and
+  // whole-route maximum-state tests are written against a guild this size,
+  // not against an arbitrary larger one, and a guild that grows past it is
+  // an explicit, documented product limit rather than a silent cliff.
+  SUPPORTED_ACTIVE_USERS_PER_GUILD: 25,
 } as const;
 
 // Global request-body size cap. router.ts's Content-Length pre-check rejects

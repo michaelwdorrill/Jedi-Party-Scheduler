@@ -122,20 +122,29 @@ async function claim(
   table: OutboxTable,
   key: OutboxKey,
   token: string,
+  content: string,
 ): Promise<{ id: string; attempt: number } | null> {
   const columns = Object.keys(key);
   const values = Object.values(key);
   const now = Date.now();
 
+  // `content` is written on every claim, including a retry, so the row
+  // always carries whatever the most recent attempt actually sent (or was
+  // about to send). This is what lets the source-independent retry consumer
+  // below re-attempt a delivery without needing to re-derive it from
+  // whatever event/poll/group state prompted the original send -- state that
+  // may no longer offer the same answer, or any answer, by the time a retry
+  // is due.
   const { results } = await env.DB.prepare(
-    `INSERT INTO ${table} (id, ${columns.join(', ')}, sent_at, attempt_count, claim_token, claimed_until)
-     VALUES (?, ${columns.map(() => '?').join(', ')}, ?, 1, ?, ?)
+    `INSERT INTO ${table} (id, ${columns.join(', ')}, sent_at, attempt_count, claim_token, claimed_until, content)
+     VALUES (?, ${columns.map(() => '?').join(', ')}, ?, 1, ?, ?, ?)
      ON CONFLICT(${columns.join(', ')}) DO UPDATE SET
        claim_token = excluded.claim_token,
        claimed_until = excluded.claimed_until,
        sent_at = excluded.sent_at,
        attempt_count = ${table}.attempt_count + 1,
-       next_attempt_at = NULL
+       next_attempt_at = NULL,
+       content = excluded.content
      WHERE ${table}.delivered_at IS NULL
        AND ${table}.failed_at IS NULL
        AND ${table}.attempt_count < ?
@@ -143,7 +152,7 @@ async function claim(
        AND (${table}.next_attempt_at IS NULL OR ${table}.next_attempt_at <= ?)
      RETURNING id, attempt_count`,
   )
-    .bind(newId(), ...values, now, token, now + LEASE_MS, MAX_DELIVERY_ATTEMPTS, now, now)
+    .bind(newId(), ...values, now, token, now + LEASE_MS, content, MAX_DELIVERY_ATTEMPTS, now, now)
     .all<{ id: string; attempt_count: number }>();
 
   const row = results[0];
@@ -215,7 +224,7 @@ export async function deliverThroughOutbox(
   if (budget && !budget.reserveDelivery(cached)) return false;
 
   const token = newId();
-  const held = await claim(env, table, key, token);
+  const held = await claim(env, table, key, token, content);
   if (!held) {
     // Nothing to send: already delivered, still backing off, or another
     // invocation won the claim. Give back what was reserved, less the one

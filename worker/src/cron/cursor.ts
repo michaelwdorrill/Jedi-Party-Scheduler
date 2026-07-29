@@ -29,7 +29,12 @@ export type CursorName =
   | 'poll_deadline_reminders'
   | 'voice_fixed'
   | 'voice_multi_winner'
-  | 'idle_groups';
+  | 'idle_groups'
+  // Source-independent retry consumers (F-04-H2, migration 0014): due rows
+  // scanned by next_attempt_at directly, not reached through whatever
+  // event/poll/group source query originally created them.
+  | 'due_notification_retries'
+  | 'due_nudge_retries';
 
 // The single-event scan orders by (start_at, id), so its key is both.
 export interface EventKey {

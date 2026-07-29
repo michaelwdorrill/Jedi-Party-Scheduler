@@ -837,10 +837,15 @@ function voiceChannelLink(guildId: string, channelId: string): string {
 // arithmetic rather than a resource problem.
 //
 // A window at least as wide as the interval guarantees every future start is
-// caught by some tick; the extra margin over CRON_INTERVAL_MS absorbs late or
-// skipped invocations, which Cloudflare does not promise to avoid. The cost of
-// the wider window is only that a DM can arrive further ahead of the event;
-// the outbox's dedupe means it is still sent exactly once.
+// caught by some tick; the extra five-minute margin over CRON_INTERVAL_MS
+// covers ordinary jitter in when Cloudflare actually fires an on-schedule
+// invocation, not a whole skipped one. A tick that fires on time always has
+// a window reaching past the next tick's nominal start, so a single late
+// invocation is already covered by the on-time one before it; only a run of
+// *consecutive* missed invocations spanning more than the margin can still
+// open a gap, and nothing here claims otherwise. The cost of the wider
+// window is only that a DM can arrive further ahead of the event; the
+// outbox's dedupe means it is still sent exactly once.
 const CRON_INTERVAL_MS = 15 * 60 * 1000;
 const VOICE_INVITE_LEAD_MS = CRON_INTERVAL_MS + 5 * 60 * 1000;
 
@@ -1038,6 +1043,117 @@ async function sweepIdleGroups(env: Env, budget: TickBudget, cursors: CursorStor
   );
 }
 
+interface DueRetryRow extends DmRecipient {
+  id: string;
+  event_id: string;
+  notification_type: NotificationType;
+  occurrence_date: string;
+  content: string;
+}
+
+// Source-independent retry consumer for notification_log (F-04-H2).
+//
+// Every other sweep above finds its recipients by asking "what's due for
+// *this* event/poll right now" -- which only works while that event/poll
+// still matches the sweep's own window. A retryable Discord failure sets
+// next_attempt_at and clears the lease, but nothing re-selects the row once
+// its source event has started, its poll has resolved, or its deadline has
+// passed: the row sits there with a real due time and nothing ever reads it
+// again. That can strand a single notification for a single user -- it does
+// not need scale to happen.
+//
+// This scans notification_log directly by next_attempt_at instead of by
+// source state, so a due retry is found regardless of whether its event is
+// still "current" by any other sweep's definition. It reuses the content
+// captured on the row by an earlier attempt (see migration 0014) rather than
+// re-deriving the message -- re-deriving is exactly the operation that just
+// failed to have an answer, since the source may no longer describe the same
+// commitment it did when the DM was first attempted.
+//
+// Still guild-scoped for membership and notification preference, same as
+// every other recipient query: a retry must not outlive the reasons the
+// original send was allowed.
+async function sweepDueNotificationRetries(env: Env, budget: TickBudget, cursors: CursorStore): Promise<void> {
+  await forEachGlobalRow<DueRetryRow>(
+    env,
+    budget,
+    cursors,
+    'due_notification_retries',
+    `SELECT nl.id, nl.user_id AS id, nl.event_id, nl.notification_type, nl.occurrence_date, nl.content,
+            u.notifications_enabled, u.dm_channel_id, u.timezone
+     FROM notification_log nl
+     JOIN events e ON e.id = nl.event_id
+     JOIN users u ON u.id = nl.user_id
+     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = e.guild_id AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = e.guild_id AND g.is_active = 1
+     WHERE nl.delivered_at IS NULL AND nl.failed_at IS NULL
+       AND nl.next_attempt_at IS NOT NULL AND nl.next_attempt_at <= ?
+       AND (nl.claimed_until IS NULL OR nl.claimed_until < ?)
+       AND nl.content IS NOT NULL`,
+    [membershipCutoff(), Date.now(), Date.now()],
+    async (row) => {
+      if (budget.exhausted) return 'incomplete';
+      await deliverThroughOutbox(
+        env,
+        'notification_log',
+        { user_id: row.id, event_id: row.event_id, notification_type: row.notification_type, occurrence_date: row.occurrence_date },
+        row,
+        row.content,
+        budget,
+      );
+      if (budget.exhausted) return 'incomplete';
+    },
+    'nl.id',
+  );
+}
+
+interface DueNudgeRetryRow extends DmRecipient {
+  id: string;
+  group_id: string;
+  last_event_at: number;
+  content: string;
+  group_name: string;
+}
+
+// The group-nudge equivalent of sweepDueNotificationRetries, for the same
+// reason: sweepIdleGroups only re-selects a group while it is still idle by
+// this tick's definition, and a group's idle episode ends (a new event gets
+// scheduled) independently of whether a member's nudge DM has actually gone
+// out yet.
+async function sweepDueNudgeRetries(env: Env, budget: TickBudget, cursors: CursorStore): Promise<void> {
+  await forEachGlobalRow<DueNudgeRetryRow>(
+    env,
+    budget,
+    cursors,
+    'due_nudge_retries',
+    `SELECT gnl.id, gnl.user_id AS id, gnl.group_id, gnl.last_event_at, gnl.content,
+            u.notifications_enabled, u.dm_channel_id, u.timezone, g.name AS group_name
+     FROM group_nudge_log gnl
+     JOIN groups g ON g.id = gnl.group_id
+     JOIN users u ON u.id = gnl.user_id
+     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = g.guild_id AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds gu ON gu.id = g.guild_id AND gu.is_active = 1
+     WHERE gnl.delivered_at IS NULL AND gnl.failed_at IS NULL
+       AND gnl.next_attempt_at IS NOT NULL AND gnl.next_attempt_at <= ?
+       AND (gnl.claimed_until IS NULL OR gnl.claimed_until < ?)
+       AND gnl.content IS NOT NULL`,
+    [membershipCutoff(), Date.now(), Date.now()],
+    async (row) => {
+      if (budget.exhausted) return 'incomplete';
+      await deliverThroughOutbox(
+        env,
+        'group_nudge_log',
+        { group_id: row.group_id, user_id: row.id, last_event_at: row.last_event_at },
+        row,
+        row.content,
+        budget,
+      );
+      if (budget.exhausted) return 'incomplete';
+    },
+    'gnl.id',
+  );
+}
+
 // Permanently deletes terminal history once nobody could plausibly still
 // need it: cancelled events (any type) and resolved/cancelled polls,
 // TERMINAL_HISTORY_RETENTION_MS after their last update. This is what
@@ -1166,6 +1282,14 @@ export async function runReminderSweep(env: Env): Promise<void> {
   await runIsolated('idleGroups', () => sweepIdleGroups(env, budget, cursors));
   await runIsolated('pruneStaleSessions', () => pruneStaleSessions(env));
   await runIsolated('purgeTerminalHistory', () => sweepPurgeTerminalHistory(env, budget));
+  // Source-independent retry consumers (F-04-H2): a row whose source
+  // event/poll/group has already left every other sweep's scan window can
+  // still be due for retry, so these scan the outbox tables directly by
+  // next_attempt_at. Run before reaping so a row that just became due gets a
+  // chance at delivery in the same tick it's picked up in, rather than
+  // possibly being reaped on a tick it was never actually retried.
+  await runIsolated('dueNotificationRetries', () => sweepDueNotificationRetries(env, budget, cursors));
+  await runIsolated('dueNudgeRetries', () => sweepDueNudgeRetries(env, budget, cursors));
   // Last, so it settles anything that used up its final attempt during this
   // tick rather than leaving it for the next one.
   await runIsolated('reapExhaustedDeliveries', () => reapExhaustedDeliveries(env));

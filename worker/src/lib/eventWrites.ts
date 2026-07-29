@@ -57,6 +57,14 @@ export interface EventWriteInput {
   windowStartAt?: number;
   windowEndAt?: number;
   windowBlockMinutes?: number;
+
+  // The revision the client actually read before building this edit
+  // (F-08-B). Optional for backward compatibility with callers that don't
+  // have one to offer -- when omitted, updateEvent falls back to `stored`'s
+  // revision, which is the pre-fix behaviour: correct for a single caller
+  // building its own `stored` read, but not a substitute for a real client
+  // round trip. See updateEvent for how this is used.
+  revision?: number;
 }
 
 // multi_winner only makes sense for discrete day/slot options (each day
@@ -212,6 +220,10 @@ function validateEventWriteInput(input: Partial<EventWriteInput>, requireComplet
   if (input.pollDeadlineAt !== undefined) {
     const deadline = assertSafeInt(input.pollDeadlineAt, 'pollDeadlineAt');
     if (deadline <= 0) throw new ValidationError('pollDeadlineAt must be a positive timestamp');
+  }
+  if (input.revision !== undefined) {
+    const revision = assertSafeInt(input.revision, 'revision');
+    if (revision < 0) throw new ValidationError('revision must not be negative');
   }
 
   if (input.pollOptions) {
@@ -728,7 +740,18 @@ export async function updateEvent(
   // the previous state-based guard: `is_recurring = 1` is a condition any
   // concurrent request can satisfy on your behalf, so a stale loser's
   // siblings rode in on the winner's success.
-  const storedRevision = stored.revision ?? 0;
+  //
+  // F-08-B: this used to be unconditionally `stored.revision`, and `stored`
+  // was always read by the route immediately before calling updateEvent --
+  // so the guard compared a fresh read to itself and could never observe a
+  // client working from stale data. The route still has to load `stored`
+  // fresh (it's how PATCH authorizes the request and gets guild_id), but the
+  // number that actually has to match is the one the *client* saw when it
+  // fetched the event to build this edit, not the one the server just
+  // re-read a moment ago. When the caller supplies it, that's what's used;
+  // callers with no client round trip to report (an internal caller passing
+  // its own freshly-read `stored`) fall back to the old behaviour.
+  const storedRevision = input.revision !== undefined ? input.revision : (stored.revision ?? 0);
   // Drawn fresh for this request. `revision + 1` would not do: it is derived
   // from what the caller read, so two requests working from the same stale
   // read compute the same value, and the loser's siblings would match the row
@@ -913,9 +936,18 @@ export async function updateEvent(
            poll_mode = ?, poll_resolution_mode = ?, window_start_at = NULL, window_end_at = NULL,
            window_block_minutes = NULL
          WHERE id = ?`,
-        input.pollStrategy ?? null,
-        input.pollThresholdCount ?? null,
-        input.pollDeadlineAt ?? null,
+        // F-08-A: a PATCH carrying only `pollOptions` (e.g. re-ordering the
+        // candidate slots) still reaches this UPDATE, since replacing the
+        // options is what triggers it. `?? null` on the other three fields
+        // meant "the caller didn't send a strategy" was indistinguishable
+        // from "the caller wants to clear it" -- every options-only edit
+        // silently wiped poll_strategy, poll_threshold_count and
+        // poll_deadline_at back to null. Falling back to what's already
+        // stored preserves them unless the request actually included a
+        // replacement value.
+        input.pollStrategy !== undefined ? input.pollStrategy : stored.poll_strategy,
+        input.pollThresholdCount !== undefined ? input.pollThresholdCount : stored.poll_threshold_count,
+        input.pollDeadlineAt !== undefined ? input.pollDeadlineAt : stored.poll_deadline_at,
         pollMode,
         pollResolutionMode,
         eventId,
@@ -931,9 +963,12 @@ export async function updateEvent(
            poll_mode = 'window', poll_resolution_mode = 'single_winner',
            window_start_at = ?, window_end_at = ?, window_block_minutes = ?
          WHERE id = ?`,
-        input.pollStrategy ?? null,
-        input.pollThresholdCount ?? null,
-        input.pollDeadlineAt ?? null,
+        // Same preservation as the pollOptions branch above (F-08-A): a
+        // window-only edit must not clear the strategy/threshold/deadline
+        // fields it didn't mention.
+        input.pollStrategy !== undefined ? input.pollStrategy : stored.poll_strategy,
+        input.pollThresholdCount !== undefined ? input.pollThresholdCount : stored.poll_threshold_count,
+        input.pollDeadlineAt !== undefined ? input.pollDeadlineAt : stored.poll_deadline_at,
         input.windowStartAt,
         input.windowEndAt ?? null,
         input.windowBlockMinutes ?? null,
