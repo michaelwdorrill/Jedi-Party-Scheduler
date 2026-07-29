@@ -62,3 +62,23 @@ custom domain (F-03) is sorted.
    action (email link with a signed token, or a page under `/admin`) that
    feeds the same allow-list insert the manual `curl`/`wrangler d1 execute`
    step in SETUP.md does today.
+
+10. **Auto-delete accounts that have gone stale.** If someone hasn't logged in
+    for a year, warn them by DM at two weeks and one week out, then purge them
+    from the system if they still haven't logged back in. Point of it: a
+    synced integration (see idea 2, Google Calendar) shouldn't quietly keep
+    running forever for someone who's stopped using the site. Needs: a
+    last-login timestamp to sweep on (cron, same pattern as the existing
+    reminder sweeps), two new DM types, and reusing the account-deletion path
+    `SettingsPage.tsx`'s type-to-confirm delete already exercises — minus the
+    user initiating it. Worth deciding whether "logged in" should also count
+    as "used" for someone who stays signed in and never opens the site, and
+    whether organizing/being invited to a future event should suppress the
+    purge even if login is stale.
+
+11. **Owner-only view of everyone signed up.** A page (or endpoint) restricted
+    to the site owner — same `OWNER_DISCORD_ID` check `worker/src/routes/admin.ts`
+    already uses for the guild allow-list — listing every user across all
+    servers: who they are, which guilds they're in, last login. No one else
+    would be able to see it. Mostly needs a frontend page; the owner-only
+    check and the underlying `users` table already exist.
