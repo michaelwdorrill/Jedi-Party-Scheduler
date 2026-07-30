@@ -416,6 +416,54 @@ to be applied by hand with a one-off `wrangler d1 execute`. A fix or an
 addition after the fact always gets a **new** numbered migration file —
 never a change to one that's already shipped.
 
+**This turned out not to be a one-off.** A full audit (dump every table's
+actual `CREATE TABLE` from `sqlite_master` and diff it against what all the
+migration files together should produce — see the command below) found the
+same silent-drift pattern in two more places, even though `d1_migrations`
+listed every migration as applied: `cron_cursors` was missing
+`cursor_key` (0011) — the serious one, since `worker/src/cron/cursor.ts`
+reads/writes it on every single cron tick with nothing catching the error,
+so this alone was enough to break the entire 15-minute sweep and stop every
+Discord notification, not just one feature — and migration 0005 hadn't
+applied *at all*: `personal_events` still had `busy` instead of
+`availability` (the free/busy scheduling assistant's 500), `events` was
+missing `voice_channel_id`/`voice_channel_name`, and `notification_log`'s
+CHECK constraint didn't yet allow `voice_channel_invite`. All three were
+fixed by hand the same way as `game` above — `ALTER TABLE ... ADD COLUMN`
+run directly against `--remote`, with `notification_log` needing a
+rename-copy-drop instead of the migration's original `DROP TABLE` (fine on
+an empty dev database, not fine once production has real rows to keep).
+
+**After running migrations against a real database — `db:migrate:remote` or
+the auto-deploy — spot-check that they actually landed**, rather than
+trusting `d1_migrations`/`wrangler d1 migrations list` alone; that table
+only proves a filename was processed, not that its statements succeeded.
+One command dumps every table's real columns at once:
+
+```
+npx wrangler d1 execute jedi-party-scheduler-db --remote --command "SELECT 'groups' t, group_concat(name) c FROM pragma_table_info('groups') UNION ALL SELECT 'events', group_concat(name) FROM pragma_table_info('events') UNION ALL SELECT 'personal_events', group_concat(name) FROM pragma_table_info('personal_events') UNION ALL SELECT 'notification_log', group_concat(name) FROM pragma_table_info('notification_log') UNION ALL SELECT 'cron_cursors', group_concat(name) FROM pragma_table_info('cron_cursors') UNION ALL SELECT 'users', group_concat(name) FROM pragma_table_info('users');"
+```
+
+Compare each row against what its table should have once every migration
+through the newest one has applied (check `worker/migrations/*.sql` for the
+current full list — new `ALTER TABLE ... ADD COLUMN`s added after this was
+written won't show up here automatically):
+
+| Table | Expected columns |
+|---|---|
+| `groups` | `id, guild_id, name, created_by, created_at, game, idle_reminder_days` |
+| `events` | `id, guild_id, organizer_id, title, description, game, event_type, timezone, start_at, end_at, status, poll_strategy, poll_threshold_count, poll_deadline_at, resolved_option_id, is_recurring, created_at, updated_at, poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes, voice_channel_id, voice_channel_name, poll_resolution_failures, revision, mutation_token` |
+| `personal_events` | ...`availability`... and **no** `busy` column |
+| `notification_log` | ...`delivered_at, failed_at, claim_token, claimed_until, attempt_count, next_attempt_at, content`, and its `notification_type` CHECK must include `voice_channel_invite` (query `sqlite_master.sql` for that one, `pragma_table_info` won't show a CHECK) |
+| `cron_cursors` | `name, position, updated_at, cursor_key` |
+| `users` | ...`free_busy_visible`, and **no** `discord_refresh_token`/`discord_token_expires_at` |
+
+A missing column here means exactly what it meant above: apply that one
+`ALTER TABLE` by hand against `--remote`, then keep going — don't assume
+finding one drifted table means the rest are clean, and don't assume
+`db:migrate:remote` reporting success (or `d1_migrations` looking complete)
+means the schema actually matches the code.
+
 Migrations run *before* the deploy, which means that for a few seconds the
 previously deployed Worker is running against the new schema. Keep
 migrations backwards-compatible with the currently live code — adding
