@@ -402,6 +402,20 @@ Without those secrets the migrate step fails and nothing is deployed;
 until they're added, run `npm run db:migrate:remote` and `npm run deploy`
 by hand.
 
+**Never edit a migration file in `worker/migrations/` once it has been
+applied to any real database.** D1's migration tool tracks what it has run
+by *filename* in the `d1_migrations` table, not by file contents — so
+editing `0002_group_game.sql` after it already ran means that database will
+never re-run it, and the edited statements silently never execute there.
+This actually happened: `0002_group_game.sql`'s `ALTER TABLE groups ADD
+COLUMN game TEXT;` was added to the file after production had already
+recorded that migration as applied, so the `groups` table was missing the
+`game` column in production for a stretch (`groups.game` errors were the
+symptom) while `d1_migrations` insisted everything was up to date. It had
+to be applied by hand with a one-off `wrangler d1 execute`. A fix or an
+addition after the fact always gets a **new** numbered migration file —
+never a change to one that's already shipped.
+
 Migrations run *before* the deploy, which means that for a few seconds the
 previously deployed Worker is running against the new schema. Keep
 migrations backwards-compatible with the currently live code — adding

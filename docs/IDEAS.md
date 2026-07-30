@@ -82,3 +82,15 @@ custom domain (F-03) is sorted.
     servers: who they are, which guilds they're in, last login. No one else
     would be able to see it. Mostly needs a frontend page; the owner-only
     check and the underlying `users` table already exist.
+
+12. **Stop an end date/time before the start from being enterable at all in
+    the New Event form.** `worker/src/lib/validate.ts` already rejects
+    `endAt <= startAt` server-side, but `EventFormPage.tsx` has no client-side
+    guard, so the only feedback right now is a rejected submit. Found while
+    testing after the schema-drift fix (see SETUP.md) — the form let you set
+    an end date/time before the start with no warning until you tried to
+    save. Worth deciding the exact UX: disable the Save button and show an
+    inline message, or auto-push the end forward as you change the start.
+    Applies to the single-event start/end fields; the poll slot rows and the
+    time-window mode have their own start/end pairs and would need the same
+    treatment.
