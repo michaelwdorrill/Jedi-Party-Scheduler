@@ -78,6 +78,10 @@ eventRoutes.get('/:eventId', async (c) => {
       rsvp_status: string;
     }>();
 
+  const organizer = await c.env.DB.prepare(`SELECT username, global_name FROM users WHERE id = ?`)
+    .bind(event.organizer_id)
+    .first<{ username: string; global_name: string | null }>();
+
   let pollOptions = null;
   if (event.event_type === 'poll' && event.poll_mode === 'options') {
     const { results: options } = await c.env.DB.prepare(
@@ -182,6 +186,8 @@ eventRoutes.get('/:eventId', async (c) => {
     endAt: event.end_at,
     isRecurring: !!event.is_recurring,
     organizerId: event.organizer_id,
+    organizerUsername: organizer?.username ?? null,
+    organizerGlobalName: organizer?.global_name ?? null,
     // The optimistic-concurrency token the client must send back on PATCH
     // (F-08-B). Without it, PATCH had no way to tell "the row I'm about to
     // edit is still the one I loaded" from "someone else changed it after I
