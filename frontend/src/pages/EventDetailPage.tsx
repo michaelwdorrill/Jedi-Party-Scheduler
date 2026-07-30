@@ -88,6 +88,9 @@ export default function EventDetailPage() {
         <div>
           <h1 className="text-2xl font-semibold">{event.title}</h1>
           {event.game && <p className="text-slate-400">{event.game}</p>}
+          <p className="text-sm text-slate-500">
+            Organized by {isOrganizer ? 'you' : event.organizerGlobalName ?? event.organizerUsername ?? 'someone no longer in this server'}
+          </p>
         </div>
         {isOrganizer && event.status !== 'cancelled' && (
           <div className="flex gap-2">

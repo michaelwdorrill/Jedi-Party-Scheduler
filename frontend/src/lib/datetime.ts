@@ -30,8 +30,19 @@ export function buildMonthGrid(monthStart: DateTime): DateTime[] {
   return days;
 }
 
+// Always leads with the date -- a time-only range ("7:30 PM - 1:00 AM") reads
+// fine for something happening today, but gives no way to tell one candidate
+// poll option from another, or today's session from one three weeks out.
 export function formatTimeRange(startMs: number, endMs: number, zone: string): string {
   const start = DateTime.fromMillis(startMs).setZone(zone);
   const end = DateTime.fromMillis(endMs).setZone(zone);
-  return `${start.toFormat('h:mm a')} – ${end.toFormat('h:mm a ZZZZ')}`;
+  const startDate = start.toFormat('ccc, LLL d');
+  const startTime = start.toFormat('h:mm a');
+  const endTime = end.toFormat('h:mm a ZZZZ');
+  if (start.hasSame(end, 'day')) {
+    return `${startDate} · ${startTime} – ${endTime}`;
+  }
+  // Spans midnight (or further): the end date matters too, or "1:00 AM" reads
+  // as the same day it started.
+  return `${startDate} ${startTime} – ${end.toFormat('ccc, LLL d')} ${endTime}`;
 }
