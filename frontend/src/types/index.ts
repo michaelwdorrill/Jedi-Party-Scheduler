@@ -6,6 +6,7 @@ export interface User {
   timezone: string;
   notificationsEnabled: boolean;
   freeBusyVisible: boolean;
+  isOwner: boolean;
 }
 
 export interface Guild {

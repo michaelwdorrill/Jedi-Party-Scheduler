@@ -1,6 +1,6 @@
 # 0001 — Quick wins
 
-**Status:** Ready
+**Status:** Built
 **Covers:** `IDEAS.md` items 4, 12, 7, 11 · **Phase:** 0
 
 Four independent changes, grouped only by being small and having no design

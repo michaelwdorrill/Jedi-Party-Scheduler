@@ -53,7 +53,12 @@ export interface GuildRow {
   name: string;
 }
 
-export function mapUser(row: UserRow) {
+// `isOwnerFlag` is computed by the caller (it needs `env`, which this
+// function deliberately doesn't take) and merely carried through here so
+// every response shaped by mapUser stays consistent. It only ever reflects
+// the caller's own account back to them -- OWNER_DISCORD_ID itself is never
+// exposed, just whether the requesting user matches it.
+export function mapUser(row: UserRow, isOwnerFlag: boolean) {
   return {
     id: row.id,
     username: row.username,
@@ -62,6 +67,7 @@ export function mapUser(row: UserRow) {
     timezone: row.timezone,
     notificationsEnabled: !!row.notifications_enabled,
     freeBusyVisible: row.free_busy_visible === undefined ? true : !!row.free_busy_visible,
+    isOwner: isOwnerFlag,
   };
 }
 

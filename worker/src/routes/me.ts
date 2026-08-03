@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
-import { deleteUserCompletely, isGuildMember, listFriends, mapUser, type UserRow } from '../lib/db';
+import { deleteUserCompletely, isGuildMember, isOwner, listFriends, mapUser, type UserRow } from '../lib/db';
 import { assertBoolean, assertTimezone, readJsonBody } from '../lib/validate';
 
 export const meRoutes = new Hono<AppEnv>();
@@ -13,7 +13,7 @@ meRoutes.get('/', async (c) => {
     .bind(userId)
     .first<UserRow>();
   if (!row) return c.text('User not found', 404);
-  return c.json(mapUser(row));
+  return c.json(mapUser(row, isOwner(c.env, userId)));
 });
 
 meRoutes.patch('/', async (c) => {
@@ -47,7 +47,7 @@ meRoutes.patch('/', async (c) => {
   const row = await c.env.DB.prepare(`SELECT ${PROFILE_COLUMNS} FROM users WHERE id = ?`)
     .bind(userId)
     .first<UserRow>();
-  return c.json(mapUser(row!));
+  return c.json(mapUser(row!, isOwner(c.env, userId)));
 });
 
 // Right to erasure. Irreversible and immediate -- no soft-delete, no grace

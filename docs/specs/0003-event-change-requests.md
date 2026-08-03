@@ -28,6 +28,40 @@ acceptance inherits, for free, the optimistic-concurrency guard from migration
 notification path — rather than reimplementing any of them against a
 request-shaped input.
 
+## `time_change` is a vote, not a unilateral organizer call (revised)
+
+Originally scoped as organizer accept/decline. Revised: a proposed time change
+affects everyone who's already committed to the event, not just the organizer,
+so it resolves the same way the app already resolves "does this time work for
+the group" — a poll, reusing `event_poll_votes`' shape (`yes`/`no`/`maybe`)
+and the existing threshold/most-votes resolution model from
+`lib/polls.ts` — rather than a single accept/decline decision. This also
+answers open question 2 below (other invitees now *are* the mechanism, not
+just notified after the fact).
+
+Filing a `time_change` request creates one poll option (the proposed time)
+and a vote from every current invitee, seeded `pending`/no-vote. The
+requester's own vote is implicitly `yes` (they proposed it). The organizer
+keeps two things a regular voter doesn't: the ability to close the vote early
+(accept or decline outright, same as today's spec), and the same
+revision-guarded write on acceptance described below — a favorable vote tally
+is what makes accepting reasonable, not what performs the write. `add_invitee`
+requests are unaffected by this change and stay organizer accept/decline,
+since there's no group consensus question there — only the organizer's invite
+quota and the target's willingness (implicit in being invited at all) are in
+play.
+
+This makes `event_change_requests` need a companion votes table
+(`event_change_request_votes`, shaped like `event_poll_votes`:
+`request_id, user_id, vote, voted_at`) and a resolution strategy/deadline
+pair on the request row, mirroring `events.poll_strategy` /
+`poll_threshold_count` / `poll_deadline_at`. The cron gains a sweep for
+past-deadline pending time-change requests, resolved the same way
+`lib/polls.ts` resolves an ordinary poll past its deadline. This is a bigger
+piece of work than the original accept/decline shape and the schema above
+will need a corresponding revision before Phase 2 starts — noted here so the
+decision isn't lost, not fully re-specced yet.
+
 ## User-visible behaviour
 
 **As an invitee**, on an event I'm invited to:
@@ -264,11 +298,10 @@ Worker-side, in the style of the existing `passN.test.ts` files:
    decline flow is where the information currently gets lost, so catching it
    there would be the highest-value placement — but it also makes declining a
    two-step interaction. Probably: offer it, don't require it.
-2. **Does an accepted `time_change` notify the other invitees?** The event's
-   time changed under them, which is arguably worth a DM regardless of how it
-   changed. That's really a missing "event was edited" notification the app
-   doesn't have at all today, and is bigger than this spec — worth capturing
-   in `IDEAS.md` separately rather than smuggling in here.
+2. ~~Does an accepted `time_change` notify the other invitees?~~ **Resolved**:
+   they're not just notified, they vote — see the revision above. They get a
+   DM when the vote opens (same as a poll invite) rather than only after the
+   fact.
 3. **Should the requester be able to file against a poll event?** A poll has
    no single time to move. `add_invitee` makes sense on a poll; `time_change`
    doesn't. Assumed: `time_change` is rejected on `event_type = 'poll'`, and
