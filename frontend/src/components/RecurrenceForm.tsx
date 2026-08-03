@@ -1,6 +1,18 @@
 import type { RecurrenceEndType, RecurrenceFreq } from '../types';
 
-const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+// Displayed Sunday-first to match the calendar grid, but the stored value
+// (event_recurrence_rules.by_weekday) is 0=Mon..6=Sun and must not move --
+// existing recurring events already encode that, so each chip carries its
+// value explicitly rather than being derived from its position in this list.
+const WEEKDAYS = [
+  { label: 'Sun', value: 6 },
+  { label: 'Mon', value: 0 },
+  { label: 'Tue', value: 1 },
+  { label: 'Wed', value: 2 },
+  { label: 'Thu', value: 3 },
+  { label: 'Fri', value: 4 },
+  { label: 'Sat', value: 5 },
+];
 
 export interface RecurrenceFormValue {
   freq: RecurrenceFreq;
@@ -56,13 +68,13 @@ export default function RecurrenceForm({
 
       {value.freq === 'WEEKLY' && (
         <div className="flex gap-1">
-          {WEEKDAYS.map((label, i) => (
+          {WEEKDAYS.map(({ label, value: day }) => (
             <button
               type="button"
               key={label}
-              onClick={() => toggleWeekday(i)}
+              onClick={() => toggleWeekday(day)}
               className={`h-8 w-8 rounded-full text-xs ${
-                value.byWeekday.includes(i)
+                value.byWeekday.includes(day)
                   ? 'bg-indigo-600 text-white'
                   : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
               }`}

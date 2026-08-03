@@ -139,6 +139,15 @@ export default function SettingsPage() {
         </button>
       </div>
 
+      {user?.isOwner && (
+        <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
+          <h2 className="font-semibold">Owner</h2>
+          <Link to="/admin/users" className="text-sm text-indigo-400 underline">
+            View all users
+          </Link>
+        </div>
+      )}
+
       <div className="space-y-3 rounded-lg border border-red-900 bg-red-950/20 p-4">
         <h2 className="font-semibold text-red-300">Delete account</h2>
         <p className="text-sm text-slate-400">

@@ -3,10 +3,12 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { DateTime } from 'luxon';
 import { api, ApiError } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
+import { useGuild } from '../auth/GuildContext';
 import InviteePicker from '../components/InviteePicker';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
 import SchedulingAssistant from '../components/SchedulingAssistant';
+import { isValidRange } from '../lib/datetime';
 import type { EventDetail, Friend, Group, PollMode, PollStrategy, VoiceChannel } from '../types';
 
 interface PollSlotDraft {
@@ -22,9 +24,20 @@ export default function EventFormPage() {
   const { eventId } = useParams();
   const [searchParams] = useSearchParams();
   const isEdit = !!eventId;
+  const { guilds, selectedGuildId: contextGuildId } = useGuild();
 
-  const guildId = searchParams.get('guild') ?? '';
   const prefillDate = searchParams.get('date') ?? DateTime.now().toISODate()!;
+
+  // Which server this event belongs to. Defaults to the ?guild= a calendar
+  // day-click or "New Event" button already carries, falling back to the
+  // top-bar guild switcher's current choice if that's ever missing -- but the
+  // picker below is what actually decides it from here on, not either of
+  // those two initial sources. On edit this is never read; loadedGuildId (the
+  // event's own guild, set once the event loads) is what's used instead, and
+  // the picker renders read-only.
+  const [formGuildId, setFormGuildId] = useState(
+    () => searchParams.get('guild') || contextGuildId || '',
+  );
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -75,12 +88,11 @@ export default function EventFormPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Voice channel to nudge confirmed attendees toward near start time. Only
-  // fetchable once we know which guild the event belongs to -- for edits
-  // that's the loaded event's guild, since the edit route carries no
-  // `?guild=` param.
+  // The guild whatever's currently loaded/selected actually belongs to: the
+  // form picker's choice on create, the loaded event's own guild on edit
+  // (read-only there, so there's nothing to reconcile with a picker).
   const [loadedGuildId, setLoadedGuildId] = useState('');
-  const effectiveGuildId = guildId || loadedGuildId;
+  const effectiveGuildId = isEdit ? loadedGuildId : formGuildId;
   const [voiceChannels, setVoiceChannels] = useState<VoiceChannel[]>([]);
   const [voiceChannelId, setVoiceChannelId] = useState('');
 
@@ -91,15 +103,18 @@ export default function EventFormPage() {
   const [loadedRevision, setLoadedRevision] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!guildId) return;
+    // Keyed on effectiveGuildId, not the raw ?guild= param, so this also runs
+    // on edit -- it previously didn't (the edit route carries no ?guild=),
+    // which meant InviteePicker had nothing to show when editing an event.
+    if (!effectiveGuildId) return;
     Promise.all([
-      api.get<Friend[]>(`/me/friends?guild_id=${guildId}`),
-      api.get<Group[]>(`/guilds/${guildId}/groups`),
+      api.get<Friend[]>(`/me/friends?guild_id=${effectiveGuildId}`),
+      api.get<Group[]>(`/guilds/${effectiveGuildId}/groups`),
     ]).then(([f, g]) => {
       setFriends(f);
       setGroups(g);
     });
-  }, [guildId]);
+  }, [effectiveGuildId]);
 
   useEffect(() => {
     if (!effectiveGuildId) return;
@@ -215,6 +230,17 @@ export default function EventFormPage() {
     ]),
   );
 
+  // Friends, groups and voice channels are all scoped to a guild, so
+  // switching servers mid-form invalidates whatever was already picked from
+  // the old one -- carrying those ids across would submit references the
+  // server will reject as not belonging to the new guild.
+  const handleGuildChange = (next: string) => {
+    setFormGuildId(next);
+    setSelectedUserIds([]);
+    setSelectedGroupIds([]);
+    setVoiceChannelId('');
+  };
+
   // Moving the start forward drags an earlier end along with it, so the form
   // can't sit in a state that would submit a negative-length event.
   const handleStartDateChange = (next: string) => {
@@ -222,10 +248,35 @@ export default function EventFormPage() {
     if (endDate < next) setEndDate(next);
   };
 
+  // Catches what handleStartDateChange doesn't: two same-day fields where the
+  // end *time* (not date) is before the start time, which the date-level
+  // nudge above has no way to see. Server-side, worker/src/lib/validate.ts
+  // rejects this unconditionally -- this is the client-side warning that was
+  // missing (idea 12), not a replacement for that check.
+  const singleRangeValid =
+    eventType !== 'single' || isValidRange(date, startTime, endDate, endTime, timezone);
+  const pollSlotsValid =
+    eventType !== 'poll' ||
+    pollMode !== 'options' ||
+    pollSlots.every((s) => isValidRange(s.date, s.startTime, s.date, s.endTime, timezone));
+  const windowRangeValid =
+    eventType !== 'poll' ||
+    pollMode !== 'window' ||
+    isValidRange(windowDate, windowStartTime, windowDate, windowEndTime, timezone);
+  const rangeValid = singleRangeValid && pollSlotsValid && windowRangeValid;
+
   const handleSubmit = async () => {
     setError(null);
     if (!title.trim()) {
       setError('Title is required.');
+      return;
+    }
+    if (!isEdit && !formGuildId) {
+      setError('Choose a server.');
+      return;
+    }
+    if (!rangeValid) {
+      setError('End must be after the start.');
       return;
     }
     setSaving(true);
@@ -296,7 +347,7 @@ export default function EventFormPage() {
         }
         navigate(`/events/${eventId}`);
       } else {
-        const created = await api.post<{ id: string }>(`/guilds/${guildId}/events`, body);
+        const created = await api.post<{ id: string }>(`/guilds/${formGuildId}/events`, body);
         navigate(`/events/${created.id}`);
       }
     } catch (e) {
@@ -309,6 +360,30 @@ export default function EventFormPage() {
   return (
     <div className="mx-auto max-w-2xl space-y-5">
       <h1 className="text-2xl font-semibold">{isEdit ? 'Edit Event' : 'New Event'}</h1>
+
+      <div>
+        <label className="mb-1 block text-sm text-slate-400">Server</label>
+        {isEdit ? (
+          <div className="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-400">
+            {guilds.find((g) => g.id === loadedGuildId)?.name ?? '—'}
+          </div>
+        ) : (
+          <select
+            value={formGuildId}
+            onChange={(e) => handleGuildChange(e.target.value)}
+            className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+          >
+            <option value="" disabled>
+              Choose a server…
+            </option>
+            {guilds.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
 
       {!isEdit && (
         <div className="flex gap-1 rounded-md bg-slate-900 p-1 w-fit">
@@ -394,10 +469,14 @@ export default function EventFormPage() {
               />
             </div>
           </div>
-          {endDate !== date && (
-            <p className="text-xs text-slate-500">
-              Runs overnight / across {DateTime.fromISO(endDate).diff(DateTime.fromISO(date), 'days').days + 1} days.
-            </p>
+          {!singleRangeValid ? (
+            <p className="text-xs text-red-400">End must be after the start.</p>
+          ) : (
+            endDate !== date && (
+              <p className="text-xs text-slate-500">
+                Runs overnight / across {DateTime.fromISO(endDate).diff(DateTime.fromISO(date), 'days').days + 1} days.
+              </p>
+            )
           )}
 
           <label className="flex items-center gap-2 text-sm text-slate-300">
@@ -427,49 +506,55 @@ export default function EventFormPage() {
 
           {pollMode === 'options' ? (
             <div className="space-y-2">
-              {pollSlots.map((slot) => (
-                <div key={slot.key} className="flex items-center gap-2">
-                  <input
-                    type="date"
-                    value={slot.date}
-                    onChange={(e) =>
-                      setPollSlots((prev) =>
-                        prev.map((s) => (s.key === slot.key ? { ...s, date: e.target.value } : s)),
-                      )
-                    }
-                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
-                  />
-                  <input
-                    type="time"
-                    value={slot.startTime}
-                    onChange={(e) =>
-                      setPollSlots((prev) =>
-                        prev.map((s) => (s.key === slot.key ? { ...s, startTime: e.target.value } : s)),
-                      )
-                    }
-                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
-                  />
-                  <span className="text-slate-500">to</span>
-                  <input
-                    type="time"
-                    value={slot.endTime}
-                    onChange={(e) =>
-                      setPollSlots((prev) =>
-                        prev.map((s) => (s.key === slot.key ? { ...s, endTime: e.target.value } : s)),
-                      )
-                    }
-                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
-                  />
-                  {pollSlots.length > 1 && (
-                    <button
-                      onClick={() => removePollSlot(slot.key)}
-                      className="text-xs text-red-400 hover:underline"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-              ))}
+              {pollSlots.map((slot) => {
+                const slotValid = isValidRange(slot.date, slot.startTime, slot.date, slot.endTime, timezone);
+                return (
+                  <div key={slot.key}>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="date"
+                        value={slot.date}
+                        onChange={(e) =>
+                          setPollSlots((prev) =>
+                            prev.map((s) => (s.key === slot.key ? { ...s, date: e.target.value } : s)),
+                          )
+                        }
+                        className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                      />
+                      <input
+                        type="time"
+                        value={slot.startTime}
+                        onChange={(e) =>
+                          setPollSlots((prev) =>
+                            prev.map((s) => (s.key === slot.key ? { ...s, startTime: e.target.value } : s)),
+                          )
+                        }
+                        className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                      />
+                      <span className="text-slate-500">to</span>
+                      <input
+                        type="time"
+                        value={slot.endTime}
+                        onChange={(e) =>
+                          setPollSlots((prev) =>
+                            prev.map((s) => (s.key === slot.key ? { ...s, endTime: e.target.value } : s)),
+                          )
+                        }
+                        className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                      />
+                      {pollSlots.length > 1 && (
+                        <button
+                          onClick={() => removePollSlot(slot.key)}
+                          className="text-xs text-red-400 hover:underline"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                    {!slotValid && <p className="mt-1 text-xs text-red-400">End must be after the start.</p>}
+                  </div>
+                );
+              })}
               <button onClick={addPollSlot} className="text-sm text-indigo-400 hover:underline">
                 + Add another time slot
               </button>
@@ -520,6 +605,9 @@ export default function EventFormPage() {
                   />
                 </div>
               </div>
+              {!windowRangeValid && (
+                <p className="text-xs text-red-400">Window end must be after the window start.</p>
+              )}
             </div>
           )}
 
@@ -623,14 +711,14 @@ export default function EventFormPage() {
         />
       </div>
 
-      {guildId && (
+      {effectiveGuildId && (
         <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
           <h2 className="mb-1 font-semibold">Availability</h2>
           <p className="mb-3 text-xs text-slate-500">
             Times only — you can see when someone is busy, never what they're doing.
           </p>
           <SchedulingAssistant
-            guildId={guildId}
+            guildId={effectiveGuildId}
             userIds={inviteeIds}
             date={eventType === 'single' ? date : pollMode === 'window' ? windowDate : (pollSlots[0]?.date ?? date)}
             zone={timezone}
@@ -666,7 +754,7 @@ export default function EventFormPage() {
           Cancel
         </button>
         <button
-          disabled={saving}
+          disabled={saving || !rangeValid}
           onClick={handleSubmit}
           className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
         >

@@ -3,7 +3,7 @@ import { buildMonthGrid } from '../lib/datetime';
 import type { EventOccurrence } from '../types';
 import EventChip from './EventChip';
 
-const WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 export default function MonthCalendarGrid({
   monthStart,

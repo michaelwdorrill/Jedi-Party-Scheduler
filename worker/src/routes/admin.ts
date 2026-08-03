@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
+import { placeholders } from '../lib/d1';
 import { isOwner } from '../lib/db';
 import { assertString, readJsonBody } from '../lib/validate';
 
@@ -8,6 +9,72 @@ export const adminRoutes = new Hono<AppEnv>();
 adminRoutes.use('*', async (c, next) => {
   if (!isOwner(c.env, c.get('userId'))) return c.text('Forbidden', 403);
   await next();
+});
+
+// Owner-only: everyone signed up, which guilds they're in, and when they last
+// logged in (idea 11). Deliberately not an event-data endpoint -- users and
+// guild membership only, matching ARCHITECTURE.md's privacy model, which
+// states there is no admin endpoint that reads other people's event data.
+//
+// Keyset-paged on users.id rather than an unbounded SELECT *, the same shape
+// cron/cursor.ts uses for its scans -- correct today's handful of rows, and
+// still correct once that's no longer true. The page size is capped well
+// under D1_MAX_BIND_PARAMS so the membership IN-list below never needs
+// chunking.
+const MAX_USERS_PAGE = 50;
+
+adminRoutes.get('/users', async (c) => {
+  const requestedLimit = Number(c.req.query('limit') ?? MAX_USERS_PAGE);
+  const limit = Math.min(MAX_USERS_PAGE, Math.max(1, Number.isFinite(requestedLimit) ? requestedLimit : MAX_USERS_PAGE));
+  const after = c.req.query('after') ?? '';
+
+  const { results: users } = await c.env.DB.prepare(
+    `SELECT id, username, global_name, notifications_enabled, last_login_at
+     FROM users WHERE id > ? ORDER BY id LIMIT ?`,
+  )
+    .bind(after, limit)
+    .all<{
+      id: string;
+      username: string;
+      global_name: string | null;
+      notifications_enabled: number;
+      last_login_at: number | null;
+    }>();
+
+  if (users.length === 0) return c.json({ users: [], nextCursor: null });
+
+  // One follow-up query for the whole page's membership, not one per user --
+  // the same reason the cron's notification sources fold their "already
+  // handled?" check into the source query rather than issuing a per-row
+  // follow-up (see lib/outbox.ts's PENDING_NOTIFICATION_JOIN comment).
+  const ids = users.map((u) => u.id);
+  const { results: memberships } = await c.env.DB.prepare(
+    `SELECT ugm.user_id AS user_id, g.id AS guild_id, g.name AS guild_name
+     FROM user_guild_membership ugm
+     JOIN guilds g ON g.id = ugm.guild_id
+     WHERE ugm.is_member = 1 AND ugm.user_id IN (${placeholders(ids.length)})`,
+  )
+    .bind(...ids)
+    .all<{ user_id: string; guild_id: string; guild_name: string }>();
+
+  const guildsByUser = new Map<string, { id: string; name: string }[]>();
+  for (const m of memberships) {
+    const list = guildsByUser.get(m.user_id) ?? [];
+    list.push({ id: m.guild_id, name: m.guild_name });
+    guildsByUser.set(m.user_id, list);
+  }
+
+  return c.json({
+    users: users.map((u) => ({
+      id: u.id,
+      username: u.username,
+      globalName: u.global_name,
+      notificationsEnabled: !!u.notifications_enabled,
+      lastLoginAt: u.last_login_at,
+      guilds: guildsByUser.get(u.id) ?? [],
+    })),
+    nextCursor: users.length === limit ? users[users.length - 1].id : null,
+  });
 });
 
 adminRoutes.get('/guilds', async (c) => {
