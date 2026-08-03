@@ -1,9 +1,15 @@
-# Future ideas (backlog, not scheduled)
+# Future ideas (the capture surface)
 
-Logged during the Pass-3/4 security review cycle so they aren't lost, not
-because any of them are being worked on yet. Deliberately not designed or
-scoped here — just captured. Revisit once the app is release-ready and the
-custom domain (F-03) is sorted.
+Things written down the moment they're thought of, so they aren't lost —
+mostly during the Pass-3/4 security review cycle and after. Deliberately not
+designed or scoped here, just captured, and the numbering is chronological
+rather than any kind of priority.
+
+**Ordering now lives in `ROADMAP.md`, and design in `specs/`.** An idea is
+captured here, scheduled there, specced there, and only then built — a
+paragraph in this file is not a design, and nothing should be built straight
+out of it. Adding a new idea here does not require touching the roadmap; the
+roadmap gets revisited between phases.
 
 1. **A sandbox/staging environment separate from production.** A second
    Cloudflare Worker + D1 database (and possibly a second Discord
@@ -94,3 +100,38 @@ custom domain (F-03) is sorted.
     Applies to the single-event start/end fields; the poll slot rows and the
     time-window mode have their own start/end pairs and would need the same
     treatment.
+
+13. **Let invitees ask the organizer for a change.** Two requests, same shape:
+    "can we move this?" (with a proposed new time) and "can we also invite
+    this person?" (naming someone). Today the only way an invitee can push
+    back on a time is to decline, which loses the information — the organizer
+    sees a "no" and not "no, but Thursday works" — and there is no in-app path
+    at all to suggest another guest; that conversation currently happens in
+    Discord and never reaches the event. Deliberately a *request*, not an
+    edit: the organizer stays the only person who can change the event, and
+    accepting a request is what applies it. Needs a new table for the pending
+    requests, two new notification types on the existing outbox (organizer
+    gets "someone asked for X", requester gets the accept/decline back), and
+    a decision about what happens to an open request when the organizer edits
+    the event out from under it — `events.revision` (migration 0013) already
+    gives us a token to detect exactly that. Also worth deciding whether the
+    "invite this person" flavour can name someone the requester can see but
+    the organizer can't, and whether a request count needs bounding the way
+    every other per-event surface is.
+
+14. **Promotion from sandbox to prod should be one boring step.** The
+    companion to idea 1: standing up a second Worker + D1 is only half of it,
+    and the half that doesn't decide whether the sandbox actually gets used.
+    If shipping a change that has been verified in the sandbox means hand-run
+    `wrangler` commands, hand-copied secrets, or remembering which of the two
+    databases a migration has been applied to, the sandbox becomes the thing
+    you skip when you're in a hurry — which is precisely when you shouldn't.
+    The target is: merge to `main` and prod gets what the sandbox already
+    proved, with no step that depends on remembering anything. Notably this
+    is not a from-scratch build — `.github/workflows/deploy-worker.yml` and
+    `deploy-pages.yml` already typecheck, test, migrate and deploy on push to
+    `main`; what's missing is a second environment for them to target first,
+    and a promotion path between the two that can't silently diverge. The
+    schema-drift incidents in SETUP.md are the argument for care here: the
+    failure mode isn't "the deploy errors", it's "the deploy reports success
+    against a database that doesn't match the code".

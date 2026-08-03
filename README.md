@@ -26,6 +26,9 @@ create/RSVP to gaming sessions with your friends.
 - `docs/SETUP.md` — manual setup checklist (Discord app/bot, Cloudflare
   account, GitHub Pages) required before this runs for real.
 - `docs/ARCHITECTURE.md` — architecture notes.
+- `docs/IDEAS.md` — the backlog, captured as it's thought of.
+- `docs/ROADMAP.md` — what order we're doing that backlog in, and why.
+- `docs/specs/` — designs for the work that's about to be built.
 
 ## Local development
 
