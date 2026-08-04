@@ -12,11 +12,49 @@ on:
       - '.github/workflows/deploy-worker.yml'
   workflow_dispatch:
 
+# deployments:read is for the Guardrail 3 check below; nothing else in this
+# workflow uses the GitHub API (wrangler auths with the CLOUDFLARE_* secrets,
+# not GITHUB_TOKEN).
+permissions:
+  contents: read
+  deployments: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Guardrail 3 (docs/specs/0002-sandbox-and-promotion.md): advisory,
+      # not blocking -- a hard gate on a single-maintainer project is the
+      # kind of thing that eventually gets bypassed wholesale, and a bypassed
+      # gate protects nothing. This never fails the job; it just says
+      # whether this exact commit was deployed to sandbox first, sourced from
+      # the GitHub Deployment deploy-sandbox.yml's `environment: sandbox` job
+      # records automatically. `continue-on-error` plus the internal `set +e`
+      # both exist for the same reason stated twice: nothing here -- a flaky
+      # API call, a missing jq, a rate limit -- is allowed to block the
+      # deploy this step is only ever meant to comment on.
+      - name: Check whether this commit was sandboxed first
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          response=$(curl -sS \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/deployments?environment=sandbox&sha=${{ github.sha }}")
+          count=$(echo "$response" | jq 'length' 2>/dev/null)
+          if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+            echo "::warning::Could not determine sandbox deployment status for this commit (unexpected API response)."
+            exit 0
+          fi
+          if [ "$count" -eq 0 ]; then
+            echo "::warning::Commit ${{ github.sha }} has no matching sandbox deployment. Consider running the Deploy Sandbox workflow against changes like this before merging, once the sandbox is in routine use."
+          else
+            echo "Commit ${{ github.sha }} was deployed to sandbox first ($count matching deployment(s))."
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -57,6 +95,22 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler d1 migrations apply jedi-party-scheduler-db --remote
+
+      # Guardrail 2 (docs/specs/0002-sandbox-and-promotion.md): fails the
+      # deploy if production's real schema doesn't match what
+      # worker/migrations/*.sql should have produced, rather than trusting
+      # d1_migrations' own bookkeeping alone. This is the automated form of
+      # the pragma_table_info spot-check docs/SETUP.md tells an operator to
+      # run by hand -- three separate past incidents had d1_migrations
+      # reporting every migration applied while columns the code depends on
+      # (including cron_cursors.cursor_key, which broke every notification
+      # the app sends) were silently missing.
+      - name: Verify production schema matches migrations
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run db:verify -- --remote
 
       - name: Deploy
         working-directory: worker

@@ -116,6 +116,13 @@ needs: editing Workers scripts and editing D1 databases.
    `worker/migrations/` is the source of truth for what exists; the
    `d1_migrations` table is the source of truth for what has run.
 
+   Then confirm the real schema actually matches, rather than trusting that
+   table alone (see "Never edit a migration file..." below for why that
+   distinction matters):
+   ```
+   npm run db:verify -- --remote
+   ```
+
    **This is also automated.** Once the repo secrets in
    "Auto-deploy the Worker from GitHub Actions" (below) are set, every push
    to `main` that touches `worker/` applies new migrations and then deploys.
@@ -434,6 +441,18 @@ run directly against `--remote`, with `notification_log` needing a
 rename-copy-drop instead of the migration's original `DROP TABLE` (fine on
 an empty dev database, not fine once production has real rows to keep).
 
+**This is now also automated**: `npm run db:verify -- --remote [--env sandbox]`
+(`worker/scripts/verify-schema.mjs`) runs as a step in both deploy workflows,
+after migrating and before deploying, and fails the deploy outright on any
+drift — it applies every file in `worker/migrations/` to a throwaway local
+database to work out what the schema *should* be, then diffs that against
+what the real database (production or sandbox) actually reports for itself.
+That's a stronger check than the hand-run version below, since it compares
+every table's exact `CREATE` statement rather than a hand-maintained column
+list that can itself go stale. The manual version remains useful as a quick
+spot-check without running a full deploy, and as the reference for what
+"matches" means if the automated check's output needs a human to interpret.
+
 **After running migrations against a real database — `db:migrate:remote` or
 the auto-deploy — spot-check that they actually landed**, rather than
 trusting `d1_migrations`/`wrangler d1 migrations list` alone; that table
@@ -470,6 +489,118 @@ migrations backwards-compatible with the currently live code — adding
 columns, tables and indexes is fine. To remove a column, ship one release
 that stops reading it and a later one that drops it, rather than relying on
 that window.
+
+## 5. Sandbox environment (optional, but recommended before building anything new)
+
+A second, isolated Worker + D1 database + Discord application to build and
+test future features against, so new work is exercised against a real
+Worker, a real database and a real bot before it reaches production —
+without touching production data or DMing a real person. See
+`docs/specs/0002-sandbox-and-promotion.md` for the full design; this is the
+provisioning checklist.
+
+Same Cloudflare account as production (no second account needed — see
+"Working with more than one Cloudflare account" above, which exists for a
+different reason: genuinely separate projects, not one project's two
+environments). What's actually separate is the *data* and the *bot*.
+
+1. **A second Discord application.** Repeat step 1 above (Discord Developer
+   Portal) to create a second application + bot, entirely separate from
+   production's. Its OAuth redirect URI will point at the sandbox Worker
+   (step 4 below), not the production one.
+2. **A second D1 database:**
+   ```
+   npx wrangler d1 create jedi-party-scheduler-db-sandbox
+   ```
+   Copy the `database_id` it prints into `worker/wrangler.toml`, replacing
+   `REPLACE_WITH_SANDBOX_D1_DATABASE_ID` under `[[env.sandbox.d1_databases]]`.
+   Leaving the placeholder in place is caught by CI
+   (`npm run check:env-parity` — Guardrail 1), but only once it happens to
+   equal *production's* id by accident; get the real id in regardless.
+3. **Fill in the sandbox client id.** In `worker/wrangler.toml`, replace
+   `REPLACE_WITH_SANDBOX_DISCORD_CLIENT_ID` under `[env.sandbox.vars]` with
+   the second application's Client ID from step 1.
+4. **Migrate, verify, and set secrets**, same shape as production but with
+   `:sandbox` script variants and `--env sandbox`:
+   ```
+   npm run db:migrate:remote:sandbox
+   npm run db:verify -- --remote --env sandbox
+
+   npx wrangler secret put DISCORD_CLIENT_SECRET --env sandbox
+   npx wrangler secret put DISCORD_BOT_TOKEN --env sandbox
+   npx wrangler secret put JWT_SIGNING_KEY --env sandbox
+   ```
+   Use a **different** `JWT_SIGNING_KEY` than production's, not the same
+   value copied over — a sandbox JWT should never be capable of validating
+   against the production Worker even in principle.
+5. **Deploy it:**
+   ```
+   npm run deploy:sandbox
+   ```
+   Note the `https://jedi-party-scheduler-worker-sandbox.<you>.workers.dev`
+   URL it prints, then go back to the second Discord application and set its
+   OAuth redirect to `<that URL>/auth/callback`.
+6. **Allow-list one throwaway test Discord server**, the same way step 2.15
+   does for production, but against the sandbox Worker's `/admin/guilds`
+   (`OWNER_DISCORD_ID` is the same account in both environments — see spec
+   0002's open question 2 — so your own login works as owner in sandbox too).
+   Invite the sandbox bot to that server.
+7. **Run the frontend against it.** No second Pages site — the sandbox
+   frontend is just `npm run dev` (from `frontend/`) with
+   `VITE_API_BASE_URL` pointed at the sandbox Worker:
+   ```
+   VITE_API_BASE_URL=https://jedi-party-scheduler-worker-sandbox.<you>.workers.dev npm run dev
+   ```
+   This works with no extra plumbing because `FRONTEND_URL` in
+   `[env.sandbox.vars]` is already `http://localhost:5173` — the Worker is
+   the OAuth redirect target and redirects back to whatever `FRONTEND_URL`
+   says (ARCHITECTURE.md's auth section), so login lands back on your local
+   dev server automatically.
+8. **Seed some synthetic data** to exercise the cron sweep (an event ~1h
+   out, one ~24h out, a past-deadline poll, an idle group) instead of
+   starting from an empty database:
+   ```
+   npm run seed:sandbox
+   ```
+   Safe to re-run any time — see the comment at the top of
+   `worker/scripts/seed-sandbox.sql`. **Never point this at production**: it
+   deletes anything with a `seed-`-prefixed id before reinserting.
+
+### Day-to-day use
+
+Push a feature branch into a `sandbox` branch (or run the **Deploy Sandbox**
+workflow manually from the Actions tab against any branch) to build and
+deploy it — `.github/workflows/deploy-sandbox.yml` runs the same
+typecheck → test → migrate → verify → deploy sequence production's workflow
+does, with `--env sandbox`. Once it looks right there, merging to `main`
+promotes it: the production workflow rebuilds and redeploys the *same*
+commit, nothing rebuilt differently for prod except which secrets and vars
+apply.
+
+That workflow's job declares `environment: sandbox`, which makes GitHub
+record a Deployment against the commit it built — this is what
+`deploy-worker.yml`'s advisory check reads to note whether a commit reaching
+production was sandboxed first. If your repository doesn't already have a
+`sandbox` environment under **Settings → Environments**, GitHub normally
+creates one automatically the first time the workflow runs with that name;
+if it doesn't, create it there (no protection rules needed — this one is
+just a label to hang deployment records on, not a gate).
+
+Three automated guardrails exist so sandbox/production drift is caught by CI
+rather than found by hand later — all detailed in spec 0002:
+
+1. **Config parity** (`npm run check:env-parity`, runs in `ci.yml` on every
+   push/PR): fails if `[vars]` and `[env.sandbox.vars]` in `wrangler.toml`
+   ever have different keys, `WORKERS_PLAN` differs between them, or
+   `env.sandbox`'s D1 `database_id` ever equals production's.
+2. **Schema verification** (`npm run db:verify`, runs in both deploy
+   workflows after migrating and before deploying): the automated version of
+   the `pragma_table_info` spot-check below — fails the deploy if the real
+   schema doesn't match what `worker/migrations/*.sql` should have produced,
+   in either environment.
+3. **"Was this sandboxed first?"** (advisory only, in `deploy-worker.yml`):
+   notes in the production deploy's log whether the commit being deployed
+   was previously deployed to sandbox. Never blocks the deploy.
 
 ## Running the tests
 

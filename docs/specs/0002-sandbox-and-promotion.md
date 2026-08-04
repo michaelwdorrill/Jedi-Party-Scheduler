@@ -1,6 +1,6 @@
 # 0002 — Sandbox environment, and promotion to production
 
-**Status:** Ready
+**Status:** Built
 **Covers:** `IDEAS.md` items 1 and 14 · **Phase:** 1
 
 One piece of work in two halves. The first half is a second Worker + D1 +
