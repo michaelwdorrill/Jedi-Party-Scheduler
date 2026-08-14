@@ -161,3 +161,35 @@ roadmap gets revisited between phases.
     "logged in" from "attempted to log in and was turned away" on that same
     view would have made this specific investigation a one-query answer
     instead of three wrong guesses.
+
+16. **A group's creator can never be counted as a member of their own
+    group.** Found in production: the "Spacebros" idle-group nudge fired
+    correctly (`sweepIdleGroups`, `worker/src/cron/reminders.ts` — right on
+    schedule, to the second) but the creator never got it, because they were
+    never in `group_members` to begin with. That's not an oversight in one
+    save — it's structural, and it's a closed loop:
+
+    - `group_members` is populated only from whatever list gets submitted
+      when a group is created or edited (`worker/src/routes/groups.ts`).
+      Nothing auto-adds `created_by`.
+    - The picker that list comes from (`GroupEditor.tsx`, fed by
+      `GroupsPage.tsx`'s `GET /me/friends`) is backed by `listFriends`
+      (`worker/src/lib/db.ts:293`), which binds `AND u.id != ?` against the
+      caller's own id — correct for "who can I invite to an event" (its
+      original purpose), silently wrong for "who's in this group" (reused
+      for a second purpose it wasn't designed for).
+    - Only the creator may edit a group's membership (`group.created_by !==
+      userId` → 403 on every mutating route in `groups.ts`), so nobody else
+      can add them either. There is currently no path, through the UI or the
+      API as designed, for a group's creator to ever appear in
+      `group_members` for their own group.
+
+    Consequences beyond the idle nudge: anything else that reads
+    `group_members` to mean "who's in this group" inherits the same gap.
+    Fix shape is fairly clear — either seed `group_members` with the creator
+    automatically on create (and on ownership transfer, if that ever
+    exists), or give `GroupEditor` its own member-source query that doesn't
+    carry `listFriends`'s self-exclusion. Worth deciding which before
+    building it: auto-seeding changes what "N members" means for every
+    existing group the moment it ships (retroactively, or only for new
+    groups?), where a dedicated query is a smaller, more local fix.
