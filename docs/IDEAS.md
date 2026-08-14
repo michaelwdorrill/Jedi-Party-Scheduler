@@ -135,3 +135,29 @@ roadmap gets revisited between phases.
     schema-drift incidents in SETUP.md are the argument for care here: the
     failure mode isn't "the deploy errors", it's "the deploy reports success
     against a database that doesn't match the code".
+
+15. **The owner-only user list can't tell "never a member" apart from "was a
+    member, later marked departed."** Found while diagnosing why a Discord
+    server member showed zero servers on `/admin/users` despite genuinely
+    being in one of them: `user_guild_membership` rows aren't deleted when
+    someone leaves (or is recorded as having left) a server — `is_member`
+    just flips to 0, either via `syncGuildMembership` (an OAuth login's own
+    fresh guild list came back without that guild) or the cron's
+    `revalidateStaleMemberships` (a periodic bot-API recheck said
+    `not_member`). The admin endpoint's `WHERE ugm.is_member = 1` filter
+    (`worker/src/routes/admin.ts`) makes both of those look identical to
+    "this person has never been in that server" — the only way to tell them
+    apart today turned out to be a raw SQL query against
+    `user_guild_membership` for one specific user. Worth either showing
+    departed memberships greyed-out/labeled on the same page, or exposing
+    `verified_at`/`is_member` history somewhere reachable without a manual DB
+    query.
+
+    Same investigation surfaced a second, related gap worth fixing alongside
+    it: `last_login_at` is stamped by `upsertUser` in `worker/src/routes/auth.ts`
+    *before* the zero-shared-guilds check that can still reject the login
+    with a 403 and no session issued — so a bounced login attempt currently
+    looks identical to a real, successful one on the admin page. Distinguishing
+    "logged in" from "attempted to log in and was turned away" on that same
+    view would have made this specific investigation a one-query answer
+    instead of three wrong guesses.
