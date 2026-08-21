@@ -125,12 +125,40 @@ function actualSchema() {
   return result.results;
 }
 
-// Collapses whitespace so formatting differences between how a migration
-// file wrote a statement and how SQLite echoes it back from sqlite_master
-// (both legitimate, neither canonical) don't register as drift.
+// Strips `-- line comments` and collapses whitespace, so formatting
+// differences between how a migration file wrote a statement and how
+// SQLite echoes it back from sqlite_master (both legitimate, neither
+// canonical) don't register as drift. The comment-stripping part isn't
+// cosmetic: confirmed against a real D1 database that it re-serializes a
+// CREATE TABLE's stored `sql` without the inline `--` comments the
+// migration file used to document individual columns, while local
+// node:sqlite preserves the original text verbatim -- without stripping
+// them here first, every commented column produced a false "mismatch".
+// Safe across every migration file (checked): none of them puts `--`
+// inside a string literal, which this would otherwise mangle.
 function normalize(sql) {
-  return sql.replace(/\s+/g, ' ').trim();
+  return sql
+    .replace(/--[^\n]*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
+
+// D1 (and SQLite itself) maintain their own bookkeeping tables alongside
+// whatever the app's migrations create -- `d1_migrations` is Wrangler's own
+// migration-tracking table, `sqlite_sequence` is SQLite's own (created the
+// moment any table uses AUTOINCREMENT), and `_cf_KV` is D1-internal.
+// None of them come from worker/migrations/*.sql and none of them ever
+// should -- confirmed against a real D1 database that these three, and
+// only these three, show up as "unexpected". An exact allowlist rather
+// than a `sqlite_`/`_cf_` prefix match on purpose: SQLite itself already
+// forbids a real table starting with `sqlite_`, but `_cf_` is only a
+// Cloudflare convention, not an enforced one, and this script's whole job
+// is to be suspicious of the unexpected rather than pattern-match it away.
+const KNOWN_D1_INFRASTRUCTURE_OBJECTS = new Set([
+  'table:d1_migrations',
+  'table:sqlite_sequence',
+  'table:_cf_KV',
+]);
 
 function toMap(rows) {
   const map = new Map();
@@ -150,7 +178,7 @@ for (const [key, sql] of expected) {
   }
 }
 for (const key of actual.keys()) {
-  if (!expected.has(key)) {
+  if (!expected.has(key) && !KNOWN_D1_INFRASTRUCTURE_OBJECTS.has(key)) {
     problems.push(`present in ${DB_NAME} but not produced by any migration file: ${key}`);
   }
 }
