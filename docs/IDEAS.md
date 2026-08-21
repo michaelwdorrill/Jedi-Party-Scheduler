@@ -193,3 +193,26 @@ roadmap gets revisited between phases.
     building it: auto-seeding changes what "N members" means for every
     existing group the moment it ships (retroactively, or only for new
     groups?), where a dedicated query is a smaller, more local fix.
+
+17. **Two frontend dependency majors are deliberately sitting behind
+    `npm audit`.** `npm audit fix` (no `--force`) cleared three vulnerable
+    transitive dev-tooling deps (`brace-expansion`, `js-yaml`, `nanoid` —
+    all pulled in by eslint/postcss, never shipped) with no compatibility
+    risk. Two remain, both requiring a major-version bump `--force` would
+    apply blind:
+    - `esbuild`/`vite` 5→8 (moderate→high, GHSA-67mh-4wv8-2f99): a
+      malicious website can read responses from a *running* `vite dev`
+      server. Doesn't touch the built production site at all -- only
+      matters if browsing untrusted sites while `npm run dev` is active.
+    - `react-router`/`react-router-dom` 6→7 (moderate, GHSA-wrjc-x8rr-h8h6
+      + GHSA-337j-9hxr-rhxg): a real runtime dependency, but checked --
+      every `navigate()`/`<Link to=...>` in this codebase uses a hardcoded
+      path or a string built from the app's own server-issued ids, never
+      untrusted input, so the open-redirect advisory doesn't appear to have
+      a reachable path here. The SSR-hydration advisory doesn't apply at
+      all (no SSR, pure client SPA).
+
+    Low real-world urgency for both given the above, but they're genuine
+    major-version bumps (vite's is three majors) that want a dedicated
+    upgrade-and-test pass, not a `--force` run in passing. Revisit
+    deliberately rather than let `npm audit` stay red indefinitely.
