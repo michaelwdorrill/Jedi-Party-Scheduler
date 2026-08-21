@@ -3,8 +3,14 @@ import type { WindowSubmission } from '../types';
 
 const STEP_MINUTES = 15;
 
-function fmt(ms: number, zone: string) {
-  return DateTime.fromMillis(ms).setZone(zone).toFormat('h:mm a');
+// Time-only reads fine when the whole window fits in one day, but idea 6
+// let a window span multiple days -- without the date, "6:00 PM" doesn't
+// say which of the window's days it falls on. Mirrors formatTimeRange's own
+// hasSame(..., 'day') check in lib/datetime.ts, applied here to whether the
+// window's own start and end share a day, not the two points being formatted.
+function fmt(ms: number, zone: string, includeDate: boolean) {
+  const dt = DateTime.fromMillis(ms).setZone(zone);
+  return includeDate ? dt.toFormat('ccc, LLL d, h:mm a') : dt.toFormat('h:mm a');
 }
 
 export default function WindowAvailabilityPicker({
@@ -26,6 +32,9 @@ export default function WindowAvailabilityPicker({
   otherSubmissions?: WindowSubmission[];
   bestCandidate?: { startAt: number; endAt: number; count: number } | null;
 }) {
+  const spansMultipleDays = !DateTime.fromMillis(windowStartAt)
+    .setZone(zone)
+    .hasSame(DateTime.fromMillis(windowEndAt).setZone(zone), 'day');
   const totalMinutes = Math.round((windowEndAt - windowStartAt) / 60000);
   const startMin = Math.round((value.startAt - windowStartAt) / 60000);
   const endMin = Math.round((value.endAt - windowStartAt) / 60000);
@@ -43,8 +52,8 @@ export default function WindowAvailabilityPicker({
   return (
     <div className="space-y-2">
       <div className="flex justify-between text-xs text-slate-500">
-        <span>{fmt(windowStartAt, zone)}</span>
-        <span>{fmt(windowEndAt, zone)}</span>
+        <span>{fmt(windowStartAt, zone, spansMultipleDays)}</span>
+        <span>{fmt(windowEndAt, zone, spansMultipleDays)}</span>
       </div>
 
       <div className="relative h-6 rounded bg-slate-800">
@@ -56,7 +65,7 @@ export default function WindowAvailabilityPicker({
               left: `${pct(Math.round((s.startAt - windowStartAt) / 60000))}%`,
               width: `${pct(Math.round((s.endAt - s.startAt) / 60000))}%`,
             }}
-            title={`${s.globalName ?? s.username}: ${fmt(s.startAt, zone)}–${fmt(s.endAt, zone)}`}
+            title={`${s.globalName ?? s.username}: ${fmt(s.startAt, zone, spansMultipleDays)}–${fmt(s.endAt, zone, spansMultipleDays)}`}
           />
         ))}
         {bestCandidate && bestCandidate.count > 0 && (
@@ -66,7 +75,7 @@ export default function WindowAvailabilityPicker({
               left: `${pct(Math.round((bestCandidate.startAt - windowStartAt) / 60000))}%`,
               width: `${pct(Math.round((bestCandidate.endAt - bestCandidate.startAt) / 60000))}%`,
             }}
-            title={`Best so far: ${fmt(bestCandidate.startAt, zone)}–${fmt(bestCandidate.endAt, zone)} (${bestCandidate.count} in)`}
+            title={`Best so far: ${fmt(bestCandidate.startAt, zone, spansMultipleDays)}–${fmt(bestCandidate.endAt, zone, spansMultipleDays)} (${bestCandidate.count} in)`}
           />
         )}
         <div
@@ -77,7 +86,7 @@ export default function WindowAvailabilityPicker({
 
       <div>
         <label className="mb-1 block text-xs text-slate-500">
-          Earliest you could start — {fmt(value.startAt, zone)}
+          Earliest you could start — {fmt(value.startAt, zone, spansMultipleDays)}
         </label>
         <input
           type="range"
@@ -91,7 +100,7 @@ export default function WindowAvailabilityPicker({
       </div>
       <div>
         <label className="mb-1 block text-xs text-slate-500">
-          Latest you could go until — {fmt(value.endAt, zone)}
+          Latest you could go until — {fmt(value.endAt, zone, spansMultipleDays)}
         </label>
         <input
           type="range"
