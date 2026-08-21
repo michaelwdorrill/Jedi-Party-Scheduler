@@ -42,6 +42,15 @@ jobs:
         working-directory: worker
         run: npm test
 
+      # Guardrail 1 (docs/specs/0002-sandbox-and-promotion.md): fails the
+      # build if wrangler.toml's [vars] and [env.sandbox.vars] ever drift out
+      # of the same key set, WORKERS_PLAN differs between them, or the
+      # sandbox's D1 database_id is ever set to production's -- catching all
+      # three here rather than at deploy time, or not at all.
+      - name: Check sandbox/production config parity
+        working-directory: worker
+        run: npm run check:env-parity
+
   frontend:
     runs-on: ubuntu-latest
     steps:

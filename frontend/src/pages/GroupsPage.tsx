@@ -37,6 +37,21 @@ export default function GroupsPage() {
     return <p className="text-slate-400">You don't share any allow-listed servers yet.</p>;
   }
 
+  // `friends` comes from GET /me/friends, which deliberately excludes the
+  // caller -- correct for "who can I invite to an event" (its original
+  // purpose, still used unmodified by EventFormPage), wrong for "who can go
+  // in this group": a group's creator was structurally unable to ever add
+  // themselves as a member, since this was the only list the picker below
+  // offered anything from. The server side already has no such exclusion
+  // (PATCH /groups/:id validates member_user_ids against active guild
+  // membership only), so this is purely about giving the picker a chance to
+  // offer yourself as an option.
+  const pickableMembers = user
+    ? [...friends, { id: user.id, username: user.username, globalName: user.globalName, avatarHash: user.avatarHash }].sort(
+        (a, b) => (a.globalName ?? a.username).localeCompare(b.globalName ?? b.username),
+      )
+    : friends;
+
   const handleSave = async (data: {
     name: string;
     game: string | null;
@@ -84,7 +99,7 @@ export default function GroupsPage() {
 
       {editing !== null && (
         <GroupEditor
-          friends={friends}
+          friends={pickableMembers}
           initial={editing === 'new' ? undefined : editing}
           onSave={handleSave}
           onCancel={() => setEditing(null)}

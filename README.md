@@ -48,3 +48,9 @@ npm run dev
 See `docs/SETUP.md` for the one-time provisioning steps (Discord application,
 Cloudflare D1 database and secrets, GitHub Pages configuration) needed before
 this works end-to-end with real Discord accounts.
+
+Once a sandbox environment is provisioned (`docs/SETUP.md`'s section 5), a
+deployed sandbox Worker is generally a better target for the frontend than
+`wrangler dev`: point `VITE_API_BASE_URL` at it and you get real Discord
+OAuth and a real cron sweep, without needing a locally-running Worker or
+risking production data.

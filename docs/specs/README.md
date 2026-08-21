@@ -28,5 +28,5 @@ enough yet.
 | Spec | Covers | Phase | Status |
 |---|---|---|---|
 | [0001-quick-wins](0001-quick-wins.md) | Ideas 4, 12, 7, 11 | 0 | Built |
-| [0002-sandbox-and-promotion](0002-sandbox-and-promotion.md) | Ideas 1, 14 | 1 | Ready |
+| [0002-sandbox-and-promotion](0002-sandbox-and-promotion.md) | Ideas 1, 14 | 1 | Built |
 | [0003-event-change-requests](0003-event-change-requests.md) | Idea 13 | 2 | Draft |

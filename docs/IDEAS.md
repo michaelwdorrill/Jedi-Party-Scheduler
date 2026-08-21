@@ -135,3 +135,84 @@ roadmap gets revisited between phases.
     schema-drift incidents in SETUP.md are the argument for care here: the
     failure mode isn't "the deploy errors", it's "the deploy reports success
     against a database that doesn't match the code".
+
+15. **The owner-only user list can't tell "never a member" apart from "was a
+    member, later marked departed."** Found while diagnosing why a Discord
+    server member showed zero servers on `/admin/users` despite genuinely
+    being in one of them: `user_guild_membership` rows aren't deleted when
+    someone leaves (or is recorded as having left) a server — `is_member`
+    just flips to 0, either via `syncGuildMembership` (an OAuth login's own
+    fresh guild list came back without that guild) or the cron's
+    `revalidateStaleMemberships` (a periodic bot-API recheck said
+    `not_member`). The admin endpoint's `WHERE ugm.is_member = 1` filter
+    (`worker/src/routes/admin.ts`) makes both of those look identical to
+    "this person has never been in that server" — the only way to tell them
+    apart today turned out to be a raw SQL query against
+    `user_guild_membership` for one specific user. Worth either showing
+    departed memberships greyed-out/labeled on the same page, or exposing
+    `verified_at`/`is_member` history somewhere reachable without a manual DB
+    query.
+
+    Same investigation surfaced a second, related gap worth fixing alongside
+    it: `last_login_at` is stamped by `upsertUser` in `worker/src/routes/auth.ts`
+    *before* the zero-shared-guilds check that can still reject the login
+    with a 403 and no session issued — so a bounced login attempt currently
+    looks identical to a real, successful one on the admin page. Distinguishing
+    "logged in" from "attempted to log in and was turned away" on that same
+    view would have made this specific investigation a one-query answer
+    instead of three wrong guesses.
+
+16. **A group's creator can never be counted as a member of their own
+    group.** Found in production: the "Spacebros" idle-group nudge fired
+    correctly (`sweepIdleGroups`, `worker/src/cron/reminders.ts` — right on
+    schedule, to the second) but the creator never got it, because they were
+    never in `group_members` to begin with. That's not an oversight in one
+    save — it's structural, and it's a closed loop:
+
+    - `group_members` is populated only from whatever list gets submitted
+      when a group is created or edited (`worker/src/routes/groups.ts`).
+      Nothing auto-adds `created_by`.
+    - The picker that list comes from (`GroupEditor.tsx`, fed by
+      `GroupsPage.tsx`'s `GET /me/friends`) is backed by `listFriends`
+      (`worker/src/lib/db.ts:293`), which binds `AND u.id != ?` against the
+      caller's own id — correct for "who can I invite to an event" (its
+      original purpose), silently wrong for "who's in this group" (reused
+      for a second purpose it wasn't designed for).
+    - Only the creator may edit a group's membership (`group.created_by !==
+      userId` → 403 on every mutating route in `groups.ts`), so nobody else
+      can add them either. There is currently no path, through the UI or the
+      API as designed, for a group's creator to ever appear in
+      `group_members` for their own group.
+
+    Consequences beyond the idle nudge: anything else that reads
+    `group_members` to mean "who's in this group" inherits the same gap.
+    Fix shape is fairly clear — either seed `group_members` with the creator
+    automatically on create (and on ownership transfer, if that ever
+    exists), or give `GroupEditor` its own member-source query that doesn't
+    carry `listFriends`'s self-exclusion. Worth deciding which before
+    building it: auto-seeding changes what "N members" means for every
+    existing group the moment it ships (retroactively, or only for new
+    groups?), where a dedicated query is a smaller, more local fix.
+
+17. **Two frontend dependency majors are deliberately sitting behind
+    `npm audit`.** `npm audit fix` (no `--force`) cleared three vulnerable
+    transitive dev-tooling deps (`brace-expansion`, `js-yaml`, `nanoid` —
+    all pulled in by eslint/postcss, never shipped) with no compatibility
+    risk. Two remain, both requiring a major-version bump `--force` would
+    apply blind:
+    - `esbuild`/`vite` 5→8 (moderate→high, GHSA-67mh-4wv8-2f99): a
+      malicious website can read responses from a *running* `vite dev`
+      server. Doesn't touch the built production site at all -- only
+      matters if browsing untrusted sites while `npm run dev` is active.
+    - `react-router`/`react-router-dom` 6→7 (moderate, GHSA-wrjc-x8rr-h8h6
+      + GHSA-337j-9hxr-rhxg): a real runtime dependency, but checked --
+      every `navigate()`/`<Link to=...>` in this codebase uses a hardcoded
+      path or a string built from the app's own server-issued ids, never
+      untrusted input, so the open-redirect advisory doesn't appear to have
+      a reachable path here. The SSR-hydration advisory doesn't apply at
+      all (no SSR, pure client SPA).
+
+    Low real-world urgency for both given the above, but they're genuine
+    major-version bumps (vite's is three majors) that want a dedicated
+    upgrade-and-test pass, not a `--force` run in passing. Revisit
+    deliberately rather than let `npm audit` stay red indefinitely.

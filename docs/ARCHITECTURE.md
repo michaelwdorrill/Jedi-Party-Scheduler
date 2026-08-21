@@ -19,6 +19,16 @@ Cloudflare Worker (Hono router)  <-->  D1 (SQLite)
 Discord REST API (OAuth token exchange, bot DMs)
 ```
 
+There are two deployments of these two deployments: production, and an
+optional sandbox (`docs/specs/0002-sandbox-and-promotion.md`) — a second
+Worker, D1 database and Discord application in the same Cloudflare account,
+for exercising a change against the real thing before it reaches production.
+The sandbox has no second frontend deployment; `FRONTEND_URL` points it at a
+local Vite dev server instead, which the OAuth redirect above already makes
+work with no extra plumbing. It holds **no real user data** — a checked-in
+seed script (`worker/scripts/seed-sandbox.sql`) provides synthetic users,
+guilds and events instead, and production data is never copied into it.
+
 ## Auth
 
 Discord OAuth2's Authorization Code flow, but the *redirect_uri* is the
