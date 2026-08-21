@@ -89,12 +89,15 @@ event/invite/notification model that already exists:
   start and end dates; the two poll creation paths don't. Cheaper than 13 and
   independent of it — worth slotting in whenever it fits.
 - **3, event-specific invite links.** Gives the organizer something to paste
-  themselves instead of the bot DMing a link that reads as a scam. Do it after
-  13, because 13's "invite this person" request is the in-app answer to the
-  same problem, and building it first tells us how much of 3 is still wanted.
-  It also shares a security surface with idea 9 (someone reaching an event or
-  a server they weren't already a member of), which is a reason to design them
-  with each other in mind.
+  themselves instead of the bot DMing a link that reads as a scam. Held until
+  13 shipped on the theory that 13's "invite this person" request might cover
+  most of it. Resolved, per `specs/0005`: they solve different problems (13 is
+  *who* can be invited, 3 is *how* an already-invited person gets a link) and
+  3 is still worth doing — but much smaller than assumed, since a plain
+  `#/events/:id` link is already gated by the same visibility check regardless
+  of how someone arrives at it, so this needed no new grant mechanism and none
+  of idea 9's security surface after all. Shipped as a "copy invite link"
+  button, no backend change.
 
 ### Phase 3 — Shape, then paint (ideas 5, 8)
 
@@ -152,7 +155,7 @@ stopped using the site.
 | 14 | Seamless sandbox → prod promotion | M | 1 | 1 | 0002 |
 | 13 | Invitee change requests | L | 2 | — | 0003 |
 | 6 | Poll date/time consistency | M | 2 | — | 0004 |
-| 3 | Event-specific invite links | M | 2 | informed by 13, 9 | TBD |
+| 3 | Event-specific invite links | S | 2 | 13 (scoped down after) | 0005 |
 | 5 | Calendar landing view | L | 3 | — | TBD |
 | 8 | Visual design pass | L | 3 | 5 | pitches first |
 | 9 | Self-service bot add + email | L | 4 | — | TBD |

@@ -20,6 +20,7 @@ export default function EventDetailPage() {
   const [windowDraft, setWindowDraft] = useState<{ startAt: number; endAt: number } | null>(null);
   const [changeRequests, setChangeRequests] = useState<ChangeRequestView[]>([]);
   const [loading, setLoading] = useState(true);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   const load = async () => {
     if (!eventId) return;
@@ -126,6 +127,17 @@ export default function EventDetailPage() {
     navigate('/calendar');
   };
 
+  // Reconstructed rather than location.href verbatim, so a copied link never
+  // carries the page's own transient view state (?occurrence=<date> on a
+  // recurring event's day view) into a link meant to mean "this event," not
+  // "this specific occurrence I happened to be looking at" (spec 0005).
+  const handleCopyInviteLink = async () => {
+    const link = `${location.origin}${location.pathname}#/events/${event.eventId}`;
+    await navigator.clipboard.writeText(link);
+    setLinkCopied(true);
+    setTimeout(() => setLinkCopied(false), 4000);
+  };
+
   return (
     <div className="mx-auto max-w-2xl space-y-5">
       <div className="flex items-start justify-between">
@@ -138,6 +150,12 @@ export default function EventDetailPage() {
         </div>
         {isOrganizer && event.status !== 'cancelled' && (
           <div className="flex gap-2">
+            <button
+              onClick={handleCopyInviteLink}
+              className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
+            >
+              {linkCopied ? 'Copied!' : 'Copy invite link'}
+            </button>
             {event.status === 'active' && (
               <Link
                 to={`/events/${event.eventId}/edit`}
@@ -163,6 +181,13 @@ export default function EventDetailPage() {
           </div>
         )}
       </div>
+
+      {linkCopied && (
+        <p className="-mt-3 text-xs text-slate-500">
+          Link copied — whoever you send it to will need to log in with Discord and be a member of this
+          server to see it.
+        </p>
+      )}
 
       {event.status === 'cancelled' && (
         <p className="rounded-md bg-slate-800 px-3 py-2 text-sm text-slate-400">
