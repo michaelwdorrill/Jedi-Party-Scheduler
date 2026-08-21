@@ -23,6 +23,7 @@
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { readdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -60,12 +61,27 @@ function expectedSchema() {
 
 const SCHEMA_QUERY = `SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name`;
 
-// Windows resolves `npx` to `npx.cmd`, and spawning a bare `'npx'` via
-// execFileSync (no shell) fails with ENOENT there -- it only finds real
-// executables, not the .cmd shim npm installs. `shell: true` would fix that
-// too, but re-introduces shell quoting for SCHEMA_QUERY's spaces; naming the
-// real executable avoids that entirely.
-const NPX = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+// Spawning `npx`/`wrangler` via their platform shim turned out to be a dead
+// end on Windows: bare `'npx'` fails with ENOENT (Windows only resolves it
+// to the `.cmd` shim npm installs, and execFileSync without a shell only
+// finds real executables); `'npx.cmd'` fails with EINVAL (Node's fix for
+// CVE-2024-27980 refuses to execute a .bat/.cmd file directly even when
+// named explicitly); and `shell: true` "fixes" both by handing the whole
+// command to cmd.exe/sh, but neither this option nor execFileSync's docs
+// promise it will quote a multi-word array element (SCHEMA_QUERY's spaces)
+// back into one shell word -- confirmed empirically, it doesn't on POSIX,
+// it just joins everything with spaces and hands the result to the shell.
+// That's silent argument corruption, not a platform quirk to route around.
+//
+// Sidestepping the shim entirely settles all three: invoke wrangler's own
+// JS entry point with the current `node` binary. `node`'s own path
+// (`process.execPath`) is a real executable with no PATH lookup and no
+// shell involved, so the args array reaches wrangler exactly as built --
+// no quoting to get right, nothing this CVE fix's restriction applies to.
+const wranglerPkgPath = createRequire(import.meta.url).resolve('wrangler/package.json');
+const wranglerPkg = JSON.parse(readFileSync(wranglerPkgPath, 'utf8'));
+const wranglerBinRelative = typeof wranglerPkg.bin === 'string' ? wranglerPkg.bin : wranglerPkg.bin.wrangler;
+const WRANGLER_BIN = join(dirname(wranglerPkgPath), wranglerBinRelative);
 
 function actualSchema() {
   const flag = remote ? '--remote' : '--local';
@@ -78,8 +94,8 @@ function actualSchema() {
   let output;
   try {
     output = execFileSync(
-      NPX,
-      ['wrangler', 'd1', 'execute', DB_NAME, flag, ...envArgs, '--json', '--command', SCHEMA_QUERY],
+      process.execPath,
+      [WRANGLER_BIN, 'd1', 'execute', DB_NAME, flag, ...envArgs, '--json', '--command', SCHEMA_QUERY],
       { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
     );
   } catch (err) {
