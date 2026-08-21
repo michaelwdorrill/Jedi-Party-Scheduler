@@ -55,7 +55,7 @@ name = "jedi-party-scheduler-worker-sandbox"
 [env.sandbox.vars]
 # One-time manual step: create a second Discord application + bot (see
 # docs/SETUP.md's sandbox section) and paste its client id here.
-DISCORD_CLIENT_ID = "REPLACE_WITH_SANDBOX_DISCORD_CLIENT_ID"
+DISCORD_CLIENT_ID = "1534208528930046044"
 # The sandbox frontend is `npm run dev`, not a second Pages deployment -- the
 # Worker is the OAuth redirect target and redirects back to whatever
 # FRONTEND_URL says (see ARCHITECTURE.md's auth section), so pointing this at
@@ -77,7 +77,7 @@ database_name = "jedi-party-scheduler-db-sandbox"
 # placeholder rather than prod's id -- check-env-parity.mjs would refuse to
 # proceed if this ever matched production's database_id, since that would
 # mean a sandbox deploy migrating and writing straight into prod.
-database_id = "REPLACE_WITH_SANDBOX_D1_DATABASE_ID"
+database_id = "0ecf1516-3a7b-4c77-8326-e093e4ac57c8"
 migrations_dir = "migrations"
 
 # The sandbox keeps the same 15-minute cron the production Worker runs --
