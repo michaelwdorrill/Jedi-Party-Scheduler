@@ -15,6 +15,7 @@ interface PollSlotDraft {
   key: string;
   date: string;
   startTime: string;
+  endDate: string;
   endTime: string;
 }
 
@@ -71,12 +72,13 @@ export default function EventFormPage() {
 
   // Poll fields ('options' mode)
   const [pollSlots, setPollSlots] = useState<PollSlotDraft[]>([
-    { key: crypto.randomUUID(), date: prefillDate, startTime: '13:00', endTime: '17:00' },
+    { key: crypto.randomUUID(), date: prefillDate, startTime: '13:00', endDate: prefillDate, endTime: '17:00' },
   ]);
   const [multiWinner, setMultiWinner] = useState(false);
 
   // Poll fields ('window' mode)
-  const [windowDate, setWindowDate] = useState(prefillDate);
+  const [windowStartDate, setWindowStartDate] = useState(prefillDate);
+  const [windowEndDate, setWindowEndDate] = useState(prefillDate);
   const [windowStartTime, setWindowStartTime] = useState('12:00');
   const [windowEndTime, setWindowEndTime] = useState('18:00');
   const [windowBlockHours, setWindowBlockHours] = useState(3);
@@ -172,11 +174,13 @@ export default function EventFormPage() {
         if (ev.pollMode === 'window') {
           if (ev.windowStartAt) {
             const s = DateTime.fromMillis(ev.windowStartAt).setZone(ev.timezone);
-            setWindowDate(s.toISODate()!);
+            setWindowStartDate(s.toISODate()!);
             setWindowStartTime(s.toFormat('HH:mm'));
           }
           if (ev.windowEndAt) {
-            setWindowEndTime(DateTime.fromMillis(ev.windowEndAt).setZone(ev.timezone).toFormat('HH:mm'));
+            const e = DateTime.fromMillis(ev.windowEndAt).setZone(ev.timezone);
+            setWindowEndDate(e.toISODate()!);
+            setWindowEndTime(e.toFormat('HH:mm'));
           }
           if (ev.windowBlockMinutes) setWindowBlockHours(ev.windowBlockMinutes / 60);
         } else if (ev.pollOptions) {
@@ -188,6 +192,7 @@ export default function EventFormPage() {
                 key: o.id,
                 date: s.toISODate()!,
                 startTime: s.toFormat('HH:mm'),
+                endDate: e.toISODate()!,
                 endTime: e.toFormat('HH:mm'),
               };
             }),
@@ -200,11 +205,24 @@ export default function EventFormPage() {
   const addPollSlot = () =>
     setPollSlots((prev) => [
       ...prev,
-      { key: crypto.randomUUID(), date: prefillDate, startTime: '13:00', endTime: '17:00' },
+      { key: crypto.randomUUID(), date: prefillDate, startTime: '13:00', endDate: prefillDate, endTime: '17:00' },
     ]);
 
   const removePollSlot = (key: string) =>
     setPollSlots((prev) => prev.filter((s) => s.key !== key));
+
+  // Same nudge as handleStartDateChange below, applied per-slot: moving a
+  // candidate day's start date forward drags its own end date along if the
+  // end would otherwise fall before it.
+  const handleSlotStartDateChange = (key: string, next: string) =>
+    setPollSlots((prev) =>
+      prev.map((s) => (s.key === key ? { ...s, date: next, endDate: s.endDate < next ? next : s.endDate } : s)),
+    );
+
+  const handleWindowStartDateChange = (next: string) => {
+    setWindowStartDate(next);
+    if (windowEndDate < next) setWindowEndDate(next);
+  };
 
   const toggleUser = (id: string) =>
     setSelectedUserIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -258,11 +276,11 @@ export default function EventFormPage() {
   const pollSlotsValid =
     eventType !== 'poll' ||
     pollMode !== 'options' ||
-    pollSlots.every((s) => isValidRange(s.date, s.startTime, s.date, s.endTime, timezone));
+    pollSlots.every((s) => isValidRange(s.date, s.startTime, s.endDate, s.endTime, timezone));
   const windowRangeValid =
     eventType !== 'poll' ||
     pollMode !== 'window' ||
-    isValidRange(windowDate, windowStartTime, windowDate, windowEndTime, timezone);
+    isValidRange(windowStartDate, windowStartTime, windowEndDate, windowEndTime, timezone);
   const rangeValid = singleRangeValid && pollSlotsValid && windowRangeValid;
 
   const handleSubmit = async () => {
@@ -323,14 +341,14 @@ export default function EventFormPage() {
         body.pollMode = pollMode;
 
         if (pollMode === 'window') {
-          body.windowStartAt = toUtcMillis(windowDate, windowStartTime);
-          body.windowEndAt = toUtcMillis(windowDate, windowEndTime);
+          body.windowStartAt = toUtcMillis(windowStartDate, windowStartTime);
+          body.windowEndAt = toUtcMillis(windowEndDate, windowEndTime);
           body.windowBlockMinutes = windowBlockHours * 60;
         } else {
           body.pollResolutionMode = pollStrategy === 'threshold' && multiWinner ? 'multi_winner' : 'single_winner';
           body.pollOptions = pollSlots.map((s) => ({
             startAt: toUtcMillis(s.date, s.startTime),
-            endAt: toUtcMillis(s.date, s.endTime),
+            endAt: toUtcMillis(s.endDate, s.endTime),
           }));
         }
       }
@@ -507,18 +525,14 @@ export default function EventFormPage() {
           {pollMode === 'options' ? (
             <div className="space-y-2">
               {pollSlots.map((slot) => {
-                const slotValid = isValidRange(slot.date, slot.startTime, slot.date, slot.endTime, timezone);
+                const slotValid = isValidRange(slot.date, slot.startTime, slot.endDate, slot.endTime, timezone);
                 return (
                   <div key={slot.key}>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <input
                         type="date"
                         value={slot.date}
-                        onChange={(e) =>
-                          setPollSlots((prev) =>
-                            prev.map((s) => (s.key === slot.key ? { ...s, date: e.target.value } : s)),
-                          )
-                        }
+                        onChange={(e) => handleSlotStartDateChange(slot.key, e.target.value)}
                         className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
                       />
                       <input
@@ -532,6 +546,17 @@ export default function EventFormPage() {
                         className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
                       />
                       <span className="text-slate-500">to</span>
+                      <input
+                        type="date"
+                        value={slot.endDate}
+                        min={slot.date}
+                        onChange={(e) =>
+                          setPollSlots((prev) =>
+                            prev.map((s) => (s.key === slot.key ? { ...s, endDate: e.target.value } : s)),
+                          )
+                        }
+                        className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                      />
                       <input
                         type="time"
                         value={slot.endTime}
@@ -567,16 +592,16 @@ export default function EventFormPage() {
               </p>
               <div className="flex flex-wrap items-end gap-3">
                 <div>
-                  <label className="mb-1 block text-sm text-slate-400">Date</label>
+                  <label className="mb-1 block text-sm text-slate-400">Window starts</label>
                   <input
                     type="date"
-                    value={windowDate}
-                    onChange={(e) => setWindowDate(e.target.value)}
+                    value={windowStartDate}
+                    onChange={(e) => handleWindowStartDateChange(e.target.value)}
                     className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm text-slate-400">Window start</label>
+                  <label className="mb-1 block text-sm text-slate-400">at</label>
                   <input
                     type="time"
                     value={windowStartTime}
@@ -585,7 +610,17 @@ export default function EventFormPage() {
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm text-slate-400">Window end</label>
+                  <label className="mb-1 block text-sm text-slate-400">Window ends</label>
+                  <input
+                    type="date"
+                    value={windowEndDate}
+                    min={windowStartDate}
+                    onChange={(e) => setWindowEndDate(e.target.value)}
+                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">at</label>
                   <input
                     type="time"
                     value={windowEndTime}
@@ -720,13 +755,13 @@ export default function EventFormPage() {
           <SchedulingAssistant
             guildId={effectiveGuildId}
             userIds={inviteeIds}
-            date={eventType === 'single' ? date : pollMode === 'window' ? windowDate : (pollSlots[0]?.date ?? date)}
+            date={eventType === 'single' ? date : pollMode === 'window' ? windowStartDate : (pollSlots[0]?.date ?? date)}
             zone={timezone}
             proposedStart={
               eventType === 'single'
                 ? toUtcMillis(date, startTime)
                 : pollMode === 'window'
-                  ? toUtcMillis(windowDate, windowStartTime)
+                  ? toUtcMillis(windowStartDate, windowStartTime)
                   : pollSlots[0]
                     ? toUtcMillis(pollSlots[0].date, pollSlots[0].startTime)
                     : null
@@ -735,9 +770,9 @@ export default function EventFormPage() {
               eventType === 'single'
                 ? toUtcMillis(endDate, endTime)
                 : pollMode === 'window'
-                  ? toUtcMillis(windowDate, windowEndTime)
+                  ? toUtcMillis(windowEndDate, windowEndTime)
                   : pollSlots[0]
-                    ? toUtcMillis(pollSlots[0].date, pollSlots[0].endTime)
+                    ? toUtcMillis(pollSlots[0].endDate, pollSlots[0].endTime)
                     : null
             }
           />

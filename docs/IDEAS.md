@@ -216,3 +216,16 @@ roadmap gets revisited between phases.
     major-version bumps (vite's is three majors) that want a dedicated
     upgrade-and-test pass, not a `--force` run in passing. Revisit
     deliberately rather than let `npm audit` stay red indefinitely.
+
+18. **A multi-day window poll's availability slider shows only times, no
+    dates, once submissions can span more than one day.** Found while
+    building idea 6 (poll date/time consistency): `WindowAvailabilityPicker.tsx`
+    was already generic over the window's full millisecond span (it never
+    assumed a single day), so letting the organizer's form propose a
+    multi-day window (e.g. "Friday evening through Sunday night") needed no
+    change there. But its labels (`fmt()`, `h:mm a` only) and the
+    submission-bar tooltips show a bare time-of-day — fine when the whole
+    window fits in one day, ambiguous once it doesn't ("6:00 PM" on which of
+    the window's days?). Fix shape: switch `fmt()` to include the date
+    whenever `windowEndAt - windowStartAt` exceeds 24h, mirroring how
+    `formatTimeRange` already leads with the date for exactly this reason.

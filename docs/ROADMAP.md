@@ -151,7 +151,7 @@ stopped using the site.
 | 1 | Sandbox/staging environment | M | 1 | — | 0002 |
 | 14 | Seamless sandbox → prod promotion | M | 1 | 1 | 0002 |
 | 13 | Invitee change requests | L | 2 | — | 0003 |
-| 6 | Poll date/time consistency | M | 2 | — | TBD |
+| 6 | Poll date/time consistency | M | 2 | — | 0004 |
 | 3 | Event-specific invite links | M | 2 | informed by 13, 9 | TBD |
 | 5 | Calendar landing view | L | 3 | — | TBD |
 | 8 | Visual design pass | L | 3 | 5 | pitches first |
