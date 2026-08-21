@@ -216,9 +216,14 @@ accepted/declined/withdrawn). Renamed from the original `change_request` /
 just the organizer.
 
 `lib/outbox.ts` is already parameterised over the table and its key columns
-(`OutboxTable`, `OutboxKey`), so this is a union-type widening plus the new
-table in the two places that enumerate them: `reapExhaustedDeliveries` and the
-source-independent retry consumer added for F-04-H2.
+(`OutboxTable`, `OutboxKey`), so this is a union-type widening plus adding the
+new table to `reapExhaustedDeliveries`'s list. Unlike `notification_log`'s
+reminder/deadline sweeps, neither of the two sweeps below is windowed by a
+moving predicate (see "Cron changes" for why), so — like `sweepNewInvites`,
+which is in the same position and also has none — `change_request_log` does
+not need one of the source-independent retry consumers added for F-04-H2. An
+undelivered row simply keeps matching the primary sweep's own WHERE clause on
+every tick until it's delivered or exhausted.
 
 ## Endpoints
 
@@ -355,19 +360,23 @@ showing it with a warning. Re-making it is one click.
 
 ## Cron changes, and the constant that has to move with them
 
-Three new sweeps, all in `cron/reminders.ts` alongside the existing ones:
+Two new sweeps, both in `cron/reminders.ts` alongside the existing ones:
 
-- **`sweepChangeRequestOpened`** — undelivered `change_request_opened` rows.
-  Shaped exactly like `sweepNewInvites`: one global, uncursored scan ordered
+- **`sweepChangeRequestNotifications`** — undelivered `change_request_opened`
+  and `change_request_decision` rows, in a *single* query rather than two:
+  a discriminated `UNION ALL` of both recipient-generation queries, ordered
   by `(request_id, user_id)`, `LIMIT budget.deliveriesAffordable`, no
-  `CursorStore` entry needed. That sweep gets away without a cursor because
-  its predicate only shrinks as rows are delivered (a delivered row drops out
-  of the `LEFT JOIN ... WHERE nl.id IS NULL OR ...` filter and never matches
-  again) rather than staying eligible indefinitely the way "confirmed poll
-  option" or "poll deadline in the next day" do — this sweep's predicate has
-  the identical shrinking shape, so it gets the identical treatment.
-- **`sweepChangeRequestDecisions`** — same shape, for undelivered
-  `change_request_decision` rows.
+  `CursorStore` entry needed. Splitting this into two separately-named
+  functions (as an earlier pass of this spec had it) reads cleaner, but each
+  one is a fixed query that runs every tick whether or not there's anything
+  to do — see the `RESERVED_QUERIES` note below for why that split has a
+  real, measured cost, and why it isn't worth paying for a distinction that's
+  otherwise just organizational. This sweep gets away without a cursor
+  because its predicate only shrinks as rows are delivered (a delivered row
+  drops out of the `LEFT JOIN ... WHERE crl.id IS NULL OR ...` filter and
+  never matches again) rather than staying eligible indefinitely the way
+  "confirmed poll option" or "poll deadline in the next day" do — the same
+  shape `sweepNewInvites` already relies on for the same reason.
 - **`resolvePastDeadlineChangeRequests`** — mirrors
   `resolvePastDeadlinePolls` exactly: `SELECT ... WHERE status = 'pending'
   AND kind = 'time_change' AND vote_deadline_at <= ? ORDER BY
@@ -376,16 +385,26 @@ Three new sweeps, all in `cron/reminders.ts` alongside the existing ones:
   `vote_resolution_failures` on failure, budgeted via `budget.trySpend`. No
   cursor, same reasoning as the poll sweep it mirrors.
 
-**`budget.ts`'s fixed-overhead reserve has to be re-measured.** The comment
-there records "fourteen sweeps ... a tick against an empty database spends 21
-queries", with 22 reserved. Three more sweeps raises that floor by roughly
-three more fixed queries (one empty-result read each), each running even when
-there's nothing to do. The existing `d1limits.test.ts` is where the real
-number gets re-asserted after these sweeps are wired in — this spec doesn't
-guess the final constant, but the design should not need more than a small,
-single-digit increase to `RESERVED_QUERIES`, since none of the three sweeps
-introduces a new cursor (the two notification sweeps reuse `sweepNewInvites`'s
-uncursored shape, and the deadline sweep reuses `resolvePastDeadlinePolls`'s).
+**`budget.ts`'s fixed-overhead reserve had to be re-measured, and the margin
+turned out tighter than "a small increase" suggested.** The comment there
+recorded "fourteen sweeps ... a tick against an empty database spends 21
+queries", with 22 reserved. Two more always-run sweeps raise that floor by two
+more fixed queries (one empty-result read each) — `RESERVED_QUERIES` moves to
+24, re-asserted for real (not guessed) in `d1limits.test.ts` and
+`pass9.test.ts`'s empty-tick measurement. That two-query cost is *why* the two
+notification types share one query instead of two separate sweeps: a three-
+query version of this (which an earlier pass of this spec called for) made
+`pass6.test.ts`'s existing "a full terminal purge and a spent notification
+budget still fit one tick" test fail outright, not just take longer to
+converge — with three fixed queries, the steady-state budget left over for the
+90-day purge after every other sweep's fixed cost was one query short of what
+a two-chunk purge batch needs, *every single tick, forever*, since nothing
+about that shortfall changes as more ticks pass. Getting back to two fixed
+queries restored the exact margin that test depends on. The lesson generalises
+past this one feature: on a Free-plan tick, a fixed per-sweep cost is not a
+rounding error, and "small" isn't a safe assumption to write into a spec
+without checking it against the sweep that's already living closest to the
+ceiling.
 
 Delivery is deliberately *not* done inline in the request handler, even though
 that would be faster than waiting up to 15 minutes. A request handler that

@@ -4,6 +4,7 @@ import type { EventRow, OverrideRow } from '../lib/events';
 import { loadOverridesForEvents } from '../lib/events';
 import { expandOccurrencesForEvent, loadRecurrenceRulesForEvents, type RecurrenceRule } from '../lib/recurrence';
 import { resolvePastDeadlinePolls } from '../lib/polls';
+import { resolvePastDeadlineChangeRequests } from '../lib/changeRequests';
 import { getConfirmedAttendeeIds } from '../lib/attendance';
 import { pruneStaleSessions } from '../lib/sessions';
 import { MEMBERSHIP_GRACE_MS, revalidateStaleMemberships } from '../lib/db';
@@ -380,6 +381,171 @@ async function sweepNewInvites(env: Env, budget: TickBudget): Promise<void> {
       console.error(`sweepNewInvites failed for event ${row.event_id}/user ${row.user_id}:`, err);
     }
   }
+}
+
+// Invitee change requests (docs/specs/0003-event-change-requests.md).
+
+function requesterDisplayName(username: string, globalName: string | null): string {
+  return globalName || username;
+}
+
+async function notifyChangeRequestOnce(
+  env: Env,
+  budget: TickBudget,
+  user: ParticipantRow,
+  requestId: string,
+  notificationType: 'change_request_opened' | 'change_request_decision',
+  content: string,
+): Promise<void> {
+  await deliverThroughOutbox(
+    env,
+    'change_request_log',
+    { request_id: requestId, user_id: user.id, notification_type: notificationType },
+    user,
+    content,
+    budget,
+  );
+}
+
+// Both notification types from event_change_requests, in one query rather
+// than two -- see budget.ts's RESERVED_QUERIES: every sweep here costs at
+// least one fixed query even when it finds nothing to do, and this is one
+// less than the naive "one sweep per notification type" split would have
+// cost every tick, forever, for a feature most guilds will rarely use.
+//
+// The two branches share nothing structurally (different recipient sets,
+// different source predicates) so they're combined as a discriminated
+// UNION ALL rather than factored into shared SQL -- `kind_notif` says which
+// one a row is, and the columns each branch doesn't use are NULL.
+//
+// "opened" notifies the organizer of every new request, and every other
+// current invitee when it's a time_change (they're being asked to vote).
+// "decision" notifies the requester once their own request is decided
+// (withdrawn excluded -- that's self-initiated, there's no one to tell).
+// Both are shaped like sweepNewInvites -- one flat, uncursored global scan
+// -- for the same reason: the predicate only shrinks as rows are delivered,
+// it never re-admits a delivered row the way a time-windowed sweep's can.
+// See the spec's "Cron changes" section for why that means no
+// source-independent retry consumer is needed here either.
+async function sweepChangeRequestNotifications(env: Env, budget: TickBudget): Promise<void> {
+  if (budget.exhausted) return;
+  const now = Date.now();
+  const cutoff = membershipCutoff();
+  const { results } = await env.DB.prepare(
+    `WITH opened_recipients AS (
+       SELECT ecr.id AS request_id, e.organizer_id AS user_id, 1 AS is_organizer
+       FROM event_change_requests ecr JOIN events e ON e.id = ecr.event_id
+       UNION
+       SELECT ecr.id AS request_id, ei.user_id AS user_id, 0 AS is_organizer
+       FROM event_change_requests ecr
+       JOIN event_invites ei ON ei.event_id = ecr.event_id
+       WHERE ecr.kind = 'time_change' AND ei.user_id != ecr.requester_id
+     )
+     SELECT 'change_request_opened' AS kind_notif, r.request_id, r.user_id, r.is_organizer,
+            ecr.kind, ecr.event_id, e.title, ecr.proposed_start_at,
+            req.username AS requester_username, req.global_name AS requester_global_name,
+            NULL AS status, NULL AS decision_note,
+            u.notifications_enabled, u.dm_channel_id, u.timezone
+     FROM opened_recipients r
+     JOIN event_change_requests ecr ON ecr.id = r.request_id
+     JOIN events e ON e.id = ecr.event_id
+     JOIN users req ON req.id = ecr.requester_id
+     JOIN users u ON u.id = r.user_id
+     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = e.guild_id AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = e.guild_id AND g.is_active = 1
+     LEFT JOIN change_request_log crl
+       ON crl.request_id = r.request_id AND crl.user_id = r.user_id AND crl.notification_type = 'change_request_opened'
+     WHERE (
+       crl.id IS NULL
+       OR (crl.delivered_at IS NULL AND crl.failed_at IS NULL AND crl.attempt_count < ?
+           AND (crl.claimed_until IS NULL OR crl.claimed_until < ?) AND (crl.next_attempt_at IS NULL OR crl.next_attempt_at <= ?))
+     )
+
+     UNION ALL
+
+     SELECT 'change_request_decision' AS kind_notif, ecr.id AS request_id, ecr.requester_id AS user_id, 0 AS is_organizer,
+            ecr.kind, ecr.event_id, e.title, NULL AS proposed_start_at,
+            '' AS requester_username, NULL AS requester_global_name,
+            ecr.status, ecr.decision_note,
+            u.notifications_enabled, u.dm_channel_id, u.timezone
+     FROM event_change_requests ecr
+     JOIN events e ON e.id = ecr.event_id
+     JOIN users u ON u.id = ecr.requester_id
+     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = e.guild_id AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = e.guild_id AND g.is_active = 1
+     LEFT JOIN change_request_log crl
+       ON crl.request_id = ecr.id AND crl.user_id = ecr.requester_id AND crl.notification_type = 'change_request_decision'
+     WHERE ecr.status IN ('accepted','declined')
+       AND (
+         crl.id IS NULL
+         OR (crl.delivered_at IS NULL AND crl.failed_at IS NULL AND crl.attempt_count < ?
+             AND (crl.claimed_until IS NULL OR crl.claimed_until < ?) AND (crl.next_attempt_at IS NULL OR crl.next_attempt_at <= ?))
+       )
+     ORDER BY request_id, user_id
+     LIMIT ?`,
+  )
+    .bind(
+      cutoff, MAX_DELIVERY_ATTEMPTS, now, now,
+      cutoff, MAX_DELIVERY_ATTEMPTS, now, now,
+      budget.deliveriesAffordable,
+    )
+    .all<
+      {
+        kind_notif: 'change_request_opened' | 'change_request_decision';
+        request_id: string;
+        user_id: string;
+        is_organizer: number;
+        kind: 'time_change' | 'add_invitee';
+        event_id: string;
+        title: string;
+        proposed_start_at: number | null;
+        requester_username: string;
+        requester_global_name: string | null;
+        status: 'accepted' | 'declined' | null;
+        decision_note: string | null;
+      } & Omit<ParticipantRow, 'id'>
+    >();
+
+  for (const row of results) {
+    if (budget.exhausted) return;
+    const user: ParticipantRow = {
+      id: row.user_id,
+      notifications_enabled: row.notifications_enabled,
+      dm_channel_id: row.dm_channel_id,
+      timezone: row.timezone,
+    };
+
+    let content: string;
+    if (row.kind_notif === 'change_request_opened') {
+      const requesterName = requesterDisplayName(row.requester_username, row.requester_global_name);
+      if (row.kind === 'time_change') {
+        const when = formatWhen(row.proposed_start_at!, user.timezone);
+        content = row.is_organizer
+          ? `${requesterName} asked to move "${row.title}" to ${when}.\n${eventLink(env, row.event_id)}`
+          : `${requesterName} proposed moving "${row.title}" to ${when} -- vote here:\n${eventLink(env, row.event_id)}`;
+      } else {
+        content = `${requesterName} asked to invite someone to "${row.title}".\n${eventLink(env, row.event_id)}`;
+      }
+    } else {
+      content =
+        row.status === 'accepted'
+          ? `Your request on "${row.title}" was accepted.\n${eventLink(env, row.event_id)}`
+          : `Your request on "${row.title}" was declined.${row.decision_note ? ` ${row.decision_note}` : ''}\n${eventLink(env, row.event_id)}`;
+    }
+
+    try {
+      await notifyChangeRequestOnce(env, budget, user, row.request_id, row.kind_notif, content);
+    } catch (err) {
+      console.error(`sweepChangeRequestNotifications failed for request ${row.request_id}/user ${row.user_id}:`, err);
+    }
+  }
+}
+
+// Mirrors sweepPollDeadlines -- resolves any time_change vote whose deadline
+// has passed, before the notification sweeps above run so the requester's
+// decision DM goes out in the same tick where possible.
+async function sweepChangeRequestDeadlines(env: Env, budget: TickBudget): Promise<void> {
+  await resolvePastDeadlineChangeRequests(env, budget);
 }
 
 async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore): Promise<void> {
@@ -1270,12 +1436,14 @@ export async function runReminderSweep(env: Env): Promise<void> {
 
   await runIsolated('membershipRevalidation', () => sweepMembershipRevalidation(env, budget));
   await runIsolated('pollDeadlines', () => sweepPollDeadlines(env, budget));
+  await runIsolated('changeRequestDeadlines', () => sweepChangeRequestDeadlines(env, budget));
   await runIsolated('singleWinnerPollNotifications', () => sweepSingleWinnerPollNotifications(env, budget, cursors));
   await runIsolated('multiWinnerPollClosedNotifications', () =>
     sweepMultiWinnerPollClosedNotifications(env, budget, cursors),
   );
   await runIsolated('confirmedMultiWinnerOptions', () => sweepConfirmedMultiWinnerOptions(env, budget, cursors));
   await runIsolated('newInvites', () => sweepNewInvites(env, budget));
+  await runIsolated('changeRequestNotifications', () => sweepChangeRequestNotifications(env, budget));
   await runIsolated('reminders', () => sweepReminders(env, budget, cursors));
   await runIsolated('pollDeadlineReminders', () => sweepPollDeadlineReminders(env, budget, cursors));
   await runIsolated('voiceChannelInvites', () => sweepVoiceChannelInvites(env, budget, cursors));

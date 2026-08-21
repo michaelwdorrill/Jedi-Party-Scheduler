@@ -44,7 +44,7 @@ const FREE_D1_QUERIES = 50;
 const PAID_SUBREQUESTS = 1000; // far higher in reality; kept conservative
 const PAID_D1_QUERIES = 1000;
 
-// Headroom left unspent for the sweeps' own bookkeeping: fourteen sweeps each
+// Headroom left unspent for the sweeps' own bookkeeping: sixteen sweeps each
 // running one or more fixed queries (page reads, poll scans, the
 // terminal-history purge, session pruning, the give-up reaper, the two
 // source-independent retry consumers added for F-04-H2) regardless of how
@@ -57,9 +57,17 @@ const PAID_D1_QUERIES = 1000;
 // was ten, which was not enough to cover the overhead it existed for -- so
 // the sweeps overspent into the platform ceiling anyway.
 // Measured: a tick against an empty database spends 21 queries across its
-// fourteen sweeps. Twenty-two leaves a little room for that to drift without
-// silently eating into the allowance the sweeps below draw on.
-const RESERVED_QUERIES = 22;
+// original fourteen sweeps. The two invitee-change-request sweeps added in
+// docs/specs/0003 (deadline resolution, and a single combined query for both
+// opened/decision notifications -- see sweepChangeRequestNotifications in
+// cron/reminders.ts, which deliberately merges what could have been two
+// separate sweeps into one query specifically to keep this reserve from
+// growing by more than it has to) each run one fixed query of their own even
+// when empty, the same as every other sweep here; the reserve below is
+// bumped to match and re-asserted against a real empty-tick count in
+// worker/test/d1limits.test.ts and worker/test/pass9.test.ts rather than
+// guessed.
+const RESERVED_QUERIES = 24;
 const RESERVED_SUBREQUESTS = 4;
 
 // What one delivery attempt actually costs, which is not one number: the

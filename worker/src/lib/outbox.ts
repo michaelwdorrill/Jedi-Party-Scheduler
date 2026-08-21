@@ -95,7 +95,7 @@ export function pendingNotificationWhereBinds(now = Date.now()): unknown[] {
 
 export type OutboxKey = Record<string, string | number>;
 
-export type OutboxTable = 'notification_log' | 'group_nudge_log';
+export type OutboxTable = 'notification_log' | 'group_nudge_log' | 'change_request_log';
 
 // Takes the lease in one statement.
 //
@@ -166,7 +166,7 @@ async function claim(
 // whole backlog rather than one per exhausted row per tick.
 export async function reapExhaustedDeliveries(env: Env): Promise<void> {
   const now = Date.now();
-  for (const table of ['notification_log', 'group_nudge_log'] as const) {
+  for (const table of ['notification_log', 'group_nudge_log', 'change_request_log'] as const) {
     const res = await env.DB.prepare(
       `UPDATE ${table} SET failed_at = ?, claim_token = NULL, claimed_until = NULL
        WHERE delivered_at IS NULL AND failed_at IS NULL AND attempt_count >= ?

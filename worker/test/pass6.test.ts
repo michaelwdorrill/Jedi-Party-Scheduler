@@ -320,8 +320,12 @@ describe('a full terminal purge and a spent notification budget still fit one ti
 
     // Several ticks: the first spend their allowance on notifications and
     // defer the purge; a later, quieter one gets to it. Every one of them
-    // stays inside the ceiling.
-    for (let tick = 0; tick < 30; tick++) {
+    // stays inside the ceiling. Bumped from 30: the invitee-change-request
+    // sweeps (docs/specs/0003) added two fixed queries to every tick's
+    // reserve, leaving slightly less usable allowance and so slightly more
+    // ticks before the 120-invitee reminder backlog fully drains and a tick
+    // is quiet enough to fit the purge too.
+    for (let tick = 0; tick < 35; tick++) {
       db.resetQueryCount();
       await runReminderSweep(env);
       expect(db.queryCount).toBeLessThan(D1_FREE_PLAN_QUERY_BUDGET);
