@@ -244,11 +244,14 @@ All under the existing `requireAuth` + event-visibility rules.
   it. Allowing it would create a second, weirder path to the same write.
 - **`GET` is asymmetric on purpose.** An invitee seeing every other invitee's
   requests would leak "who wants to move this and why" to the whole invite
-  list, which is a conversation between one person and the organizer. The
-  vote tally on a `time_change` request is the one exception — every invitee
-  can already see it's open (they were asked to vote), so the response
-  includes the tally (yes/no/maybe counts) but not who cast which vote,
-  mirroring `getOptionTallies`'s aggregate-only shape.
+  list, which is a conversation between one person and the organizer. An open
+  `time_change` request is the one exception, and concretely: a non-organizer
+  caller's `GET` returns their own requests (any kind, any status) plus every
+  *other* invitee's `time_change` request that's still `pending` — visible
+  because voting on it requires seeing it, invisible again once it's decided,
+  same as an `add_invitee` request always is. The tally on those rows is
+  aggregate-only (yes/no/maybe counts, not who cast which vote), mirroring
+  `getOptionTallies`'s shape.
 - **`target_user_id` must be a member of the event's guild**, checked
   server-side against `user_guild_membership` via the same
   `requireActiveGuildMember` helper `loadEventIfVisible` already uses — not

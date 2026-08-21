@@ -505,6 +505,41 @@ describe('GET asymmetry and notification dedupe', () => {
     expect(asOrganizer).toHaveLength(2);
   });
 
+  it("exposes another invitee's open time_change request so it can be voted on, but not their add_invitee request", async () => {
+    const { db, env } = setup();
+    await seedBasicEvent(db);
+    await seedUser(db, 'inv-a');
+    await seedMembership(db, 'inv-a', 'guild-1');
+    await seedInvite(db, 'ev1', 'inv-a');
+    await seedUser(db, 'inv-b');
+    await seedMembership(db, 'inv-b', 'guild-1');
+    await seedInvite(db, 'ev1', 'inv-b');
+    await seedUser(db, 'inv-c');
+    await seedMembership(db, 'inv-c', 'guild-1');
+    await seedInvite(db, 'ev1', 'inv-c');
+    const event = await loadEventRow(db, 'ev1');
+
+    const requestId = await createChangeRequest(env, event, 'inv-a', {
+      kind: 'time_change',
+      proposedStartAt: Date.now() + 20 * HOUR_MS,
+      proposedEndAt: Date.now() + 21 * HOUR_MS,
+    });
+    await seedUser(db, 'target');
+    await seedMembership(db, 'target', 'guild-1');
+    await createChangeRequest(env, event, 'inv-a', { kind: 'add_invitee', targetUserId: 'target' });
+
+    // inv-b filed nothing, but should see inv-a's open time_change (to vote
+    // on it) and not inv-a's add_invitee (not theirs, not a vote).
+    const asInviteeB = await listChangeRequests(env, event, 'inv-b', false);
+    expect(asInviteeB.map((r) => r.kind).sort()).toEqual(['time_change']);
+
+    // Once decided, it's no longer someone else's business to see.
+    const request = await loadChangeRequest(env, 'ev1', requestId);
+    await declineChangeRequest(env, request!, 'organizer', null);
+    const afterDecision = await listChangeRequests(env, event, 'inv-b', false);
+    expect(afterDecision).toHaveLength(0);
+  });
+
   it('produces two distinct change_request_log rows for two requests on one event', async () => {
     const { db, env } = setup();
     await seedBasicEvent(db);

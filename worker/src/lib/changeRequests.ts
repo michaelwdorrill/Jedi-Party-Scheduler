@@ -459,8 +459,15 @@ export async function listChangeRequests(
         event.id,
         CHANGE_REQUEST_LIST_LIMIT,
       )
-    : env.DB.prepare(
-        `SELECT * FROM event_change_requests WHERE event_id = ? AND requester_id = ? ORDER BY created_at DESC LIMIT ?`,
+    : // Own requests, any kind/status, plus -- the one exception to "own
+      // requests only" -- every other invitee's *open* time_change request,
+      // since voting on it requires seeing it. Once decided it reverts to
+      // invisible for anyone but its own requester, same as an add_invitee
+      // request always is.
+      env.DB.prepare(
+        `SELECT * FROM event_change_requests
+         WHERE event_id = ? AND (requester_id = ? OR (kind = 'time_change' AND status = 'pending'))
+         ORDER BY created_at DESC LIMIT ?`,
       ).bind(event.id, viewerId, CHANGE_REQUEST_LIST_LIMIT)
   ).all<ChangeRequestRow>();
 
