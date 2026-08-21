@@ -60,13 +60,26 @@ function expectedSchema() {
 
 const SCHEMA_QUERY = `SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name`;
 
+// Windows resolves `npx` to `npx.cmd`, and spawning a bare `'npx'` via
+// execFileSync (no shell) fails with ENOENT there -- it only finds real
+// executables, not the .cmd shim npm installs. `shell: true` would fix that
+// too, but re-introduces shell quoting for SCHEMA_QUERY's spaces; naming the
+// real executable avoids that entirely.
+const NPX = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+
 function actualSchema() {
   const flag = remote ? '--remote' : '--local';
+  // Same rule as every other wrangler d1 command against the sandbox
+  // database: --env sandbox is required to resolve a D1 binding declared
+  // under [[env.sandbox.d1_databases]], since named environments don't
+  // inherit into the unscoped lookup a bare database name would otherwise
+  // use (the same reason [vars] doesn't inherit -- see wrangler.toml).
+  const envArgs = envName === 'sandbox' ? ['--env', 'sandbox'] : [];
   let output;
   try {
     output = execFileSync(
-      'npx',
-      ['wrangler', 'd1', 'execute', DB_NAME, flag, '--json', '--command', SCHEMA_QUERY],
+      NPX,
+      ['wrangler', 'd1', 'execute', DB_NAME, flag, ...envArgs, '--json', '--command', SCHEMA_QUERY],
       { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
     );
   } catch (err) {

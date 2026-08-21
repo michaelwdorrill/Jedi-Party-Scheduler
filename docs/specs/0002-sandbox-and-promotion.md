@@ -35,7 +35,13 @@ sandbox you stop using.
 A `[env.sandbox]` block in `worker/wrangler.toml` with its own `name`,
 `[[env.sandbox.d1_databases]]` and `[env.sandbox.vars]`, deployed with
 `wrangler deploy --env sandbox` and migrated with
-`wrangler d1 migrations apply jedi-party-scheduler-db-sandbox --remote`.
+`wrangler d1 migrations apply jedi-party-scheduler-db-sandbox --remote --env sandbox`.
+The trailing `--env sandbox` is required, not optional -- `d1 migrations
+apply`/`d1 execute` resolve a database name against the config for the given
+environment, and a binding declared under `[[env.sandbox.d1_databases]]`
+simply isn't visible without it. The same non-inheritance rule as `[vars]`,
+just discovered one command at a time the first time each was actually run
+against a live database.
 
 Same Cloudflare account, not a second one. SETUP.md's "Working with more than
 one Cloudflare account" section exists because juggling accounts was already
