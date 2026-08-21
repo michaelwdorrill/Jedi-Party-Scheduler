@@ -227,7 +227,13 @@ export default function ChangeRequestSection({
   if (requests.length === 0 && !isInvitee) return null;
 
   const myRequests = requests.filter((r) => r.requesterId === userId);
-  const votable = requests.filter((r) => r.kind === 'time_change' && r.status === 'pending' && r.requesterId !== userId);
+  // Voting is invitee-only (the spec: "every current invitee" votes; the
+  // organizer has Accept/Decline instead) -- gated on isInvitee, not merely
+  // "not the requester", so the organizer never sees vote buttons on their
+  // own event even though the GET response includes this row for them too.
+  const votable = isInvitee
+    ? requests.filter((r) => r.kind === 'time_change' && r.status === 'pending' && r.requesterId !== userId)
+    : [];
   const organizerPending = isOrganizer ? requests.filter((r) => r.status === 'pending') : [];
 
   const openInviteForm = async () => {
