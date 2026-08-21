@@ -1,6 +1,6 @@
 # 0003 — Invitee change requests
 
-**Status:** Ready to build
+**Status:** Built
 **Covers:** `IDEAS.md` item 13 · **Phase:** 2
 
 Lets an invitee ask the organizer for two things — "can we move this?" (with a

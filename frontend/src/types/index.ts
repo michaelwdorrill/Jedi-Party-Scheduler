@@ -166,3 +166,39 @@ export interface EventDetail extends EventOccurrence {
   invites: EventInvite[];
   pollOptions: PollOption[] | null;
 }
+
+// Invitee change requests (docs/specs/0003-event-change-requests.md).
+export type ChangeRequestKind = 'time_change' | 'add_invitee';
+export type ChangeRequestStatus = 'pending' | 'accepted' | 'declined' | 'withdrawn';
+
+// As returned by GET /events/:eventId/change-requests. What a given viewer
+// sees is asymmetric server-side -- see the spec -- so this shape is the
+// same for organizer and invitee callers, just a different subset of rows.
+export interface ChangeRequestView {
+  id: string;
+  kind: ChangeRequestKind;
+  requesterId: string;
+  requesterUsername: string;
+  requesterGlobalName: string | null;
+  proposedStartAt: number | null;
+  proposedEndAt: number | null;
+  occurrenceDate: string;
+  targetUserId: string | null;
+  targetUsername: string | null;
+  targetGlobalName: string | null;
+  message: string | null;
+  status: ChangeRequestStatus;
+  decisionNote: string | null;
+  eventRevision: number;
+  voteThresholdCount: number | null;
+  voteDeadlineAt: number | null;
+  // Aggregate only -- never a per-voter breakdown, mirroring PollOption's tally.
+  tally: { yes: number; no: number; maybe: number } | null;
+  myVote: PollVote | null;
+  createdAt: number;
+  decidedAt: number | null;
+  decidedBy: string | null;
+  // Advisory: the event has moved since this request was filed. Never true
+  // for a recurring time_change, whose accept path doesn't consult it.
+  stale: boolean;
+}
