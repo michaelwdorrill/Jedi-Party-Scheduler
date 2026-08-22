@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import { buildCalendarOccurrences } from '../lib/calendar';
-import { deleteUserCompletely, isGuildMember, isOwner, listFriends, mapUser, type UserRow } from '../lib/db';
+import { chunkIds, placeholders } from '../lib/d1';
+import { deleteUserCompletely, isGuildMember, isOwner, listFriends, mapUser, MEMBERSHIP_GRACE_MS, type UserRow } from '../lib/db';
 import { assertBoolean, assertTimezone, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
 
 export const meRoutes = new Hono<AppEnv>();
@@ -105,6 +106,72 @@ meRoutes.get('/events', async (c) => {
   if (to - from > LIMITS.MAX_QUERY_RANGE_MS) throw new ValidationError('from/to range is too large');
 
   return c.json(await buildCalendarOccurrences(c.env, userId, from, to));
+});
+
+// Every group across every server the caller is still an active member of.
+// The per-guild equivalent (GET /guilds/:id/groups) still exists for the
+// event form's invitee picker, which is legitimately server-scoped -- this
+// one exists so the Groups page doesn't need a server chosen up front, the
+// same reason /me/events does (spec 0006).
+meRoutes.get('/groups', async (c) => {
+  const userId = c.get('userId');
+
+  // Same membership predicate as the calendar: leaving a server has to take
+  // its groups off your list, and a membership row nothing has confirmed
+  // within the grace window stops counting.
+  const { results: groups } = await c.env.DB.prepare(
+    `SELECT gr.id, gr.guild_id, gr.name, gr.game, gr.idle_reminder_days, gr.created_by, g.name AS guild_name
+     FROM groups gr
+     JOIN user_guild_membership m
+       ON m.guild_id = gr.guild_id AND m.user_id = ? AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = gr.guild_id AND g.is_active = 1
+     ORDER BY g.name, gr.name`,
+  )
+    .bind(userId, Date.now() - MEMBERSHIP_GRACE_MS)
+    .all<{
+      id: string;
+      guild_id: string;
+      name: string;
+      game: string | null;
+      idle_reminder_days: number;
+      created_by: string;
+      guild_name: string;
+    }>();
+
+  // One chunked query for every group's members rather than one per group --
+  // same reason the per-guild route does it that way.
+  const membersByGroup = new Map<string, { id: string; username: string; global_name: string | null; avatar_hash: string | null }[]>();
+  for (const chunk of chunkIds(groups.map((g) => g.id))) {
+    const { results } = await c.env.DB.prepare(
+      `SELECT gm.group_id, u.id, u.username, u.global_name, u.avatar_hash
+       FROM group_members gm JOIN users u ON u.id = gm.user_id
+       WHERE gm.group_id IN (${placeholders(chunk.length)})`,
+    )
+      .bind(...chunk)
+      .all<{ group_id: string; id: string; username: string; global_name: string | null; avatar_hash: string | null }>();
+    for (const row of results) {
+      if (!membersByGroup.has(row.group_id)) membersByGroup.set(row.group_id, []);
+      membersByGroup.get(row.group_id)!.push(row);
+    }
+  }
+
+  return c.json(
+    groups.map((g) => ({
+      id: g.id,
+      guildId: g.guild_id,
+      guildName: g.guild_name,
+      name: g.name,
+      game: g.game,
+      idleReminderDays: g.idle_reminder_days,
+      createdBy: g.created_by,
+      members: (membersByGroup.get(g.id) ?? []).map((m) => ({
+        id: m.id,
+        username: m.username,
+        globalName: m.global_name,
+        avatarHash: m.avatar_hash,
+      })),
+    })),
+  );
 });
 
 meRoutes.get('/friends', async (c) => {

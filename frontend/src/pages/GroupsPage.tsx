@@ -7,22 +7,25 @@ import type { Friend, Group } from '../types';
 
 export default function GroupsPage() {
   const { user } = useAuth();
-  const { selectedGuildId } = useGuild();
+  const { guilds } = useGuild();
   const [groups, setGroups] = useState<Group[]>([]);
   const [friends, setFriends] = useState<Friend[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Group | 'new' | null>(null);
+  // Which server a *new* group belongs to. Groups are genuinely per-server
+  // (their members have to share one), so unlike the calendar this can't just
+  // span everything -- but it's a choice made when creating, not a mode the
+  // whole page sits in. Defaults to the first server you're in.
+  const [newGroupGuildId, setNewGroupGuildId] = useState('');
+
+  // The server whose roster the picker should offer: the one being edited, or
+  // the one chosen for a new group.
+  const editorGuildId = editing && editing !== 'new' ? editing.guildId : newGroupGuildId;
 
   const load = async () => {
-    if (!selectedGuildId) return;
     setLoading(true);
     try {
-      const [groupList, friendList] = await Promise.all([
-        api.get<Group[]>(`/guilds/${selectedGuildId}/groups`),
-        api.get<Friend[]>(`/me/friends?guild_id=${selectedGuildId}`),
-      ]);
-      setGroups(groupList);
-      setFriends(friendList);
+      setGroups(await api.get<Group[]>('/me/groups'));
     } finally {
       setLoading(false);
     }
@@ -30,10 +33,20 @@ export default function GroupsPage() {
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedGuildId]);
+  }, []);
 
-  if (!selectedGuildId) {
+  useEffect(() => {
+    if (!newGroupGuildId && guilds.length > 0) setNewGroupGuildId(guilds[0].id);
+  }, [guilds, newGroupGuildId]);
+
+  // Friends are legitimately server-scoped -- you can only group people you
+  // share a server with -- so this reloads whenever the editor's server does.
+  useEffect(() => {
+    if (!editorGuildId) return;
+    api.get<Friend[]>(`/me/friends?guild_id=${editorGuildId}`).then(setFriends);
+  }, [editorGuildId]);
+
+  if (guilds.length === 0) {
     return <p className="text-slate-400">You don't share any allow-listed servers yet.</p>;
   }
 
@@ -58,7 +71,7 @@ export default function GroupsPage() {
     memberUserIds: string[];
   }) => {
     if (editing === 'new') {
-      await api.post(`/guilds/${selectedGuildId}/groups`, {
+      await api.post(`/guilds/${newGroupGuildId}/groups`, {
         name: data.name,
         game: data.game,
         idle_reminder_days: data.idleReminderDays,
@@ -96,6 +109,23 @@ export default function GroupsPage() {
         )}
       </div>
 
+      {editing === 'new' && guilds.length > 1 && (
+        <div>
+          <label className="mb-1 block text-sm text-slate-400">Server</label>
+          <select
+            value={newGroupGuildId}
+            onChange={(e) => setNewGroupGuildId(e.target.value)}
+            className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+          >
+            {guilds.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {editing !== null && (
         <GroupEditor
           friends={pickableMembers}
@@ -126,6 +156,13 @@ export default function GroupsPage() {
                 <div className="font-medium">
                   {g.name}
                   {g.game && <span className="ml-2 text-sm font-normal text-slate-500">— {g.game}</span>}
+                  {/* Which server this group lives on. Needed now that the
+                      page lists every server's groups at once. */}
+                  {g.guildName && (
+                    <span className="ml-2 rounded bg-slate-800 px-1.5 py-0.5 text-xs font-normal text-slate-400">
+                      {g.guildName}
+                    </span>
+                  )}
                 </div>
                 <div className="text-sm text-slate-400">
                   {g.members.map((m) => m.globalName ?? m.username).join(', ') || 'No members'}

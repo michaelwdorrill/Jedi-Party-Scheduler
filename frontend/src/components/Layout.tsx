@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { APP_VERSION, PUBLISHED_AT } from '../lib/legal';
-import GuildSwitcher from './GuildSwitcher';
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   `rounded-md px-3 py-2 text-sm font-medium ${
@@ -59,7 +58,6 @@ export default function Layout() {
             </nav>
           </div>
           <div className="flex items-center gap-3">
-            <GuildSwitcher />
             {user && (
               <div className="flex items-center gap-2 text-sm text-slate-300">
                 <span>{user.globalName ?? user.username}</span>

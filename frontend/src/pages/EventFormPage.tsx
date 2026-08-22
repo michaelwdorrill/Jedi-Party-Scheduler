@@ -31,7 +31,7 @@ export default function EventFormPage() {
 
   // Which server this event belongs to. Defaults to the ?guild= a calendar
   // day-click or "New Event" button already carries, falling back to the
-  // top-bar guild switcher's current choice if that's ever missing -- but the
+  // last server you used if that's ever missing -- but the
   // picker below is what actually decides it from here on, not either of
   // those two initial sources. On edit this is never read; loadedGuildId (the
   // event's own guild, set once the event loads) is what's used instead, and
