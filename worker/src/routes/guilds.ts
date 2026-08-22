@@ -209,11 +209,17 @@ guildRoutes.post('/:guildId/groups', async (c) => {
 
   const groupId = newId();
   const now = Date.now();
+  // The creator is always a member of their own group (migration 0017).
+  // Deduped here rather than relying on INSERT OR IGNORE alone, so the count
+  // against MAX_GROUP_MEMBERS below reflects the roster that actually gets
+  // written -- and so a creator who *did* tick themselves in the picker
+  // doesn't silently consume two slots' worth of parameters.
+  const rosterIds = memberIds.includes(userId) ? memberIds : [userId, ...memberIds];
   await c.env.DB.batch([
     c.env.DB.prepare(
       `INSERT INTO groups (id, guild_id, name, game, idle_reminder_days, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).bind(groupId, guildId, name, game, idleReminderDays, userId, now),
-    ...chunkRows(memberIds, 3).map((chunk) =>
+    ...chunkRows(rosterIds, 3).map((chunk) =>
       c.env.DB.prepare(
         `INSERT OR IGNORE INTO group_members (group_id, user_id, added_at)
          VALUES ${chunk.map(() => '(?, ?, ?)').join(', ')}`,

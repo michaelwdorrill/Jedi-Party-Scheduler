@@ -3,6 +3,7 @@ import type { AppEnv } from '../lib/authMiddleware';
 import type { Env } from '../env';
 import { chunkRows } from '../lib/d1';
 import { filterActiveGuildMembers, requireActiveGuildMember } from '../lib/db';
+import { ownerDepartureStatements } from '../lib/groups';
 import { assertOptionalString, assertSafeInt, assertString, assertStringArray, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
 
 export const groupRoutes = new Hono<AppEnv>();
@@ -119,6 +120,13 @@ groupRoutes.patch('/:groupId', async (c) => {
   }
   if (memberIds !== undefined) {
     const now = Date.now();
+    // The owner stays on their own roster whatever the submitted list says.
+    // The edit form sends the complete desired membership, so an owner who
+    // simply doesn't tick themselves would otherwise silently leave -- which
+    // is a different intent from the explicit "remove me" that
+    // DELETE /:groupId/members/:userId expresses, and the only one of the two
+    // that should hand the group to someone else.
+    if (!memberIds.includes(userId)) memberIds = [userId, ...memberIds];
     statements.push(c.env.DB.prepare(`DELETE FROM group_members WHERE group_id = ?`).bind(groupId));
     // Multi-row inserts: a roster may hold MAX_GROUP_MEMBERS people, and one
     // statement each would put that many queries in a single batch.
@@ -194,6 +202,18 @@ groupRoutes.delete('/:groupId/members/:userId', async (c) => {
     return c.text('Not found', 404);
   }
   if (group.created_by !== requesterId) return c.text('Forbidden', 403);
+
+  // The owner removing themselves is the one case that changes who owns the
+  // group rather than just who's in it. Ownership moves to whoever has turned
+  // up to the most of this group's sessions (see lib/groups.ts), in the same
+  // batch as the removal so there's no committed moment where the group's
+  // owner isn't one of its members. If there's no one to hand it to, that
+  // throws and the removal is refused.
+  if (targetUserId === group.created_by) {
+    const { statements, successorId } = await ownerDepartureStatements(c.env, group);
+    await c.env.DB.batch(statements);
+    return c.json({ ok: true, transferredTo: successorId });
+  }
 
   await c.env.DB.prepare(`DELETE FROM group_members WHERE group_id = ? AND user_id = ?`)
     .bind(groupId, targetUserId)
