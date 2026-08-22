@@ -21,6 +21,23 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.3',
+    date: '22 August 2026',
+    summary: 'Uncle Owen is a calendar now, not a server switcher.',
+    added: [
+      'Your calendar shows everything across every server at once, plus your own personal time. No more switching servers to find out what you have on.',
+      'Filter the calendar to game sessions, personal time, or a single server — but "everything" is the default.',
+    ],
+    changed: [
+      'The server switcher is gone from the top bar. A server is now a label on an event and a choice you make when creating one, not a mode the whole app sits in.',
+      'Groups from every server appear on one page, each tagged with the server it belongs to.',
+      "You're automatically a member of any group you create, and existing groups have been corrected. If you leave a group you own, it passes to whoever has come to the most of its sessions.",
+    ],
+    fixed: [
+      'The owner-only user list can now tell someone who left a server from someone who was never in it, and a real login from a sign-in attempt that was turned away.',
+    ],
+  },
+  {
     version: '0.2',
     date: '22 August 2026',
     summary: 'Invitees can ask for changes, and polls handle multi-day sessions.',

@@ -92,6 +92,15 @@ roadmap gets revisited between phases.
    relaxing that would be a real privacy regression. Servers stop mattering
    for *viewing*; they keep mattering for *who you can add*.
 
+   **Built in v0.3** (`specs/0006-calendar-first.md`) — `GET /me/events` and
+   `GET /me/groups`, the calendar and dashboard spanning every server, server
+   demoted to a filter/label, and the top-bar switcher removed. **One piece
+   deliberately deferred:** the free/busy-only *server browse* ("see what
+   else is on in a server, without event detail"). It's a genuinely different
+   query with a privacy dimension -- it shows blocks for events you are not
+   invited to -- and belongs designed against `lib/freeBusy.ts`'s guarantees
+   rather than bolted onto the personal calendar. Still open.
+
 6. **Poll date/time handling inconsistency.** A fixed-time event lets you set
    separate start and end dates/times. Potential-invite events (both
    candidate-day polls and the time-window mode) currently don't offer that
@@ -215,6 +224,13 @@ roadmap gets revisited between phases.
     "logged in" from "attempted to log in and was turned away" on that same
     view would have made this specific investigation a one-query answer
     instead of three wrong guesses.
+
+    **Done in v0.3.** Both halves: the admin endpoint dropped its
+    `is_member = 1` filter and now tags each membership, with departed ones
+    struck through; and migration 0018 split `last_login_attempt_at` (stamped
+    by `upsertUser` as soon as Discord returns a profile) from
+    `last_login_at` (stamped by the new `markLoginSucceeded`, only once a
+    session is actually issued).
 
 16. **A group's creator can never be counted as a member of their own
     group.** Found in production: the "Spacebros" idle-group nudge fired

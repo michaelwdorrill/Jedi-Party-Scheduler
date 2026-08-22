@@ -99,7 +99,7 @@ event/invite/notification model that already exists:
   of idea 9's security surface after all. Shipped as a "copy invite link"
   button, no backend change.
 
-### Phase 3 — Calendar-first (ideas 5, 16, 15) → **v0.3**
+### Phase 3 — Calendar-first (ideas 5, 16, 15) → **v0.3** ✅ shipped
 
 The headline release, and the one that answers the loudest standing
 complaint: the app is *too server-heavy*. Idea 5 was rescoped in Aug 2026
@@ -113,10 +113,12 @@ think about servers":
 
 - **5, calendar-first.** A new `GET /me/events`, the calendar as the landing
   page, the guild switcher demoted from global nav to a contextual control,
-  and server reduced to a label/filter. Includes the free/busy-only server
-  browse — a privacy-relevant call, not just a layout one, designed against
-  `lib/freeBusy.ts`'s existing guarantees rather than around them. The
-  boundary that does *not* move: server stays load-bearing for invitation.
+  and server reduced to a label/filter. The boundary that does *not* move:
+  server stays load-bearing for invitation. **The free/busy-only server
+  browse was deliberately left out of v0.3** — it shows blocks for events you
+  are *not* invited to, which is a privacy-relevant design call rather than a
+  layout one, and belongs designed against `lib/freeBusy.ts`'s guarantees on
+  its own terms. Still open in `IDEAS.md`, so it still counts against 1.0.
 - **16, group creator membership.** Auto-seed the creator, backfill existing
   groups, ownership transfer on self-removal, and the owner/member split
   (owner adds-removes-renames-deletes; any member can create events for the
@@ -125,7 +127,7 @@ think about servers":
   "departed", and "logged in" from "was turned away at login". Small, and it
   belongs with the other "the app should say what it means" work.
 
-### Phase 3.5 — Visual design pass (idea 8) → **v0.4**
+### Phase 3.5 — Visual design pass (idea 8) → **v0.4** ← next
 
 Styles the set of views that survived Phase 3. Rule 3 above is the whole
 argument for this ordering — doing it first means paying for it twice.
@@ -198,9 +200,9 @@ shifts.
 | Version | Contents | Status |
 |---|---|---|
 | 0.1 | Everything up to and including the sandbox and promotion guardrails (Phases 0–1) | Shipped |
-| **0.2** | Phase 2 — invitee change requests, poll date consistency, invite links; plus the dependency upgrades and the version stamp | **Shipped 22 Aug 2026** |
-| 0.3 | Phase 3 — calendar-first (5), group creator membership (16), admin list gaps (15) | Next |
-| 0.4 | Visual design pass (8) | Planned |
+| **0.2** | Phase 2 — invitee change requests, poll date consistency, invite links; plus the dependency upgrades and the version stamp | Shipped 22 Aug 2026 |
+| **0.3** | Phase 3 — calendar-first (5), group creator membership (16), admin list gaps (15), changelog page | **Shipped 22 Aug 2026** |
+| 0.4 | Visual design pass (8) | Next |
 | 0.5 | Interactive bot (19) | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
@@ -221,9 +223,9 @@ shifts.
 | 3 | Event-specific invite links | S | 2 | 0.2 | 13 (scoped down after) | 0005 |
 | 17 | Frontend dependency majors | M | 2 | 0.2 | — | none needed |
 | 18 | Multi-day window slider labels | XS | 2 | 0.2 | 6 | none needed |
-| 5 | Calendar-first, not server-first | L | 3 | 0.3 | — | TBD |
-| 16 | Group creator membership + roles | M | 3 | 0.3 | — | TBD |
-| 15 | Admin list: departed vs never-member | S | 3 | 0.3 | — | TBD |
+| 5 | Calendar-first, not server-first | L | 3 | 0.3 | — | 0006 |
+| 16 | Group creator membership + roles | M | 3 | 0.3 | — | none needed |
+| 15 | Admin list: departed vs never-member | S | 3 | 0.3 | — | none needed |
 | 8 | Visual design pass | L | 3.5 | 0.4 | 5 | pitches first |
 | 19 | Interactive bot (RSVP, slash, sync) | L | 3.75 | 0.5 | 8 | TBD |
 | 9 | Self-service bot add + email | L | 4 | 0.6 | — | TBD |
