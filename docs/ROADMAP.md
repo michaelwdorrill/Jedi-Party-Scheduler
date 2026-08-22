@@ -130,13 +130,28 @@ think about servers":
   "departed", and "logged in" from "was turned away at login". Small, and it
   belongs with the other "the app should say what it means" work.
 
-### Phase 3.5 — Visual design pass (idea 8) → **v0.4** ← next
+### Phase 3.5 — Visual design pass (ideas 8, 20) → **v0.4** ← next
 
 Styles the set of views that survived Phase 3. Rule 3 above is the whole
 argument for this ordering — doing it first means paying for it twice.
 
 Idea 8 is also the one item on this roadmap that wants *options* rather than
 a spec: pitches to choose between, then a spec for the chosen one.
+
+**Idea 20 (merge the Dashboard into the Calendar) rides along with it, and
+deliberately isn't its own phase.** The itinerary becomes a right sidebar
+beside the calendar instead of a separate tab. It needs no worker work at
+all — after idea 5 both pages already call the same `GET /me/events` — so
+it is purely a question of layout, which is what this phase is for. Keeping
+it separate would mean designing the landing page once for the pass and
+again for the merge, i.e. the same double-payment Rule 3 exists to avoid.
+The design pitches should therefore assume the merged landing page rather
+than the current two-tab split.
+
+The open calls for idea 20 (whether the sidebar follows the calendar or
+stays anchored to now, what happens on mobile, where the header and action
+buttons live) are layout calls, so they get answered *by* the chosen pitch
+rather than before it.
 
 ### Phase 3.75 — An interactive bot (idea 19) → **v0.5**
 
@@ -205,7 +220,7 @@ shifts.
 | 0.1 | Everything up to and including the sandbox and promotion guardrails (Phases 0–1) | Shipped |
 | **0.2** | Phase 2 — invitee change requests, poll date consistency, invite links; plus the dependency upgrades and the version stamp | Shipped 22 Aug 2026 |
 | **0.3** | Phase 3 — calendar-first (5), group creator membership (16), admin list gaps (15), changelog page | **Shipped 22 Aug 2026** |
-| 0.4 | Visual design pass (8) | Next |
+| 0.4 | Visual design pass (8), Dashboard/Calendar merged into one landing page (20) | Next |
 | 0.5 | Interactive bot (19) | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
@@ -230,6 +245,7 @@ shifts.
 | 16 | Group creator membership + roles | M | 3 | 0.3 | — | none needed |
 | 15 | Admin list: departed vs never-member | S | 3 | 0.3 | — | none needed |
 | 8 | Visual design pass | L | 3.5 | 0.4 | 5 | pitches first |
+| 20 | Merge Dashboard into Calendar | M | 3.5 | 0.4 | 5 | folded into 8's pitches |
 | 19 | Interactive bot (RSVP, slash, sync) | L | 3.75 | 0.5 | 8 | TBD |
 | 9 | Self-service bot add + email | L | 4 | 0.6 | — | TBD |
 | 10 | Stale-account auto-delete | M | 4 | 0.6 | — | TBD |
