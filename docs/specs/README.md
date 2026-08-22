@@ -25,8 +25,17 @@ enough yet.
 
 ## Index
 
-| Spec | Covers | Phase | Status |
-|---|---|---|---|
-| [0001-quick-wins](0001-quick-wins.md) | Ideas 4, 12, 7, 11 | 0 | Built |
-| [0002-sandbox-and-promotion](0002-sandbox-and-promotion.md) | Ideas 1, 14 | 1 | Built |
-| [0003-event-change-requests](0003-event-change-requests.md) | Idea 13 | 2 | Draft |
+| Spec | Covers | Phase | Ships in | Status |
+|---|---|---|---|---|
+| [0001-quick-wins](0001-quick-wins.md) | Ideas 4, 12, 7, 11 | 0 | 0.1 | Built |
+| [0002-sandbox-and-promotion](0002-sandbox-and-promotion.md) | Ideas 1, 14 | 1 | 0.1 | Built |
+| [0003-event-change-requests](0003-event-change-requests.md) | Idea 13 | 2 | 0.2 | Built |
+| [0004-poll-datetime-consistency](0004-poll-datetime-consistency.md) | Idea 6 | 2 | 0.2 | Built |
+| [0005-event-invite-links](0005-event-invite-links.md) | Idea 3 | 2 | 0.2 | Built |
+| [0006-calendar-first](0006-calendar-first.md) | Idea 5 | 3 | 0.3 | Built |
+| [0007-server-noticeboard](0007-server-noticeboard.md) | Idea 5 (second half) | TBD | TBD | Decisions locked |
+| [0008-visual-design-pass](0008-visual-design-pass.md) | Ideas 8, 20 | 3.5 | 0.4 | Pitches — awaiting a choice |
+
+This index had drifted: it stopped at 0003 while 0004–0007 existed, and
+listed 0003 as Draft after it shipped. Keeping it current is cheap and it is
+the only place the specs are listed together.

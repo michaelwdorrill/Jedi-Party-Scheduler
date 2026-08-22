@@ -404,3 +404,45 @@ roadmap gets revisited between phases.
     designing that page twice, which is exactly the argument that put idea
     8 after idea 5 in the first place. So the design pitches should be
     drawn with the merged calendar+itinerary landing page as a given.
+
+21. **Clicking an event chip on the month calendar opens the New Event form
+    instead of the event.** `MonthCalendarGrid` renders each day cell as
+    `<button onClick={() => onDayClick(day)}>` and nests the day's
+    `EventChip`s inside it — and `EventChip` renders a react-router `<Link>`,
+    i.e. an `<a href>`. So a click on a chip triggers the chip's own
+    navigation *and* bubbles to the day cell's handler, which
+    `navigate('/events/new?date=…')`. The day-cell handler runs second and
+    wins, so the event you clicked never opens.
+
+    Also invalid HTML on its own terms — an anchor inside a button — which
+    collapses the two into one ambiguous control for keyboard and
+    screen-reader users. Found while auditing the calendar for the v0.4
+    design pass (`specs/0008`). The nesting and the double-fire are plain
+    from the code; the exact landing page is worth confirming against the
+    deployed sandbox before the fix is written.
+
+    Fix is forced by all three of 0008's pitches — every one of them has to
+    say what a day cell *is*, and none can keep "a button that contains
+    links". Likely shape: the cell stops being a button, chips stay links,
+    and "new event on this day" becomes an explicit affordance rather than
+    the cell's whole background.
+
+22. **The calendar can only ever show this month and next month.**
+    `CalendarPage` holds `tab: 0 | 1` and `monthWindow(monthsFromNow: 0 | 1,
+    zone)` takes that literal type, so there is no arbitrary month paging
+    anywhere in the app — you cannot look at December from August, and you
+    cannot look backwards at all. `fullWindow()` fetches exactly those two
+    months, so it's a data limit as well as a UI one.
+
+    Noticed while writing `specs/0008`, where it matters twice: it makes
+    idea 20's "does the sidebar follow the calendar or stay anchored to now"
+    much cheaper than it looked (the grid moves by one month, once, not to
+    "arbitrary months" as that entry assumed), and pitch C's value partly
+    rests on the ceiling being *invisible* rather than raised.
+
+    Deliberately left out of v0.4: it's a behaviour change, not a design one.
+    Worth deciding whether the fix is a real month pager (prev/next without
+    bound, which means `/me/events` gets asked for arbitrary windows and the
+    query bound that made spec 0006 cheap needs re-checking) or simply a
+    wider fixed window. Also worth asking whether looking *backwards* at past
+    sessions is wanted — nothing in the app offers that today.

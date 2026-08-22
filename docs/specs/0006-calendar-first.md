@@ -1,6 +1,6 @@
 # 0006 — Calendar-first, not server-first
 
-**Status:** In progress
+**Status:** Built
 **Covers:** `IDEAS.md` item 5 · **Phase:** 3 · **Ships in:** v0.3
 
 ## The complaint
