@@ -107,16 +107,76 @@ Two values in the token set, applied once. It is the one place the direction
 spends boldness, and it is diegetic rather than decorative: the world this is
 named after has two suns, so things in it are lit twice.
 
-### How far the theme goes — the one open call
+### Scenery: full homestead by default, twin suns in Settings
 
-A dial, not a fork; the token set is identical at all three settings, so moving
-later is cheap.
+Decided by review. The dial stops being a design question and becomes a
+preference someone can reach.
 
-| Setting | What it adds | Trade |
+| Setting | What it is | |
 |---|---|---|
-| 1 · Atmosphere only | Palette, type, double shadow. No imagery. | A stranger wouldn't clock the reference. |
-| **2 · Twin-sun mark** *(recommended)* | Two-circle logo mark; horizon-with-vaporators on the login page and empty states. | Present, never in the way. |
-| 3 · Full homestead | Sunset wash behind the header, sand-grain texture, stencilled panel labels. | Most characterful; most likely to wear thin by the four-hundredth visit. |
+| **Homestead** | Everything in *Twin suns*, plus: the binary-sunset wash behind the header, a sand-grain overlay on the ground, stencilled panel rules on section heads, and vaporators on the horizon at the foot of the landing page. | **Default** |
+| **Twin suns** | Palette, type, the double shadow, and the two-circle mark. No wash, no grain, no scenery. | Settings → Scenery |
+
+**The two are additive, and that is what makes this cheap.** *Twin suns* is
+*Homestead* with the scenery removed — not a second design. Same tokens, same
+type, same layout, same components; the toggle adds or removes one class on the
+app root. There is no second visual system to maintain and no combinatorial
+testing beyond "does each surface still read with the wash off".
+
+Concretely, `Homestead` is a `data-scenery="homestead"` attribute on `<html>`
+and a handful of rules keyed off it. Nothing else in the app branches on it.
+
+The third position from the earlier draft — *atmosphere only*, no mark — drops
+out. It existed to hedge on how far to commit, and that is now answered. With
+the toggle built, adding it back is one more value in the same enum.
+
+#### Three implementation calls this forces
+
+**1. It must not flash.** If the preference is read from storage in React after
+mount, everyone on *Twin suns* watches the homestead paint and then disappear,
+on every load. So the choice is stamped onto `<html>` by a small inline script
+in `index.html` before first paint — the same technique dark-mode toggles use:
+
+```html
+<script>
+  try {
+    var s = localStorage.getItem('uo.scenery');
+    document.documentElement.dataset.scenery =
+      s === 'twin-suns' ? 'twin-suns'
+      : s === 'homestead' ? 'homestead'
+      : matchMedia('(prefers-contrast: more)').matches ? 'twin-suns' : 'homestead';
+  } catch (e) { document.documentElement.dataset.scenery = 'homestead'; }
+</script>
+```
+
+Cheap, but invisible until it is missing, and the kind of thing that gets
+discovered long after it should have been.
+
+**2. It lives in local storage, not the database.** This keeps v0.4 free of a
+migration entirely, which is worth something in a repo that has had three
+schema-drift incidents in production (`SETUP.md`). The cost is honest: the
+preference is per-device, so a phone and a laptop can disagree. `users` already
+has a `timezone` column and a `scenery` beside it is a small change later if
+that turns out to grate — see open question 3.
+
+**3. Increased contrast flips the default, an explicit choice never.** The wash
+and the grain are the parts that cost text contrast. If the OS asks for
+increased contrast and the user has *not* chosen, the default resolves to *Twin
+suns* (the `prefers-contrast` branch above). An explicit choice always beats the
+inference, in both directions — the same precedence the theme tokens use.
+
+#### What Homestead has to prove before it ships
+
+It is the default, so it carries the burden, not the toggle:
+
+- **Contrast with the wash on.** Header text and nav sit over a gradient running
+  violet → rust → amber. Every state of that chrome has to clear 4.5:1 against
+  the darkest and lightest points of the gradient, not just the middle.
+- **The grain must not be an image.** It is an inline SVG `feTurbulence` data
+  URI at ~5% opacity, `pointer-events: none`, behind content. No asset enters
+  the build and it costs no request.
+- **Body text never sits on the wash.** The gradient is confined to the header
+  band and fades to the ground before content starts.
 
 ### One practical constraint
 
@@ -144,6 +204,11 @@ every surface reads from a token.
 3. **View switch.** Month/agenda toggle, persisted, agenda as the mobile
    default; the merged landing page from idea 20; `/calendar` redirects to `/`.
 
+The Scenery setting belongs to branch 2 (identity), along with the inline
+pre-paint script and the Settings control. It is not a fourth branch: shipping
+the identity without its own escape hatch would mean a window where the only
+way out of the wash is a code change.
+
 Each lands on the sandbox before `main`, per CLAUDE.md. Three round trips
 rather than one, but each is a thing that can be looked at and judged on its
 own.
@@ -159,7 +224,7 @@ own.
 
 ## Out of scope
 
-- **A light theme in v0.4.** The tokens above define one and the palette table
+- **A user-facing light theme in v0.4.** The tokens above define one and the palette table
   carries its values, but shipping and reviewing both doubles the surface.
   Dark-first now, light flipped on when it can be looked at properly.
 - **Raising the two-month ceiling** (idea 22). The agenda view *hides* it; it
@@ -171,16 +236,15 @@ own.
 
 ## Open questions
 
-1. **Theme intensity** — setting 1, 2 or 3. Recommended: 2.
-2. **Eight-way group-colour distinguishability** was never verified on the old
+1. **Eight-way group-colour distinguishability** was never verified on the old
    palette and is not yet verified on the new one. Worth checking against the
    real group list on the sandbox rather than in the abstract.
-3. **Does the view preference belong on the server?** Local storage is right
-   for v0.4 — no schema change, no migration — but it means the preference
-   doesn't follow you between devices. `users` already has a `timezone` column;
-   a `default_view` beside it is a small future change if it turns out to
-   matter.
-4. **Does the agenda need its own range control** once it is the primary view
+2. **Do the view and scenery preferences belong on the server?** Local storage
+   is right for v0.4 — no schema change, no migration — but both are per-device,
+   so a phone and a laptop can disagree. `users` already has a `timezone`
+   column; `default_view` and `scenery` beside it are a small future change if
+   it turns out to matter. Worth deciding together rather than one at a time.
+3. **Does the agenda need its own range control** once it is the primary view
    on mobile, given idea 22's ceiling? Deliberately not answered here.
 
 ## Rejected alternatives
@@ -191,7 +255,14 @@ own.
   different questions, and keeping both is what makes the mobile problem go
   away.
 - **Theming the navigation** ("Tosche Station" for Settings, and so on). The
-  reliable way to make a themed app worse to use.
+  reliable way to make a themed app worse to use. Note this does *not* extend to
+  the Scenery setting's own option labels — "Homestead" and "Twin suns" are
+  preference names rather than controls anyone needs to find under pressure, and
+  each carries a plain one-line description beneath it.
+- **Shipping Twin suns as the default and Homestead as opt-in.** The safer
+  ordering, and rejected deliberately: almost nobody opens Settings to turn
+  decoration *on*, so the app's actual identity would have been something most
+  users never saw.
 - **A light-first identity.** Tatooine daylight is the obvious pitch and the
   palette above supports it, but the app is dark today and its users arrive
   from Discord. Dark-first, light later.
