@@ -87,6 +87,10 @@ export default function Layout() {
           Privacy
         </NavLink>
         <span className="px-2">·</span>
+        <NavLink to="/changelog" className="hover:text-slate-400">
+          Changelog
+        </NavLink>
+        <span className="px-2">·</span>
         <span>
           v{APP_VERSION} — published {PUBLISHED_AT}
         </span>

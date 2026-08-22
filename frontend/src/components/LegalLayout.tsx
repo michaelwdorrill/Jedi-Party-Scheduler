@@ -4,9 +4,15 @@ import { APP_VERSION, LAST_UPDATED, PUBLISHED_AT, SERVICE_NAME } from '../lib/le
 export default function LegalLayout({
   title,
   children,
+  // LAST_UPDATED is when the *legal text* changed, which is meaningful on the
+  // Terms and Privacy pages and actively misleading anywhere else -- the
+  // changelog is not "last updated" whenever the policies were revised. Pages
+  // that aren't legal documents pass false and supply their own framing.
+  showLastUpdated = true,
 }: {
   title: string;
   children: React.ReactNode;
+  showLastUpdated?: boolean;
 }) {
   return (
     <div className="min-h-screen">
@@ -22,13 +28,18 @@ export default function LegalLayout({
             <Link to="/privacy" className="hover:text-slate-200">
               Privacy
             </Link>
+            <Link to="/changelog" className="hover:text-slate-200">
+              Changelog
+            </Link>
           </nav>
         </div>
       </header>
 
       <main className="mx-auto max-w-3xl px-4 py-8">
         <h1 className="text-3xl font-bold">{title}</h1>
-        <p className="mt-1 text-sm text-slate-500">Last updated {LAST_UPDATED}</p>
+        {showLastUpdated && (
+          <p className="mt-1 text-sm text-slate-500">Last updated {LAST_UPDATED}</p>
+        )}
         <div className="legal mt-6 space-y-5 text-slate-300">{children}</div>
 
         {/* Which build of the app these terms describe -- distinct from

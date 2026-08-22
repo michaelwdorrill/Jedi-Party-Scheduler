@@ -11,6 +11,7 @@ import GroupsPage from './pages/GroupsPage';
 import PersonalEventPage from './pages/PersonalEventPage';
 import PrivacyPage from './pages/PrivacyPage';
 import TermsPage from './pages/TermsPage';
+import ChangelogPage from './pages/ChangelogPage';
 import SettingsPage from './pages/SettingsPage';
 import AdminUsersPage from './pages/AdminUsersPage';
 
@@ -23,6 +24,7 @@ export default function App() {
           be readable without logging in. */}
       <Route path="/privacy" element={<PrivacyPage />} />
       <Route path="/terms" element={<TermsPage />} />
+      <Route path="/changelog" element={<ChangelogPage />} />
 
       <Route element={<AuthGuard />}>
         <Route element={<Layout />}>
