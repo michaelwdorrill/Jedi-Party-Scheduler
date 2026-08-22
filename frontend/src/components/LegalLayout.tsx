@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { LAST_UPDATED, SERVICE_NAME } from '../lib/legal';
+import { APP_VERSION, LAST_UPDATED, PUBLISHED_AT, SERVICE_NAME } from '../lib/legal';
 
 export default function LegalLayout({
   title,
@@ -30,6 +30,15 @@ export default function LegalLayout({
         <h1 className="text-3xl font-bold">{title}</h1>
         <p className="mt-1 text-sm text-slate-500">Last updated {LAST_UPDATED}</p>
         <div className="legal mt-6 space-y-5 text-slate-300">{children}</div>
+
+        {/* Which build of the app these terms describe -- distinct from
+            LAST_UPDATED above, which is when the legal text itself last
+            changed. The two move independently: a release can ship without
+            touching the policies, and the policies can be revised without a
+            release. */}
+        <footer className="mt-10 border-t border-slate-800 pt-4 text-xs text-slate-500">
+          {SERVICE_NAME} v{APP_VERSION} — published {PUBLISHED_AT}
+        </footer>
       </main>
     </div>
   );

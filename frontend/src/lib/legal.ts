@@ -11,6 +11,16 @@ export const CONTACT_EMAIL = 'JediParty@proton.me';
 export const SERVICE_NAME = 'Uncle Owen';
 export const LAST_UPDATED = '27 July 2026';
 
+// The released version of the app, and when that version was published.
+//
+// Deliberately hand-maintained constants rather than something derived from
+// the build (a git SHA, `new Date()` at bundle time): those change on every
+// rebuild, including rebuilds that ship no user-visible change at all, which
+// would make "published" mean "last redeployed" instead of "last released".
+// Bump both together when cutting a release.
+export const APP_VERSION = '0.2';
+export const PUBLISHED_AT = '22 August 2026, 06:18 UTC';
+
 // The person or entity legally responsible for the data ("data controller"
 // under GDPR). For a personally-run project this is just your name.
 export const OPERATOR = 'the operator of Uncle Owen';
