@@ -446,3 +446,33 @@ roadmap gets revisited between phases.
     query bound that made spec 0006 cheap needs re-checking) or simply a
     wider fixed window. Also worth asking whether looking *backwards* at past
     sessions is wanted — nothing in the app offers that today.
+
+23. **The sandbox has no frontend, so the sandbox-first rule has a blind spot
+    for frontend-only changes.** `deploy-sandbox.yml` is worker-only — every
+    step runs with `working-directory: worker` — and `deploy-pages.yml`
+    publishes the frontend from `main` and nowhere else. So pushing a
+    frontend-only branch to `sandbox` deploys a Worker that didn't change and
+    puts the actual diff nowhere anyone can click.
+
+    `SETUP.md` and CLAUDE.md already say the intended route is
+    `VITE_API_BASE_URL=<sandbox worker url> npm run dev` locally, and for a
+    worker change that's clearly right — a second Pages deployment would be
+    cost for no benefit. But v0.4 is three branches of almost entirely
+    frontend work (`specs/0009`), which is the first time the gap really
+    bites: "verify it on the sandbox" turns into "run it on your own machine",
+    which only Michael can do, and which leaves no artifact anyone else can
+    look at.
+
+    Found while pushing v0.4 branch 1. Worth deciding between:
+    - **A sandbox Pages project.** Cleanest, and makes "go look at it" a link
+      rather than a local build. Cost is a second Pages deployment plus the
+      env-parity surface that `check:env-parity` would want extending to.
+    - **A preview build artifact on CI.** Cheaper — upload `frontend/dist`
+      from the existing CI run so any branch has something downloadable — but
+      it's a static bundle with no API base URL baked in, so it needs one
+      configured at build time to be useful.
+    - **Leave it, and make the rule explicit.** Say plainly in CLAUDE.md that
+      frontend-only changes are verified locally, so nobody reads
+      "sandbox-first" as promising something it can't do for them.
+
+    The third is free and should happen regardless of whether the first two do.
