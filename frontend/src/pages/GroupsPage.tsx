@@ -40,12 +40,11 @@ export default function GroupsPage() {
   // `friends` comes from GET /me/friends, which deliberately excludes the
   // caller -- correct for "who can I invite to an event" (its original
   // purpose, still used unmodified by EventFormPage), wrong for "who can go
-  // in this group": a group's creator was structurally unable to ever add
-  // themselves as a member, since this was the only list the picker below
-  // offered anything from. The server side already has no such exclusion
-  // (PATCH /groups/:id validates member_user_ids against active guild
-  // membership only), so this is purely about giving the picker a chance to
-  // offer yourself as an option.
+  // in this group". The picker still needs to be able to render you, because
+  // you are always a member of a group you own (migration 0017) and the
+  // editor shows that membership as a locked selection rather than hiding
+  // it. The server has no such exclusion either -- PATCH /groups/:id
+  // validates member_user_ids against active guild membership only.
   const pickableMembers = user
     ? [...friends, { id: user.id, username: user.username, globalName: user.globalName, avatarHash: user.avatarHash }].sort(
         (a, b) => (a.globalName ?? a.username).localeCompare(b.globalName ?? b.username),
@@ -101,6 +100,9 @@ export default function GroupsPage() {
         <GroupEditor
           friends={pickableMembers}
           initial={editing === 'new' ? undefined : editing}
+          // Only lock yourself in on groups you own -- which is every group
+          // you can reach this editor for, since editing is owner-only.
+          lockedUserId={editing === 'new' || editing.createdBy === user?.id ? user?.id : undefined}
           onSave={handleSave}
           onCancel={() => setEditing(null)}
         />
