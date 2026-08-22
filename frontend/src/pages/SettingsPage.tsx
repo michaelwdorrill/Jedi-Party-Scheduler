@@ -4,6 +4,7 @@ import { API_BASE_URL, api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { clearToken, getToken } from '../auth/tokenStorage';
 import TimezoneSelect from '../components/TimezoneSelect';
+import { buttonClass, cardClass } from '../components/ui';
 
 export default function SettingsPage() {
   const { user, refreshUser, logout } = useAuth();
@@ -77,15 +78,15 @@ export default function SettingsPage() {
     <div className="mx-auto max-w-md space-y-5">
       <h1 className="text-2xl font-semibold">Settings</h1>
 
-      <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
+      <div className={cardClass('md', 'space-y-3')}>
         <div>
-          <label className="mb-1 block text-sm text-slate-400">
+          <label className="mb-1 block text-sm text-muted">
             Default timezone (used to display events and pick times)
           </label>
           <TimezoneSelect value={timezone} onChange={setTimezone} />
         </div>
 
-        <label className="flex items-start gap-2 text-sm text-slate-300">
+        <label className="flex items-start gap-2 text-sm text-ink-dim">
           <input
             type="checkbox"
             checked={notificationsEnabled}
@@ -95,7 +96,7 @@ export default function SettingsPage() {
           Send me Discord DMs for invites and reminders
         </label>
 
-        <label className="flex items-start gap-2 text-sm text-slate-300">
+        <label className="flex items-start gap-2 text-sm text-ink-dim">
           <input
             type="checkbox"
             checked={freeBusyVisible}
@@ -104,7 +105,7 @@ export default function SettingsPage() {
           />
           <span>
             Let people I share a server with see when I'm busy
-            <span className="block text-xs text-slate-500">
+            <span className="block text-xs text-faint">
               They only ever see opaque blocks of time — never the name, game, or people involved.
               Turn this off and they see nothing at all for you.
             </span>
@@ -114,18 +115,18 @@ export default function SettingsPage() {
         <button
           disabled={saving}
           onClick={handleSave}
-          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          className={buttonClass('primary', 'lg')}
         >
           {saving ? 'Saving…' : 'Save'}
         </button>
         {saved && <p className="text-sm text-emerald-400">Saved.</p>}
       </div>
 
-      <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
+      <div className={cardClass('md', 'space-y-3')}>
         <h2 className="font-semibold">Your data</h2>
-        <p className="text-sm text-slate-400">
+        <p className="text-sm text-muted">
           See the{' '}
-          <Link to="/privacy" className="text-indigo-400 underline">
+          <Link to="/privacy" className="text-accent-text underline">
             Privacy Policy
           </Link>{' '}
           for what's stored and why.
@@ -133,16 +134,16 @@ export default function SettingsPage() {
         <button
           disabled={exporting}
           onClick={handleExport}
-          className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800 disabled:opacity-50"
+          className={buttonClass('secondary')}
         >
           {exporting ? 'Preparing…' : 'Download my data'}
         </button>
       </div>
 
       {user?.isOwner && (
-        <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <div className={cardClass('md', 'space-y-3')}>
           <h2 className="font-semibold">Owner</h2>
-          <Link to="/admin/users" className="text-sm text-indigo-400 underline">
+          <Link to="/admin/users" className="text-sm text-accent-text underline">
             View all users
           </Link>
         </div>
@@ -150,7 +151,7 @@ export default function SettingsPage() {
 
       <div className="space-y-3 rounded-lg border border-red-900 bg-red-950/20 p-4">
         <h2 className="font-semibold text-red-300">Delete account</h2>
-        <p className="text-sm text-slate-400">
+        <p className="text-sm text-muted">
           Permanently removes everything: your profile, personal time blocks, RSVPs, poll votes,
           group memberships, and every event you organised. Immediate and irreversible.
         </p>

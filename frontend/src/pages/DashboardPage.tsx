@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
 import { formatTimeRange } from '../lib/datetime';
 import type { EventOccurrence } from '../types';
+import { Button, Card, PageHeader } from '../components/ui';
 
 export default function DashboardPage() {
   const { user } = useAuth();
@@ -36,39 +37,25 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold">
-          Welcome back{user ? `, ${user.globalName ?? user.username}` : ''}
-        </h1>
-        <div className="flex gap-2">
-          <Link
-            to="/personal/new"
-            className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
-          >
-            + Personal time
-          </Link>
-          <Link
-            to="/events/new"
-            className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
-          >
-            + New Event
-          </Link>
-        </div>
-      </div>
+      <PageHeader title={`Welcome back${user ? `, ${user.globalName ?? user.username}` : ''}`}>
+        <Button to="/personal/new" variant="secondary">
+          + Personal time
+        </Button>
+        <Button to="/events/new">+ New Event</Button>
+      </PageHeader>
 
       {guilds.length === 0 ? (
-        <p className="text-slate-400">
+        <p className="text-muted">
           You don't share any allow-listed Discord servers with this app yet. Ask the owner to
           add your server to the allow-list.
         </p>
       ) : (
-        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-          <h2 className="mb-3 font-semibold">Upcoming sessions</h2>
+        <Card title="Upcoming sessions">
           {loading ? (
-            <p className="text-slate-400">Loading…</p>
+            <p className="text-muted">Loading…</p>
           ) : upcoming.length === 0 ? (
-            <p className="text-slate-400">
-              Nothing on the calendar yet. <Link to="/calendar" className="text-indigo-400 underline">Create an event</Link>.
+            <p className="text-muted">
+              Nothing on the calendar yet. <Link to="/calendar" className="text-accent-text underline">Create an event</Link>.
             </p>
           ) : (
             <ul className="space-y-2">
@@ -76,10 +63,10 @@ export default function DashboardPage() {
                 <li key={occ.occurrenceId}>
                   <Link
                     to={occ.isPersonal ? `/personal/${occ.eventId}` : `/events/${occ.eventId}`}
-                    className="flex items-center justify-between rounded px-2 py-1.5 hover:bg-slate-800"
+                    className="flex items-center justify-between rounded px-2 py-1.5 hover:bg-raised"
                   >
                     <span>{occ.title}</span>
-                    <span className="text-sm text-slate-400">
+                    <span className="text-sm text-muted">
                       {occ.startAt && occ.endAt
                         ? formatTimeRange(occ.startAt, occ.endAt, zone)
                         : 'Poll open'}
@@ -89,7 +76,7 @@ export default function DashboardPage() {
               ))}
             </ul>
           )}
-        </div>
+        </Card>
       )}
     </div>
   );

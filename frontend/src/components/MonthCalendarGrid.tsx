@@ -2,6 +2,8 @@ import { DateTime } from 'luxon';
 import { buildMonthGrid } from '../lib/datetime';
 import type { EventOccurrence } from '../types';
 import EventChip from './EventChip';
+import { focusRing } from './ui/styles';
+import { cardClass } from './ui';
 
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -41,9 +43,9 @@ export default function MonthCalendarGrid({
   }
 
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900 p-3">
+    <div className={cardClass('sm')}>
       <div className="mb-2 text-center font-semibold">{monthStart.toFormat('MMMM yyyy')}</div>
-      <div className="grid grid-cols-7 gap-1 text-xs text-slate-500">
+      <div className="grid grid-cols-7 gap-1 text-xs text-faint">
         {WEEKDAY_LABELS.map((d) => (
           <div key={d} className="p-1 text-center">
             {d}
@@ -55,26 +57,55 @@ export default function MonthCalendarGrid({
           const key = day.toISODate()!;
           const inMonth = day.hasSame(monthStart, 'month');
           const isToday = day.equals(today);
+          // ring-accent-hover, not ring-accent: today's ring was indigo-500 while
+          // buttons were indigo-600, and this branch preserves that difference
+          // rather than quietly closing it. 0009 unifies them on --tatoo-i.
           const dayEvents = (byDay.get(key) ?? []).sort((a, b) => (a.startAt! - b.startAt!));
 
+          // The cell is a container, not a control. It used to be a <button>
+          // with the day's EventChips -- which render <Link>, i.e. <a> --
+          // nested inside it: invalid HTML, one ambiguous control for keyboard
+          // and screen-reader users, and a live bug, because a click on a chip
+          // bubbled to the cell's handler and navigated to the New Event form
+          // instead of opening the event.
+          //
+          // The date itself carries "new event on this day" now. It is already
+          // on screen, so nothing is added to a dense grid, and there is
+          // exactly one control per interactive thing.
           return (
-            <button
+            <div
               key={key}
-              onClick={() => onDayClick?.(day)}
               className={`min-h-20 rounded border p-1 text-left align-top text-xs ${
-                inMonth ? 'border-slate-800' : 'border-slate-900 opacity-40'
-              } ${isToday ? 'ring-1 ring-indigo-500' : ''} hover:bg-slate-800`}
+                inMonth ? 'border-edge' : 'border-surface opacity-40'
+              } ${isToday ? 'ring-1 ring-accent-hover' : ''}`}
             >
-              <div className="mb-1 text-right text-slate-400">{day.day}</div>
+              <div className="mb-1 text-right">
+                {onDayClick ? (
+                  <button
+                    type="button"
+                    onClick={() => onDayClick(day)}
+                    aria-label={`New event on ${day.toFormat('cccc d LLLL yyyy')}`}
+                    className={`rounded px-1 hover:bg-raised hover:text-ink ${focusRing} ${
+                      isToday ? 'font-semibold text-accent-text' : 'text-muted'
+                    }`}
+                  >
+                    {day.day}
+                  </button>
+                ) : (
+                  <span className={isToday ? 'font-semibold text-accent-text' : 'text-muted'}>
+                    {day.day}
+                  </span>
+                )}
+              </div>
               <div className="space-y-0.5">
                 {dayEvents.slice(0, 3).map((occ) => (
                   <EventChip key={occ.occurrenceId} occurrence={occ} zone={zone} />
                 ))}
                 {dayEvents.length > 3 && (
-                  <div className="text-slate-500">+{dayEvents.length - 3} more</div>
+                  <div className="text-faint">+{dayEvents.length - 3} more</div>
                 )}
               </div>
-            </button>
+            </div>
           );
         })}
       </div>

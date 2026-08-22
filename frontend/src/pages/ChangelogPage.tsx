@@ -10,25 +10,25 @@ function Entry({ entry }: { entry: ChangelogEntry }) {
   const isCurrent = entry.version === APP_VERSION;
   return (
     <Section heading={`v${entry.version} — ${entry.date}`}>
-      <p className="text-slate-400">
+      <p className="text-muted">
         {entry.summary}
         {isCurrent && <span className="ml-2 text-xs text-emerald-400">current</span>}
       </p>
       {entry.added && (
         <>
-          <h3 className="mt-3 text-sm font-semibold text-slate-200">Added</h3>
+          <h3 className="mt-3 text-sm font-semibold text-ink-soft">Added</h3>
           <Bullets items={entry.added} />
         </>
       )}
       {entry.changed && (
         <>
-          <h3 className="mt-3 text-sm font-semibold text-slate-200">Changed</h3>
+          <h3 className="mt-3 text-sm font-semibold text-ink-soft">Changed</h3>
           <Bullets items={entry.changed} />
         </>
       )}
       {entry.fixed && (
         <>
-          <h3 className="mt-3 text-sm font-semibold text-slate-200">Fixed</h3>
+          <h3 className="mt-3 text-sm font-semibold text-ink-soft">Fixed</h3>
           <Bullets items={entry.fixed} />
         </>
       )}

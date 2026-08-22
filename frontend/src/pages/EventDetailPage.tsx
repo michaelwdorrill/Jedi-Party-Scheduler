@@ -8,6 +8,7 @@ import PollOptionRow from '../components/PollOptionRow';
 import RsvpButtons from '../components/RsvpButtons';
 import WindowAvailabilityPicker from '../components/WindowAvailabilityPicker';
 import type { ChangeRequestView, EventDetail, Friend, PollVote, RsvpStatus, WindowInfo } from '../types';
+import { buttonClass, cardClass } from '../components/ui';
 
 export default function EventDetailPage() {
   const { eventId } = useParams();
@@ -53,8 +54,8 @@ export default function EventDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eventId]);
 
-  if (loading) return <p className="text-slate-400">Loading…</p>;
-  if (!event) return <p className="text-slate-400">Event not found.</p>;
+  if (loading) return <p className="text-muted">Loading…</p>;
+  if (!event) return <p className="text-muted">Event not found.</p>;
 
   const isOrganizer = event.organizerId === user?.id;
   const zone = user?.timezone ?? event.timezone;
@@ -143,8 +144,8 @@ export default function EventDetailPage() {
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-semibold">{event.title}</h1>
-          {event.game && <p className="text-slate-400">{event.game}</p>}
-          <p className="text-sm text-slate-500">
+          {event.game && <p className="text-muted">{event.game}</p>}
+          <p className="text-sm text-faint">
             Organized by {isOrganizer ? 'you' : event.organizerGlobalName ?? event.organizerUsername ?? 'someone no longer in this server'}
           </p>
         </div>
@@ -152,14 +153,14 @@ export default function EventDetailPage() {
           <div className="flex gap-2">
             <button
               onClick={handleCopyInviteLink}
-              className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
+              className={buttonClass('secondary')}
             >
               {linkCopied ? 'Copied!' : 'Copy invite link'}
             </button>
             {event.status === 'active' && (
               <Link
                 to={`/events/${event.eventId}/edit`}
-                className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
+                className={buttonClass('secondary')}
               >
                 Edit
               </Link>
@@ -183,28 +184,28 @@ export default function EventDetailPage() {
       </div>
 
       {linkCopied && (
-        <p className="-mt-3 text-xs text-slate-500">
+        <p className="-mt-3 text-xs text-faint">
           Link copied — whoever you send it to will need to log in with Discord and be a member of this
           server to see it.
         </p>
       )}
 
       {event.status === 'cancelled' && (
-        <p className="rounded-md bg-slate-800 px-3 py-2 text-sm text-slate-400">
+        <p className="rounded-md bg-raised px-3 py-2 text-sm text-muted">
           This event has been cancelled.
         </p>
       )}
 
-      {event.description && <p className="text-slate-300">{event.description}</p>}
+      {event.description && <p className="text-ink-dim">{event.description}</p>}
 
       {event.voiceChannelId && (
-        <p className="text-sm text-slate-400">
+        <p className="text-sm text-muted">
           Voice channel:{' '}
           <a
             href={`https://discord.com/channels/${event.guildId}/${event.voiceChannelId}`}
             target="_blank"
             rel="noreferrer"
-            className="text-indigo-400 hover:underline"
+            className="text-accent-text hover:underline"
           >
             {event.voiceChannelName}
           </a>{' '}
@@ -213,7 +214,7 @@ export default function EventDetailPage() {
       )}
 
       {event.eventType === 'single' && event.startAt && event.endAt && (
-        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <div className={cardClass()}>
           <p className="mb-3 font-medium">{formatTimeRange(event.startAt, event.endAt, zone)}</p>
           {event.status === 'active' && (
             <RsvpButtons current={event.myRsvpStatus} onChange={handleRsvp} />
@@ -223,7 +224,7 @@ export default function EventDetailPage() {
 
       {event.eventType === 'poll' && event.pollMode === 'options' && !isMultiWinner && event.status === 'active' && event.pollOptions && (
         <div className="space-y-2">
-          <p className="text-sm text-slate-400">
+          <p className="text-sm text-muted">
             {event.pollStrategy === 'threshold'
               ? `Confirms once ${event.pollThresholdCount} people say they're in, otherwise by the deadline.`
               : "Whichever time slot has the most votes wins at the deadline."}
@@ -244,7 +245,7 @@ export default function EventDetailPage() {
 
       {event.eventType === 'poll' && isMultiWinner && event.pollOptions && (
         <div className="space-y-2">
-          <p className="text-sm text-slate-400">
+          <p className="text-sm text-muted">
             Each day is confirmed independently once {event.pollThresholdCount} people say they're in — any that
             qualify all happen. You can still vote (or join a confirmed day) any time before it starts.
           </p>
@@ -267,8 +268,8 @@ export default function EventDetailPage() {
         windowInfo.windowStartAt != null &&
         windowInfo.windowEndAt != null &&
         windowInfo.windowBlockMinutes != null && (
-          <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
-            <p className="text-sm text-slate-400">
+          <div className={cardClass('md', 'space-y-3')}>
+            <p className="text-sm text-muted">
               {event.pollStrategy === 'threshold'
                 ? `Confirms once ${event.pollThresholdCount} people can commit to the same block, otherwise by the deadline.`
                 : 'The best-overlapping block wins at the deadline.'}
@@ -290,7 +291,7 @@ export default function EventDetailPage() {
             )}
             <button
               onClick={handleSubmitWindow}
-              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
+              className={buttonClass()}
             >
               {windowInfo.mySubmission ? 'Update my availability' : 'Submit my availability'}
             </button>
@@ -322,13 +323,13 @@ export default function EventDetailPage() {
         />
       )}
 
-      <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+      <div className={cardClass()}>
         <h2 className="mb-2 font-semibold">Invited</h2>
         <ul className="space-y-1 text-sm">
           {event.invites.map((inv) => (
             <li key={inv.userId} className="flex items-center justify-between">
               <span>{inv.globalName ?? inv.username}</span>
-              <span className="text-slate-400">
+              <span className="text-muted">
                 {event.eventType === 'single' ? inv.rsvpStatus : ''}
               </span>
             </li>

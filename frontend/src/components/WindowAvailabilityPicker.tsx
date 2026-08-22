@@ -51,12 +51,12 @@ export default function WindowAvailabilityPicker({
 
   return (
     <div className="space-y-2">
-      <div className="flex justify-between text-xs text-slate-500">
+      <div className="flex justify-between text-xs text-faint">
         <span>{fmt(windowStartAt, zone, spansMultipleDays)}</span>
         <span>{fmt(windowEndAt, zone, spansMultipleDays)}</span>
       </div>
 
-      <div className="relative h-6 rounded bg-slate-800">
+      <div className="relative h-6 rounded bg-raised">
         {otherSubmissions.map((s) => (
           <div
             key={s.userId}
@@ -79,13 +79,13 @@ export default function WindowAvailabilityPicker({
           />
         )}
         <div
-          className="absolute inset-y-0 rounded bg-indigo-600/70"
+          className="absolute inset-y-0 rounded bg-accent/70"
           style={{ left: `${pct(startMin)}%`, width: `${pct(endMin - startMin)}%` }}
         />
       </div>
 
       <div>
-        <label className="mb-1 block text-xs text-slate-500">
+        <label className="mb-1 block text-xs text-faint">
           Earliest you could start — {fmt(value.startAt, zone, spansMultipleDays)}
         </label>
         <input
@@ -99,7 +99,7 @@ export default function WindowAvailabilityPicker({
         />
       </div>
       <div>
-        <label className="mb-1 block text-xs text-slate-500">
+        <label className="mb-1 block text-xs text-faint">
           Latest you could go until — {fmt(value.endAt, zone, spansMultipleDays)}
         </label>
         <input
@@ -112,7 +112,7 @@ export default function WindowAvailabilityPicker({
           className="w-full"
         />
       </div>
-      <p className="text-xs text-slate-500">
+      <p className="text-xs text-faint">
         Needs to cover at least a {(blockMinutes / 60).toFixed(1).replace(/\.0$/, '')}-hour block.
       </p>
     </div>

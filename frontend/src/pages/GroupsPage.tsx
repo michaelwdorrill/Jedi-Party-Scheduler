@@ -4,6 +4,7 @@ import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
 import GroupEditor from '../components/GroupEditor';
 import type { Friend, Group } from '../types';
+import { buttonClass, cardClass, controlClass } from '../components/ui';
 
 export default function GroupsPage() {
   const { user } = useAuth();
@@ -47,7 +48,7 @@ export default function GroupsPage() {
   }, [editorGuildId]);
 
   if (guilds.length === 0) {
-    return <p className="text-slate-400">You don't share any allow-listed servers yet.</p>;
+    return <p className="text-muted">You don't share any allow-listed servers yet.</p>;
   }
 
   // `friends` comes from GET /me/friends, which deliberately excludes the
@@ -102,7 +103,7 @@ export default function GroupsPage() {
         {editing === null && (
           <button
             onClick={() => setEditing('new')}
-            className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
+            className={buttonClass()}
           >
             + New Group
           </button>
@@ -111,11 +112,11 @@ export default function GroupsPage() {
 
       {editing === 'new' && guilds.length > 1 && (
         <div>
-          <label className="mb-1 block text-sm text-slate-400">Server</label>
+          <label className="mb-1 block text-sm text-muted">Server</label>
           <select
             value={newGroupGuildId}
             onChange={(e) => setNewGroupGuildId(e.target.value)}
-            className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+            className={controlClass('lg', 'w-full')}
           >
             {guilds.map((g) => (
               <option key={g.id} value={g.id}>
@@ -139,9 +140,9 @@ export default function GroupsPage() {
       )}
 
       {loading ? (
-        <p className="text-slate-400">Loading…</p>
+        <p className="text-muted">Loading…</p>
       ) : groups.length === 0 ? (
-        <p className="text-slate-400">
+        <p className="text-muted">
           No groups yet. Groups let you invite a whole crew (e.g. "Raid Team") to an event at
           once.
         </p>
@@ -150,21 +151,21 @@ export default function GroupsPage() {
           {groups.map((g) => (
             <li
               key={g.id}
-              className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900 p-3"
+              className={cardClass('sm', 'flex items-center justify-between')}
             >
               <div>
                 <div className="font-medium">
                   {g.name}
-                  {g.game && <span className="ml-2 text-sm font-normal text-slate-500">— {g.game}</span>}
+                  {g.game && <span className="ml-2 text-sm font-normal text-faint">— {g.game}</span>}
                   {/* Which server this group lives on. Needed now that the
                       page lists every server's groups at once. */}
                   {g.guildName && (
-                    <span className="ml-2 rounded bg-slate-800 px-1.5 py-0.5 text-xs font-normal text-slate-400">
+                    <span className="ml-2 rounded bg-raised px-1.5 py-0.5 text-xs font-normal text-muted">
                       {g.guildName}
                     </span>
                   )}
                 </div>
-                <div className="text-sm text-slate-400">
+                <div className="text-sm text-muted">
                   {g.members.map((m) => m.globalName ?? m.username).join(', ') || 'No members'}
                 </div>
               </div>
@@ -172,7 +173,7 @@ export default function GroupsPage() {
                 <div className="flex gap-2">
                   <button
                     onClick={() => setEditing(g)}
-                    className="rounded-md border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800"
+                    className={buttonClass('secondary', 'sm')}
                   >
                     Edit
                   </button>

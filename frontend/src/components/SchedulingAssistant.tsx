@@ -64,7 +64,7 @@ export default function SchedulingAssistant({
 
   if (userIds.length === 0) {
     return (
-      <p className="text-sm text-slate-500">
+      <p className="text-sm text-faint">
         Pick some people above to see when they're already busy.
       </p>
     );
@@ -97,12 +97,12 @@ export default function SchedulingAssistant({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between text-xs text-slate-500">
+      <div className="flex items-center justify-between text-xs text-faint">
         <span>{dayStart.toFormat('ccc d LLL')}</span>
         {loading && <span>Checking availability…</span>}
       </div>
 
-      <div className="flex text-[10px] text-slate-600">
+      <div className="flex text-[10px] text-fainter">
         <div className="w-28 shrink-0" />
         <div className="relative h-4 flex-1">
           {hourTicks.map((t) => (
@@ -120,19 +120,19 @@ export default function SchedulingAssistant({
       <div className="space-y-1">
         {entries.map((entry) => (
           <div key={entry.userId} className="flex items-center gap-2">
-            <span className="w-28 shrink-0 truncate text-xs text-slate-300" title={entry.globalName ?? entry.username}>
+            <span className="w-28 shrink-0 truncate text-xs text-ink-dim" title={entry.globalName ?? entry.username}>
               {entry.globalName ?? entry.username}
             </span>
-            <div className="relative h-5 flex-1 overflow-hidden rounded bg-slate-800">
+            <div className="relative h-5 flex-1 overflow-hidden rounded bg-raised">
               {!entry.visible ? (
-                <span className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-500">
+                <span className="absolute inset-0 flex items-center justify-center text-[10px] text-faint">
                   availability hidden
                 </span>
               ) : (
                 <>
                   {proposedStart != null && proposedEnd != null && (
                     <div
-                      className="absolute inset-y-0 border-x border-indigo-400/70 bg-indigo-500/20"
+                      className="absolute inset-y-0 border-x border-accent-text/70 bg-accent-hover/20"
                       style={{
                         left: `${pct(proposedStart)}%`,
                         width: `${pct(proposedEnd) - pct(proposedStart)}%`,

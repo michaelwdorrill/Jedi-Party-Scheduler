@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { APP_VERSION, PUBLISHED_AT } from '../lib/legal';
+import { buttonClass } from './ui';
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   `rounded-md px-3 py-2 text-sm font-medium ${
-    isActive ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+    isActive ? 'bg-accent text-white' : 'text-ink-dim hover:bg-raised hover:text-white'
   }`;
 
 type LogoutBanner = 'none' | 'queued' | 'unresolved';
@@ -38,7 +39,7 @@ export default function Layout() {
           contact support.
         </div>
       )}
-      <header className="border-b border-slate-800 bg-slate-900">
+      <header className="border-b border-edge bg-surface">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
           <div className="flex items-center gap-4">
             <span className="text-lg font-semibold">Uncle Owen</span>
@@ -59,11 +60,11 @@ export default function Layout() {
           </div>
           <div className="flex items-center gap-3">
             {user && (
-              <div className="flex items-center gap-2 text-sm text-slate-300">
+              <div className="flex items-center gap-2 text-sm text-ink-dim">
                 <span>{user.globalName ?? user.username}</span>
                 <button
                   onClick={() => void handleLogout()}
-                  className="rounded-md border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800"
+                  className={buttonClass('secondary', 'sm')}
                 >
                   Log out
                 </button>
@@ -76,16 +77,16 @@ export default function Layout() {
         <Outlet />
       </main>
 
-      <footer className="mx-auto max-w-5xl px-4 pb-8 pt-4 text-xs text-slate-600">
-        <NavLink to="/terms" className="hover:text-slate-400">
+      <footer className="mx-auto max-w-5xl px-4 pb-8 pt-4 text-xs text-fainter">
+        <NavLink to="/terms" className="hover:text-muted">
           Terms
         </NavLink>
         <span className="px-2">·</span>
-        <NavLink to="/privacy" className="hover:text-slate-400">
+        <NavLink to="/privacy" className="hover:text-muted">
           Privacy
         </NavLink>
         <span className="px-2">·</span>
-        <NavLink to="/changelog" className="hover:text-slate-400">
+        <NavLink to="/changelog" className="hover:text-muted">
           Changelog
         </NavLink>
         <span className="px-2">·</span>

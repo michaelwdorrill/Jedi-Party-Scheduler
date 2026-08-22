@@ -7,6 +7,7 @@ import { useGuild } from '../auth/GuildContext';
 import { fullWindow, monthWindow } from '../lib/datetime';
 import MonthCalendarGrid from '../components/MonthCalendarGrid';
 import type { EventOccurrence } from '../types';
+import { buttonClass, controlClass } from '../components/ui';
 
 // Calendar-first (docs/specs/0006). This loads GET /me/events -- everything
 // across every server you're in, plus your own personal time -- rather than
@@ -65,16 +66,16 @@ export default function CalendarPage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex gap-1 rounded-md bg-slate-900 p-1">
+          <div className="flex gap-1 rounded-md bg-surface p-1">
             <button
               onClick={() => setTab(0)}
-              className={`rounded px-3 py-1 text-sm ${tab === 0 ? 'bg-indigo-600 text-white' : 'text-slate-300'}`}
+              className={`rounded px-3 py-1 text-sm ${tab === 0 ? 'bg-accent text-white' : 'text-ink-dim'}`}
             >
               This Month
             </button>
             <button
               onClick={() => setTab(1)}
-              className={`rounded px-3 py-1 text-sm ${tab === 1 ? 'bg-indigo-600 text-white' : 'text-slate-300'}`}
+              className={`rounded px-3 py-1 text-sm ${tab === 1 ? 'bg-accent text-white' : 'text-ink-dim'}`}
             >
               Next Month
             </button>
@@ -86,7 +87,7 @@ export default function CalendarPage() {
               const v = e.target.value;
               setFilter(v === 'all' || v === 'personal' || v === 'games' ? v : { guildId: v });
             }}
-            className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm"
+            className={controlClass('md')}
           >
             <option value="all">Everything</option>
             <option value="games">Game sessions only</option>
@@ -105,14 +106,14 @@ export default function CalendarPage() {
 
         <button
           onClick={() => navigate('/events/new')}
-          className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
+          className={buttonClass()}
         >
           + New Event
         </button>
       </div>
 
       {loading ? (
-        <p className="text-slate-400">Loading…</p>
+        <p className="text-muted">Loading…</p>
       ) : (
         <>
           <MonthCalendarGrid
@@ -125,7 +126,7 @@ export default function CalendarPage() {
             onDayClick={(day: DateTime) => navigate(`/events/new?date=${day.toISODate()}`)}
           />
           {occurrences.length === 0 && (
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-faint">
               {guilds.length === 0
                 ? "You don't share any allow-listed servers yet."
                 : 'Nothing scheduled in this window yet.'}

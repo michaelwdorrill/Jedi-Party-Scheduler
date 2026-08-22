@@ -1,6 +1,7 @@
 import { Link, Navigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { API_BASE_URL } from '../api/client';
+import { buttonClass } from '../components/ui';
 
 export default function LoginPage() {
   const { isAuthenticated, loading } = useAuth();
@@ -11,23 +12,23 @@ export default function LoginPage() {
   return (
     <div className="flex h-screen flex-col items-center justify-center gap-6">
       <h1 className="text-3xl font-bold">Uncle Owen</h1>
-      <p className="max-w-md text-center text-slate-400">
+      <p className="max-w-md text-center text-muted">
         Log in with Discord to see the schedule for your servers and coordinate
         sessions with your friends.
       </p>
       <a
         href={`${API_BASE_URL}/auth/login`}
-        className="rounded-md bg-indigo-600 px-5 py-3 font-semibold text-white hover:bg-indigo-500"
+        className={buttonClass('primary', 'hero')}
       >
         Log in with Discord
       </a>
-      <p className="text-xs text-slate-600">
+      <p className="text-xs text-fainter">
         By logging in you agree to the{' '}
-        <Link to="/terms" className="underline hover:text-slate-400">
+        <Link to="/terms" className="underline hover:text-muted">
           Terms
         </Link>{' '}
         and{' '}
-        <Link to="/privacy" className="underline hover:text-slate-400">
+        <Link to="/privacy" className="underline hover:text-muted">
           Privacy Policy
         </Link>
         .

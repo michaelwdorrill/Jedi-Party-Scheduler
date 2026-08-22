@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
 import type { PersonalEvent, PersonalAvailability } from '../types';
+import { buttonClass, cardClass, controlClass } from '../components/ui';
 
 // Personal time: private to you, never shown to anyone else, and (unless you
 // untick "show me as busy") it makes you look unavailable in other people's
@@ -138,7 +139,7 @@ export default function PersonalEventPage() {
     navigate('/calendar');
   };
 
-  if (loading) return <p className="text-slate-400">Loading…</p>;
+  if (loading) return <p className="text-muted">Loading…</p>;
 
   return (
     <div className="mx-auto max-w-2xl space-y-5">
@@ -154,7 +155,7 @@ export default function PersonalEventPage() {
         )}
       </div>
 
-      <p className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-400">
+      <p className="rounded-md border border-edge bg-surface px-3 py-2 text-sm text-muted">
         Only you can see this. Others just see that you're unavailable — never the name or details.
       </p>
 
@@ -163,75 +164,75 @@ export default function PersonalEventPage() {
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="What is it? (e.g. Work, Travel, Dinner)"
-          className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2"
+          className="w-full rounded-md border border-edge-strong bg-raised px-3 py-2"
         />
         <textarea
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           placeholder="Notes (optional)"
-          className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+          className={controlClass('lg', 'w-full')}
           rows={2}
         />
         <div>
-          <label className="mb-1 block text-sm text-slate-400">Timezone</label>
+          <label className="mb-1 block text-sm text-muted">Timezone</label>
           <TimezoneSelect value={timezone} onChange={setTimezone} />
         </div>
       </div>
 
-      <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
+      <div className={cardClass('md', 'space-y-3')}>
         <div className="flex flex-wrap gap-3">
           <div className="flex-1 min-w-[8rem]">
-            <label className="mb-1 block text-sm text-slate-400">Starts</label>
+            <label className="mb-1 block text-sm text-muted">Starts</label>
             <input
               type="date"
               value={date}
               onChange={(e) => handleStartDateChange(e.target.value)}
-              className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+              className={controlClass('lg', 'w-full')}
             />
           </div>
           <div className="w-28">
-            <label className="mb-1 block text-sm text-slate-400">at</label>
+            <label className="mb-1 block text-sm text-muted">at</label>
             <input
               type="time"
               value={startTime}
               onChange={(e) => setStartTime(e.target.value)}
-              className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+              className={controlClass('lg', 'w-full')}
             />
           </div>
           <div className="flex-1 min-w-[8rem]">
-            <label className="mb-1 block text-sm text-slate-400">Ends</label>
+            <label className="mb-1 block text-sm text-muted">Ends</label>
             <input
               type="date"
               value={endDate}
               min={date}
               onChange={(e) => setEndDate(e.target.value)}
-              className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+              className={controlClass('lg', 'w-full')}
             />
           </div>
           <div className="w-28">
-            <label className="mb-1 block text-sm text-slate-400">at</label>
+            <label className="mb-1 block text-sm text-muted">at</label>
             <input
               type="time"
               value={endTime}
               onChange={(e) => setEndTime(e.target.value)}
-              className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+              className={controlClass('lg', 'w-full')}
             />
           </div>
         </div>
         {endDate !== date && (
-          <p className="text-xs text-slate-500">
+          <p className="text-xs text-faint">
             Blocks {DateTime.fromISO(endDate).diff(DateTime.fromISO(date), 'days').days + 1} days.
           </p>
         )}
 
-        <label className="flex items-center gap-2 text-sm text-slate-300">
+        <label className="flex items-center gap-2 text-sm text-ink-dim">
           <input type="checkbox" checked={isRecurring} onChange={(e) => setIsRecurring(e.target.checked)} />
           Repeats
         </label>
         {isRecurring && <RecurrenceForm value={recurrence} onChange={setRecurrence} />}
 
         <div className="space-y-2">
-          <label className="flex items-start gap-2 text-sm text-slate-300">
+          <label className="flex items-start gap-2 text-sm text-ink-dim">
             <input
               type="radio"
               name="availability"
@@ -243,7 +244,7 @@ export default function PersonalEventPage() {
               <strong>Busy</strong> — others see an opaque block here and won't schedule over it.
             </span>
           </label>
-          <label className="flex items-start gap-2 text-sm text-slate-300">
+          <label className="flex items-start gap-2 text-sm text-ink-dim">
             <input
               type="radio"
               name="availability"
@@ -256,7 +257,7 @@ export default function PersonalEventPage() {
               this time slot in the scheduling assistant.
             </span>
           </label>
-          <label className="flex items-start gap-2 text-sm text-slate-300">
+          <label className="flex items-start gap-2 text-sm text-ink-dim">
             <input
               type="radio"
               name="availability"
@@ -277,14 +278,14 @@ export default function PersonalEventPage() {
       <div className="flex justify-end gap-2">
         <button
           onClick={() => navigate(-1)}
-          className="rounded-md border border-slate-700 px-4 py-2 text-sm hover:bg-slate-800"
+          className={buttonClass('secondary', 'lg')}
         >
           Cancel
         </button>
         <button
           disabled={saving}
           onClick={handleSubmit}
-          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          className={buttonClass('primary', 'lg')}
         >
           {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Block this time'}
         </button>

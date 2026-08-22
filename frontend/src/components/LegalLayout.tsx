@@ -16,19 +16,19 @@ export default function LegalLayout({
 }) {
   return (
     <div className="min-h-screen">
-      <header className="border-b border-slate-800 bg-slate-900">
+      <header className="border-b border-edge bg-surface">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
           <Link to="/" className="text-lg font-semibold">
             {SERVICE_NAME}
           </Link>
-          <nav className="flex gap-3 text-sm text-slate-400">
-            <Link to="/terms" className="hover:text-slate-200">
+          <nav className="flex gap-3 text-sm text-muted">
+            <Link to="/terms" className="hover:text-ink-soft">
               Terms
             </Link>
-            <Link to="/privacy" className="hover:text-slate-200">
+            <Link to="/privacy" className="hover:text-ink-soft">
               Privacy
             </Link>
-            <Link to="/changelog" className="hover:text-slate-200">
+            <Link to="/changelog" className="hover:text-ink-soft">
               Changelog
             </Link>
           </nav>
@@ -38,16 +38,16 @@ export default function LegalLayout({
       <main className="mx-auto max-w-3xl px-4 py-8">
         <h1 className="text-3xl font-bold">{title}</h1>
         {showLastUpdated && (
-          <p className="mt-1 text-sm text-slate-500">Last updated {LAST_UPDATED}</p>
+          <p className="mt-1 text-sm text-faint">Last updated {LAST_UPDATED}</p>
         )}
-        <div className="legal mt-6 space-y-5 text-slate-300">{children}</div>
+        <div className="legal mt-6 space-y-5 text-ink-dim">{children}</div>
 
         {/* Which build of the app these terms describe -- distinct from
             LAST_UPDATED above, which is when the legal text itself last
             changed. The two move independently: a release can ship without
             touching the policies, and the policies can be revised without a
             release. */}
-        <footer className="mt-10 border-t border-slate-800 pt-4 text-xs text-slate-500">
+        <footer className="mt-10 border-t border-edge pt-4 text-xs text-faint">
           {SERVICE_NAME} v{APP_VERSION} — published {PUBLISHED_AT}
         </footer>
       </main>
@@ -58,7 +58,7 @@ export default function LegalLayout({
 export function Section({ heading, children }: { heading: string; children: React.ReactNode }) {
   return (
     <section className="space-y-2">
-      <h2 className="text-xl font-semibold text-slate-100">{heading}</h2>
+      <h2 className="text-xl font-semibold text-ink">{heading}</h2>
       {children}
     </section>
   );

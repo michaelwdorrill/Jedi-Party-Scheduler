@@ -21,8 +21,8 @@ export default function RsvpButtons({
           onClick={() => onChange(opt.value)}
           className={`rounded-md border px-3 py-1.5 text-sm ${
             current === opt.value
-              ? 'border-indigo-500 bg-indigo-600 text-white'
-              : 'border-slate-700 text-slate-300 hover:bg-slate-800'
+              ? 'border-accent-hover bg-accent text-white'
+              : 'border-edge-strong text-ink-dim hover:bg-raised'
           }`}
         >
           {opt.label}

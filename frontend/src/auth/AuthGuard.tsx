@@ -5,7 +5,7 @@ export default function AuthGuard() {
   const { isAuthenticated, loading } = useAuth();
 
   if (loading) {
-    return <div className="flex h-screen items-center justify-center text-slate-400">Loading…</div>;
+    return <div className="flex h-screen items-center justify-center text-muted">Loading…</div>;
   }
 
   if (!isAuthenticated) {

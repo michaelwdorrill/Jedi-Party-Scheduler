@@ -17,7 +17,7 @@ export default function EventChip({
       : UNGROUPED_COLOR;
 
   const cancelled = occurrence.status === 'cancelled';
-  const color = cancelled ? 'bg-slate-700 line-through opacity-60' : palette.bg;
+  const color = cancelled ? 'bg-raised-hi line-through opacity-60' : palette.bg;
 
   const time = occurrence.startAt
     ? DateTime.fromMillis(occurrence.startAt).setZone(zone).toFormat('h:mm a')
