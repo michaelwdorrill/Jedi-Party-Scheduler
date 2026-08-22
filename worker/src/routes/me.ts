@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
+import { buildCalendarOccurrences } from '../lib/calendar';
 import { deleteUserCompletely, isGuildMember, isOwner, listFriends, mapUser, type UserRow } from '../lib/db';
-import { assertBoolean, assertTimezone, readJsonBody } from '../lib/validate';
+import { assertBoolean, assertTimezone, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
 
 export const meRoutes = new Hono<AppEnv>();
 
@@ -82,6 +83,28 @@ meRoutes.get('/export', async (c) => {
     out[key] = results;
   }
   return c.json(out);
+});
+
+// The cross-guild personal calendar -- everything you organize or are
+// invited to, across every server you're still an active member of, plus your
+// own personal time blocks. This is what makes the app calendar-first rather
+// than server-first (docs/specs/0006): there was previously no way to ask
+// "what's on for me" without first picking a server.
+//
+// Cheaper than it sounds, and cheaper than the per-guild route it
+// generalizes: both are bounded by what the caller is personally attached to,
+// not by how much exists in a guild. See lib/calendar.ts.
+meRoutes.get('/events', async (c) => {
+  const userId = c.get('userId');
+  const from = Number(c.req.query('from'));
+  const to = Number(c.req.query('to'));
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) {
+    throw new ValidationError('from and to (unix ms) are required');
+  }
+  if (to <= from) throw new ValidationError('to must be after from');
+  if (to - from > LIMITS.MAX_QUERY_RANGE_MS) throw new ValidationError('from/to range is too large');
+
+  return c.json(await buildCalendarOccurrences(c.env, userId, from, to));
 });
 
 meRoutes.get('/friends', async (c) => {

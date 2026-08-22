@@ -3,18 +3,9 @@ import type { AppEnv } from '../lib/authMiddleware';
 import { chunkIds, chunkRows, placeholders } from '../lib/d1';
 import { filterActiveGuildMembers, isGuildMember, listUserGuilds, MEMBERSHIP_GRACE_MS } from '../lib/db';
 import { newId } from '../lib/ids';
-import { expandOccurrencesForEvent, loadRecurrenceRulesForEvents } from '../lib/recurrence';
-import type { EventRow } from '../lib/events';
-import {
-  mapOccurrence,
-  loadOverridesForEvents,
-  loadMyRsvpForEvents,
-  loadPrimaryGroupForEvents,
-  loadConfirmedOptionsForEvents,
-} from '../lib/events';
 import { createEventWithInvites, type EventWriteInput } from '../lib/eventWrites';
+import { buildCalendarOccurrences } from '../lib/calendar';
 import { computeBusyBlocksForUsers } from '../lib/freeBusy';
-import { expandPersonalOccurrences } from '../lib/personalEvents';
 import { fetchGuildVoiceChannels } from '../lib/discord';
 import {
   assertOptionalString,
@@ -236,150 +227,11 @@ guildRoutes.get('/:guildId/events', async (c) => {
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
   const { from, to } = parseRangeQuery(c);
-
-  // Only events the user is the organizer of, or is individually/group-invited
-  // to -- and only ones that could possibly land in the requested window.
-  // Without that second filter this loaded every event the user had ever been
-  // part of on every calendar view, then discarded almost all of them after
-  // expansion, so the cost of viewing one month grew with the guild's entire
-  // history. Recurring events are unfiltered because whether they fall in the
-  // window isn't a property of a stored timestamp -- a series has to be
-  // expanded to find out.
-  //
-  // Polls used to get the same unconditional pass as recurring events, on
-  // the theory that an open poll's eventual date is unknown ahead of time.
-  // That's true for a poll that hasn't resolved yet, but a poll that HAS
-  // resolved (single_winner) already has a real start_at and belongs under
-  // the ordinary date-range branch below, not a blanket "load every poll
-  // ever created" exemption -- a guild's entire history of old, resolved,
-  // and cancelled polls was otherwise reloaded and discarded on every single
-  // calendar view, forever, regardless of how old they were. So:
-  //   - a still-open (non-multi_winner) poll is included only if its
-  //     deadline actually falls in the requested window;
-  //   - a multi_winner poll is included only if it's still open, or has a
-  //     confirmed day landing in the window (`mw` below); and
-  //   - a resolved single_winner poll falls through to the ordinary
-  //     start_at-range branch, exactly like a fixed-time event.
-  const { results: events } = await c.env.DB.prepare(
-    `SELECT DISTINCT e.* FROM events e
-     LEFT JOIN event_invites i ON i.event_id = e.id AND i.user_id = ?
-     LEFT JOIN event_poll_options mw
-       ON mw.event_id = e.id AND mw.confirmed_at IS NOT NULL AND mw.start_at <= ? AND mw.end_at >= ?
-     WHERE e.guild_id = ? AND (e.organizer_id = ? OR i.user_id IS NOT NULL)
-       AND (
-         -- Only *active* recurring series. A cancelled series has no
-         -- occurrences to show, but this branch used to admit it before any
-         -- status check, so every cancelled recurring event a guild had ever
-         -- created was reloaded and re-expanded on every calendar view until
-         -- the 90-day purge eventually reached it -- and cancelled rows are
-         -- exempt from the active-event quota, so they could be created far
-         -- faster than they were purged.
-         (e.is_recurring = 1 AND e.status = 'active')
-         OR (e.event_type = 'poll' AND e.poll_resolution_mode = 'multi_winner' AND (e.status = 'active' OR mw.id IS NOT NULL))
-         OR (
-           e.event_type = 'poll' AND e.poll_resolution_mode != 'multi_winner' AND e.status != 'resolved'
-           AND e.poll_deadline_at IS NOT NULL AND e.poll_deadline_at BETWEEN ? AND ?
-         )
-         OR (e.start_at IS NOT NULL AND e.start_at <= ? AND COALESCE(e.end_at, e.start_at) >= ?)
-       )`,
-  )
-    .bind(userId, to, from, guildId, userId, from, to, to, from)
-    .all<EventRow>();
-
-  const eventIds = events.map((e) => e.id);
-  const overridesByEvent = await loadOverridesForEvents(c.env, eventIds);
-  const rsvpByEvent = await loadMyRsvpForEvents(c.env, eventIds, userId);
-  const groupByEvent = await loadPrimaryGroupForEvents(c.env, eventIds);
-  // Both bulk-loaded once for the whole visible list rather than once per
-  // recurring event / per multi-winner poll -- previously the two largest
-  // contributors to this route's query count scaling with how many events a
-  // user could see, instead of staying roughly fixed per request.
-  const recurrenceRulesByEvent = await loadRecurrenceRulesForEvents(
-    c.env,
-    events.filter((e) => e.is_recurring).map((e) => e.id),
-  );
-  const confirmedOptionsByEvent = await loadConfirmedOptionsForEvents(
-    c.env,
-    events.filter((e) => e.event_type === 'poll' && e.poll_resolution_mode === 'multi_winner').map((e) => e.id),
-  );
-
-  const occurrences = [];
-  for (const event of events) {
-    if (event.event_type === 'poll' && event.poll_resolution_mode === 'multi_winner') {
-      // Each independently-confirmed day is its own occurrence, and stays on
-      // the calendar even after the parent poll stops accepting new votes.
-      const confirmedOptions = confirmedOptionsByEvent.get(event.id) ?? [];
-      for (const opt of confirmedOptions) {
-        if (opt.start_at <= to && opt.end_at >= from) {
-          occurrences.push(
-            mapOccurrence(event, `${event.id}::opt:${opt.id}`, opt.start_at, opt.end_at, rsvpByEvent.get(event.id) ?? null, groupByEvent.get(event.id) ?? null),
-          );
-        }
-      }
-      if (
-        event.status === 'active' &&
-        event.poll_deadline_at &&
-        event.poll_deadline_at >= from &&
-        event.poll_deadline_at <= to
-      ) {
-        occurrences.push(mapOccurrence(event, event.id, null, null, rsvpByEvent.get(event.id) ?? null, groupByEvent.get(event.id) ?? null));
-      }
-      continue;
-    }
-    if (event.event_type === 'poll' && event.status !== 'resolved') {
-      // Unresolved polls show once, at the poll deadline, not per-occurrence.
-      if (event.poll_deadline_at && event.poll_deadline_at >= from && event.poll_deadline_at <= to) {
-        occurrences.push(mapOccurrence(event, event.id, null, null, rsvpByEvent.get(event.id) ?? null, groupByEvent.get(event.id) ?? null));
-      }
-      continue;
-    }
-    if (!event.is_recurring) {
-      if (event.start_at && event.start_at <= to && (event.end_at ?? event.start_at) >= from) {
-        occurrences.push(mapOccurrence(event, event.id, event.start_at, event.end_at, rsvpByEvent.get(event.id) ?? null, groupByEvent.get(event.id) ?? null));
-      }
-      continue;
-    }
-    const expanded = await expandOccurrencesForEvent(
-      c.env,
-      event,
-      from,
-      to,
-      overridesByEvent.get(event.id) ?? [],
-      recurrenceRulesByEvent.get(event.id),
-    );
-    for (const occ of expanded) {
-      occurrences.push(
-        mapOccurrence(event, `${event.id}::${occ.date}`, occ.startAt, occ.endAt, rsvpByEvent.get(event.id) ?? null, groupByEvent.get(event.id) ?? null),
-      );
-    }
-  }
-
-  // The caller's own personal events ride along on whichever guild calendar
-  // they're viewing -- they aren't guild-scoped, but the point of them is to
-  // see your real availability next to your gaming schedule. Never returned
-  // for anyone but their owner.
-  for (const occ of await expandPersonalOccurrences(c.env, userId, from, to)) {
-    occurrences.push({
-      occurrenceId: `personal:${occ.occurrenceId}`,
-      eventId: occ.event.id,
-      title: occ.event.title,
-      description: occ.event.description,
-      game: null,
-      eventType: 'single' as const,
-      status: occ.event.status,
-      timezone: occ.event.timezone,
-      startAt: occ.startAt,
-      endAt: occ.endAt,
-      isRecurring: !!occ.event.is_recurring,
-      isPersonal: true,
-      organizerId: occ.event.user_id,
-      myRsvpStatus: null,
-      pollDeadlineAt: null,
-      groupId: null,
-    });
-  }
-
-  return c.json(occurrences);
+  // The shared builder (lib/calendar.ts), scoped to this one guild. GET
+  // /me/events is the same call without the scope -- keeping them one
+  // implementation is what stops the two views disagreeing about what a
+  // resolved poll or an overridden recurrence looks like.
+  return c.json(await buildCalendarOccurrences(c.env, userId, from, to, { guildId }));
 });
 
 guildRoutes.post('/:guildId/events', async (c) => {
