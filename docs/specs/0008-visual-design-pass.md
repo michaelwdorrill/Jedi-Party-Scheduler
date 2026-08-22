@@ -1,7 +1,22 @@
 # 0008 — Visual design pass: three pitches
 
-**Status:** Pitches — awaiting a choice
+**Status:** Superseded by 0009
 **Covers:** `IDEAS.md` items 8 and 20 · **Phase:** 3.5 · **Ships in:** v0.4
+
+## Outcome of the review
+
+All three pitches below were rejected on the same ground: they varied
+arrangement and palette while treating the app as a generic scheduler that
+happened to need styling, and none of them asked what the app *is*. The
+direction that replaced them takes the app's own name as the brief —
+see `0009-binary-sunset.md`.
+
+Two things here survived the review and carry forward into 0009: the audit
+of what the frontend is starting from, and the two findings (ideas 21 and 22).
+The three pitches themselves did not.
+
+This file is kept as written. Per the convention in `README.md`, a spec is a
+plan rather than a log, and is not retro-edited to pretend it predicted things.
 
 ## Why this file is pitches and not a spec
 

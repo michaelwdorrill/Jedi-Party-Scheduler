@@ -34,7 +34,8 @@ enough yet.
 | [0005-event-invite-links](0005-event-invite-links.md) | Idea 3 | 2 | 0.2 | Built |
 | [0006-calendar-first](0006-calendar-first.md) | Idea 5 | 3 | 0.3 | Built |
 | [0007-server-noticeboard](0007-server-noticeboard.md) | Idea 5 (second half) | TBD | TBD | Decisions locked |
-| [0008-visual-design-pass](0008-visual-design-pass.md) | Ideas 8, 20 | 3.5 | 0.4 | Pitches — awaiting a choice |
+| [0008-visual-design-pass](0008-visual-design-pass.md) | Ideas 8, 20 | 3.5 | 0.4 | Superseded by 0009 |
+| [0009-binary-sunset](0009-binary-sunset.md) | Ideas 8, 20 | 3.5 | 0.4 | Ready |
 
 This index had drifted: it stopped at 0003 while 0004–0007 existed, and
 listed 0003 as Draft after it shipped. Keeping it current is cheap and it is
