@@ -299,6 +299,18 @@ export const LIMITS = {
   MAX_OVERRIDES_PER_EVENT: 500,
   MAX_EVENT_DURATION_MS: 366 * 24 * 60 * 60 * 1000, // a year -- generous ceiling for e.g. long travel blocks
 
+  // Invitee change requests (docs/specs/0003-event-change-requests.md).
+  // Both counts are of status='pending' only, so a resolved request doesn't
+  // consume a slot forever.
+  MAX_OPEN_CHANGE_REQUESTS_PER_USER_PER_EVENT: 3,
+  MAX_OPEN_CHANGE_REQUESTS_PER_EVENT: 50,
+  CHANGE_REQUEST_MESSAGE: 500,
+  // How long a time_change vote stays open before the deadline sweep
+  // resolves it by tally. Much shorter than an ordinary poll's
+  // (organizer-chosen) deadline -- this is a meta-question about an
+  // already-scheduled event, not a future session to plan around.
+  CHANGE_REQUEST_VOTE_WINDOW_MS: 72 * 60 * 60 * 1000,
+
   // The other half of PRIVATE_FREE_PROFILE, above. Not enforced as a reject
   // anywhere -- guild membership is synced from Discord at login
   // (lib/db.ts's syncGuildMembership), and refusing someone's login because

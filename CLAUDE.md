@@ -1,5 +1,18 @@
 # Working in this repo
 
+## The user's local clone
+
+Michael's local clone of this repo lives at
+`C:\Users\Michael\Documents\GitHub\Jedi-Party-Scheduler` on Windows
+(PowerShell). Anything that has to run against his real Cloudflare
+credentials — `npm run deploy:sandbox`, `db:migrate:remote:sandbox`,
+`wrangler tail`, etc. — has to run in a PowerShell terminal `cd`'d into that
+folder (or `worker`/`frontend` beneath it, per the command), **not** in a
+Claude Code cloud/remote session, which has no access to his local
+`wrangler`/Cloudflare auth. When walking him through such a command, give
+the `cd` step explicitly rather than assuming he's already in the right
+directory.
+
 ## Cloudflare account and credentials
 
 This project deploys into the **`uncleowen`** Cloudflare account — not any

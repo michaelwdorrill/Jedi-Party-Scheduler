@@ -9,7 +9,7 @@ import { assertIsoDate, assertOneOf, assertStringArray, LIMITS, readJsonBody, Va
 
 export const eventRoutes = new Hono<AppEnv>();
 
-async function loadEventIfVisible(env: Env, eventId: string, userId: string): Promise<EventRow | null> {
+export async function loadEventIfVisible(env: Env, eventId: string, userId: string): Promise<EventRow | null> {
   const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
   if (!event) return null;
   // A former member holding a stale invite (or even the organizer, if they
@@ -28,7 +28,7 @@ async function loadEventIfVisible(env: Env, eventId: string, userId: string): Pr
 // exists, confirm the requester organizes it, AND confirm they're still a
 // current active member of its guild (leaving/removal revokes control too,
 // not just visibility).
-async function loadOwnedActiveEvent(env: Env, eventId: string, userId: string): Promise<EventRow | null> {
+export async function loadOwnedActiveEvent(env: Env, eventId: string, userId: string): Promise<EventRow | null> {
   const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
   if (!event) return null;
   if (event.organizer_id !== userId) return null;

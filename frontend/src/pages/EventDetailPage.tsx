@@ -3,10 +3,11 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { formatTimeRange } from '../lib/datetime';
+import ChangeRequestSection from '../components/ChangeRequestSection';
 import PollOptionRow from '../components/PollOptionRow';
 import RsvpButtons from '../components/RsvpButtons';
 import WindowAvailabilityPicker from '../components/WindowAvailabilityPicker';
-import type { EventDetail, PollVote, RsvpStatus, WindowInfo } from '../types';
+import type { ChangeRequestView, EventDetail, Friend, PollVote, RsvpStatus, WindowInfo } from '../types';
 
 export default function EventDetailPage() {
   const { eventId } = useParams();
@@ -17,7 +18,9 @@ export default function EventDetailPage() {
   const [event, setEvent] = useState<EventDetail | null>(null);
   const [windowInfo, setWindowInfo] = useState<WindowInfo | null>(null);
   const [windowDraft, setWindowDraft] = useState<{ startAt: number; endAt: number } | null>(null);
+  const [changeRequests, setChangeRequests] = useState<ChangeRequestView[]>([]);
   const [loading, setLoading] = useState(true);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   const load = async () => {
     if (!eventId) return;
@@ -29,6 +32,11 @@ export default function EventDetailPage() {
         const w = await api.get<WindowInfo>(`/events/${eventId}/window`);
         setWindowInfo(w);
         setWindowDraft((prev) => prev ?? w.mySubmission ?? defaultWindowDraft(w));
+      }
+      if (ev.status === 'active') {
+        setChangeRequests(await api.get<ChangeRequestView[]>(`/events/${eventId}/change-requests`));
+      } else {
+        setChangeRequests([]);
       }
     } finally {
       setLoading(false);
@@ -75,11 +83,59 @@ export default function EventDetailPage() {
     await load();
   };
 
+  const loadFriends = () => api.get<Friend[]>(`/me/friends?guild_id=${event.guildId}`);
+
+  const handleFileTimeChange = async (input: {
+    proposedStartAt: number;
+    proposedEndAt: number;
+    occurrenceDate?: string;
+    message: string | null;
+  }) => {
+    await api.post(`/events/${event.eventId}/change-requests`, { kind: 'time_change', ...input });
+    await load();
+  };
+
+  const handleFileAddInvitee = async (input: { targetUserId: string; message: string | null }) => {
+    await api.post(`/events/${event.eventId}/change-requests`, { kind: 'add_invitee', ...input });
+    await load();
+  };
+
+  const handleVoteChangeRequest = async (requestId: string, vote: PollVote) => {
+    await api.post(`/events/${event.eventId}/change-requests/${requestId}/vote`, { vote });
+    await load();
+  };
+
+  const handleAcceptChangeRequest = async (requestId: string) => {
+    await api.post(`/events/${event.eventId}/change-requests/${requestId}/accept`);
+    await load();
+  };
+
+  const handleDeclineChangeRequest = async (requestId: string) => {
+    await api.post(`/events/${event.eventId}/change-requests/${requestId}/decline`);
+    await load();
+  };
+
+  const handleWithdrawChangeRequest = async (requestId: string) => {
+    await api.delete(`/events/${event.eventId}/change-requests/${requestId}`);
+    await load();
+  };
+
   const handleCancelOccurrence = async () => {
     if (!occurrenceDate) return;
     if (!confirm(`Cancel just the ${occurrenceDate} occurrence?`)) return;
     await api.post(`/events/${event.eventId}/occurrences/${occurrenceDate}/cancel`, {});
     navigate('/calendar');
+  };
+
+  // Reconstructed rather than location.href verbatim, so a copied link never
+  // carries the page's own transient view state (?occurrence=<date> on a
+  // recurring event's day view) into a link meant to mean "this event," not
+  // "this specific occurrence I happened to be looking at" (spec 0005).
+  const handleCopyInviteLink = async () => {
+    const link = `${location.origin}${location.pathname}#/events/${event.eventId}`;
+    await navigator.clipboard.writeText(link);
+    setLinkCopied(true);
+    setTimeout(() => setLinkCopied(false), 4000);
   };
 
   return (
@@ -94,6 +150,12 @@ export default function EventDetailPage() {
         </div>
         {isOrganizer && event.status !== 'cancelled' && (
           <div className="flex gap-2">
+            <button
+              onClick={handleCopyInviteLink}
+              className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
+            >
+              {linkCopied ? 'Copied!' : 'Copy invite link'}
+            </button>
             {event.status === 'active' && (
               <Link
                 to={`/events/${event.eventId}/edit`}
@@ -119,6 +181,13 @@ export default function EventDetailPage() {
           </div>
         )}
       </div>
+
+      {linkCopied && (
+        <p className="-mt-3 text-xs text-slate-500">
+          Link copied — whoever you send it to will need to log in with Discord and be a member of this
+          server to see it.
+        </p>
+      )}
 
       {event.status === 'cancelled' && (
         <p className="rounded-md bg-slate-800 px-3 py-2 text-sm text-slate-400">
@@ -233,6 +302,24 @@ export default function EventDetailPage() {
           <p className="mb-1 text-sm text-emerald-400">This session is confirmed.</p>
           <p className="font-medium">{formatTimeRange(event.startAt, event.endAt, zone)}</p>
         </div>
+      )}
+
+      {user && (
+        <ChangeRequestSection
+          event={event}
+          userId={user.id}
+          isOrganizer={isOrganizer}
+          isInvitee={event.invites.some((inv) => inv.userId === user.id)}
+          requests={changeRequests}
+          occurrenceDate={occurrenceDate}
+          loadFriends={loadFriends}
+          onFileTimeChange={handleFileTimeChange}
+          onFileAddInvitee={handleFileAddInvitee}
+          onVote={handleVoteChangeRequest}
+          onAccept={handleAcceptChangeRequest}
+          onDecline={handleDeclineChangeRequest}
+          onWithdraw={handleWithdrawChangeRequest}
+        />
       )}
 
       <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">

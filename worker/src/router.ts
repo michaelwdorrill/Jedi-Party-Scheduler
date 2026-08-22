@@ -8,6 +8,7 @@ import { guildRoutes } from './routes/guilds';
 import { groupRoutes } from './routes/groups';
 import { eventRoutes } from './routes/events';
 import { pollRoutes } from './routes/polls';
+import { changeRequestRoutes } from './routes/changeRequests';
 import { personalRoutes } from './routes/personal';
 import { adminRoutes } from './routes/admin';
 import { MembershipUnavailableError } from './lib/db';
@@ -82,6 +83,7 @@ export function buildApp() {
   app.use('/events/*', requireAuth);
   app.route('/events', eventRoutes);
   app.route('/events', pollRoutes);
+  app.route('/events', changeRequestRoutes);
 
   app.use('/personal-events/*', requireAuth);
   app.route('/personal-events', personalRoutes);
