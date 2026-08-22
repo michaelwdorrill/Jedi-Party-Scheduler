@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
+import { APP_VERSION, PUBLISHED_AT } from '../lib/legal';
 import GuildSwitcher from './GuildSwitcher';
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -85,6 +86,10 @@ export default function Layout() {
         <NavLink to="/privacy" className="hover:text-slate-400">
           Privacy
         </NavLink>
+        <span className="px-2">·</span>
+        <span>
+          v{APP_VERSION} — published {PUBLISHED_AT}
+        </span>
       </footer>
     </div>
   );

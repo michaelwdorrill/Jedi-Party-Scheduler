@@ -25,6 +25,27 @@ roadmap gets revisited between phases.
    calendar, which direction, what Google sees) that the Privacy Policy would
    need to cover.
 
+   **Decided (Aug 2026), after considering and rejecting an .ics/webcal feed
+   as a cheaper substitute:** a subscription feed is read-only by
+   construction, so it cannot do the two-way sync that is the whole point
+   here — and Google refreshes external ICS feeds on its own schedule,
+   typically 12–24 hours, which is useless for a scheduling app where a
+   moved session has to propagate now. OAuth is the only route to the stated
+   goal. Three further calls made at the same time:
+   - **Build it in two halves.** Push first (Uncle Owen → Google): needs
+     OAuth, but no incremental sync, no webhook channel renewal, no conflict
+     model, and it delivers most of the felt value. Pull second.
+   - **Pull via `freebusy.query`, not full event read.** Scheduling only
+     needs busy/free times, never titles — which is a narrower scope, a
+     smaller privacy surface, and exactly the language `lib/freeBusy.ts`
+     already speaks. Pulling event *titles* is wanted eventually but is
+     explicitly out of scope for the first build.
+   - **The 100-user unverified-app cap is accepted.** Google requires app
+     verification for the read/write `calendar` scope; unverified means a
+     100-user ceiling and an "unverified app" warning screen. That's fine at
+     this app's scale, and the Privacy Policy revision is accepted as part
+     of the cost.
+
 3. **Manual, event-specific invite links.** A link (not a bot-sent DM) that
    takes a specific person straight to one event, or to the poll/time-options
    for one event, so the organizer can paste it into their own message rather
@@ -32,11 +53,44 @@ roadmap gets revisited between phases.
 
 4. **Calendar weeks should run Sunday–Saturday, not Monday–Sunday.**
 
-5. **Calendar landing view.** Land on "just your calendar" with no
-   guild-switcher tab up front. Then offer views for: a specific server's
-   calendar (showing blocked/busy time even for events you're not invited to
-   — i.e. free/busy, not full detail), your personal events only, your Uncle
-   Owen game events only, and personal+game combined.
+5. **Calendar-first, not server-first** (was: "calendar landing view").
+   Land on "just your calendar" with no guild-switcher tab up front. Then
+   offer views for: a specific server's calendar (showing blocked/busy time
+   even for events you're not invited to — i.e. free/busy, not full detail),
+   your personal events only, your Uncle Owen game events only, and
+   personal+game combined.
+
+   **Rescoped (Aug 2026) from a view change to an organizing-principle
+   change.** The stated pain is that the app is "too server heavy — people
+   shouldn't be thinking of this a server at a time." A landing view alone
+   doesn't fix that, because the server-scoping is structural: the *only*
+   event-listing endpoint is `GET /guilds/:guildId/events`, and
+   `CalendarPage` early-returns when no guild is selected. There is no
+   cross-guild "my events" query anywhere in the app.
+
+   The counterintuitive part, and the reason this is more tractable than it
+   sounds: **the cross-guild personal calendar is a cheaper query than the
+   per-guild one it replaces.** Today's asks for every event in a guild
+   (up to `MAX_ACTIVE_EVENTS_PER_GUILD`, whether or not you're involved);
+   the replacement asks for events you organize or are invited to, which is
+   bounded by your own invite rows. The expensive shape — "every event in
+   every guild I'm in" — is the *server browse* view, which stays opt-in and
+   keeps its existing per-guild bounds. (See `validate.ts`'s own warning
+   that per-guild quotas multiply: "'300 events' becomes 4,200 the moment
+   someone is in fourteen of them.")
+
+   What it takes: a new `GET /me/events?from=&to=` returning events across
+   every guild where you're still an active member, each carrying
+   `guildId`/`guildName`; the guild switcher demoted from global nav to a
+   contextual control; server becoming a label/filter rather than a mode.
+   The recurrence, override and RSVP loaders already take arbitrary event-id
+   lists rather than a guild, so they need no change.
+
+   **The boundary that must not move:** server stays load-bearing for
+   *invitation*. `filterActiveGuildMembers` is what stops an event on one
+   server pulling in someone you only share a different server with, and
+   relaxing that would be a real privacy regression. Servers stop mattering
+   for *viewing*; they keep mattering for *who you can add*.
 
 6. **Poll date/time handling inconsistency.** A fixed-time event lets you set
    separate start and end dates/times. Potential-invite events (both
@@ -194,6 +248,25 @@ roadmap gets revisited between phases.
     existing group the moment it ships (retroactively, or only for new
     groups?), where a dedicated query is a smaller, more local fix.
 
+    **Half-done, and the decisions are now made (Aug 2026).** Commit 5f83816
+    took the smaller option — `GroupsPage` merges the caller into the list
+    it hands the picker, so a creator *can* tick themselves. They still
+    aren't a member automatically, and every group created before that fix
+    still doesn't have its creator in it. Remaining work, as decided:
+    - **Auto-seed `created_by` into `group_members` on create**, and
+      **backfill existing groups** (so this applies retroactively — the
+      "N members" counts on existing groups will move, which is correct).
+    - **Ownership transfer when an owner removes themselves:** hand the
+      group to the member with the most `accepted` RSVPs on events invited
+      via that group. Tiebreak by earliest `added_at`, then user id, so it's
+      deterministic. If there is no one to transfer to, block the removal
+      rather than orphan the group.
+    - **Permissions:** only the owner may add/remove members, rename, or
+      delete. **Any member may create events for the group.** (Note that
+      inviting a group to an event is already open to any guild member —
+      `resolveInviteeUserIds` checks the group's guild, not its ownership —
+      so this is mostly about making that intentional rather than incidental.)
+
 17. ~~Two frontend dependency majors deliberately sitting behind `npm
     audit`.~~ **Done.** Both cleared: `react-router-dom` 6→7.18.2 and
     `vite` 5→8.2.2 (`npm audit fix --force`'s own resolution left
@@ -220,3 +293,45 @@ roadmap gets revisited between phases.
     the window's days?). Fix shape: switch `fmt()` to include the date
     whenever `windowEndAt - windowStartAt` exceeds 24h, mirroring how
     `formatTimeRange` already leads with the date for exactly this reason.
+    **Done** — shipped in v0.2.
+
+19. **Make the bot interactive, not just a megaphone.** Today the bot is
+    outbound-DM-only: it sends invites, reminders, poll results and voice
+    nudges, and has no way to receive anything back. Everything it sends is
+    a dead end that says "go to the website." Adding a Discord
+    **interactions endpoint** (Discord POSTs to the Worker, Ed25519-signed;
+    3-second response deadline with deferred replies for anything slower)
+    is one new inbound surface that unlocks all of the following:
+
+    - **Respond without leaving Discord**, tiered to the event type,
+      because one widget does not fit all three:
+      - *Fixed-time event* → three buttons (I'm in / Maybe / Can't), mapping
+        straight onto `event_invites.rsvp_status`. Full fidelity.
+      - *Options poll* → one multi-select menu of the candidate slots.
+        Discord caps a select at 25 options and `MAX_POLL_OPTIONS` is 20, so
+        it already fits. Chosen → `yes` per option; unchosen → no vote at
+        all, which is exactly how `getOptionTallies`'s LEFT JOIN already
+        treats absence, so it degrades gracefully. The yes/maybe/no nuance
+        stays available on the site.
+      - *Window poll* → a link button to the site, deliberately. Picking a
+        continuous sub-range at 15-minute granularity (now potentially
+        across several days, post-idea-6) has no honest Discord primitive:
+        two dropdowns break past 25 steps, and a text modal means parsing
+        free text.
+    - **Edit the original message when a poll resolves** — swap the vote
+      control for the confirmed time and RSVP buttons. Cheap, since the
+      message id is already in hand.
+    - **Slash commands** (`/schedule`, `/whos-free`, `/my-events`).
+    - **Discord Scheduled Events sync** — create the guild's native
+      scheduled event when an Uncle Owen event confirms, which gets
+      Discord's own calendar UI, notifications and interested-list for free.
+    - **Rich embeds instead of plain-text DMs** — pure formatting, but a
+      large part of why the current DMs "read like spam/scam" (see idea 3).
+
+    **Explicitly ruled out (Aug 2026): posting event announcements to a
+    server channel.** It was considered as a way to make invites feel less
+    like unsolicited DMs, and rejected: a channel post is visible to
+    everyone with read access to that channel, including people who have
+    never used Uncle Owen, which breaks the model where an event is visible
+    to its organizer and invitees only. Everything above stays DM-and-site
+    scoped, and should remain so.
