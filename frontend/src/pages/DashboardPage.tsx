@@ -9,19 +9,20 @@ import type { EventOccurrence } from '../types';
 
 export default function DashboardPage() {
   const { user } = useAuth();
-  const { guilds, selectedGuildId } = useGuild();
+  const { guilds } = useGuild();
   const [upcoming, setUpcoming] = useState<EventOccurrence[]>([]);
   const [loading, setLoading] = useState(true);
   const zone = user?.timezone ?? 'America/New_York';
 
+  // Across every server, not one at a time (spec 0006). "What's coming up"
+  // was never a per-server question.
   useEffect(() => {
-    if (!selectedGuildId) return;
     setLoading(true);
     const now = DateTime.now().setZone(zone);
     const from = now.toMillis();
     const to = now.plus({ days: 60 }).toMillis();
     api
-      .get<EventOccurrence[]>(`/guilds/${selectedGuildId}/events?from=${from}&to=${to}`)
+      .get<EventOccurrence[]>(`/me/events?from=${from}&to=${to}`)
       .then((all) =>
         setUpcoming(
           all
@@ -31,7 +32,7 @@ export default function DashboardPage() {
         ),
       )
       .finally(() => setLoading(false));
-  }, [selectedGuildId, zone]);
+  }, [zone]);
 
   return (
     <div className="space-y-6">
@@ -46,14 +47,12 @@ export default function DashboardPage() {
           >
             + Personal time
           </Link>
-          {selectedGuildId && (
-            <Link
-              to={`/events/new?guild=${selectedGuildId}`}
-              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
-            >
-              + New Event
-            </Link>
-          )}
+          <Link
+            to="/events/new"
+            className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
+          >
+            + New Event
+          </Link>
         </div>
       </div>
 

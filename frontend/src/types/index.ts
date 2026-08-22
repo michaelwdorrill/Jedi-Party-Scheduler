@@ -107,6 +107,11 @@ export interface EventOccurrence {
   isRecurring: boolean;
   isPersonal: boolean;
   organizerId: string;
+  // Which server this event belongs to, for labelling and filtering on the
+  // cross-guild calendar (spec 0006). Null for personal time, which isn't
+  // guild-scoped.
+  guildId: string | null;
+  guildName: string | null;
   myRsvpStatus: RsvpStatus | null;
   pollDeadlineAt: number | null;
   // Which saved group this event was invited through, if any. Used purely to
