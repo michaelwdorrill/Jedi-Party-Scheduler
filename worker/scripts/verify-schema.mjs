@@ -143,6 +143,78 @@ function normalize(sql) {
     .trim();
 }
 
+// Whitespace *around* punctuation, which collapsing runs of whitespace
+// above does not touch: `( id` and `(id` both survive that collapse exactly
+// as written, and D1 re-serializes a stored CREATE TABLE with different
+// padding than the migration file used. Confirmed against production, where
+// notification_log differed from its own migration by exactly this and
+// nothing else -- `( id` vs `(id`, `) )` vs `))`.
+//
+// This does also rewrite the inside of string literals (`'a, b'` becomes
+// `'a,b'`), which would be wrong if the output were ever executed. It isn't:
+// canonicalize() below exists only to compare two schemas to each other, and
+// both sides go through the identical transformation.
+function tightenPunctuation(sql) {
+  return sql.replace(/\s*([(),])\s*/g, '$1');
+}
+
+// Splits a CREATE TABLE's parenthesised body into its top-level parts -- one
+// per column definition or table constraint -- tracking nesting and quoting
+// so the commas inside `CHECK(x IN('a','b'))` and `UNIQUE(a,b)` don't cut a
+// definition in half.
+function splitTopLevel(body) {
+  const parts = [];
+  let depth = 0;
+  let quote = null;
+  let current = '';
+  for (const ch of body) {
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    else if (ch === ',' && depth === 0) {
+      parts.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+// Column *order*, which SQLite does not treat as semantically meaningful --
+// nothing in this codebase reads a column positionally, and every schema
+// change since 0001 has been an ALTER TABLE ADD COLUMN, which appends.
+//
+// That combination is what produced two of the four differences this script
+// reported against production: a table repaired by hand (see SETUP.md's
+// drift incidents, where columns were re-added after later migrations had
+// already run) ends up holding the same columns in a different order than a
+// clean replay of the migrations produces. Sorting the parts before
+// comparing keeps every check that actually matters -- a missing column, an
+// extra one, a changed type, default, constraint or foreign key all still
+// compare unequal after sorting -- and drops only the one difference that
+// cannot affect behaviour.
+//
+// Deliberately not a fix applied to production instead: making the stored
+// column order match would mean a rename-copy-drop of `events` and `groups`
+// against live data, which is real risk taken on for a purely cosmetic gain.
+function canonicalize(sql) {
+  const tightened = tightenPunctuation(normalize(sql));
+  const match = /^(CREATE TABLE [^(]*)\((.*)\)$/i.exec(tightened);
+  if (!match) return tightened;
+  return `${match[1]}(${splitTopLevel(match[2]).sort().join(',')})`;
+}
+
 // D1 (and SQLite itself) maintain their own bookkeeping tables alongside
 // whatever the app's migrations create -- `d1_migrations` is Wrangler's own
 // migration-tracking table, `sqlite_sequence` is SQLite's own (created the
@@ -162,7 +234,7 @@ const KNOWN_D1_INFRASTRUCTURE_OBJECTS = new Set([
 
 function toMap(rows) {
   const map = new Map();
-  for (const row of rows) map.set(`${row.type}:${row.name}`, normalize(row.sql));
+  for (const row of rows) map.set(`${row.type}:${row.name}`, canonicalize(row.sql));
   return map;
 }
 
