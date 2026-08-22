@@ -115,10 +115,13 @@ think about servers":
   page, the guild switcher demoted from global nav to a contextual control,
   and server reduced to a label/filter. The boundary that does *not* move:
   server stays load-bearing for invitation. **The free/busy-only server
-  browse was deliberately left out of v0.3** — it shows blocks for events you
-  are *not* invited to, which is a privacy-relevant design call rather than a
-  layout one, and belongs designed against `lib/freeBusy.ts`'s guarantees on
-  its own terms. Still open in `IDEAS.md`, so it still counts against 1.0.
+  browse was deliberately left out of v0.3** — it shows events you are *not*
+  invited to, which is a privacy-relevant design call rather than a layout
+  one. Since rescoped upward into the **server noticeboard** (titles and
+  attendee lists, not anonymous busy blocks); the four design calls are
+  locked and written down in `specs/0007-server-noticeboard.md`, but it is
+  unscheduled and blocked on a Privacy Policy rewrite. Still open in
+  `IDEAS.md`, so it still counts against 1.0.
 - **16, group creator membership.** Auto-seed the creator, backfill existing
   groups, ownership transfer on self-removal, and the owner/member split
   (owner adds-removes-renames-deletes; any member can create events for the

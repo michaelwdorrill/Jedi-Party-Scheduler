@@ -118,6 +118,20 @@ CI rather than by hand later — don't route around them:
   deployment, that is a thing to report to Michael, not a thing to note
   and move on from.
 
+There is also a local guardrail that fires at the moment of the mistake
+rather than after it: `.claude/hooks/block-push-to-main.mjs`, wired up as a
+`PreToolUse` hook in `.claude/settings.json`. Any Bash command that would
+push to `main` (including `HEAD:main`, a force push, or a bare `git push`
+while on `main`) turns into a permission prompt carrying the sandbox-first
+rule as its reason. It *asks* rather than denies, because the rule is
+"sandbox first unless this specific release is agreed to skip it", and a
+prompt is that conversation. For an override already agreed with Michael:
+`UO_ALLOW_MAIN_PUSH=1 git push origin main`. Tests:
+`node .claude/hooks/block-push-to-main.test.mjs`.
+
+The real enforcement is GitHub branch protection on `main` — the hook is
+repo-local and advisory by design.
+
 ## Before starting new work
 
 Check `docs/IDEAS.md` (captured backlog), `docs/ROADMAP.md` (what order and

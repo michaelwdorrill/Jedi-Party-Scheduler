@@ -101,6 +101,16 @@ roadmap gets revisited between phases.
    invited to -- and belongs designed against `lib/freeBusy.ts`'s guarantees
    rather than bolted onto the personal calendar. Still open.
 
+   **Rescoped again (Aug 2026), upward: not free/busy, a noticeboard.**
+   "If you're in a server, that's more public noticeboard type thing than
+   anything" -- so the browse view shows event *titles* and *who's going*,
+   not anonymous busy blocks. Four calls locked: visible by default with a
+   per-event private toggle; new events only, never retroactive;
+   descriptions stay hidden; invitees cannot hide themselves from the
+   attendee list. Design and the blockers (the Privacy Policy currently
+   promises the exact opposite) are in
+   `specs/0007-server-noticeboard.md`. Still open.
+
 6. **Poll date/time handling inconsistency.** A fixed-time event lets you set
    separate start and end dates/times. Potential-invite events (both
    candidate-day polls and the time-window mode) currently don't offer that
