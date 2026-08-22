@@ -101,6 +101,16 @@ roadmap gets revisited between phases.
    invited to -- and belongs designed against `lib/freeBusy.ts`'s guarantees
    rather than bolted onto the personal calendar. Still open.
 
+   **Rescoped again (Aug 2026), upward: not free/busy, a noticeboard.**
+   "If you're in a server, that's more public noticeboard type thing than
+   anything" -- so the browse view shows event *titles* and *who's going*,
+   not anonymous busy blocks. Four calls locked: visible by default with a
+   per-event private toggle; new events only, never retroactive;
+   descriptions stay hidden; invitees cannot hide themselves from the
+   attendee list. Design and the blockers (the Privacy Policy currently
+   promises the exact opposite) are in
+   `specs/0007-server-noticeboard.md`. Still open.
+
 6. **Poll date/time handling inconsistency.** A fixed-time event lets you set
    separate start and end dates/times. Potential-invite events (both
    candidate-day polls and the time-window mode) currently don't offer that
@@ -351,3 +361,46 @@ roadmap gets revisited between phases.
     never used Uncle Owen, which breaks the model where an event is visible
     to its organizer and invitees only. Everything above stays DM-and-site
     scoped, and should remain so.
+
+20. **Merge the Dashboard into the Calendar as one landing page.** Two
+    top-level tabs currently split what is one question. `/` is the
+    Dashboard — a "Welcome back" header, the New Event / Personal time
+    buttons, and an "Upcoming sessions" list — and `/calendar` is the grid.
+    The itinerary would work better as a **right sidebar alongside the
+    calendar** than as a separate tab you have to go to first.
+
+    **This is a pure layout change, and idea 5 is why.** Before v0.3 it
+    wouldn't have been: the Dashboard and the Calendar were fed by
+    different queries. Now both call the same `GET /me/events` — the
+    Dashboard asks for now→+60d and takes the first 8, the Calendar asks
+    for the visible range — so merging them needs no new endpoint, no
+    schema change and no worker work at all. It is the mirror image of
+    idea 5, which *looked* like a view change and turned out to be
+    structural.
+
+    Decisions it needs, none of them settled:
+
+    - **Does the sidebar follow the calendar, or stay anchored to now?**
+      They want different ranges: "what's coming up" means from *now*,
+      while the grid pans to arbitrary months. Anchoring the sidebar to
+      now (so paging to December doesn't empty it) is the more useful
+      behaviour and costs a second, smaller query.
+    - **Mobile.** A sidebar beside a month grid doesn't fit a phone. It
+      has to collapse to a stacked list above or below the grid, or behind
+      a toggle. This is the real cost of the change and the reason it
+      isn't trivial.
+    - **What happens to `/`, `/calendar`, and the nav.** The merged view
+      should own `/`, with `/calendar` kept as a redirect rather than
+      removed — it's linked from the Dashboard's own empty state today
+      and may be bookmarked.
+    - **Where the header and the two action buttons go**, and whether the
+      `guilds.length === 0` empty state ("you don't share any allow-listed
+      servers") still has a home. It currently gates the whole Dashboard.
+
+    **Sequencing: this belongs *inside* the v0.4 design pass (idea 8), not
+    before or after it.** Phase 3.5 is defined as styling "the set of views
+    that survived Phase 3" — and this changes which views there are. Doing
+    the design pass first and re-laying-out the landing page second means
+    designing that page twice, which is exactly the argument that put idea
+    8 after idea 5 in the first place. So the design pitches should be
+    drawn with the merged calendar+itinerary landing page as a given.
