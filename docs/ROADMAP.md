@@ -140,7 +140,10 @@ month grid and the agenda as views you swap between. That also settles idea
 20's mobile question, which its entry called the real cost of the change.
 The desert ships turned up: **full homestead is the default**, with a Settings
 toggle to a calmer twin-suns treatment for anyone who wants it quieter. v0.4
-touches no schema — both preferences live in local storage.
+touches no schema — both preferences live in local storage. A small amount of
+motion rides along (a login hero, a twin-suns loading primitive replacing seven
+ad-hoc `Loading…` strings, and one ambient detail), all of it behind
+`prefers-reduced-motion`.
 
 Styles the set of views that survived Phase 3. Rule 3 above is the whole
 argument for this ordering — doing it first means paying for it twice.

@@ -186,6 +186,74 @@ logotype, which is a trademark and a logo rather than a text face. Saira
 Condensed does the same job and is licensed for it. Everything is CSS and
 inline SVG; no image files enter the build.
 
+## Motion
+
+Added after review liked the horizon graphic and asked for "some light
+animations". Companion motion study: the `Desert Weather` artifact.
+
+**The rule.** This is a tool people open to answer a question and leave, so
+animation that delights on visit one is irritating by visit four hundred.
+Motion earns a place only if it (a) happens where there is no task, (b) replaces
+something that already has to move, or (c) sits far enough in the periphery that
+you only notice it when you look.
+
+Four pieces qualify. All are CSS keyframes over inline SVG — no animation
+library, no video, no image assets.
+
+| # | Where | What moves | Repeats |
+|---|---|---|---|
+| 1 | `LoginPage.tsx` | Both suns descend and fade in, the warm glow builds, vaporators resolve, the sign-in block rises last (2.6s) | Never — once per session at most |
+| 2 | The 7 `Loading…` strings | The smaller sun orbits the larger, swelling in front and dimming behind (1.9s) | While waiting |
+| 3 | Empty states | **Nothing.** A drawn horizon and the line "Nothing on the horizon" | — |
+| 4 | Landing page foot | A droplet falls from a vaporator bulb; two cycles at 9s and 12.5s so it never finds an anticipatable rhythm | Ambient, Homestead only |
+
+**Piece 2 is the one that pays for itself.** A loading state has to signal
+waiting regardless of appearance, so there is no patience cost — and it folds
+seven ad-hoc `Loading…` strings (`AuthGuard`, `CalendarPage`, `GroupsPage`,
+`EventDetailPage`, `PersonalEventPage`, `AdminUsersPage`, `DashboardPage`) into
+one `<Loading />` primitive, a fifth alongside Button/Card/Field/PageHeader.
+Worth doing as a simplification before any argument about how it looks.
+
+**Piece 3 deliberately does not move.** An empty state is already a small
+disappointment; animating it draws attention to the emptiness rather than to the
+way out of it. The personality goes into the drawing and the copy, which a
+screen reader can also read.
+
+### Reduced motion is the default, not the fallback
+
+Every animated element's normal CSS **is** its finished appearance; keyframes
+supply only where it starts from, and the `animation` property is added inside
+`@media (prefers-reduced-motion: no-preference)`.
+
+That ordering is the whole correctness argument. The common bug is animating
+*into* existence — `opacity: 0` in the base rule — so anyone who asks for reduced
+motion gets a blank stage instead of a composed one. Built this way, turning
+motion off can only remove movement, never content.
+
+### Ruled out
+
+- **Heat shimmer over the horizon.** Continuous distortion near text is a nausea
+  risk, and it is the most expensive thing here to paint.
+- **Event chips animating in as the calendar loads.** Staggered entry across up
+  to 40 cells means the thing you came to read is still assembling when you look
+  at it.
+- **Page transitions between routes.** Latency on every navigation for novelty
+  that expires in a week.
+- **Sun position tracking real time of day.** Charming, and that is what loses
+  it: the login hero is the only surface it would show on, and you see that
+  screen about once.
+- **Parallax dunes on scroll.** The landing page is a calendar; scroll-linked
+  motion behind a grid of dates is noise.
+
+### Cost, honestly
+
+This is scope idea 8 did not name, though it sits inside "general polish". It
+lands in branch 2 (identity). The loading primitive is a net simplification; the
+login hero and empty state are roughly half a day between them, mostly drawing;
+the drip is an hour and is the first thing to cut. None of it touches the
+worker, the schema, or any data path, so all four delete cleanly if they do not
+survive the sandbox.
+
 ## Sequencing: three branches, foundation first
 
 The review's instinct was foundation-first, contingent on the direction. The
