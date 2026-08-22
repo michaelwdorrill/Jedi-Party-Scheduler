@@ -72,16 +72,34 @@ scripts above already have this baked in, so it only matters if invoking
 ... package.json` or a wrangler "couldn't find" error is very often just
 this.
 
-## Promoting sandbox work to production
+## Promoting sandbox work to production — sandbox first, every time
 
-1. Push a feature branch into a `sandbox` branch, or run the **Deploy
-   Sandbox** GitHub Actions workflow manually (Actions tab → Deploy
-   Sandbox → Run workflow) against any branch.
+**The default route to production is: feature branch → sandbox → verify →
+merge to `main`. Not "feature branch → merge to `main`".** This holds for a
+cloud/remote Claude Code session exactly as much as it does for Michael at
+his own machine, and it holds even when he has already said "push it to
+prod" — that authorises the *destination*, not a shortcut past the
+sandbox. If a release is genuinely urgent enough to skip the sandbox, say
+so out loud and get a yes for *that specific release* first.
+
+1. Push the feature branch, then push it into the `sandbox` branch
+   (`git push -u origin HEAD:sandbox`, or `--force-with-lease` if `sandbox`
+   holds an older feature). Alternatively run the **Deploy Sandbox** GitHub
+   Actions workflow manually (Actions tab → Deploy Sandbox → Run workflow)
+   against any branch.
 2. Verify it against the deployed sandbox Worker — log in, exercise the
    feature, check `wrangler tail --env sandbox` if something's off.
-3. Merge the branch to `main` as normal. `deploy-worker.yml` rebuilds and
+3. Only then merge the branch to `main`. `deploy-worker.yml` rebuilds and
    redeploys the **same commit**, nothing rebuilt differently for
    production except which vars/secrets apply.
+
+**A remote session has no excuse here.** `deploy-sandbox.yml` triggers on a
+push to the `sandbox` branch and authenticates with *repository secrets*,
+not with Michael's local Cloudflare credentials. So a cloud session can
+deploy to the sandbox on its own — it just can't click around the deployed
+result, which is what step 2 needs Michael for. "I couldn't reach the
+sandbox from here" is not true; it was true of `npm run deploy:sandbox` and
+that is a different thing.
 
 Three automated guardrails exist so sandbox/production drift is caught by
 CI rather than by hand later — don't route around them:
@@ -93,7 +111,12 @@ CI rather than by hand later — don't route around them:
   `worker/migrations/*.sql` -- this is what caught three genuine schema-
   drift incidents in production before this existed (see `docs/SETUP.md`).
 - An advisory (non-blocking) note on the production deploy about whether
-  the commit was deployed to sandbox first.
+  the commit was deployed to sandbox first. It is deliberately advisory —
+  see `deploy-worker.yml` for why — which makes it *easy* to read past.
+  It fired on every production deploy of v0.3 and was read past. If a
+  production deploy's summary says the commit has no matching sandbox
+  deployment, that is a thing to report to Michael, not a thing to note
+  and move on from.
 
 ## Before starting new work
 
