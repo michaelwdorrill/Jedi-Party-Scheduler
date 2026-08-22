@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { AppEnv } from '../lib/authMiddleware';
 import { exchangeCodeForToken, fetchDiscordUser, fetchDiscordUserGuilds } from '../lib/discord';
-import { listUserGuilds, syncGuildMembership, upsertUser } from '../lib/db';
+import { listUserGuilds, markLoginSucceeded, syncGuildMembership, upsertUser } from '../lib/db';
 import { signJwt, verifyJwt } from '../lib/jwt';
 import { createSession, revokeSession, rotateSession } from '../lib/sessions';
 
@@ -97,6 +97,10 @@ authRoutes.get('/callback', async (c) => {
       c.header('Cache-Control', NO_STORE);
       return c.text("You're not a member of any server this app is set up for.", 403);
     }
+
+    // Past the guild check, so this is a real login rather than an attempt
+    // that got turned away (migration 0018).
+    await markLoginSucceeded(c.env, discordUser.id);
 
     const session = await createSession(c.env, discordUser.id);
     const jwt = await signJwt(discordUser.id, session.id, c.env.JWT_SIGNING_KEY);

@@ -29,7 +29,7 @@ adminRoutes.get('/users', async (c) => {
   const after = c.req.query('after') ?? '';
 
   const { results: users } = await c.env.DB.prepare(
-    `SELECT id, username, global_name, notifications_enabled, last_login_at
+    `SELECT id, username, global_name, notifications_enabled, last_login_at, last_login_attempt_at
      FROM users WHERE id > ? ORDER BY id LIMIT ?`,
   )
     .bind(after, limit)
@@ -39,6 +39,7 @@ adminRoutes.get('/users', async (c) => {
       global_name: string | null;
       notifications_enabled: number;
       last_login_at: number | null;
+      last_login_attempt_at: number | null;
     }>();
 
   if (users.length === 0) return c.json({ users: [], nextCursor: null });
@@ -47,20 +48,31 @@ adminRoutes.get('/users', async (c) => {
   // the same reason the cron's notification sources fold their "already
   // handled?" check into the source query rather than issuing a per-row
   // follow-up (see lib/outbox.ts's PENDING_NOTIFICATION_JOIN comment).
+  // Deliberately no `is_member = 1` filter. Membership rows aren't deleted
+  // when someone leaves a server -- syncGuildMembership and the cron's
+  // revalidateStaleMemberships just flip the flag to 0 -- so filtering them
+  // out here made "was in this server, since departed" look identical to
+  // "has never been in it". That cost a real investigation: a member showing
+  // zero servers on this page turned out to be a departed row, and the only
+  // way to find out was a raw SQL query. Both states now come back, tagged.
   const ids = users.map((u) => u.id);
   const { results: memberships } = await c.env.DB.prepare(
-    `SELECT ugm.user_id AS user_id, g.id AS guild_id, g.name AS guild_name
+    `SELECT ugm.user_id AS user_id, g.id AS guild_id, g.name AS guild_name,
+            ugm.is_member AS is_member, ugm.verified_at AS verified_at
      FROM user_guild_membership ugm
      JOIN guilds g ON g.id = ugm.guild_id
-     WHERE ugm.is_member = 1 AND ugm.user_id IN (${placeholders(ids.length)})`,
+     WHERE ugm.user_id IN (${placeholders(ids.length)})`,
   )
     .bind(...ids)
-    .all<{ user_id: string; guild_id: string; guild_name: string }>();
+    .all<{ user_id: string; guild_id: string; guild_name: string; is_member: number; verified_at: number | null }>();
 
-  const guildsByUser = new Map<string, { id: string; name: string }[]>();
+  const guildsByUser = new Map<
+    string,
+    { id: string; name: string; isMember: boolean; verifiedAt: number | null }[]
+  >();
   for (const m of memberships) {
     const list = guildsByUser.get(m.user_id) ?? [];
-    list.push({ id: m.guild_id, name: m.guild_name });
+    list.push({ id: m.guild_id, name: m.guild_name, isMember: !!m.is_member, verifiedAt: m.verified_at });
     guildsByUser.set(m.user_id, list);
   }
 
@@ -71,6 +83,7 @@ adminRoutes.get('/users', async (c) => {
       globalName: u.global_name,
       notificationsEnabled: !!u.notifications_enabled,
       lastLoginAt: u.last_login_at,
+      lastLoginAttemptAt: u.last_login_attempt_at,
       guilds: guildsByUser.get(u.id) ?? [],
     })),
     nextCursor: users.length === limit ? users[users.length - 1].id : null,

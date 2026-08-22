@@ -43,14 +43,20 @@ describe('GET /admin/users', () => {
     await seedMembership(db, 'alice', 'guild-1');
     await seedMembership(db, 'alice', 'guild-2');
     await seedMembership(db, 'bob', 'guild-1');
-    // A membership row that's since lapsed should not be reported as current.
+    // A membership row that's since lapsed. It must still be *reported* --
+    // hiding it made "departed" indistinguishable from "never a member"
+    // (idea 15) -- but tagged isMember: false rather than as current.
     await seedMembership(db, 'bob', 'guild-2', { isMember: 0 });
 
     const headers = await authFor(env, 'owner');
     const res = await call(env, '/admin/users', { headers });
     expect(res.status).toBe(200);
     const body = await res.json<{
-      users: { id: string; guilds: { id: string; name: string }[]; lastLoginAt: number | null }[];
+      users: {
+        id: string;
+        guilds: { id: string; name: string; isMember: boolean }[];
+        lastLoginAt: number | null;
+      }[];
       nextCursor: string | null;
     }>();
 
@@ -58,10 +64,41 @@ describe('GET /admin/users', () => {
 
     const alice = body.users.find((u) => u.id === 'alice')!;
     expect(alice.guilds.map((g) => g.id).sort()).toEqual(['guild-1', 'guild-2']);
+    expect(alice.guilds.every((g) => g.isMember)).toBe(true);
     expect(alice.lastLoginAt).not.toBeNull();
 
+    // Bob's departed guild-2 row comes back, flagged -- that's the whole
+    // point. Someone showing no *current* servers still shows the history.
     const bob = body.users.find((u) => u.id === 'bob')!;
-    expect(bob.guilds.map((g) => g.id)).toEqual(['guild-1']);
+    expect(bob.guilds.map((g) => g.id).sort()).toEqual(['guild-1', 'guild-2']);
+    expect(bob.guilds.find((g) => g.id === 'guild-1')!.isMember).toBe(true);
+    expect(bob.guilds.find((g) => g.id === 'guild-2')!.isMember).toBe(false);
+  });
+
+  it('reports a login attempt that was turned away separately from a real login', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'owner');
+    // seedUser stamps both, as a successful login would. An attempt that was
+    // rejected for sharing no allow-listed server leaves last_login_at alone,
+    // which is what makes the two tellable apart on this page (idea 15).
+    await seedUser(db, 'bounced');
+    await db
+      .prepare(`UPDATE users SET last_login_at = NULL, last_login_attempt_at = ? WHERE id = 'bounced'`)
+      .bind(Date.now())
+      .run();
+
+    const headers = await authFor(env, 'owner');
+    const res = await call(env, '/admin/users', { headers });
+    const body = await res.json<{
+      users: { id: string; lastLoginAt: number | null; lastLoginAttemptAt: number | null }[];
+    }>();
+
+    const bounced = body.users.find((u) => u.id === 'bounced')!;
+    expect(bounced.lastLoginAt).toBeNull();
+    expect(bounced.lastLoginAttemptAt).not.toBeNull();
+
+    const owner = body.users.find((u) => u.id === 'owner')!;
+    expect(owner.lastLoginAt).not.toBeNull();
   });
 
   it('pages with a keyset cursor rather than returning everything at once', async () => {
@@ -94,6 +131,14 @@ describe('GET /admin/users', () => {
     const res = await call(env, '/admin/users', { headers });
     const body = await res.json<{ users: Record<string, unknown>[] }>();
     const keys = Object.keys(body.users[0]).sort();
-    expect(keys).toEqual(['globalName', 'guilds', 'id', 'lastLoginAt', 'notificationsEnabled', 'username']);
+    expect(keys).toEqual([
+      'globalName',
+      'guilds',
+      'id',
+      'lastLoginAt',
+      'lastLoginAttemptAt',
+      'notificationsEnabled',
+      'username',
+    ]);
   });
 });

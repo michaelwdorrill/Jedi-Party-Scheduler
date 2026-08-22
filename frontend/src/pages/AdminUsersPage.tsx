@@ -9,7 +9,12 @@ interface AdminUser {
   globalName: string | null;
   notificationsEnabled: boolean;
   lastLoginAt: number | null;
-  guilds: { id: string; name: string }[];
+  // When someone reached a valid Discord profile but was turned away for
+  // sharing no allow-listed server, this is set and lastLoginAt is not.
+  lastLoginAttemptAt: number | null;
+  // Includes departed memberships, flagged -- filtering them out server-side
+  // is what made "left this server" look like "was never in it".
+  guilds: { id: string; name: string; isMember: boolean }[];
 }
 
 interface UsersPage {
@@ -88,10 +93,35 @@ export default function AdminUsersPage() {
                     <span className="ml-1 text-xs text-slate-500">@{u.username}</span>
                   </td>
                   <td className="px-3 py-2 text-slate-400">
-                    {u.guilds.map((g) => g.name).join(', ') || '—'}
+                    {u.guilds.length === 0 ? (
+                      '—'
+                    ) : (
+                      <span className="flex flex-wrap gap-x-2">
+                        {u.guilds.map((g) => (
+                          <span
+                            key={g.id}
+                            className={g.isMember ? '' : 'text-slate-600 line-through'}
+                            title={g.isMember ? undefined : 'No longer a member of this server'}
+                          >
+                            {g.name}
+                          </span>
+                        ))}
+                      </span>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-slate-400">
-                    {u.lastLoginAt ? DateTime.fromMillis(u.lastLoginAt).toRelative() : 'never'}
+                    {u.lastLoginAt ? (
+                      DateTime.fromMillis(u.lastLoginAt).toRelative()
+                    ) : u.lastLoginAttemptAt ? (
+                      <span
+                        className="text-amber-500"
+                        title="Signed in with Discord but was turned away for sharing no allow-listed server"
+                      >
+                        turned away {DateTime.fromMillis(u.lastLoginAttemptAt).toRelative()}
+                      </span>
+                    ) : (
+                      'never'
+                    )}
                   </td>
                   <td className="px-3 py-2 text-slate-400">{u.notificationsEnabled ? 'on' : 'off'}</td>
                 </tr>

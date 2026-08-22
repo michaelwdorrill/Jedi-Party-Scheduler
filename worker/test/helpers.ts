@@ -103,10 +103,10 @@ export async function seedUser(db: ShimDatabase, id: string): Promise<string> {
   const now = Date.now();
   await db.prepare(
     `INSERT INTO users (id, username, global_name, avatar_hash, timezone, notifications_enabled,
-       created_at, updated_at, last_login_at)
-     VALUES (?, ?, NULL, NULL, 'America/New_York', 1, ?, ?, ?)`,
+       created_at, updated_at, last_login_at, last_login_attempt_at)
+     VALUES (?, ?, NULL, NULL, 'America/New_York', 1, ?, ?, ?, ?)`,
   )
-    .bind(id, `user-${id}`, now, now, now)
+    .bind(id, `user-${id}`, now, now, now, now)
     .run();
   return id;
 }

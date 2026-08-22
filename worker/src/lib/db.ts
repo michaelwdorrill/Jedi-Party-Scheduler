@@ -314,21 +314,33 @@ export interface UpsertUserInput {
   avatarHash: string | null;
 }
 
+// Records a login *attempt*, not a successful login. This runs as soon as
+// Discord hands back a valid profile, which is before routes/auth.ts checks
+// that the caller shares an allow-listed server -- a check that can still
+// reject with a 403 and issue no session. Stamping `last_login_at` here made
+// those two outcomes identical on the owner-only user list (migration 0018);
+// `markLoginSucceeded` below is what records the real thing.
 export async function upsertUser(env: Env, input: UpsertUserInput): Promise<void> {
   const now = Date.now();
   await env.DB.prepare(
     `INSERT INTO users (id, username, global_name, avatar_hash, timezone, notifications_enabled,
-       created_at, updated_at, last_login_at)
+       created_at, updated_at, last_login_attempt_at)
      VALUES (?, ?, ?, ?, 'America/New_York', 1, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        username = excluded.username,
        global_name = excluded.global_name,
        avatar_hash = excluded.avatar_hash,
        updated_at = excluded.updated_at,
-       last_login_at = excluded.last_login_at`,
+       last_login_attempt_at = excluded.last_login_attempt_at`,
   )
     .bind(input.id, input.username, input.globalName, input.avatarHash, now, now, now)
     .run();
+}
+
+// Called only once a session is actually being issued, so `last_login_at`
+// means what its name says.
+export async function markLoginSucceeded(env: Env, userId: string): Promise<void> {
+  await env.DB.prepare(`UPDATE users SET last_login_at = ? WHERE id = ?`).bind(Date.now(), userId).run();
 }
 
 // Full erasure of a user's data, exposed as DELETE /me. Discord's Developer
