@@ -1,6 +1,6 @@
 # 0009 — Binary sunset: the v0.4 visual identity
 
-**Status:** Ready
+**Status:** Built
 **Covers:** `IDEAS.md` items 8 and 20 · **Phase:** 3.5 · **Ships in:** v0.4
 **Supersedes:** `0008-visual-design-pass.md`
 

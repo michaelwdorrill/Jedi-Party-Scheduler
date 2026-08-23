@@ -130,7 +130,7 @@ think about servers":
   "departed", and "logged in" from "was turned away at login". Small, and it
   belongs with the other "the app should say what it means" work.
 
-### Phase 3.5 — Visual design pass (ideas 8, 20) → **v0.4** ← in progress
+### Phase 3.5 — Visual design pass (ideas 8, 20) → **v0.4** ✅ shipped
 
 **Spec:** `specs/0009-binary-sunset.md` (Ready). The three pitches in
 `specs/0008` were all rejected as insufficiently distinctive; the direction
@@ -166,7 +166,7 @@ stays anchored to now, what happens on mobile, where the header and action
 buttons live) are layout calls, so they get answered *by* the chosen pitch
 rather than before it.
 
-### Phase 3.75 — An interactive bot (idea 19) → **v0.5**
+### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ← next
 
 One new inbound surface (a Discord interactions endpoint) turns the bot from
 a megaphone into something you can answer. Sequenced after the design pass
@@ -233,7 +233,7 @@ shifts.
 | 0.1 | Everything up to and including the sandbox and promotion guardrails (Phases 0–1) | Shipped |
 | **0.2** | Phase 2 — invitee change requests, poll date consistency, invite links; plus the dependency upgrades and the version stamp | Shipped 22 Aug 2026 |
 | **0.3** | Phase 3 — calendar-first (5), group creator membership (16), admin list gaps (15), changelog page | **Shipped 22 Aug 2026** |
-| **0.4** | Phase 3.5 — visual design pass (8), Dashboard/Calendar merged into one landing page (20) | **In progress** — direction agreed (`specs/0009`), building in three branches |
+| **0.4** | Phase 3.5 — visual design pass (8), Dashboard/Calendar merged into one landing page (20) | **Shipped 23 Aug 2026** |
 | 0.5 | Interactive bot (19) | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
@@ -263,7 +263,7 @@ shifts.
 | 9 | Self-service bot add + email | L | 4 | 0.6 | — | TBD |
 | 10 | Stale-account auto-delete | M | 4 | 0.6 | — | TBD |
 | 2 | Google Calendar sync | XL | 5 | 0.7 | 1, 5, 10 | TBD |
-| 21 | Calendar chip click opens New Event | S | 3.5 | 0.4 | — | 0009 (foundation branch) |
+| 21 | Calendar chip click opens New Event | S | 3.5 | 0.4 | — | 0009 — done |
 | 22 | Calendar can only show 2 months | M | — | — | — | deferred out of 0009 |
 
 Ideas 15–19 were captured after this roadmap was first written and had never

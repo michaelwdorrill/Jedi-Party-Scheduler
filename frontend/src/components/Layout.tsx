@@ -58,9 +58,6 @@ export default function Layout() {
             </span>
             <nav className="flex gap-1">
               <NavLink to="/" end className={navLinkClass}>
-                Dashboard
-              </NavLink>
-              <NavLink to="/calendar" className={navLinkClass}>
                 Calendar
               </NavLink>
               <NavLink to="/groups" className={navLinkClass}>
