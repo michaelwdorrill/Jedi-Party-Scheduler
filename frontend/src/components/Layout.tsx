@@ -2,10 +2,12 @@ import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { APP_VERSION, PUBLISHED_AT } from '../lib/legal';
+import { buttonClass } from './ui';
+import Sky from './Sky';
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-  `rounded-md px-3 py-2 text-sm font-medium ${
-    isActive ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+  `rounded-md px-3 py-2 font-display text-sm uppercase tracking-wide ${
+    isActive ? 'bg-accent text-on-accent' : 'text-ink-dim hover:bg-raised hover:text-ink'
   }`;
 
 type LogoutBanner = 'none' | 'queued' | 'unresolved';
@@ -24,29 +26,38 @@ export default function Layout() {
   };
 
   return (
-    <div className="min-h-screen">
+    <>
+      <Sky />
+      <div className="uo-page flex min-h-screen flex-col">
       {logoutBanner === 'queued' && (
-        <div className="bg-amber-900/60 px-4 py-2 text-center text-sm text-amber-100">
+        <div className="bg-warning-surface/75 px-4 py-2 text-center text-sm text-warning-text">
           You're signed out on this device, but we couldn't reach the server to end the session. It'll
           be ended automatically next time you're online.
         </div>
       )}
       {logoutBanner === 'unresolved' && (
-        <div className="bg-red-900/60 px-4 py-2 text-center text-sm text-red-100">
+        <div className="bg-danger-surface/75 px-4 py-2 text-center text-sm text-danger-text">
           You're signed out on this device, but we couldn't confirm the server-side session ended, and
           couldn't even record it for automatic retry. If this device is shared or was compromised,
           contact support.
         </div>
       )}
-      <header className="border-b border-slate-800 bg-slate-900">
+      <header className="border-b border-edge bg-surface/80 backdrop-blur-sm">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
           <div className="flex items-center gap-4">
-            <span className="text-lg font-semibold">Uncle Owen</span>
+            <span className="flex items-center gap-2">
+              {/* The twin-sun mark. Two circles, one larger and warmer than
+                  the other -- the whole identity in 20 pixels. */}
+              <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" className="shrink-0">
+                <circle cx="8" cy="10" r="6" fill="#E8913A" />
+                <circle cx="14.5" cy="13" r="3.2" fill="#F2C879" />
+              </svg>
+              <span className="font-display text-xl font-bold uppercase tracking-widest">
+                Uncle Owen
+              </span>
+            </span>
             <nav className="flex gap-1">
               <NavLink to="/" end className={navLinkClass}>
-                Dashboard
-              </NavLink>
-              <NavLink to="/calendar" className={navLinkClass}>
                 Calendar
               </NavLink>
               <NavLink to="/groups" className={navLinkClass}>
@@ -59,11 +70,11 @@ export default function Layout() {
           </div>
           <div className="flex items-center gap-3">
             {user && (
-              <div className="flex items-center gap-2 text-sm text-slate-300">
+              <div className="flex items-center gap-2 text-sm text-ink-dim">
                 <span>{user.globalName ?? user.username}</span>
                 <button
                   onClick={() => void handleLogout()}
-                  className="rounded-md border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800"
+                  className={buttonClass('secondary', 'sm')}
                 >
                   Log out
                 </button>
@@ -72,20 +83,20 @@ export default function Layout() {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-5xl px-4 py-6">
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6">
         <Outlet />
       </main>
 
-      <footer className="mx-auto max-w-5xl px-4 pb-8 pt-4 text-xs text-slate-600">
-        <NavLink to="/terms" className="hover:text-slate-400">
+      <footer className="mx-auto max-w-5xl px-4 pb-8 pt-2 text-xs text-fainter">
+        <NavLink to="/terms" className="hover:text-muted">
           Terms
         </NavLink>
         <span className="px-2">·</span>
-        <NavLink to="/privacy" className="hover:text-slate-400">
+        <NavLink to="/privacy" className="hover:text-muted">
           Privacy
         </NavLink>
         <span className="px-2">·</span>
-        <NavLink to="/changelog" className="hover:text-slate-400">
+        <NavLink to="/changelog" className="hover:text-muted">
           Changelog
         </NavLink>
         <span className="px-2">·</span>
@@ -93,6 +104,7 @@ export default function Layout() {
           v{APP_VERSION} — published {PUBLISHED_AT}
         </span>
       </footer>
-    </div>
+      </div>
+    </>
   );
 }

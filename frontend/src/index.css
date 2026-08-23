@@ -3,5 +3,428 @@
 @tailwind utilities;
 
 body {
-  @apply bg-slate-950 text-slate-100;
+  @apply bg-ground font-sans text-ink;
+}
+
+@layer base {
+  /* Headings carry the display face. Set here rather than per-component so a
+   * heading is a heading wherever it appears -- the app had no type roles at
+   * all before this, only ad-hoc sizes. */
+  h1,
+  h2,
+  h3 {
+    @apply font-display uppercase tracking-wide;
+  }
+
+  /* Times, dates and counts line up in columns all over this app -- the
+   * calendar grid, attendee counts, the poll tallies -- so they get the mono
+   * face and tabular figures by default. */
+  time,
+  .tabular {
+    @apply font-mono tabular-nums;
+  }
+
+  /* One rule, every focusable element.
+   *
+   * `outline` rather than a ring, deliberately: it draws outside the border
+   * box without affecting layout, it does not collide with box-shadow the way
+   * Tailwind's ring utilities do, and it is the one focus mechanism native
+   * controls (checkbox, radio, select) accept without a fight.
+   *
+   * accent-text rather than accent: the primary button is filled with accent,
+   * so an accent outline on it would be the same colour as the thing it marks.
+   */
+  :focus-visible {
+    outline: 2px solid theme('colors.accent-text');
+    outline-offset: 2px;
+  }
+
+  /* Calendar chips sit in cells with 4px of padding inside a grid with a 4px
+   * gap, so an outward offset lands on their neighbours. Drawn inside instead. */
+  .focus-inset:focus-visible {
+    outline-offset: -3px;
+  }
+}
+
+/* ===========================================================================
+   SCENERY — the homestead layer (spec 0009)
+   ===========================================================================
+   Everything below is additive and gated on the attribute the pre-paint script
+   in index.html stamps on <html>. `twin-suns` is simply this minus the
+   scenery: no separate design, no second set of tokens, nothing to keep in
+   sync. Settings → Scenery toggles the attribute.
+   =========================================================================== */
+
+/* Sand grain. An inline SVG turbulence filter, so no asset enters the build
+ * and it costs no request. Sits above the content at 4% and is inert -- at
+ * that weight it reads as tooth on the surface rather than as texture on top
+ * of the words. */
+[data-scenery='homestead'] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Stencilled panel rules. A short brass bar before a heading, the way a label
+ * is stamped onto equipment rather than printed on a page. */
+[data-scenery='homestead'] h2:not(.no-stencil)::before,
+[data-scenery='homestead'] .stencil::before {
+  content: '';
+  display: inline-block;
+  width: 0.7em;
+  height: 2px;
+  margin-right: 0.55em;
+  vertical-align: middle;
+  background: theme('colors.accent');
+}
+
+/* Vaporators on the horizon, at the foot of the page. Rendered by Layout and
+ * simply not shown under twin-suns. */
+[data-scenery='twin-suns'] .horizon-foot {
+  display: none;
+}
+
+
+
+/* ===========================================================================
+   MOTION (spec 0009)
+   ===========================================================================
+   The rule this is built against: the app is a tool people open to answer a
+   question and leave, so animation that delights on visit one is irritating by
+   visit four hundred. Motion earns a place only if it happens where there is
+   no task (the login screen), replaces something that already has to move (a
+   loading state), or sits far enough in the periphery that you only notice it
+   when you look (the condensate).
+
+   Every animated element's normal CSS *is* its finished appearance; the
+   keyframes only supply where it starts from, and the `animation` property is
+   added inside a no-preference query. That ordering is the whole correctness
+   argument: the common bug is animating *into* existence, which hands anyone
+   who asked for reduced motion a blank stage instead of a composed one. Built
+   this way, turning motion off can only remove movement, never content.
+   =========================================================================== */
+
+/* The smaller sun orbits the larger one, swelling as it passes in front and
+ * dimming as it goes behind. z-index steps rather than eases, which is what
+ * sells the pass-behind. */
+@keyframes uo-orbit {
+  0% {
+    transform: translate(22px, 0) scale(1);
+    opacity: 1;
+    z-index: 1;
+  }
+  25% {
+    transform: translate(0, 8px) scale(1.12);
+    opacity: 1;
+    z-index: 3;
+  }
+  50% {
+    transform: translate(-22px, 0) scale(1);
+    opacity: 1;
+    z-index: 1;
+  }
+  75% {
+    transform: translate(0, -8px) scale(0.74);
+    opacity: 0.5;
+    z-index: 1;
+  }
+  100% {
+    transform: translate(22px, 0) scale(1);
+    opacity: 1;
+    z-index: 1;
+  }
+}
+
+@keyframes uo-sunset {
+  from {
+    transform: translateY(-26px);
+    opacity: 0;
+  }
+}
+
+@keyframes uo-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes uo-rise {
+  from {
+    transform: translateY(14px);
+    opacity: 0;
+  }
+}
+
+/* A single droplet from a vaporator bulb. The fall occupies 13% of the cycle
+ * and the rest is idle, so it stays peripheral rather than becoming a metronome. */
+@keyframes uo-drip {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  3% {
+    opacity: 0.85;
+  }
+  13% {
+    transform: translateY(17px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(17px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .uo-orbiter {
+    animation: uo-orbit 1.9s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+  }
+  .uo-hero-suns {
+    animation: uo-sunset 2.6s cubic-bezier(0.16, 0.7, 0.3, 1) both;
+  }
+  .uo-hero-glow {
+    animation: uo-fade-in 3.1s ease-out both;
+  }
+  .uo-hero-vaps {
+    animation: uo-fade-in 1.9s ease-out 0.35s both;
+  }
+  .uo-hero-copy {
+    animation: uo-rise 0.95s cubic-bezier(0.16, 0.7, 0.3, 1) 0.75s both;
+  }
+  /* Two vaporators on different cycles, so the pair never finds a rhythm you
+   * can anticipate. Homestead only -- the Settings toggle removes it. */
+  [data-scenery='homestead'] .uo-drop-a {
+    animation: uo-drip 9s linear infinite;
+  }
+  [data-scenery='homestead'] .uo-drop-b {
+    animation: uo-drip 12.5s linear 4.2s infinite;
+  }
+}
+
+/* ===========================================================================
+   THE SKY — a fixed scene the app sits inside
+   ===========================================================================
+   Anchored to the viewport rather than the document, so the ground is the
+   bottom of the screen at every window size. Behind everything, and inert.
+   Homestead only; Twin suns removes it entirely.
+   =========================================================================== */
+
+.uo-sky {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+[data-scenery='twin-suns'] .uo-sky {
+  display: none;
+}
+
+/* The sunset, full height. Dark at the top so body text stays comfortably
+ * readable over it, brightening only in the last quarter where the horizon is
+ * and where little but the footer sits. */
+.uo-sky-grad {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to bottom,
+    #221830 0%,
+    #2b1d31 34%,
+    #43272f 58%,
+    #6b402c 76%,
+    #9a5c2e 86%,
+    #5a3418 90%,
+    #1a1008 93%,
+    #120b07 100%
+  );
+}
+
+/* The suns. Separate elements on separate timings, because they are at
+ * different distances -- moving them together made them read as one painted
+ * backdrop rather than as two bodies. */
+.uo-sun {
+  position: absolute;
+  border-radius: 9999px;
+  will-change: transform;
+}
+
+.uo-sun-i {
+  right: 26%;
+  bottom: 9%;
+  width: 19vw;
+  min-width: 150px;
+  aspect-ratio: 1;
+  background: radial-gradient(circle at 42% 38%, #f2a855, #d97b28 68%, #c26a20 100%);
+  opacity: 0.55;
+  filter: blur(0.5px);
+}
+
+.uo-sun-ii {
+  right: 15%;
+  bottom: 6%;
+  width: 9vw;
+  min-width: 74px;
+  aspect-ratio: 1;
+  background: radial-gradient(circle at 40% 36%, #ffe4a8, #e8c07a 70%, #d3a95f 100%);
+  opacity: 0.45;
+}
+
+/* Craft and clouds alike start offscreen left and are translated across in
+ * `vw`. Both are <img>, so their intrinsic size would otherwise lay them out
+ * in flow. */
+.uo-craft,
+.uo-cloud {
+  position: absolute;
+  left: 0;
+  max-width: none;
+  will-change: transform;
+  transform: translate3d(-40vw, 0, 0);
+}
+
+/* Content rides above the scene. */
+.uo-page {
+  position: relative;
+  z-index: 1;
+}
+
+/* --- drift and traffic ---------------------------------------------------- */
+
+@keyframes uo-drift {
+  from {
+    transform: translate3d(-6%, 0, 0);
+  }
+  to {
+    transform: translate3d(6%, 0, 0);
+  }
+}
+
+@keyframes uo-drift-far {
+  from {
+    transform: translate3d(3%, 0, 0);
+  }
+  to {
+    transform: translate3d(-4%, 0, 0);
+  }
+}
+
+@keyframes uo-cross {
+  from {
+    transform: translate3d(-40vw, 0, 0);
+  }
+  to {
+    transform: translate3d(135vw, 0, 0);
+  }
+}
+
+/* Right to left, unmirrored -- for art that already faces left.
+ *
+ * The X-wing sprite carries its bulk on the right (engines, S-foils) and tapers
+ * to a nose on the left, so it faces left and has to fly leftward. Mirroring it
+ * to fly rightward put it tail-first, which is exactly how it looked. The Star
+ * Destroyer is the reverse -- stern and tower at the left, bow at the right --
+ * so it flies rightward unmirrored. The TIE is a symmetric hexagon in profile
+ * and does not care either way. */
+@keyframes uo-cross-rtl {
+  from {
+    transform: translate3d(135vw, 0, 0);
+  }
+  to {
+    transform: translate3d(-40vw, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .uo-sun-i {
+    animation: uo-drift 260s ease-in-out infinite alternate;
+  }
+  .uo-sun-ii {
+    animation: uo-drift-far 155s ease-in-out infinite alternate;
+  }
+
+  /* `backwards` is the whole reason this looks right on load.
+   *
+   * Every craft below is staggered with a delay so the sky fills in over time
+   * rather than launching everything at once. Without a backwards fill, an
+   * element with a delay renders at its *authored* position for the length of
+   * that delay -- which put a static TIE and X-wing against the left edge of
+   * the screen on every page load until the animation finally started. The
+   * fill makes the 0% keyframe apply during the delay instead, so they wait
+   * offscreen where they belong. */
+  .uo-craft {
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+    animation-fill-mode: backwards;
+  }
+
+  .uo-craft-destroyer {
+    animation-name: uo-cross;
+    animation-duration: 190s;
+  }
+  .uo-craft-xwing-a {
+    animation-name: uo-cross-rtl;
+    animation-duration: 27s;
+    animation-delay: 4s;
+  }
+  .uo-craft-xwing-b {
+    animation-name: uo-cross-rtl;
+    animation-duration: 27s;
+    animation-delay: 5.6s;
+  }
+  .uo-craft-xwing-c {
+    animation-name: uo-cross-rtl;
+    animation-duration: 21s;
+    animation-delay: 38s;
+  }
+  .uo-craft-tie-a {
+    animation-name: uo-cross;
+    animation-duration: 23s;
+    animation-delay: 12s;
+  }
+  .uo-craft-tie-b {
+    animation-name: uo-cross;
+    animation-duration: 23s;
+    animation-delay: 13.4s;
+  }
+  .uo-craft-tie-c {
+    animation-name: uo-cross;
+    animation-duration: 31s;
+    animation-delay: 52s;
+  }
+  .uo-craft-skimmer {
+    animation-name: uo-cross-rtl;
+    animation-duration: 13s;
+    animation-delay: 20s;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .uo-cloud {
+    animation-name: uo-cross;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+    animation-fill-mode: backwards;
+  }
+
+  /* Negative delays start each cloud mid-crossing, so the sky is populated on
+   * the very first frame instead of filling in over the next few minutes. */
+  .uo-cloud-1 { animation-duration: 420s; animation-delay: -90s; }
+  .uo-cloud-9 { animation-duration: 380s; animation-delay: -260s; }
+  .uo-cloud-2 { animation-duration: 360s; animation-delay: -210s; }
+  .uo-cloud-3 { animation-duration: 330s; animation-delay: -40s; }
+  .uo-cloud-4 { animation-duration: 300s; animation-delay: -180s; }
+  .uo-cloud-5 { animation-duration: 280s; animation-delay: -95s; }
+  .uo-cloud-6 { animation-duration: 250s; animation-delay: -215s; }
+  .uo-cloud-7 { animation-duration: 230s; animation-delay: -60s; }
+  .uo-cloud-8 { animation-duration: 210s; animation-delay: -160s; }
+
+  .uo-craft-destroyer-2 {
+    animation-name: uo-cross;
+    animation-duration: 300s;
+    animation-delay: 70s;
+  }
 }

@@ -17,7 +17,7 @@ export default function EventChip({
       : UNGROUPED_COLOR;
 
   const cancelled = occurrence.status === 'cancelled';
-  const color = cancelled ? 'bg-slate-700 line-through opacity-60' : palette.bg;
+  const color = cancelled ? 'bg-raised-hi line-through opacity-60' : palette.bg;
 
   const time = occurrence.startAt
     ? DateTime.fromMillis(occurrence.startAt).setZone(zone).toFormat('h:mm a')
@@ -42,7 +42,7 @@ export default function EventChip({
   return (
     <Link
       to={to}
-      className={`block truncate rounded px-1.5 py-0.5 text-xs text-white ${color} hover:opacity-90`}
+      className={`block truncate rounded px-1.5 py-0.5 text-xs ${color} hover:opacity-90 focus-inset`}
       title={`${occurrence.title}${occurrence.isPersonal ? ' (personal time)' : occurrence.guildName ? ` — ${occurrence.guildName}` : ''}`}
     >
       <span className="font-medium">{time}</span> {occurrence.title}

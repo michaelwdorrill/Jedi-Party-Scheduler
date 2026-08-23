@@ -10,6 +10,7 @@ import TimezoneSelect from '../components/TimezoneSelect';
 import SchedulingAssistant from '../components/SchedulingAssistant';
 import { isValidRange } from '../lib/datetime';
 import type { EventDetail, Friend, Group, PollMode, PollStrategy, VoiceChannel } from '../types';
+import { buttonClass, cardClass, controlClass } from '../components/ui';
 
 interface PollSlotDraft {
   key: string;
@@ -380,16 +381,16 @@ export default function EventFormPage() {
       <h1 className="text-2xl font-semibold">{isEdit ? 'Edit Event' : 'New Event'}</h1>
 
       <div>
-        <label className="mb-1 block text-sm text-slate-400">Server</label>
+        <label className="mb-1 block text-sm text-muted">Server</label>
         {isEdit ? (
-          <div className="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-400">
+          <div className="w-full rounded-md border border-edge bg-surface px-3 py-2 text-sm text-muted">
             {guilds.find((g) => g.id === loadedGuildId)?.name ?? '—'}
           </div>
         ) : (
           <select
             value={formGuildId}
             onChange={(e) => handleGuildChange(e.target.value)}
-            className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+            className={controlClass('lg', 'w-full')}
           >
             <option value="" disabled>
               Choose a server…
@@ -404,16 +405,16 @@ export default function EventFormPage() {
       </div>
 
       {!isEdit && (
-        <div className="flex gap-1 rounded-md bg-slate-900 p-1 w-fit">
+        <div className="flex gap-1 rounded-md bg-surface p-1 w-fit">
           <button
             onClick={() => setEventType('single')}
-            className={`rounded px-3 py-1 text-sm ${eventType === 'single' ? 'bg-indigo-600 text-white' : 'text-slate-300'}`}
+            className={`rounded px-3 py-1 font-display text-sm uppercase tracking-wide ${eventType === 'single' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
           >
             Fixed time
           </button>
           <button
             onClick={() => setEventType('poll')}
-            className={`rounded px-3 py-1 text-sm ${eventType === 'poll' ? 'bg-indigo-600 text-white' : 'text-slate-300'}`}
+            className={`rounded px-3 py-1 text-sm ${eventType === 'poll' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
           >
             Potential invite (poll)
           </button>
@@ -425,97 +426,97 @@ export default function EventFormPage() {
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="Title (e.g. Raid night)"
-          className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2"
+          className={controlClass('lg-base', 'w-full')}
         />
         <input
           value={game}
           onChange={(e) => setGame(e.target.value)}
           placeholder="Game (optional)"
-          className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+          className={controlClass('lg', 'w-full')}
         />
         <textarea
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           placeholder="Description (optional)"
-          className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+          className={controlClass('lg', 'w-full')}
           rows={2}
         />
         <div>
-          <label className="mb-1 block text-sm text-slate-400">Timezone</label>
+          <label className="mb-1 block text-sm text-muted">Timezone</label>
           <TimezoneSelect value={timezone} onChange={setTimezone} />
         </div>
       </div>
 
       {eventType === 'single' ? (
-        <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <div className={cardClass('md', 'space-y-3')}>
           <div className="flex flex-wrap gap-3">
             <div className="flex-1 min-w-[8rem]">
-              <label className="mb-1 block text-sm text-slate-400">Starts</label>
+              <label className="mb-1 block text-sm text-muted">Starts</label>
               <input
                 type="date"
                 value={date}
                 onChange={(e) => handleStartDateChange(e.target.value)}
-                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+                className={controlClass('lg', 'w-full')}
               />
             </div>
             <div className="w-28">
-              <label className="mb-1 block text-sm text-slate-400">at</label>
+              <label className="mb-1 block text-sm text-muted">at</label>
               <input
                 type="time"
                 value={startTime}
                 onChange={(e) => setStartTime(e.target.value)}
-                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+                className={controlClass('lg', 'w-full')}
               />
             </div>
             <div className="flex-1 min-w-[8rem]">
-              <label className="mb-1 block text-sm text-slate-400">Ends</label>
+              <label className="mb-1 block text-sm text-muted">Ends</label>
               <input
                 type="date"
                 value={endDate}
                 min={date}
                 onChange={(e) => setEndDate(e.target.value)}
-                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+                className={controlClass('lg', 'w-full')}
               />
             </div>
             <div className="w-28">
-              <label className="mb-1 block text-sm text-slate-400">at</label>
+              <label className="mb-1 block text-sm text-muted">at</label>
               <input
                 type="time"
                 value={endTime}
                 onChange={(e) => setEndTime(e.target.value)}
-                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+                className={controlClass('lg', 'w-full')}
               />
             </div>
           </div>
           {!singleRangeValid ? (
-            <p className="text-xs text-red-400">End must be after the start.</p>
+            <p className="text-xs text-danger-text">End must be after the start.</p>
           ) : (
             endDate !== date && (
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-faint">
                 Runs overnight / across {DateTime.fromISO(endDate).diff(DateTime.fromISO(date), 'days').days + 1} days.
               </p>
             )
           )}
 
-          <label className="flex items-center gap-2 text-sm text-slate-300">
+          <label className="flex items-center gap-2 text-sm text-ink-dim">
             <input type="checkbox" checked={isRecurring} onChange={(e) => setIsRecurring(e.target.checked)} />
             Repeats
           </label>
           {isRecurring && <RecurrenceForm value={recurrence} onChange={setRecurrence} />}
         </div>
       ) : (
-        <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <div className={cardClass('md', 'space-y-3')}>
           {!isEdit && (
-            <div className="flex gap-1 rounded-md bg-slate-800 p-1 w-fit">
+            <div className="flex gap-1 rounded-md bg-raised p-1 w-fit">
               <button
                 onClick={() => setPollMode('options')}
-                className={`rounded px-3 py-1 text-xs ${pollMode === 'options' ? 'bg-indigo-600 text-white' : 'text-slate-300'}`}
+                className={`rounded px-3 py-1 text-xs ${pollMode === 'options' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
               >
                 Candidate days/times
               </button>
               <button
                 onClick={() => setPollMode('window')}
-                className={`rounded px-3 py-1 text-xs ${pollMode === 'window' ? 'bg-indigo-600 text-white' : 'text-slate-300'}`}
+                className={`rounded px-3 py-1 text-xs ${pollMode === 'window' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
               >
                 Time window
               </button>
@@ -533,7 +534,7 @@ export default function EventFormPage() {
                         type="date"
                         value={slot.date}
                         onChange={(e) => handleSlotStartDateChange(slot.key, e.target.value)}
-                        className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                        className={controlClass('sm')}
                       />
                       <input
                         type="time"
@@ -543,9 +544,9 @@ export default function EventFormPage() {
                             prev.map((s) => (s.key === slot.key ? { ...s, startTime: e.target.value } : s)),
                           )
                         }
-                        className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                        className={controlClass('sm')}
                       />
-                      <span className="text-slate-500">to</span>
+                      <span className="text-faint">to</span>
                       <input
                         type="date"
                         value={slot.endDate}
@@ -555,7 +556,7 @@ export default function EventFormPage() {
                             prev.map((s) => (s.key === slot.key ? { ...s, endDate: e.target.value } : s)),
                           )
                         }
-                        className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                        className={controlClass('sm')}
                       />
                       <input
                         type="time"
@@ -565,83 +566,83 @@ export default function EventFormPage() {
                             prev.map((s) => (s.key === slot.key ? { ...s, endTime: e.target.value } : s)),
                           )
                         }
-                        className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                        className={controlClass('sm')}
                       />
                       {pollSlots.length > 1 && (
                         <button
                           onClick={() => removePollSlot(slot.key)}
-                          className="text-xs text-red-400 hover:underline"
+                          className="text-xs text-danger-text hover:underline"
                         >
                           Remove
                         </button>
                       )}
                     </div>
-                    {!slotValid && <p className="mt-1 text-xs text-red-400">End must be after the start.</p>}
+                    {!slotValid && <p className="mt-1 text-xs text-danger-text">End must be after the start.</p>}
                   </div>
                 );
               })}
-              <button onClick={addPollSlot} className="text-sm text-indigo-400 hover:underline">
+              <button onClick={addPollSlot} className="text-sm text-accent-text hover:underline">
                 + Add another time slot
               </button>
             </div>
           ) : (
             <div className="space-y-2">
-              <p className="text-sm text-slate-400">
+              <p className="text-sm text-muted">
                 Propose a window of time; invitees mark the range within it they could commit to, and the
                 best-overlapping block is picked automatically.
               </p>
               <div className="flex flex-wrap items-end gap-3">
                 <div>
-                  <label className="mb-1 block text-sm text-slate-400">Window starts</label>
+                  <label className="mb-1 block text-sm text-muted">Window starts</label>
                   <input
                     type="date"
                     value={windowStartDate}
                     onChange={(e) => handleWindowStartDateChange(e.target.value)}
-                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                    className={controlClass('sm')}
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm text-slate-400">at</label>
+                  <label className="mb-1 block text-sm text-muted">at</label>
                   <input
                     type="time"
                     value={windowStartTime}
                     onChange={(e) => setWindowStartTime(e.target.value)}
-                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                    className={controlClass('sm')}
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm text-slate-400">Window ends</label>
+                  <label className="mb-1 block text-sm text-muted">Window ends</label>
                   <input
                     type="date"
                     value={windowEndDate}
                     min={windowStartDate}
                     onChange={(e) => setWindowEndDate(e.target.value)}
-                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                    className={controlClass('sm')}
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm text-slate-400">at</label>
+                  <label className="mb-1 block text-sm text-muted">at</label>
                   <input
                     type="time"
                     value={windowEndTime}
                     onChange={(e) => setWindowEndTime(e.target.value)}
-                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                    className={controlClass('sm')}
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm text-slate-400">Session length (hours)</label>
+                  <label className="mb-1 block text-sm text-muted">Session length (hours)</label>
                   <input
                     type="number"
                     min={0.5}
                     step={0.5}
                     value={windowBlockHours}
                     onChange={(e) => setWindowBlockHours(Math.max(0.5, Number(e.target.value)))}
-                    className="w-24 rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm"
+                    className={controlClass('sm', 'w-24')}
                   />
                 </div>
               </div>
               {!windowRangeValid && (
-                <p className="text-xs text-red-400">Window end must be after the window start.</p>
+                <p className="text-xs text-danger-text">Window end must be after the window start.</p>
               )}
             </div>
           )}
@@ -660,7 +661,7 @@ export default function EventFormPage() {
                 disabled={pollStrategy !== 'threshold'}
                 value={pollThreshold}
                 onChange={(e) => setPollThreshold(Math.max(1, Number(e.target.value)))}
-                className="w-14 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-xs disabled:opacity-50"
+                className={controlClass('xs', 'w-14')}
               />
               people say yes
             </label>
@@ -678,7 +679,7 @@ export default function EventFormPage() {
           </div>
 
           {pollMode === 'options' && pollStrategy === 'threshold' && (
-            <label className="flex items-start gap-2 text-sm text-slate-300">
+            <label className="flex items-start gap-2 text-sm text-ink-dim">
               <input
                 type="checkbox"
                 checked={multiWinner}
@@ -693,35 +694,35 @@ export default function EventFormPage() {
           )}
 
           <div>
-            <label className="mb-1 block text-sm text-slate-400">
+            <label className="mb-1 block text-sm text-muted">
               Voting deadline (auto-resolve if the threshold isn't reached)
             </label>
             <input
               type="date"
               value={pollDeadline}
               onChange={(e) => setPollDeadline(e.target.value)}
-              className="rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+              className={controlClass('lg')}
             />
           </div>
         </div>
       )}
 
       {effectiveGuildId && (
-        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <div className={cardClass()}>
           <h2 className="mb-1 font-semibold">Voice channel (optional)</h2>
-          <p className="mb-3 text-xs text-slate-500">
+          <p className="mb-3 text-xs text-faint">
             Shortly before start, confirmed attendees get a DM with a link to join this channel. Discord
             doesn't let a bot pull people into voice automatically -- this is just a one-click nudge.
           </p>
           {voiceChannels.length === 0 ? (
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-faint">
               No voice channels found -- make sure the bot has been invited to this server.
             </p>
           ) : (
             <select
               value={voiceChannelId}
               onChange={(e) => setVoiceChannelId(e.target.value)}
-              className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+              className={controlClass('lg', 'w-full')}
             >
               <option value="">None</option>
               {voiceChannels.map((vc) => (
@@ -734,7 +735,7 @@ export default function EventFormPage() {
         </div>
       )}
 
-      <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+      <div className={cardClass()}>
         <h2 className="mb-2 font-semibold">Invite</h2>
         <InviteePicker
           friends={friends}
@@ -747,9 +748,9 @@ export default function EventFormPage() {
       </div>
 
       {effectiveGuildId && (
-        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <div className={cardClass()}>
           <h2 className="mb-1 font-semibold">Availability</h2>
-          <p className="mb-3 text-xs text-slate-500">
+          <p className="mb-3 text-xs text-faint">
             Times only — you can see when someone is busy, never what they're doing.
           </p>
           <SchedulingAssistant
@@ -779,19 +780,19 @@ export default function EventFormPage() {
         </div>
       )}
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && <p className="text-sm text-danger-text">{error}</p>}
 
       <div className="flex justify-end gap-2">
         <button
           onClick={() => navigate(-1)}
-          className="rounded-md border border-slate-700 px-4 py-2 text-sm hover:bg-slate-800"
+          className={buttonClass('secondary', 'lg')}
         >
           Cancel
         </button>
         <button
           disabled={saving || !rangeValid}
           onClick={handleSubmit}
-          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          className={buttonClass('primary', 'lg')}
         >
           {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create event'}
         </button>

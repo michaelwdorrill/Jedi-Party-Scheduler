@@ -1,3 +1,5 @@
+import { controlClass } from './ui';
+
 const FALLBACK_ZONES = [
   'America/New_York',
   'America/Chicago',
@@ -37,7 +39,7 @@ export default function TimezoneSelect({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+      className={controlClass('lg', 'w-full')}
     >
       {zones.map((z) => (
         <option key={z} value={z}>

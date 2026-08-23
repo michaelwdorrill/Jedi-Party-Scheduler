@@ -21,6 +21,26 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.4',
+    date: '23 August 2026',
+    summary: 'Uncle Owen looks like Tatooine, and the calendar is the whole app.',
+    added: [
+      'A visual identity taken from the app\u2019s own name: a binary sunset behind everything, twin suns, and the ground always at the bottom of your screen whatever size the window is.',
+      'The Dashboard and the Calendar are one page now. Your month sits beside what\u2019s coming up, rather than being a separate tab you had to visit first.',
+      'Switch that page between a month grid and an agenda list, whichever suits you. Phones get the agenda by default, because a month grid and a sidebar don\u2019t fit side by side on one.',
+      'Settings \u2192 Scenery turns the desert down to just the twin-sun mark if the full treatment is too much \u2014 and it turns itself down automatically if your device asks for higher contrast.',
+    ],
+    changed: [
+      'Every colour in the app moved from cold slate and indigo to warm sand and brass. Group colours were re-picked to sit on that ground and to stay properly distinct from one another.',
+      'Waiting for something to load now shows the two suns rather than the word \u201cLoading\u201d.',
+      'Every button, field and link now shows a clear outline when you reach it with the keyboard \u2014 previously the app relied entirely on whatever your browser drew.',
+    ],
+    fixed: [
+      'Clicking an event on the calendar opens that event. It used to take you to the New Event form instead.',
+      'The calendar grid no longer nests a link inside a button, which made each day a single ambiguous control for keyboard and screen-reader users.',
+    ],
+  },
+  {
     version: '0.3',
     date: '22 August 2026',
     summary: 'Uncle Owen is a calendar now, not a server switcher.',

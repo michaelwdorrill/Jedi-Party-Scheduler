@@ -19,7 +19,7 @@ export default function InviteePicker({
     <div className="space-y-3">
       {groups && groups.length > 0 && (
         <div>
-          <div className="mb-1 text-xs uppercase tracking-wide text-slate-500">Groups</div>
+          <div className="mb-1 text-xs uppercase tracking-wide text-faint">Groups</div>
           <div className="flex flex-wrap gap-2">
             {groups.map((g) => {
               const checked = selectedGroupIds?.includes(g.id) ?? false;
@@ -30,8 +30,8 @@ export default function InviteePicker({
                   onClick={() => onToggleGroup?.(g.id)}
                   className={`rounded-full border px-3 py-1 text-sm ${
                     checked
-                      ? 'border-indigo-500 bg-indigo-600 text-white'
-                      : 'border-slate-700 text-slate-300 hover:bg-slate-800'
+                      ? 'border-accent-hover bg-accent text-on-accent'
+                      : 'border-edge-strong text-ink-dim hover:bg-raised'
                   }`}
                 >
                   {g.name} ({g.members.length})
@@ -43,9 +43,9 @@ export default function InviteePicker({
       )}
 
       <div>
-        <div className="mb-1 text-xs uppercase tracking-wide text-slate-500">Friends</div>
+        <div className="mb-1 text-xs uppercase tracking-wide text-faint">Friends</div>
         {friends.length === 0 ? (
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-faint">
             No friends yet — friends are people who share this server and have also logged in.
           </p>
         ) : (
@@ -59,8 +59,8 @@ export default function InviteePicker({
                   onClick={() => onToggleUser(f.id)}
                   className={`rounded-full border px-3 py-1 text-sm ${
                     checked
-                      ? 'border-indigo-500 bg-indigo-600 text-white'
-                      : 'border-slate-700 text-slate-300 hover:bg-slate-800'
+                      ? 'border-accent-hover bg-accent text-on-accent'
+                      : 'border-edge-strong text-ink-dim hover:bg-raised'
                   }`}
                 >
                   {f.globalName ?? f.username}

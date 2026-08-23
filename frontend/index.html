@@ -3,7 +3,39 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@500;600;700&family=Barlow:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#1A1410" />
     <title>Uncle Owen</title>
+    <script>
+      // Stamps the scenery choice before first paint. Without this, everyone
+      // on `twin-suns` watches the homestead paint and then vanish on every
+      // single load -- the setting is read in React, which runs after the
+      // first frame. Cheap, and invisible until it is missing.
+      //
+      // Duplicated from src/lib/scenery.ts on purpose: this has to run before
+      // the bundle exists, so it cannot import from it. Keep the two in sync.
+      (function () {
+        var v = 'homestead';
+        try {
+          var s = localStorage.getItem('uo.scenery');
+          v =
+            s === 'twin-suns' || s === 'homestead'
+              ? s
+              : matchMedia('(prefers-contrast: more)').matches
+                ? 'twin-suns'
+                : 'homestead';
+        } catch (e) {
+          /* storage blocked -- the default is already correct */
+        }
+        document.documentElement.dataset.scenery = v;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

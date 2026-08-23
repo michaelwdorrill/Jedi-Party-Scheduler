@@ -3,6 +3,7 @@ import { DateTime } from 'luxon';
 import { formatTimeRange, isValidRange } from '../lib/datetime';
 import InviteePicker from './InviteePicker';
 import type { ChangeRequestView, EventDetail, Friend, PollVote } from '../types';
+import { buttonClass, cardClass, controlClass } from './ui';
 
 // Invitee change requests (docs/specs/0003-event-change-requests.md): lets an
 // invitee ask the organizer to move the event or invite someone else,
@@ -56,73 +57,73 @@ function MoveRequestForm({
   };
 
   return (
-    <div className="space-y-3 rounded-md border border-slate-700 bg-slate-800/60 p-3">
+    <div className="space-y-3 rounded-md border border-edge-strong bg-raised/60 p-3">
       {event.isRecurring && (
         <div>
-          <label className="mb-1 block text-xs text-slate-400">Which occurrence?</label>
+          <label className="mb-1 block text-xs text-muted">Which occurrence?</label>
           <input
             type="date"
             value={occDate}
             onChange={(e) => setOccDate(e.target.value)}
-            className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+            className={controlClass('lg', 'w-full')}
           />
         </div>
       )}
       <div className="flex flex-wrap gap-3">
         <div className="flex-1 min-w-[8rem]">
-          <label className="mb-1 block text-xs text-slate-400">Proposed start</label>
+          <label className="mb-1 block text-xs text-muted">Proposed start</label>
           <input
             type="date"
             value={date}
             onChange={(e) => setDate(e.target.value)}
-            className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+            className={controlClass('lg', 'w-full')}
           />
         </div>
         <div className="w-24">
-          <label className="mb-1 block text-xs text-slate-400">at</label>
+          <label className="mb-1 block text-xs text-muted">at</label>
           <input
             type="time"
             value={startTime}
             onChange={(e) => setStartTime(e.target.value)}
-            className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+            className={controlClass('lg', 'w-full')}
           />
         </div>
         <div className="flex-1 min-w-[8rem]">
-          <label className="mb-1 block text-xs text-slate-400">Proposed end</label>
+          <label className="mb-1 block text-xs text-muted">Proposed end</label>
           <input
             type="date"
             value={endDate}
             onChange={(e) => setEndDate(e.target.value)}
-            className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+            className={controlClass('lg', 'w-full')}
           />
         </div>
         <div className="w-24">
-          <label className="mb-1 block text-xs text-slate-400">at</label>
+          <label className="mb-1 block text-xs text-muted">at</label>
           <input
             type="time"
             value={endTime}
             onChange={(e) => setEndTime(e.target.value)}
-            className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+            className={controlClass('lg', 'w-full')}
           />
         </div>
       </div>
-      {!rangeValid && <p className="text-xs text-red-400">End must be after the start.</p>}
+      {!rangeValid && <p className="text-xs text-danger-text">End must be after the start.</p>}
       <textarea
         value={message}
         onChange={(e) => setMessage(e.target.value)}
         placeholder="Note to the organizer (optional)"
         rows={2}
-        className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+        className={controlClass('lg', 'w-full')}
       />
       <div className="flex gap-2">
         <button
           onClick={submit}
           disabled={!canSubmit}
-          className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          className={buttonClass()}
         >
           Send request
         </button>
-        <button onClick={onCancel} className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800">
+        <button onClick={onCancel} className={buttonClass('secondary')}>
           Cancel
         </button>
       </div>
@@ -154,7 +155,7 @@ function InviteRequestForm({
   };
 
   return (
-    <div className="space-y-3 rounded-md border border-slate-700 bg-slate-800/60 p-3">
+    <div className="space-y-3 rounded-md border border-edge-strong bg-raised/60 p-3">
       <InviteePicker
         friends={friends}
         selectedUserIds={targetUserId ? [targetUserId] : []}
@@ -165,17 +166,17 @@ function InviteRequestForm({
         onChange={(e) => setMessage(e.target.value)}
         placeholder="Note to the organizer (optional)"
         rows={2}
-        className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+        className={controlClass('lg', 'w-full')}
       />
       <div className="flex gap-2">
         <button
           onClick={submit}
           disabled={!targetUserId || submitting}
-          className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          className={buttonClass()}
         >
           Send request
         </button>
-        <button onClick={onCancel} className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800">
+        <button onClick={onCancel} className={buttonClass('secondary')}>
           Cancel
         </button>
       </div>
@@ -185,7 +186,7 @@ function InviteRequestForm({
 
 function Tally({ tally }: { tally: { yes: number; no: number; maybe: number } }) {
   return (
-    <span className="text-xs text-slate-400">
+    <span className="text-xs text-muted">
       {tally.yes} in · {tally.maybe} maybe · {tally.no} out
     </span>
   );
@@ -242,7 +243,7 @@ export default function ChangeRequestSection({
   };
 
   return (
-    <div className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-4">
+    <div className={cardClass('md', 'space-y-4')}>
       <h2 className="font-semibold">Change requests</h2>
 
       {isInvitee && event.status === 'active' && (
@@ -251,7 +252,7 @@ export default function ChangeRequestSection({
             {event.eventType === 'single' && openForm !== 'move' && (
               <button
                 onClick={() => setOpenForm('move')}
-                className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
+                className={buttonClass('secondary')}
               >
                 Ask to move this
               </button>
@@ -259,7 +260,7 @@ export default function ChangeRequestSection({
             {openForm !== 'invite' && (
               <button
                 onClick={openInviteForm}
-                className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
+                className={buttonClass('secondary')}
               >
                 Suggest someone
               </button>
@@ -291,13 +292,13 @@ export default function ChangeRequestSection({
 
       {votable.length > 0 && (
         <div className="space-y-2">
-          <h3 className="text-sm font-medium text-slate-300">Open for your vote</h3>
+          <h3 className="text-sm font-medium text-ink-dim">Open for your vote</h3>
           {votable.map((r) => (
-            <div key={r.id} className="rounded-md border border-slate-700 bg-slate-800/40 p-3 text-sm">
+            <div key={r.id} className="rounded-md border border-edge-strong bg-raised/40 p-3 text-sm">
               <p>
                 {requesterName(r)} proposed moving this to{' '}
                 {r.proposedStartAt && r.proposedEndAt && formatTimeRange(r.proposedStartAt, r.proposedEndAt, event.timezone)}
-                {r.message && <span className="text-slate-400"> — “{r.message}”</span>}
+                {r.message && <span className="text-muted"> — “{r.message}”</span>}
               </p>
               <div className="mt-2 flex items-center gap-2">
                 {(['yes', 'maybe', 'no'] as PollVote[]).map((v) => (
@@ -305,7 +306,7 @@ export default function ChangeRequestSection({
                     key={v}
                     onClick={() => onVote(r.id, v)}
                     className={`rounded-md border px-2 py-1 text-xs ${
-                      r.myVote === v ? 'border-indigo-500 bg-indigo-600 text-white' : 'border-slate-700 text-slate-300 hover:bg-slate-800'
+                      r.myVote === v ? 'border-accent-hover bg-accent text-on-accent' : 'border-edge-strong text-ink-dim hover:bg-raised'
                     }`}
                   >
                     {VOTE_LABEL[v]}
@@ -320,9 +321,9 @@ export default function ChangeRequestSection({
 
       {myRequests.length > 0 && (
         <div className="space-y-2">
-          <h3 className="text-sm font-medium text-slate-300">My requests</h3>
+          <h3 className="text-sm font-medium text-ink-dim">My requests</h3>
           {myRequests.map((r) => (
-            <div key={r.id} className="flex items-start justify-between rounded-md border border-slate-800 p-2 text-sm">
+            <div key={r.id} className="flex items-start justify-between rounded-md border border-edge p-2 text-sm">
               <div>
                 <p>
                   {r.kind === 'time_change'
@@ -331,14 +332,14 @@ export default function ChangeRequestSection({
                       : 'Move request'
                     : `Invite ${r.targetGlobalName ?? r.targetUsername ?? 'someone'}`}
                 </p>
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-faint">
                   {r.status}
                   {r.kind === 'time_change' && r.tally && r.status === 'pending' && <> — <Tally tally={r.tally} /></>}
                   {r.decisionNote && ` — ${r.decisionNote}`}
                 </p>
               </div>
               {r.status === 'pending' && (
-                <button onClick={() => onWithdraw(r.id)} className="text-xs text-slate-400 hover:text-red-400">
+                <button onClick={() => onWithdraw(r.id)} className="text-xs text-muted hover:text-danger-text">
                   Withdraw
                 </button>
               )}
@@ -349,9 +350,9 @@ export default function ChangeRequestSection({
 
       {isOrganizer && organizerPending.length > 0 && (
         <div className="space-y-2">
-          <h3 className="text-sm font-medium text-slate-300">Pending requests</h3>
+          <h3 className="text-sm font-medium text-ink-dim">Pending requests</h3>
           {organizerPending.map((r) => (
-            <div key={r.id} className="space-y-2 rounded-md border border-slate-700 bg-slate-800/40 p-3 text-sm">
+            <div key={r.id} className="space-y-2 rounded-md border border-edge-strong bg-raised/40 p-3 text-sm">
               <p>
                 {requesterName(r)}{' '}
                 {r.kind === 'time_change'
@@ -360,22 +361,22 @@ export default function ChangeRequestSection({
                     : 'asked to move this'
                   : `asked to invite ${r.targetGlobalName ?? r.targetUsername ?? 'someone'}`}
               </p>
-              {r.message && <p className="text-slate-400">“{r.message}”</p>}
+              {r.message && <p className="text-muted">“{r.message}”</p>}
               {r.stale && (
-                <p className="text-xs text-amber-400">
+                <p className="text-xs text-warning-text">
                   This event has changed since the request was made — re-check before accepting.
                 </p>
               )}
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => onAccept(r.id)}
-                  className="rounded-md border border-emerald-800 px-2 py-1 text-xs text-emerald-400 hover:bg-emerald-950"
+                  className="rounded-md border border-success/60 px-2 py-1 text-xs text-success-text hover:bg-success-surface"
                 >
                   Accept
                 </button>
                 <button
                   onClick={() => onDecline(r.id)}
-                  className="rounded-md border border-red-800 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
+                  className="rounded-md border border-danger/60 px-2 py-1 text-xs text-danger-text hover:bg-danger-surface"
                 >
                   Decline
                 </button>

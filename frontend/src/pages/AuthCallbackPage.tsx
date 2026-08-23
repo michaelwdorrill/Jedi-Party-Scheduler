@@ -26,8 +26,8 @@ export default function AuthCallbackPage() {
   if (error) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-4">
-        <p className="text-red-400">{error}</p>
-        <a href="#/login" className="text-indigo-400 underline">
+        <p className="text-danger-text">{error}</p>
+        <a href="#/login" className="text-accent-text underline">
           Back to login
         </a>
       </div>
@@ -36,5 +36,5 @@ export default function AuthCallbackPage() {
 
   if (done) return <Navigate to="/" replace />;
 
-  return <div className="flex h-screen items-center justify-center text-slate-400">Signing you in…</div>;
+  return <div className="flex h-screen items-center justify-center text-muted">Signing you in…</div>;
 }

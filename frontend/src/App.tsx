@@ -3,8 +3,7 @@ import AuthGuard from './auth/AuthGuard';
 import Layout from './components/Layout';
 import LoginPage from './pages/LoginPage';
 import AuthCallbackPage from './pages/AuthCallbackPage';
-import DashboardPage from './pages/DashboardPage';
-import CalendarPage from './pages/CalendarPage';
+import HomePage from './pages/HomePage';
 import EventDetailPage from './pages/EventDetailPage';
 import EventFormPage from './pages/EventFormPage';
 import GroupsPage from './pages/GroupsPage';
@@ -28,8 +27,10 @@ export default function App() {
 
       <Route element={<AuthGuard />}>
         <Route element={<Layout />}>
-          <Route path="/" element={<DashboardPage />} />
-          <Route path="/calendar" element={<CalendarPage />} />
+          <Route path="/" element={<HomePage />} />
+          {/* Kept as a redirect rather than removed: it is bookmarkable, and
+              the old Dashboard's empty state linked to it. */}
+          <Route path="/calendar" element={<Navigate to="/" replace />} />
           <Route path="/groups" element={<GroupsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/admin/users" element={<AdminUsersPage />} />

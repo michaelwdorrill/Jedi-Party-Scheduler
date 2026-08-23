@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { Friend, Group } from '../types';
 import InviteePicker from './InviteePicker';
+import { buttonClass, cardClass, controlClass } from './ui';
 
 export default function GroupEditor({
   friends,
@@ -34,29 +35,29 @@ export default function GroupEditor({
   };
 
   return (
-    <div className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-4">
+    <div className={cardClass('md', 'space-y-4')}>
       <div>
-        <label className="mb-1 block text-sm text-slate-400">Group name</label>
+        <label className="mb-1 block text-sm text-muted">Group name</label>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="e.g. Raid Team"
-          className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+          className={controlClass('lg', 'w-full')}
         />
       </div>
 
       <div>
-        <label className="mb-1 block text-sm text-slate-400">Default game (optional)</label>
+        <label className="mb-1 block text-sm text-muted">Default game (optional)</label>
         <input
           value={game}
           onChange={(e) => setGame(e.target.value)}
           placeholder="e.g. Stellaris — pre-fills new events invited via this group"
-          className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+          className={controlClass('lg', 'w-full')}
         />
       </div>
 
       <div>
-        <label className="mb-1 block text-sm text-slate-400">
+        <label className="mb-1 block text-sm text-muted">
           Nudge the group if idle for (days)
         </label>
         <input
@@ -64,7 +65,7 @@ export default function GroupEditor({
           min={1}
           value={idleReminderDays}
           onChange={(e) => setIdleReminderDays(Math.max(1, Number(e.target.value)))}
-          className="w-24 rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+          className={controlClass('lg', 'w-24')}
         />
       </div>
 
@@ -74,7 +75,7 @@ export default function GroupEditor({
         onToggleUser={toggle}
       />
       {lockedUserId && (
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-faint">
           You're always a member of a group you own. To leave it, hand it over or delete it.
         </p>
       )}
@@ -82,7 +83,7 @@ export default function GroupEditor({
       <div className="flex justify-end gap-2">
         <button
           onClick={onCancel}
-          className="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
+          className={buttonClass('secondary')}
         >
           Cancel
         </button>
@@ -91,7 +92,7 @@ export default function GroupEditor({
           onClick={() =>
             onSave({ name: name.trim(), game: game.trim() || null, idleReminderDays, memberUserIds: memberIds })
           }
-          className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          className={buttonClass()}
         >
           Save
         </button>

@@ -1,11 +1,12 @@
 import { Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from './AuthContext';
+import { Loading } from '../components/ui';
 
 export default function AuthGuard() {
   const { isAuthenticated, loading } = useAuth();
 
   if (loading) {
-    return <div className="flex h-screen items-center justify-center text-slate-400">Loading…</div>;
+    return <Loading className="h-screen" />;
   }
 
   if (!isAuthenticated) {

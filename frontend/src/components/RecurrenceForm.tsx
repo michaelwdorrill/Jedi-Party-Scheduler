@@ -1,4 +1,5 @@
 import type { RecurrenceEndType, RecurrenceFreq } from '../types';
+import { controlClass } from './ui';
 
 // Displayed Sunday-first to match the calendar grid, but the stored value
 // (event_recurrence_rules.by_weekday) is 0=Mon..6=Sun and must not move --
@@ -41,27 +42,27 @@ export default function RecurrenceForm({
     });
 
   return (
-    <div className="space-y-3 rounded-md border border-slate-700 bg-slate-800/50 p-3">
+    <div className="space-y-3 rounded-md border border-edge-strong bg-raised/50 p-3">
       <div className="flex items-center gap-2">
-        <span className="text-sm text-slate-400">Repeats</span>
+        <span className="text-sm text-muted">Repeats</span>
         <select
           value={value.freq}
           onChange={(e) => set({ freq: e.target.value as RecurrenceFreq })}
-          className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
+          className={controlClass('sm-tight')}
         >
           <option value="DAILY">Daily</option>
           <option value="WEEKLY">Weekly</option>
           <option value="MONTHLY">Monthly</option>
         </select>
-        <span className="text-sm text-slate-400">every</span>
+        <span className="text-sm text-muted">every</span>
         <input
           type="number"
           min={1}
           value={value.interval}
           onChange={(e) => set({ interval: Math.max(1, Number(e.target.value)) })}
-          className="w-16 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
+          className={controlClass('xs', 'w-16 text-sm')}
         />
-        <span className="text-sm text-slate-400">
+        <span className="text-sm text-muted">
           {value.freq === 'DAILY' ? 'day(s)' : value.freq === 'WEEKLY' ? 'week(s)' : 'month(s)'}
         </span>
       </div>
@@ -75,8 +76,8 @@ export default function RecurrenceForm({
               onClick={() => toggleWeekday(day)}
               className={`h-8 w-8 rounded-full text-xs ${
                 value.byWeekday.includes(day)
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                  ? 'bg-accent text-on-accent'
+                  : 'bg-raised text-ink-dim hover:bg-raised-hi'
               }`}
             >
               {label[0]}
@@ -85,7 +86,7 @@ export default function RecurrenceForm({
         </div>
       )}
 
-      <div className="flex items-center gap-3 text-sm text-slate-400">
+      <div className="flex items-center gap-3 text-sm text-muted">
         <span>Ends</span>
         <label className="flex items-center gap-1">
           <input
@@ -107,7 +108,7 @@ export default function RecurrenceForm({
             disabled={value.endType !== 'on_date'}
             value={value.endDate}
             onChange={(e) => set({ endDate: e.target.value })}
-            className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-xs disabled:opacity-50"
+            className={controlClass('xs')}
           />
         </label>
         <label className="flex items-center gap-1">
@@ -123,7 +124,7 @@ export default function RecurrenceForm({
             disabled={value.endType !== 'after_count'}
             value={value.endCount}
             onChange={(e) => set({ endCount: Math.max(1, Number(e.target.value)) })}
-            className="w-16 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-xs disabled:opacity-50"
+            className={controlClass('xs', 'w-16')}
           />
           occurrences
         </label>

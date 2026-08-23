@@ -130,7 +130,20 @@ think about servers":
   "departed", and "logged in" from "was turned away at login". Small, and it
   belongs with the other "the app should say what it means" work.
 
-### Phase 3.5 — Visual design pass (ideas 8, 20) → **v0.4** ← next
+### Phase 3.5 — Visual design pass (ideas 8, 20) → **v0.4** ✅ shipped
+
+**Spec:** `specs/0009-binary-sunset.md` (Ready). The three pitches in
+`specs/0008` were all rejected as insufficiently distinctive; the direction
+that replaced them takes the app's own name as the brief — a Tatooine palette
+and material system — and resolves pitch B vs pitch C by keeping **both** the
+month grid and the agenda as views you swap between. That also settles idea
+20's mobile question, which its entry called the real cost of the change.
+The desert ships turned up: **full homestead is the default**, with a Settings
+toggle to a calmer twin-suns treatment for anyone who wants it quieter. v0.4
+touches no schema — both preferences live in local storage. A small amount of
+motion rides along (a login hero, a twin-suns loading primitive replacing seven
+ad-hoc `Loading…` strings, and one ambient detail), all of it behind
+`prefers-reduced-motion`.
 
 Styles the set of views that survived Phase 3. Rule 3 above is the whole
 argument for this ordering — doing it first means paying for it twice.
@@ -153,7 +166,7 @@ stays anchored to now, what happens on mobile, where the header and action
 buttons live) are layout calls, so they get answered *by* the chosen pitch
 rather than before it.
 
-### Phase 3.75 — An interactive bot (idea 19) → **v0.5**
+### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ← next
 
 One new inbound surface (a Discord interactions endpoint) turns the bot from
 a megaphone into something you can answer. Sequenced after the design pass
@@ -220,7 +233,7 @@ shifts.
 | 0.1 | Everything up to and including the sandbox and promotion guardrails (Phases 0–1) | Shipped |
 | **0.2** | Phase 2 — invitee change requests, poll date consistency, invite links; plus the dependency upgrades and the version stamp | Shipped 22 Aug 2026 |
 | **0.3** | Phase 3 — calendar-first (5), group creator membership (16), admin list gaps (15), changelog page | **Shipped 22 Aug 2026** |
-| 0.4 | Visual design pass (8), Dashboard/Calendar merged into one landing page (20) | Next |
+| **0.4** | Phase 3.5 — visual design pass (8), Dashboard/Calendar merged into one landing page (20) | **Shipped 23 Aug 2026** |
 | 0.5 | Interactive bot (19) | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
@@ -244,15 +257,20 @@ shifts.
 | 5 | Calendar-first, not server-first | L | 3 | 0.3 | — | 0006 |
 | 16 | Group creator membership + roles | M | 3 | 0.3 | — | none needed |
 | 15 | Admin list: departed vs never-member | S | 3 | 0.3 | — | none needed |
-| 8 | Visual design pass | L | 3.5 | 0.4 | 5 | pitches first |
-| 20 | Merge Dashboard into Calendar | M | 3.5 | 0.4 | 5 | folded into 8's pitches |
+| 8 | Visual design pass | L | 3.5 | 0.4 | 5 | 0009 (0008 superseded) |
+| 20 | Merge Dashboard into Calendar | M | 3.5 | 0.4 | 5 | 0009 (0008 superseded) |
 | 19 | Interactive bot (RSVP, slash, sync) | L | 3.75 | 0.5 | 8 | TBD |
 | 9 | Self-service bot add + email | L | 4 | 0.6 | — | TBD |
 | 10 | Stale-account auto-delete | M | 4 | 0.6 | — | TBD |
 | 2 | Google Calendar sync | XL | 5 | 0.7 | 1, 5, 10 | TBD |
+| 21 | Calendar chip click opens New Event | S | 3.5 | 0.4 | — | 0009 — done |
+| 22 | Calendar can only show 2 months | M | — | — | — | deferred out of 0009 |
 
 Ideas 15–19 were captured after this roadmap was first written and had never
-been scheduled; they're placed above. 17 and 18 are struck through as done.
+been scheduled; they're placed above. Ideas 21 and 22 were found while writing
+the v0.4 pitches: 21 is a live bug that all three pitches force a fix for, so
+it rides along in 0.4; 22 is a behaviour change rather than a design one and is
+deliberately left unscheduled. 17 and 18 are struck through as done.
 
 ## Things this roadmap is not
 

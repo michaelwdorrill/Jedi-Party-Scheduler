@@ -404,3 +404,248 @@ roadmap gets revisited between phases.
     designing that page twice, which is exactly the argument that put idea
     8 after idea 5 in the first place. So the design pitches should be
     drawn with the merged calendar+itinerary landing page as a given.
+
+21. **Clicking an event chip on the month calendar opens the New Event form
+    instead of the event.** `MonthCalendarGrid` renders each day cell as
+    `<button onClick={() => onDayClick(day)}>` and nests the day's
+    `EventChip`s inside it — and `EventChip` renders a react-router `<Link>`,
+    i.e. an `<a href>`. So a click on a chip triggers the chip's own
+    navigation *and* bubbles to the day cell's handler, which
+    `navigate('/events/new?date=…')`. The day-cell handler runs second and
+    wins, so the event you clicked never opens.
+
+    Also invalid HTML on its own terms — an anchor inside a button — which
+    collapses the two into one ambiguous control for keyboard and
+    screen-reader users. Found while auditing the calendar for the v0.4
+    design pass (`specs/0008`). The nesting and the double-fire are plain
+    from the code; the exact landing page is worth confirming against the
+    deployed sandbox before the fix is written.
+
+    Fix is forced by all three of 0008's pitches — every one of them has to
+    say what a day cell *is*, and none can keep "a button that contains
+    links". Likely shape: the cell stops being a button, chips stay links,
+    and "new event on this day" becomes an explicit affordance rather than
+    the cell's whole background.
+
+22. **The calendar can only ever show this month and next month.**
+    `CalendarPage` holds `tab: 0 | 1` and `monthWindow(monthsFromNow: 0 | 1,
+    zone)` takes that literal type, so there is no arbitrary month paging
+    anywhere in the app — you cannot look at December from August, and you
+    cannot look backwards at all. `fullWindow()` fetches exactly those two
+    months, so it's a data limit as well as a UI one.
+
+    Noticed while writing `specs/0008`, where it matters twice: it makes
+    idea 20's "does the sidebar follow the calendar or stay anchored to now"
+    much cheaper than it looked (the grid moves by one month, once, not to
+    "arbitrary months" as that entry assumed), and pitch C's value partly
+    rests on the ceiling being *invisible* rather than raised.
+
+    Deliberately left out of v0.4: it's a behaviour change, not a design one.
+    Worth deciding whether the fix is a real month pager (prev/next without
+    bound, which means `/me/events` gets asked for arbitrary windows and the
+    query bound that made spec 0006 cheap needs re-checking) or simply a
+    wider fixed window. Also worth asking whether looking *backwards* at past
+    sessions is wanted — nothing in the app offers that today.
+
+23. **The sandbox has no frontend, so the sandbox-first rule has a blind spot
+    for frontend-only changes.** `deploy-sandbox.yml` is worker-only — every
+    step runs with `working-directory: worker` — and `deploy-pages.yml`
+    publishes the frontend from `main` and nowhere else. So pushing a
+    frontend-only branch to `sandbox` deploys a Worker that didn't change and
+    puts the actual diff nowhere anyone can click.
+
+    `SETUP.md` and CLAUDE.md already say the intended route is
+    `VITE_API_BASE_URL=<sandbox worker url> npm run dev` locally, and for a
+    worker change that's clearly right — a second Pages deployment would be
+    cost for no benefit. But v0.4 is three branches of almost entirely
+    frontend work (`specs/0009`), which is the first time the gap really
+    bites: "verify it on the sandbox" turns into "run it on your own machine",
+    which only Michael can do, and which leaves no artifact anyone else can
+    look at.
+
+    Sharper than first written: `deploy-sandbox.yml`'s push trigger also
+    carries `paths: ['worker/**', '.github/workflows/deploy-sandbox.yml']`, so
+    a frontend-only push to `sandbox` is not merely unhelpful — it is a
+    complete no-op, and the Actions tab shows no run at all. That path filter
+    is *correct* (deploying an unchanged Worker achieves nothing), which is
+    what makes this a design gap rather than a bug: there is simply no branch
+    you can push a frontend change to and have anything happen.
+
+    Worth knowing alongside it: `ci.yml` runs on `push: branches: [main]` and
+    on `pull_request`, so a feature branch with no PR open gets no CI either.
+    A frontend branch therefore has *zero* automated verification until a PR
+    exists — which is fine if you know it, and misleading if you assume
+    pushing a branch ran something.
+
+    Found while pushing v0.4 branch 1. Worth deciding between:
+    - **A sandbox Pages project.** Cleanest, and makes "go look at it" a link
+      rather than a local build. Cost is a second Pages deployment plus the
+      env-parity surface that `check:env-parity` would want extending to.
+    - **A preview build artifact on CI.** Cheaper — upload `frontend/dist`
+      from the existing CI run so any branch has something downloadable — but
+      it's a static bundle with no API base URL baked in, so it needs one
+      configured at build time to be useful.
+    - **Leave it, and make the rule explicit.** Say plainly in CLAUDE.md that
+      frontend-only changes are verified locally, so nobody reads
+      "sandbox-first" as promising something it can't do for them.
+
+    The third is free and should happen regardless of whether the first two do.
+
+24. **A failed API call is displayed as "you have nothing scheduled".**
+    `CalendarPage` does
+    `api.get(...).then(setOccurrences).finally(() => setLoading(false))` —
+    no `.catch`. `api.get` *does* throw an `ApiError` on a non-ok response
+    (`client.ts`), so the rejection goes unhandled, `occurrences` stays `[]`,
+    `loading` flips to false, and the user is shown the cheerful empty state:
+    "Nothing scheduled in this window yet."
+
+    So a 404, a 500, an expired session or an unreachable Worker all render
+    identically to a genuinely empty calendar. Only `AuthCallbackPage` and
+    `EventFormPage` have a `.catch` anywhere in `pages/`.
+
+    Found the expensive way: the sandbox Worker predated v0.3 and had no
+    `/me/events` route at all, so every calendar request 404'd — and the app
+    said, confidently and in a friendly tone, that there was nothing on. It
+    cost a long detour of testing a *frontend* branch against what looked
+    like missing data. The screen that is supposed to tell you what is
+    happening was the one actively hiding it.
+
+    Wants: an error state distinct from the empty state, on every page that
+    loads data. Probably a small `useAsync`-style hook rather than a `.catch`
+    bolted onto each call, since `DashboardPage`, `GroupsPage`,
+    `EventDetailPage`, `PersonalEventPage` and `AdminUsersPage` all have the
+    same shape. Worth doing alongside v0.4's design pass — an error state is
+    a surface that needs designing, and `specs/0009` is already deciding what
+    empty states look like.
+
+25. **CI actions are on a deprecated Node runtime.** Every workflow pins
+    `actions/checkout@v4` and `actions/setup-node@v4` — ten call sites across
+    `ci.yml`, `deploy-pages.yml`, `deploy-sandbox.yml` and
+    `deploy-worker.yml`. GitHub now forces those onto Node 24 and emits a
+    deprecation warning on every run (seen on Deploy Sandbox #1).
+
+    Advisory today, a broken deploy whenever GitHub stops forcing the
+    substitution. Bumping both to `@v5` is a ten-line change with no logic in
+    it — the kind of thing that is trivial now and an emergency later, on the
+    day a release is already blocked.
+
+    Worth pairing with a decision about whether to pin action versions by
+    major at all, since this will recur every couple of years.
+
+26. **The organizer is shown RSVP buttons they get a 403 for.** On a
+    fixed-time event you organised, "I'm in / Maybe / Can't make it" render
+    and do nothing at all when clicked.
+
+    Two halves. The server's `POST /events/:eventId/rsvp` does
+    `UPDATE event_invites ... WHERE event_id = ? AND user_id = ?` and then
+    `if (result.meta.changes === 0) return c.text('Not invited to this
+    event', 403)`. An organiser has no `event_invites` row — the model treats
+    them as implicitly attending, which is why the attendance and reminder
+    queries all say `... UNION SELECT ?` with the organiser id rather than
+    reading a row. So the update matches nothing and the organiser is told
+    they are not invited to their own event.
+
+    The client half is idea 24 again: `handleRsvp` is
+    `await api.post(...); await load();` with no `.catch`, so the 403 becomes
+    an unhandled rejection and the button appears inert. Two bugs, and the
+    second is what makes the first so confusing to hit.
+
+    The UI has no organiser check either — `EventDetailPage` gates the RSVP
+    block on `eventType === 'single' && startAt && endAt` and nothing else.
+
+    Which way to fix it is a real design question, not a typo:
+    - **Give the organiser an `event_invites` row** at creation, accepted by
+      default. Lets them decline their own session, which is a genuine case —
+      the DM can be ill. But every `UNION SELECT ?` in `attendance.ts`,
+      `reminders.ts` and `changeRequests.ts` then risks double-counting, so
+      it is a wider change than it looks.
+    - **Hide the buttons from the organiser** and say "you're the organiser,
+      you're counted as attending". Matches the model as built, cheap, and
+      loses the ability to say you can't make your own event.
+
+    **Refined on the sandbox, and decided.** It is narrower than first
+    written: an organiser who *also* invites themselves gets a row like anyone
+    else and can RSVP normally. `inviteStatements` in `lib/eventWrites.ts`
+    inserts only the invitees it is given, all at `'pending'` — so the 403
+    only strikes an organiser who did not add themselves, which is the common
+    case and the one that looks broken.
+
+    **Decision: give the organiser a real `event_invites` row at creation,
+    defaulted to `'accepted'`** rather than `'pending'` — they are the one
+    person whose attendance is not in question. That keeps "I can't make my
+    own session" possible, which hiding the buttons would have cost.
+
+    The care is all in the audit that comes with it. Every
+    `... UNION SELECT ?` that folds the organiser in by hand
+    (`attendance.ts`, `reminders.ts`, `changeRequests.ts`) has to be
+    revisited: with a real row present, a union that forces the organiser
+    into the accepted set would override a decline and report them as
+    attending anyway. `changeRequests.ts` also counts
+    `COUNT(*) FROM event_invites` for its thresholds, and those counts move by
+    one. Plus a migration to backfill existing events.
+
+    **Sharpened again, by Michael.** The event that worked was a *group*
+    event and he was a member of that group — so his invite row came from
+    group resolution, not from anything organiser-specific.
+    `resolveInvitees` in `lib/eventWrites.ts` builds the list from direct user
+    ids plus group members and has no organiser case at all, and idea 16 (v0.3)
+    guarantees a group's creator is a member of it. So:
+
+    - **Group event, organiser in the invited group** → row via
+      `invitedVia: 'group'`, RSVP works. Always has.
+    - **Non-group event** (individual invitees, or none) → no row → 403.
+
+    That narrows the fix usefully: add the organiser after resolution *only if
+    they are not already among the invitees*. Group events are then untouched,
+    and the blast radius is non-group events only — which also shrinks the
+    `COUNT(*)` threshold concern in `changeRequests.ts`, since group events
+    already counted the organiser.
+
+    The `UNION SELECT <organiser>` audit still stands and is still the risky
+    half: with a real row present, a union that forces the organiser into the
+    accepted set would override a decline and report them attending anyway.
+
+    Found while verifying v0.4 branch 1 on the sandbox.
+
+
+27. **Fade events that have already happened.** A past session on the month
+    grid renders exactly like an upcoming one, so the eye has to read dates to
+    work out what is still ahead. The grid covers this month and next, so
+    roughly half of what is on screen at any time is already over.
+
+    Wants to stay distinguishable from *cancelled*, which is already
+    `line-through` plus reduced opacity. Two different states that both mean
+    "not happening" would collapse into one if past events simply dimmed too —
+    so past is probably opacity alone, cancelled keeps the strike.
+
+    Note an asymmetry v0.4 introduced: the agenda view filters to today
+    onwards, so past events never appear there at all, while the grid shows
+    them. That is arguably correct rather than a bug — the grid is the shape of
+    a month and the agenda is what is next — but it means this only applies to
+    the grid, and the two views should be *deliberately* different rather than
+    accidentally so.
+
+    Also worth deciding: does an in-progress event (started, not yet ended)
+    count as past? It should not.
+
+28. **Warn — but do not block — when an event is created in the past.**
+    Nothing stops you dating an event yesterday today.
+
+    **Blocking is the wrong fix**, and the reason is worth writing down: every
+    reminder query in `cron/reminders.ts` bounds on `start_at >= now`, so a
+    past event is never picked up by the cron. No overdue DMs, no stuck outbox
+    rows, no operational harm at all. It simply sits there.
+
+    Meanwhile there are legitimate reasons to do it: logging a session that
+    already happened, correcting a mistyped year on an event that has since
+    passed, or editing any old event at all — a naive rule would block that
+    last one, which would be actively obstructive.
+
+    So: an inline warning on the form, not a hard stop. Worth contrasting with
+    idea 12 (v0.1), which *does* hard-block an end before a start. The
+    distinction is that end-before-start is incoherent, while a past date is
+    merely unusual — block the incoherent, warn on the unusual.
+
+    Timezones make the case stronger: "tonight at 7" can already be in the past
+    in the organiser's own zone by the time the form is submitted, and a hard
+    block would reject it with no way forward.
