@@ -517,3 +517,17 @@ roadmap gets revisited between phases.
     same shape. Worth doing alongside v0.4's design pass — an error state is
     a surface that needs designing, and `specs/0009` is already deciding what
     empty states look like.
+
+25. **CI actions are on a deprecated Node runtime.** Every workflow pins
+    `actions/checkout@v4` and `actions/setup-node@v4` — ten call sites across
+    `ci.yml`, `deploy-pages.yml`, `deploy-sandbox.yml` and
+    `deploy-worker.yml`. GitHub now forces those onto Node 24 and emits a
+    deprecation warning on every run (seen on Deploy Sandbox #1).
+
+    Advisory today, a broken deploy whenever GitHub stops forcing the
+    substitution. Bumping both to `@v5` is a ten-line change with no logic in
+    it — the kind of thing that is trivial now and an emergency later, on the
+    day a release is already blocked.
+
+    Worth pairing with a decision about whether to pin action versions by
+    major at all, since this will recur every couple of years.
