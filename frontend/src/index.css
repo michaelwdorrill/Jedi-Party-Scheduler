@@ -321,12 +321,20 @@ body {
   }
 }
 
-@keyframes uo-cross-back {
+/* Right to left, unmirrored -- for art that already faces left.
+ *
+ * The X-wing sprite carries its bulk on the right (engines, S-foils) and tapers
+ * to a nose on the left, so it faces left and has to fly leftward. Mirroring it
+ * to fly rightward put it tail-first, which is exactly how it looked. The Star
+ * Destroyer is the reverse -- stern and tower at the left, bow at the right --
+ * so it flies rightward unmirrored. The TIE is a symmetric hexagon in profile
+ * and does not care either way. */
+@keyframes uo-cross-rtl {
   from {
-    transform: translate3d(135vw, 0, 0) scaleX(-1);
+    transform: translate3d(135vw, 0, 0);
   }
   to {
-    transform: translate3d(-40vw, 0, 0) scaleX(-1);
+    transform: translate3d(-40vw, 0, 0);
   }
 }
 
@@ -357,43 +365,38 @@ body {
     animation-name: uo-cross;
     animation-duration: 190s;
   }
-  .uo-craft-freighter {
-    animation-name: uo-cross-back;
-    animation-duration: 78s;
-    animation-delay: 26s;
-  }
   .uo-craft-xwing-a {
-    animation-name: uo-cross;
+    animation-name: uo-cross-rtl;
     animation-duration: 27s;
     animation-delay: 4s;
   }
   .uo-craft-xwing-b {
-    animation-name: uo-cross;
+    animation-name: uo-cross-rtl;
     animation-duration: 27s;
     animation-delay: 5.6s;
   }
   .uo-craft-xwing-c {
-    animation-name: uo-cross;
+    animation-name: uo-cross-rtl;
     animation-duration: 21s;
     animation-delay: 38s;
   }
   .uo-craft-tie-a {
-    animation-name: uo-cross-back;
+    animation-name: uo-cross;
     animation-duration: 23s;
     animation-delay: 12s;
   }
   .uo-craft-tie-b {
-    animation-name: uo-cross-back;
+    animation-name: uo-cross;
     animation-duration: 23s;
     animation-delay: 13.4s;
   }
   .uo-craft-tie-c {
-    animation-name: uo-cross-back;
+    animation-name: uo-cross;
     animation-duration: 31s;
     animation-delay: 52s;
   }
   .uo-craft-skimmer {
-    animation-name: uo-cross;
+    animation-name: uo-cross-rtl;
     animation-duration: 13s;
     animation-delay: 20s;
   }
@@ -420,7 +423,7 @@ body {
   .uo-cloud-8 { animation-duration: 210s; animation-delay: -160s; }
 
   .uo-craft-destroyer-2 {
-    animation-name: uo-cross-back;
+    animation-name: uo-cross;
     animation-duration: 300s;
     animation-delay: 70s;
   }
