@@ -584,4 +584,68 @@ roadmap gets revisited between phases.
     `COUNT(*) FROM event_invites` for its thresholds, and those counts move by
     one. Plus a migration to backfill existing events.
 
+    **Sharpened again, by Michael.** The event that worked was a *group*
+    event and he was a member of that group — so his invite row came from
+    group resolution, not from anything organiser-specific.
+    `resolveInvitees` in `lib/eventWrites.ts` builds the list from direct user
+    ids plus group members and has no organiser case at all, and idea 16 (v0.3)
+    guarantees a group's creator is a member of it. So:
+
+    - **Group event, organiser in the invited group** → row via
+      `invitedVia: 'group'`, RSVP works. Always has.
+    - **Non-group event** (individual invitees, or none) → no row → 403.
+
+    That narrows the fix usefully: add the organiser after resolution *only if
+    they are not already among the invitees*. Group events are then untouched,
+    and the blast radius is non-group events only — which also shrinks the
+    `COUNT(*)` threshold concern in `changeRequests.ts`, since group events
+    already counted the organiser.
+
+    The `UNION SELECT <organiser>` audit still stands and is still the risky
+    half: with a real row present, a union that forces the organiser into the
+    accepted set would override a decline and report them attending anyway.
+
     Found while verifying v0.4 branch 1 on the sandbox.
+
+
+27. **Fade events that have already happened.** A past session on the month
+    grid renders exactly like an upcoming one, so the eye has to read dates to
+    work out what is still ahead. The grid covers this month and next, so
+    roughly half of what is on screen at any time is already over.
+
+    Wants to stay distinguishable from *cancelled*, which is already
+    `line-through` plus reduced opacity. Two different states that both mean
+    "not happening" would collapse into one if past events simply dimmed too —
+    so past is probably opacity alone, cancelled keeps the strike.
+
+    Note an asymmetry v0.4 introduced: the agenda view filters to today
+    onwards, so past events never appear there at all, while the grid shows
+    them. That is arguably correct rather than a bug — the grid is the shape of
+    a month and the agenda is what is next — but it means this only applies to
+    the grid, and the two views should be *deliberately* different rather than
+    accidentally so.
+
+    Also worth deciding: does an in-progress event (started, not yet ended)
+    count as past? It should not.
+
+28. **Warn — but do not block — when an event is created in the past.**
+    Nothing stops you dating an event yesterday today.
+
+    **Blocking is the wrong fix**, and the reason is worth writing down: every
+    reminder query in `cron/reminders.ts` bounds on `start_at >= now`, so a
+    past event is never picked up by the cron. No overdue DMs, no stuck outbox
+    rows, no operational harm at all. It simply sits there.
+
+    Meanwhile there are legitimate reasons to do it: logging a session that
+    already happened, correcting a mistyped year on an event that has since
+    passed, or editing any old event at all — a naive rule would block that
+    last one, which would be actively obstructive.
+
+    So: an inline warning on the form, not a hard stop. Worth contrasting with
+    idea 12 (v0.1), which *does* hard-block an end before a start. The
+    distinction is that end-before-start is incoherent, while a past date is
+    merely unusual — block the incoherent, warn on the unusual.
+
+    Timezones make the case stronger: "tonight at 7" can already be in the past
+    in the organiser's own zone by the time the form is submitted, and a hard
+    block would reject it with no way forward.
