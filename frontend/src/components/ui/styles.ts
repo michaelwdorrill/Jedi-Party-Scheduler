@@ -20,6 +20,15 @@ export const focusRing =
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-text ' +
   'focus-visible:ring-offset-2 focus-visible:ring-offset-ground';
 
+// The inset variant, for small controls that carry their own fill and sit in
+// tight grids -- calendar chips being the case it exists for. An outset ring
+// there would add 4px outside a chip whose cell has 4px of padding and 4px of
+// grid gap, so it would crowd or clip its neighbours. Drawn inside the chip it
+// costs no layout at all, and a near-white ring reads against every colour in
+// the group palette, which an accent-coloured one would not.
+export const focusRingInset =
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ink';
+
 /** Joins class names, dropping anything falsy. */
 export function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(' ');
