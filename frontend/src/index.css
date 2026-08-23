@@ -5,3 +5,33 @@
 body {
   @apply bg-ground text-ink;
 }
+
+@layer base {
+  /* One rule, every focusable element.
+   *
+   * This replaces an earlier attempt that composed a ring into the shared
+   * Button/control class builders. That only ever reached what went through
+   * those builders, which left nav links, footer links, the segmented
+   * fixed-time/poll toggle, and native checkboxes still showing the browser's
+   * white default -- so the app displayed two different focus styles at once
+   * and read as broken rather than as a considered distinction.
+   *
+   * `outline` rather than a ring, deliberately: it draws outside the border
+   * box without affecting layout, it does not collide with box-shadow the way
+   * Tailwind's ring utilities do, and it is the one focus mechanism native
+   * controls (checkbox, radio, select) accept without a fight.
+   *
+   * accent-text rather than accent: the primary button is filled with accent,
+   * so an accent outline on it would be the same colour as the thing it marks.
+   */
+  :focus-visible {
+    outline: 2px solid theme('colors.accent-text');
+    outline-offset: 2px;
+  }
+
+  /* Calendar chips sit in cells with 4px of padding inside a grid with a 4px
+   * gap, so an outward offset lands on their neighbours. Drawn inside instead. */
+  .focus-inset:focus-visible {
+    outline-offset: -3px;
+  }
+}

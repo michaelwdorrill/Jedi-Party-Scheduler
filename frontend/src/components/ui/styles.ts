@@ -1,33 +1,11 @@
 // Shared style fragments for the UI primitives.
 //
-// `focusRing` exists as one constant rather than a habit because the app went
-// 27 files without a single focus style (see spec 0009's audit). Anything a
-// keyboard can reach composes this in, so it can't be forgotten one component
-// at a time again.
-
-// The ring takes the accent-text step, not the base accent: the primary
-// button is *filled* with accent, so an accent ring is the same colour as it
-// is meant to be marking, separated only by the 2px offset band. It reads as
-// an odd dark hairline rather than as a focus indicator. The lighter step
-// contrasts against both the page ground and the accent fill.
-//
-// Worth recording why this replaces anything at all: the browser's own focus
-// ring was never missing -- Chrome draws a two-tone one that is perfectly
-// visible on a dark page. What the app lacked was *control* over it. That is
-// what makes it consistent across elements and themeable in 0009, and it is a
-// smaller claim than "the app had no focus indication".
-export const focusRing =
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-text ' +
-  'focus-visible:ring-offset-2 focus-visible:ring-offset-ground';
-
-// The inset variant, for small controls that carry their own fill and sit in
-// tight grids -- calendar chips being the case it exists for. An outset ring
-// there would add 4px outside a chip whose cell has 4px of padding and 4px of
-// grid gap, so it would crowd or clip its neighbours. Drawn inside the chip it
-// costs no layout at all, and a near-white ring reads against every colour in
-// the group palette, which an accent-coloured one would not.
-export const focusRingInset =
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ink';
+// Focus is handled globally in index.css, not here -- see the note on the
+// `:focus-visible` rule for why the per-builder version was withdrawn. What
+// matters for these builders is only that they must never emit a utility that
+// clears the outline, which would suppress it. There is a test for exactly
+// that -- and the token is spelled out only there, because Tailwind scans
+// source text for class-like strings and writing it here emits a real rule.
 
 /** Joins class names, dropping anything falsy. */
 export function cn(...parts: Array<string | false | null | undefined>): string {
@@ -73,7 +51,6 @@ export function buttonClass(
     'rounded-md disabled:opacity-50',
     BUTTON_VARIANTS[variant],
     BUTTON_SIZES[size],
-    focusRing,
     className,
   );
 }
@@ -108,7 +85,6 @@ export function controlClass(size: ControlSize = 'lg', className?: string) {
   return cn(
     'rounded-md border border-edge-strong bg-raised text-ink disabled:opacity-50',
     CONTROL_SIZES[size],
-    focusRing,
     className,
   );
 }

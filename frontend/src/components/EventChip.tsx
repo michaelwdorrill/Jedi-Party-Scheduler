@@ -2,7 +2,6 @@ import { Link } from 'react-router-dom';
 import { DateTime } from 'luxon';
 import type { EventOccurrence } from '../types';
 import { groupColor, PERSONAL_COLOR, UNGROUPED_COLOR } from '../lib/colors';
-import { focusRingInset } from './ui/styles';
 
 export default function EventChip({
   occurrence,
@@ -43,7 +42,7 @@ export default function EventChip({
   return (
     <Link
       to={to}
-      className={`block truncate rounded px-1.5 py-0.5 text-xs text-white ${color} hover:opacity-90 ${focusRingInset}`}
+      className={`block truncate rounded px-1.5 py-0.5 text-xs text-white ${color} hover:opacity-90 focus-inset`}
       title={`${occurrence.title}${occurrence.isPersonal ? ' (personal time)' : occurrence.guildName ? ` — ${occurrence.guildName}` : ''}`}
     >
       <span className="font-medium">{time}</span> {occurrence.title}

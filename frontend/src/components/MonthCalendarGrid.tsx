@@ -2,7 +2,6 @@ import { DateTime } from 'luxon';
 import { buildMonthGrid } from '../lib/datetime';
 import type { EventOccurrence } from '../types';
 import EventChip from './EventChip';
-import { focusRing } from './ui/styles';
 import { cardClass } from './ui';
 
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -86,7 +85,7 @@ export default function MonthCalendarGrid({
                     type="button"
                     onClick={() => onDayClick(day)}
                     aria-label={`New event on ${day.toFormat('cccc d LLLL yyyy')}`}
-                    className={`rounded px-1 hover:bg-raised hover:text-ink ${focusRing} ${
+                    className={`rounded px-1 hover:bg-raised hover:text-ink ${
                       isToday ? 'font-semibold text-accent-text' : 'text-muted'
                     }`}
                   >

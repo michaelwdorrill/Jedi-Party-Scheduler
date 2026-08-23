@@ -1,12 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  buttonClass,
-  cardClass,
-  cn,
-  controlClass,
-  focusRing,
-  focusRingInset,
-} from '../src/components/ui/styles';
+import { buttonClass, cardClass, cn, controlClass } from '../src/components/ui/styles';
 
 describe('cn', () => {
   it('drops falsy parts so conditional classes do not leave gaps', () => {
@@ -14,35 +7,22 @@ describe('cn', () => {
   });
 });
 
-// The app shipped 27 files with no focus styling at all (spec 0009's audit).
-// These assertions are the guardrail: anything a keyboard can reach is built
-// from one of these, so a missing ring becomes a failing test rather than a
-// thing nobody notices.
-describe('focus is never optional', () => {
+// Focus lives in one global `:focus-visible` rule in index.css, so these
+// builders must stay out of its way. `outline-none` anywhere in them would
+// silently suppress the app's focus style for every control built from them --
+// which is exactly the bug this replaced, in reverse.
+describe('nothing suppresses the global focus outline', () => {
   it.each([
     ['button', buttonClass()],
     ['secondary button', buttonClass('secondary', 'lg')],
     ['ghost button', buttonClass('ghost', 'sm')],
     ['control', controlClass()],
     ['small control', controlClass('xs')],
-  ])('%s carries the shared focus ring', (_label, cls) => {
-    for (const part of focusRing.split(' ')) {
-      expect(cls).toContain(part);
-    }
-  });
-});
-
-describe('focusRingInset', () => {
-  it('draws inside the element, so it costs no layout in a dense grid', () => {
-    expect(focusRingInset).toContain('ring-inset');
-  });
-
-  it('suppresses the browser default the same way the outset ring does', () => {
-    expect(focusRingInset).toContain('focus-visible:outline-none');
-  });
-
-  it('rings in near-white, legible on every fill in the group palette', () => {
-    expect(focusRingInset).toContain('ring-ink');
+    ['title control', controlClass('lg-base')],
+    ['card', cardClass()],
+  ])('%s does not set outline-none', (_label, cls) => {
+    expect(cls).not.toContain('outline-none');
+    expect(cls).not.toContain('outline-0');
   });
 });
 
