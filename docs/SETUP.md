@@ -548,7 +548,15 @@ environments). What's actually separate is the *data* and the *bot*.
 7. **Run the frontend against it.** No second Pages site — the sandbox
    frontend is just `npm run dev` (from `frontend/`) with
    `VITE_API_BASE_URL` pointed at the sandbox Worker:
+   PowerShell (which is where Michael's clone lives — the `VAR=value cmd`
+   form below it is bash and silently does nothing here):
+   ```powershell
+   cd C:\Users\Michael\Documents\GitHub\Jedi-Party-Scheduler\frontend
+   $env:VITE_API_BASE_URL = "https://jedi-party-scheduler-worker-sandbox.<you>.workers.dev"
+   npm run dev
    ```
+   bash/zsh:
+   ```bash
    VITE_API_BASE_URL=https://jedi-party-scheduler-worker-sandbox.<you>.workers.dev npm run dev
    ```
    This works with no extra plumbing because `FRONTEND_URL` in
