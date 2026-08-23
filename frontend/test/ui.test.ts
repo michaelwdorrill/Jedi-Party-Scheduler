@@ -5,6 +5,7 @@ import {
   cn,
   controlClass,
   focusRing,
+  focusRingInset,
 } from '../src/components/ui/styles';
 
 describe('cn', () => {
@@ -28,6 +29,20 @@ describe('focus is never optional', () => {
     for (const part of focusRing.split(' ')) {
       expect(cls).toContain(part);
     }
+  });
+});
+
+describe('focusRingInset', () => {
+  it('draws inside the element, so it costs no layout in a dense grid', () => {
+    expect(focusRingInset).toContain('ring-inset');
+  });
+
+  it('suppresses the browser default the same way the outset ring does', () => {
+    expect(focusRingInset).toContain('focus-visible:outline-none');
+  });
+
+  it('rings in near-white, legible on every fill in the group palette', () => {
+    expect(focusRingInset).toContain('ring-ink');
   });
 });
 

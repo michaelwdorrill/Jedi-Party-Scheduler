@@ -531,3 +531,36 @@ roadmap gets revisited between phases.
 
     Worth pairing with a decision about whether to pin action versions by
     major at all, since this will recur every couple of years.
+
+26. **The organizer is shown RSVP buttons they get a 403 for.** On a
+    fixed-time event you organised, "I'm in / Maybe / Can't make it" render
+    and do nothing at all when clicked.
+
+    Two halves. The server's `POST /events/:eventId/rsvp` does
+    `UPDATE event_invites ... WHERE event_id = ? AND user_id = ?` and then
+    `if (result.meta.changes === 0) return c.text('Not invited to this
+    event', 403)`. An organiser has no `event_invites` row — the model treats
+    them as implicitly attending, which is why the attendance and reminder
+    queries all say `... UNION SELECT ?` with the organiser id rather than
+    reading a row. So the update matches nothing and the organiser is told
+    they are not invited to their own event.
+
+    The client half is idea 24 again: `handleRsvp` is
+    `await api.post(...); await load();` with no `.catch`, so the 403 becomes
+    an unhandled rejection and the button appears inert. Two bugs, and the
+    second is what makes the first so confusing to hit.
+
+    The UI has no organiser check either — `EventDetailPage` gates the RSVP
+    block on `eventType === 'single' && startAt && endAt` and nothing else.
+
+    Which way to fix it is a real design question, not a typo:
+    - **Give the organiser an `event_invites` row** at creation, accepted by
+      default. Lets them decline their own session, which is a genuine case —
+      the DM can be ill. But every `UNION SELECT ?` in `attendance.ts`,
+      `reminders.ts` and `changeRequests.ts` then risks double-counting, so
+      it is a wider change than it looks.
+    - **Hide the buttons from the organiser** and say "you're the organiser,
+      you're counted as attending". Matches the model as built, cheap, and
+      loses the ability to say you can't make your own event.
+
+    Found while verifying v0.4 branch 1 on the sandbox.
