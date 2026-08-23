@@ -47,7 +47,7 @@ export default function PollOptionRow({
               onClick={() => onVote(v)}
               className={`rounded-md border px-2 py-1 text-xs ${
                 option.myVote === v
-                  ? 'border-accent-hover bg-accent text-white'
+                  ? 'border-accent-hover bg-accent text-on-accent'
                   : 'border-edge-strong text-ink-dim hover:bg-raised'
               }`}
             >

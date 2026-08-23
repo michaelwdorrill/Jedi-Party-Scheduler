@@ -6,7 +6,7 @@ import { buttonClass } from './ui';
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   `rounded-md px-3 py-2 text-sm font-medium ${
-    isActive ? 'bg-accent text-white' : 'text-ink-dim hover:bg-raised hover:text-white'
+    isActive ? 'bg-accent text-on-accent' : 'text-ink-dim hover:bg-raised hover:text-ink'
   }`;
 
 type LogoutBanner = 'none' | 'queued' | 'unresolved';

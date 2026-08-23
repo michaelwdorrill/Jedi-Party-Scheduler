@@ -69,13 +69,13 @@ export default function CalendarPage() {
           <div className="flex gap-1 rounded-md bg-surface p-1">
             <button
               onClick={() => setTab(0)}
-              className={`rounded px-3 py-1 text-sm ${tab === 0 ? 'bg-accent text-white' : 'text-ink-dim'}`}
+              className={`rounded px-3 py-1 text-sm ${tab === 0 ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
             >
               This Month
             </button>
             <button
               onClick={() => setTab(1)}
-              className={`rounded px-3 py-1 text-sm ${tab === 1 ? 'bg-accent text-white' : 'text-ink-dim'}`}
+              className={`rounded px-3 py-1 text-sm ${tab === 1 ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
             >
               Next Month
             </button>

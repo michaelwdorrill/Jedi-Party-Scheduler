@@ -306,7 +306,7 @@ export default function ChangeRequestSection({
                     key={v}
                     onClick={() => onVote(r.id, v)}
                     className={`rounded-md border px-2 py-1 text-xs ${
-                      r.myVote === v ? 'border-accent-hover bg-accent text-white' : 'border-edge-strong text-ink-dim hover:bg-raised'
+                      r.myVote === v ? 'border-accent-hover bg-accent text-on-accent' : 'border-edge-strong text-ink-dim hover:bg-raised'
                     }`}
                   >
                     {VOTE_LABEL[v]}

@@ -42,7 +42,7 @@ export default function EventChip({
   return (
     <Link
       to={to}
-      className={`block truncate rounded px-1.5 py-0.5 text-xs text-white ${color} hover:opacity-90 focus-inset`}
+      className={`block truncate rounded px-1.5 py-0.5 text-xs ${color} hover:opacity-90 focus-inset`}
       title={`${occurrence.title}${occurrence.isPersonal ? ' (personal time)' : occurrence.guildName ? ` — ${occurrence.guildName}` : ''}`}
     >
       <span className="font-medium">{time}</span> {occurrence.title}

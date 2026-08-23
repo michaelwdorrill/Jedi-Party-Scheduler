@@ -76,7 +76,7 @@ export default function RecurrenceForm({
               onClick={() => toggleWeekday(day)}
               className={`h-8 w-8 rounded-full text-xs ${
                 value.byWeekday.includes(day)
-                  ? 'bg-accent text-white'
+                  ? 'bg-accent text-on-accent'
                   : 'bg-raised text-ink-dim hover:bg-raised-hi'
               }`}
             >

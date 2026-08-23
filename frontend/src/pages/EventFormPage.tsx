@@ -408,13 +408,13 @@ export default function EventFormPage() {
         <div className="flex gap-1 rounded-md bg-surface p-1 w-fit">
           <button
             onClick={() => setEventType('single')}
-            className={`rounded px-3 py-1 text-sm ${eventType === 'single' ? 'bg-accent text-white' : 'text-ink-dim'}`}
+            className={`rounded px-3 py-1 text-sm ${eventType === 'single' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
           >
             Fixed time
           </button>
           <button
             onClick={() => setEventType('poll')}
-            className={`rounded px-3 py-1 text-sm ${eventType === 'poll' ? 'bg-accent text-white' : 'text-ink-dim'}`}
+            className={`rounded px-3 py-1 text-sm ${eventType === 'poll' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
           >
             Potential invite (poll)
           </button>
@@ -510,13 +510,13 @@ export default function EventFormPage() {
             <div className="flex gap-1 rounded-md bg-raised p-1 w-fit">
               <button
                 onClick={() => setPollMode('options')}
-                className={`rounded px-3 py-1 text-xs ${pollMode === 'options' ? 'bg-accent text-white' : 'text-ink-dim'}`}
+                className={`rounded px-3 py-1 text-xs ${pollMode === 'options' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
               >
                 Candidate days/times
               </button>
               <button
                 onClick={() => setPollMode('window')}
-                className={`rounded px-3 py-1 text-xs ${pollMode === 'window' ? 'bg-accent text-white' : 'text-ink-dim'}`}
+                className={`rounded px-3 py-1 text-xs ${pollMode === 'window' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
               >
                 Time window
               </button>

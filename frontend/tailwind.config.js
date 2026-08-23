@@ -1,55 +1,82 @@
 /** @type {import('tailwindcss').Config} */
 
-// Semantic tokens, not raw palette steps.
+// Binary sunset — the v0.4 identity (docs/specs/0009-binary-sunset.md).
 //
-// The point of naming these by role rather than by colour is that the *next*
-// restyle is a change to this file instead of a change to 27 components. The
-// values below are exactly the slate/indigo steps the app already used, so
-// introducing them changed nothing on screen; spec 0009 repoints them at the
-// binary-sunset palette, and that is meant to be the whole visual diff.
+// Branch 1 put semantic tokens in front of every surface in the app so that
+// this file would be the whole visual diff. This is that payoff: the values
+// below moved, and nothing else had to.
 //
-// Two pairs share a value today and are still worth separating, because they
-// stop sharing one in 0009:
-//   raised / edge          both #1e293b (slate-800) -- a fill and a hairline
-//   raised-hi / edge-strong both #334155 (slate-700) -- likewise
-//
-// The nine slate steps the app had drifted into are preserved here as nine
-// tokens rather than collapsed, because collapsing them would change colours
-// and this branch deliberately changes none. 0009 collapses the ramp in the
-// identity branch, where the values move anyway.
-//
-// Not tokenised yet, on purpose: the group-chip palette in lib/colors.ts
-// (0009 retunes it for a warm ground) and the tinted status banners in red /
-// amber / emerald. Both are branch-2 work and both would have meant judgement
-// calls about colour in a branch whose whole claim is that it makes none.
+// Dark-first, single theme. 0009 defines a light ("noon at the homestead")
+// column too and the ramp below is built to accept it, but shipping and
+// reviewing both doubles the surface, so light is deliberately out of v0.4.
 export default {
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
   theme: {
     extend: {
       colors: {
-        ground: '#020617', // page background          (was slate-950)
-        surface: '#0f172a', // cards, bars, panels      (was slate-900)
-        raised: '#1e293b', // input fills, hover states (was slate-800)
-        'raised-hi': '#334155', // a step above raised   (was slate-700)
+        // The ground runs warm black to lit sand. No cold grey anywhere in
+        // the app -- that absence is most of what makes it read as desert.
+        ground: '#1A1410', // page
+        surface: '#241C16', // cards, bars, panels
+        raised: '#2C231B', // input fills, hover states
+        'raised-hi': '#3A2E24', // a step above raised
 
-        edge: '#1e293b', // hairline borders           (was slate-800)
-        'edge-strong': '#334155', // control borders   (was slate-700)
+        edge: '#372B22', // hairline borders
+        'edge-strong': '#4A3A2C', // control borders
 
-        ink: '#f1f5f9', // primary text                (was slate-100)
-        'ink-soft': '#e2e8f0', //                        (was slate-200)
-        'ink-dim': '#cbd5e1', // de-emphasised text    (was slate-300)
-        muted: '#94a3b8', // secondary text            (was slate-400)
-        faint: '#64748b', // tertiary text, footers    (was slate-500)
-        fainter: '#475569', // barely-there text       (was slate-600)
+        ink: '#F0E2CC', // primary text -- parchment, not white
+        'ink-soft': '#E4D5BE',
+        'ink-dim': '#D6C0A0',
+        muted: '#A8927A', // secondary text
+        faint: '#85715C', // tertiary text, footers
+        fainter: '#6B5945', // barely-there text
 
-        accent: '#4f46e5', // primary actions          (was indigo-600)
-        'accent-hover': '#6366f1', //                  (was indigo-500)
-        'accent-text': '#818cf8', // accent on a dark ground (was indigo-400)
-        'on-accent': '#ffffff', // text on an accent fill
+        // The two suns. Tatoo I is the larger, warmer one and carries primary
+        // actions; Tatoo II is smaller and paler and does the lighter-weight
+        // work -- accent text, the second of the two shadows.
+        accent: '#E8913A', // Tatoo I
+        'accent-hover': '#F2A855',
+        'accent-text': '#F0A34F',
+        'on-accent': '#1A1008', // near-black on an orange fill, not white
+        'accent-2': '#F2C879', // Tatoo II
 
-        danger: '#dc2626', // destructive actions      (was red-600)
-        'danger-hover': '#ef4444', //                  (was red-500)
-        'danger-text': '#f87171', //                   (was red-400)
+        // The two counterpoints that stop this being a generic warm palette.
+        // Vaporator teal is load-bearing rather than decorative: personal time
+        // reads cool against warm group sessions, a distinction the old
+        // slate-600 made only faintly.
+        dusk: '#8B6BA0', // the violet band of the sunset
+        moisture: '#6FA8A8', // vaporator condensate
+
+        // Status, warmed to sit on sand rather than on slate.
+        danger: '#C4432E',
+        'danger-hover': '#D9553D',
+        'danger-text': '#EE8A6E',
+        'danger-surface': '#3A1D14',
+        warning: '#C08A2A',
+        'warning-text': '#E4B15C',
+        'warning-surface': '#33260F',
+        success: '#6E8C4A',
+        'success-text': '#A8C077',
+        'success-surface': '#222A15',
+      },
+
+      fontFamily: {
+        // Saira Condensed for display: condensed and slightly stencilled, it
+        // reads as equipment labelling. Barlow for everything read at length --
+        // humanist, industrial lineage, holds up small. No serif anywhere: a
+        // serif would read artisanal, and this is used-future.
+        display: ['"Saira Condensed"', '"Barlow Condensed"', 'ui-sans-serif', 'sans-serif'],
+        sans: ['Barlow', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+      },
+
+      boxShadow: {
+        // The signature. Two suns means two shadows: a hard warm one from
+        // Tatoo I and a soft violet one from Tatoo II, at different angles.
+        // Two values, applied once, and nothing else looks like it.
+        lift: '3px 4px 0 -2px rgba(232, 145, 58, .16), -2px 3px 12px -3px rgba(0, 0, 0, .55)',
+        'lift-lg':
+          '6px 8px 0 -3px rgba(232, 145, 58, .13), -4px 8px 30px -8px rgba(0, 0, 0, .70)',
       },
     },
   },

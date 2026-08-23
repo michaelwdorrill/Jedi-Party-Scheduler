@@ -30,7 +30,7 @@ export default function InviteePicker({
                   onClick={() => onToggleGroup?.(g.id)}
                   className={`rounded-full border px-3 py-1 text-sm ${
                     checked
-                      ? 'border-accent-hover bg-accent text-white'
+                      ? 'border-accent-hover bg-accent text-on-accent'
                       : 'border-edge-strong text-ink-dim hover:bg-raised'
                   }`}
                 >
@@ -59,7 +59,7 @@ export default function InviteePicker({
                   onClick={() => onToggleUser(f.id)}
                   className={`rounded-full border px-3 py-1 text-sm ${
                     checked
-                      ? 'border-accent-hover bg-accent text-white'
+                      ? 'border-accent-hover bg-accent text-on-accent'
                       : 'border-edge-strong text-ink-dim hover:bg-raised'
                   }`}
                 >

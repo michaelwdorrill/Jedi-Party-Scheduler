@@ -60,7 +60,7 @@ export default function WindowAvailabilityPicker({
         {otherSubmissions.map((s) => (
           <div
             key={s.userId}
-            className="absolute top-0 h-2 rounded bg-slate-600"
+            className="absolute top-0 h-2 rounded bg-raised-hi"
             style={{
               left: `${pct(Math.round((s.startAt - windowStartAt) / 60000))}%`,
               width: `${pct(Math.round((s.endAt - s.startAt) / 60000))}%`,

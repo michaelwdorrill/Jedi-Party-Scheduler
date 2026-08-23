@@ -3,7 +3,26 @@
 @tailwind utilities;
 
 body {
-  @apply bg-ground text-ink;
+  @apply bg-ground font-sans text-ink;
+}
+
+@layer base {
+  /* Headings carry the display face. Set here rather than per-component so a
+   * heading is a heading wherever it appears -- the app had no type roles at
+   * all before this, only ad-hoc sizes. */
+  h1,
+  h2,
+  h3 {
+    @apply font-display uppercase tracking-wide;
+  }
+
+  /* Times, dates and counts line up in columns all over this app -- the
+   * calendar grid, attendee counts, the poll tallies -- so they get the mono
+   * face and tabular figures by default. */
+  time,
+  .tabular {
+    @apply font-mono tabular-nums;
+  }
 }
 
 @layer base {
