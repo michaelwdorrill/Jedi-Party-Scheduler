@@ -6,7 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
 import type { PersonalEvent, PersonalAvailability } from '../types';
-import { buttonClass, cardClass, controlClass } from '../components/ui';
+import { Loading, buttonClass, cardClass, controlClass } from '../components/ui';
 
 // Personal time: private to you, never shown to anyone else, and (unless you
 // untick "show me as busy") it makes you look unavailable in other people's
@@ -139,7 +139,7 @@ export default function PersonalEventPage() {
     navigate('/calendar');
   };
 
-  if (loading) return <p className="text-muted">Loading…</p>;
+  if (loading) return <Loading />;
 
   return (
     <div className="mx-auto max-w-2xl space-y-5">

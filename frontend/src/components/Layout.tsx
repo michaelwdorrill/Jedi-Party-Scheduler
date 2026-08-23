@@ -87,7 +87,26 @@ export default function Layout() {
         <Outlet />
       </main>
 
-      <footer className="mx-auto max-w-5xl px-4 pb-8 pt-4 text-xs text-fainter">
+      {/* Vaporators on the horizon, with condensate. Homestead only -- the
+          Settings toggle hides the whole strip. The drops carry their own
+          colour, so opacity is per-group rather than on the svg. */}
+      <div className="horizon-foot mx-auto max-w-5xl px-4 pt-10" aria-hidden="true">
+        <svg viewBox="0 0 900 40" preserveAspectRatio="none" className="block h-9 w-full">
+          <g fill="currentColor" opacity="0.13">
+            <rect x="118" y="10" width="2.5" height="30" />
+            <ellipse cx="119" cy="9" rx="5.5" ry="6.5" />
+            <rect x="150" y="17" width="2" height="23" />
+            <ellipse cx="151" cy="16" rx="4" ry="5" />
+            <rect x="742" y="13" width="2.2" height="27" />
+            <ellipse cx="743" cy="12" rx="4.5" ry="5.5" />
+            <path d="M0 40 C 140 31, 300 37, 470 33 C 640 29, 780 38, 900 34 L900 40 Z" />
+          </g>
+          <circle className="uo-drop-a" cx="119" cy="16" r="2.4" fill="#6FA8A8" opacity="0" />
+          <circle className="uo-drop-b" cx="743" cy="19" r="2.1" fill="#6FA8A8" opacity="0" />
+        </svg>
+      </div>
+
+      <footer className="mx-auto max-w-5xl px-4 pb-8 pt-2 text-xs text-fainter">
         <NavLink to="/terms" className="hover:text-muted">
           Terms
         </NavLink>

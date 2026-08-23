@@ -106,3 +106,124 @@ body {
 [data-scenery='twin-suns'] .horizon-foot {
   display: none;
 }
+
+/* The login page paints its own sky at full height, so the page-level wash
+ * would sit on top of it. Scoped off there. */
+body:has(.uo-hero-copy) {
+  background-image: none;
+}
+
+/* ===========================================================================
+   MOTION (spec 0009)
+   ===========================================================================
+   The rule this is built against: the app is a tool people open to answer a
+   question and leave, so animation that delights on visit one is irritating by
+   visit four hundred. Motion earns a place only if it happens where there is
+   no task (the login screen), replaces something that already has to move (a
+   loading state), or sits far enough in the periphery that you only notice it
+   when you look (the condensate).
+
+   Every animated element's normal CSS *is* its finished appearance; the
+   keyframes only supply where it starts from, and the `animation` property is
+   added inside a no-preference query. That ordering is the whole correctness
+   argument: the common bug is animating *into* existence, which hands anyone
+   who asked for reduced motion a blank stage instead of a composed one. Built
+   this way, turning motion off can only remove movement, never content.
+   =========================================================================== */
+
+/* The smaller sun orbits the larger one, swelling as it passes in front and
+ * dimming as it goes behind. z-index steps rather than eases, which is what
+ * sells the pass-behind. */
+@keyframes uo-orbit {
+  0% {
+    transform: translate(22px, 0) scale(1);
+    opacity: 1;
+    z-index: 1;
+  }
+  25% {
+    transform: translate(0, 8px) scale(1.12);
+    opacity: 1;
+    z-index: 3;
+  }
+  50% {
+    transform: translate(-22px, 0) scale(1);
+    opacity: 1;
+    z-index: 1;
+  }
+  75% {
+    transform: translate(0, -8px) scale(0.74);
+    opacity: 0.5;
+    z-index: 1;
+  }
+  100% {
+    transform: translate(22px, 0) scale(1);
+    opacity: 1;
+    z-index: 1;
+  }
+}
+
+@keyframes uo-sunset {
+  from {
+    transform: translateY(-26px);
+    opacity: 0;
+  }
+}
+
+@keyframes uo-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes uo-rise {
+  from {
+    transform: translateY(14px);
+    opacity: 0;
+  }
+}
+
+/* A single droplet from a vaporator bulb. The fall occupies 13% of the cycle
+ * and the rest is idle, so it stays peripheral rather than becoming a metronome. */
+@keyframes uo-drip {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  3% {
+    opacity: 0.85;
+  }
+  13% {
+    transform: translateY(17px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(17px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .uo-orbiter {
+    animation: uo-orbit 1.9s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+  }
+  .uo-hero-suns {
+    animation: uo-sunset 2.6s cubic-bezier(0.16, 0.7, 0.3, 1) both;
+  }
+  .uo-hero-glow {
+    animation: uo-fade-in 3.1s ease-out both;
+  }
+  .uo-hero-vaps {
+    animation: uo-fade-in 1.9s ease-out 0.35s both;
+  }
+  .uo-hero-copy {
+    animation: uo-rise 0.95s cubic-bezier(0.16, 0.7, 0.3, 1) 0.75s both;
+  }
+  /* Two vaporators on different cycles, so the pair never finds a rhythm you
+   * can anticipate. Homestead only -- the Settings toggle removes it. */
+  [data-scenery='homestead'] .uo-drop-a {
+    animation: uo-drip 9s linear infinite;
+  }
+  [data-scenery='homestead'] .uo-drop-b {
+    animation: uo-drip 12.5s linear 4.2s infinite;
+  }
+}

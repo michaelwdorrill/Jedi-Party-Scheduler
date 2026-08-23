@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { DateTime } from 'luxon';
 import { api, ApiError } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
-import { buttonClass } from '../components/ui';
+import { Loading, buttonClass } from '../components/ui';
 
 interface AdminUser {
   id: string;
@@ -74,7 +74,7 @@ export default function AdminUsersPage() {
       </p>
 
       {loading ? (
-        <p className="text-sm text-faint">Loading…</p>
+        <Loading />
       ) : (
         <div className="overflow-hidden rounded-lg border border-edge">
           <table className="w-full text-left text-sm">

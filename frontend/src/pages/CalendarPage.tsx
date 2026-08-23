@@ -7,7 +7,7 @@ import { useGuild } from '../auth/GuildContext';
 import { fullWindow, monthWindow } from '../lib/datetime';
 import MonthCalendarGrid from '../components/MonthCalendarGrid';
 import type { EventOccurrence } from '../types';
-import { buttonClass, controlClass } from '../components/ui';
+import { Button, EmptyState, Loading, buttonClass, controlClass } from '../components/ui';
 
 // Calendar-first (docs/specs/0006). This loads GET /me/events -- everything
 // across every server you're in, plus your own personal time -- rather than
@@ -113,7 +113,7 @@ export default function CalendarPage() {
       </div>
 
       {loading ? (
-        <p className="text-muted">Loading…</p>
+        <Loading />
       ) : (
         <>
           <MonthCalendarGrid
@@ -126,11 +126,18 @@ export default function CalendarPage() {
             onDayClick={(day: DateTime) => navigate(`/events/new?date=${day.toISODate()}`)}
           />
           {occurrences.length === 0 && (
-            <p className="text-sm text-faint">
+            <EmptyState
+              title="Nothing on the horizon"
+              action={
+                guilds.length > 0 ? (
+                  <Button onClick={() => navigate('/events/new')}>+ New Event</Button>
+                ) : undefined
+              }
+            >
               {guilds.length === 0
-                ? "You don't share any allow-listed servers yet."
-                : 'Nothing scheduled in this window yet.'}
-            </p>
+                ? "You don't share any allow-listed servers with this app yet. Ask the owner to add your server."
+                : 'No sessions scheduled in this window.'}
+            </EmptyState>
           )}
         </>
       )}

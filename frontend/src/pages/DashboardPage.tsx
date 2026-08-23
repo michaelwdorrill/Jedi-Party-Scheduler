@@ -6,7 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
 import { formatTimeRange } from '../lib/datetime';
 import type { EventOccurrence } from '../types';
-import { Button, Card, PageHeader } from '../components/ui';
+import { Button, Card, EmptyState, Loading, PageHeader } from '../components/ui';
 
 export default function DashboardPage() {
   const { user } = useAuth();
@@ -52,11 +52,11 @@ export default function DashboardPage() {
       ) : (
         <Card title="Upcoming sessions">
           {loading ? (
-            <p className="text-muted">Loading…</p>
+            <Loading />
           ) : upcoming.length === 0 ? (
-            <p className="text-muted">
-              Nothing on the calendar yet. <Link to="/calendar" className="text-accent-text underline">Create an event</Link>.
-            </p>
+            <EmptyState title="Nothing on the horizon" action={<Button to="/events/new">+ New Event</Button>}>
+              No sessions in the next two months.
+            </EmptyState>
           ) : (
             <ul className="space-y-2">
               {upcoming.map((occ) => (

@@ -8,7 +8,7 @@ import PollOptionRow from '../components/PollOptionRow';
 import RsvpButtons from '../components/RsvpButtons';
 import WindowAvailabilityPicker from '../components/WindowAvailabilityPicker';
 import type { ChangeRequestView, EventDetail, Friend, PollVote, RsvpStatus, WindowInfo } from '../types';
-import { buttonClass, cardClass } from '../components/ui';
+import { Loading, buttonClass, cardClass } from '../components/ui';
 
 export default function EventDetailPage() {
   const { eventId } = useParams();
@@ -54,7 +54,7 @@ export default function EventDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eventId]);
 
-  if (loading) return <p className="text-muted">Loading…</p>;
+  if (loading) return <Loading />;
   if (!event) return <p className="text-muted">Event not found.</p>;
 
   const isOrganizer = event.organizerId === user?.id;

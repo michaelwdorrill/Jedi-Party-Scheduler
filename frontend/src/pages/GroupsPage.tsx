@@ -4,7 +4,7 @@ import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
 import GroupEditor from '../components/GroupEditor';
 import type { Friend, Group } from '../types';
-import { buttonClass, cardClass, controlClass } from '../components/ui';
+import { Loading, buttonClass, cardClass, controlClass } from '../components/ui';
 
 export default function GroupsPage() {
   const { user } = useAuth();
@@ -140,7 +140,7 @@ export default function GroupsPage() {
       )}
 
       {loading ? (
-        <p className="text-muted">Loading…</p>
+        <Loading />
       ) : groups.length === 0 ? (
         <p className="text-muted">
           No groups yet. Groups let you invite a whole crew (e.g. "Raid Team") to an event at
