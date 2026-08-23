@@ -5,8 +5,19 @@
 // keyboard can reach composes this in, so it can't be forgotten one component
 // at a time again.
 
+// ring-accent-text, not ring-accent: the primary button is *filled* with
+// `accent`, so an `accent` ring around it is the same colour as the thing it
+// is meant to be marking, separated only by the 2px offset band. It reads as
+// an odd dark hairline rather than as a focus indicator. The lighter step
+// contrasts against both the page ground and the accent fill.
+//
+// Worth recording why this replaces anything at all: the browser's own focus
+// ring was never missing -- Chrome draws a two-tone one that is perfectly
+// visible on a dark page. What the app lacked was *control* over it. That is
+// what makes it consistent across elements and themeable in 0009, and it is a
+// smaller claim than "the app had no focus indication".
 export const focusRing =
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ' +
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-text ' +
   'focus-visible:ring-offset-2 focus-visible:ring-offset-ground';
 
 /** Joins class names, dropping anything falsy. */
