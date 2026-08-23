@@ -94,5 +94,9 @@ const CARD_PADDING = { sm: 'p-3', md: 'p-4' } as const;
 export type CardPadding = keyof typeof CARD_PADDING;
 
 export function cardClass(padding: CardPadding = 'md', className?: string) {
-  return cn('rounded-lg border border-edge bg-surface', CARD_PADDING[padding], className);
+  return cn(
+    'rounded-lg border border-edge bg-surface/85 backdrop-blur-sm',
+    CARD_PADDING[padding],
+    className,
+  );
 }

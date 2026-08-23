@@ -70,7 +70,7 @@ export default function WindowAvailabilityPicker({
         ))}
         {bestCandidate && bestCandidate.count > 0 && (
           <div
-            className="absolute bottom-0 h-2 rounded bg-emerald-700/70"
+            className="absolute bottom-0 h-2 rounded bg-success/70"
             style={{
               left: `${pct(Math.round((bestCandidate.startAt - windowStartAt) / 60000))}%`,
               width: `${pct(Math.round((bestCandidate.endAt - bestCandidate.startAt) / 60000))}%`,

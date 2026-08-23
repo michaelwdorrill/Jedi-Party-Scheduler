@@ -3,6 +3,7 @@ import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { APP_VERSION, PUBLISHED_AT } from '../lib/legal';
 import { buttonClass } from './ui';
+import Sky from './Sky';
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   `rounded-md px-3 py-2 font-display text-sm uppercase tracking-wide ${
@@ -25,21 +26,23 @@ export default function Layout() {
   };
 
   return (
-    <div className="min-h-screen">
+    <>
+      <Sky />
+      <div className="uo-page flex min-h-screen flex-col">
       {logoutBanner === 'queued' && (
-        <div className="bg-amber-900/60 px-4 py-2 text-center text-sm text-amber-100">
+        <div className="bg-warning-surface/75 px-4 py-2 text-center text-sm text-warning-text">
           You're signed out on this device, but we couldn't reach the server to end the session. It'll
           be ended automatically next time you're online.
         </div>
       )}
       {logoutBanner === 'unresolved' && (
-        <div className="bg-red-900/60 px-4 py-2 text-center text-sm text-red-100">
+        <div className="bg-danger-surface/75 px-4 py-2 text-center text-sm text-danger-text">
           You're signed out on this device, but we couldn't confirm the server-side session ended, and
           couldn't even record it for automatic retry. If this device is shared or was compromised,
           contact support.
         </div>
       )}
-      <header className="border-b border-edge bg-surface">
+      <header className="border-b border-edge bg-surface/80 backdrop-blur-sm">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
           <div className="flex items-center gap-4">
             <span className="flex items-center gap-2">
@@ -83,28 +86,9 @@ export default function Layout() {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-5xl px-4 py-6">
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6">
         <Outlet />
       </main>
-
-      {/* Vaporators on the horizon, with condensate. Homestead only -- the
-          Settings toggle hides the whole strip. The drops carry their own
-          colour, so opacity is per-group rather than on the svg. */}
-      <div className="horizon-foot mx-auto max-w-5xl px-4 pt-10" aria-hidden="true">
-        <svg viewBox="0 0 900 40" preserveAspectRatio="none" className="block h-9 w-full">
-          <g fill="currentColor" opacity="0.13">
-            <rect x="118" y="10" width="2.5" height="30" />
-            <ellipse cx="119" cy="9" rx="5.5" ry="6.5" />
-            <rect x="150" y="17" width="2" height="23" />
-            <ellipse cx="151" cy="16" rx="4" ry="5" />
-            <rect x="742" y="13" width="2.2" height="27" />
-            <ellipse cx="743" cy="12" rx="4.5" ry="5.5" />
-            <path d="M0 40 C 140 31, 300 37, 470 33 C 640 29, 780 38, 900 34 L900 40 Z" />
-          </g>
-          <circle className="uo-drop-a" cx="119" cy="16" r="2.4" fill="#6FA8A8" opacity="0" />
-          <circle className="uo-drop-b" cx="743" cy="19" r="2.1" fill="#6FA8A8" opacity="0" />
-        </svg>
-      </div>
 
       <footer className="mx-auto max-w-5xl px-4 pb-8 pt-2 text-xs text-fainter">
         <NavLink to="/terms" className="hover:text-muted">
@@ -123,6 +107,7 @@ export default function Layout() {
           v{APP_VERSION} — published {PUBLISHED_AT}
         </span>
       </footer>
-    </div>
+      </div>
+    </>
   );
 }

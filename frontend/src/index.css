@@ -55,25 +55,6 @@ body {
    sync. Settings → Scenery toggles the attribute.
    =========================================================================== */
 
-/* The binary sunset itself, washed behind the top of the page. Fixed rather
- * than scrolling, so it reads as sky the content moves under rather than as a
- * banner that slides away. Fades fully into the ground before any body text
- * reaches it -- the gradient is the one part of this that could cost contrast,
- * so it is kept off the reading area entirely. */
-[data-scenery='homestead'] body {
-  background-image: linear-gradient(
-    to bottom,
-    #3a2440 0%,
-    #56382f 26%,
-    #7a4f2a 48%,
-    rgba(26, 20, 16, 0.6) 76%,
-    rgba(26, 20, 16, 0) 100%
-  );
-  background-repeat: no-repeat;
-  background-attachment: fixed;
-  background-size: 100% 300px;
-}
-
 /* Sand grain. An inline SVG turbulence filter, so no asset enters the build
  * and it costs no request. Sits above the content at 4% and is inert -- at
  * that weight it reads as tooth on the surface rather than as texture on top
@@ -107,11 +88,7 @@ body {
   display: none;
 }
 
-/* The login page paints its own sky at full height, so the page-level wash
- * would sit on top of it. Scoped off there. */
-body:has(.uo-hero-copy) {
-  background-image: none;
-}
+
 
 /* ===========================================================================
    MOTION (spec 0009)
@@ -225,5 +202,137 @@ body:has(.uo-hero-copy) {
   }
   [data-scenery='homestead'] .uo-drop-b {
     animation: uo-drip 12.5s linear 4.2s infinite;
+  }
+}
+
+/* ===========================================================================
+   THE SKY — a fixed scene the app sits inside
+   ===========================================================================
+   Anchored to the viewport rather than the document, so the ground is the
+   bottom of the screen at every window size. Behind everything, and inert.
+   Homestead only; Twin suns removes it entirely.
+   =========================================================================== */
+
+.uo-sky {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+[data-scenery='twin-suns'] .uo-sky {
+  display: none;
+}
+
+/* The sunset, full height. Dark at the top so body text stays comfortably
+ * readable over it, brightening only in the last quarter where the horizon is
+ * and where little but the footer sits. */
+.uo-sky-grad {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to bottom,
+    #221830 0%,
+    #2b1d31 34%,
+    #43272f 58%,
+    #6b402c 76%,
+    #9a5c2e 86%,
+    #5a3418 90%,
+    #1a1008 93%,
+    #120b07 100%
+  );
+}
+
+.uo-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Ground and vaporators are pinned to the bottom edge rather than scaled with
+ * the viewport, so the horizon sits at a consistent height on any screen. */
+.uo-ground {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 15vh;
+  min-height: 90px;
+}
+
+.uo-vaporators {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 13vh;
+  min-height: 78px;
+}
+
+/* Content rides above the scene. */
+.uo-page {
+  position: relative;
+  z-index: 1;
+}
+
+/* --- drift and traffic ---------------------------------------------------- */
+
+@keyframes uo-drift {
+  from {
+    transform: translate3d(-8%, 0, 0);
+  }
+  to {
+    transform: translate3d(8%, 0, 0);
+  }
+}
+
+/* Crosses in the first 34% of the cycle and waits offscreen for the rest, so
+ * the sky is usually empty. Same shape as the condensate: mostly idle. */
+@keyframes uo-cross {
+  0% {
+    transform: translate3d(-22vw, 0, 0);
+  }
+  34% {
+    transform: translate3d(118vw, 0, 0);
+  }
+  100% {
+    transform: translate3d(118vw, 0, 0);
+  }
+}
+
+@keyframes uo-cross-back {
+  0% {
+    transform: translate3d(118vw, 0, 0) scaleX(-1);
+  }
+  30% {
+    transform: translate3d(-22vw, 0, 0) scaleX(-1);
+  }
+  100% {
+    transform: translate3d(-22vw, 0, 0) scaleX(-1);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* The suns are the anchor of the scene, so they barely move -- a slow sway
+   * that reads as air rather than as travel. */
+  .uo-layer-suns {
+    animation: uo-drift 240s ease-in-out infinite alternate;
+  }
+  .uo-layer-cloud {
+    animation: uo-drift 150s ease-in-out infinite alternate;
+  }
+
+  /* Nearer things cross faster. A Star Destroyer is enormous and far away, so
+   * it is the slowest thing in the sky despite being the biggest. */
+  .uo-ship-destroyer {
+    animation: uo-cross 420s linear infinite;
+  }
+  .uo-ship-tie {
+    animation: uo-cross-back 95s linear 40s infinite;
+  }
+  .uo-ship-xwing {
+    animation: uo-cross 68s linear 18s infinite;
   }
 }

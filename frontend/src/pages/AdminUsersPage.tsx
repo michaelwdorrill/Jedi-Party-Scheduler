@@ -115,7 +115,7 @@ export default function AdminUsersPage() {
                       DateTime.fromMillis(u.lastLoginAt).toRelative()
                     ) : u.lastLoginAttemptAt ? (
                       <span
-                        className="text-amber-500"
+                        className="text-warning-text"
                         title="Signed in with Discord but was turned away for sharing no allow-listed server"
                       >
                         turned away {DateTime.fromMillis(u.lastLoginAttemptAt).toRelative()}

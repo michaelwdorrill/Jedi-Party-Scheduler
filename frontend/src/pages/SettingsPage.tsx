@@ -121,7 +121,7 @@ export default function SettingsPage() {
         >
           {saving ? 'Saving…' : 'Save'}
         </button>
-        {saved && <p className="text-sm text-emerald-400">Saved.</p>}
+        {saved && <p className="text-sm text-success-text">Saved.</p>}
       </div>
 
       <div className={cardClass('md', 'space-y-3')}>
@@ -185,8 +185,8 @@ export default function SettingsPage() {
         </div>
       )}
 
-      <div className="space-y-3 rounded-lg border border-red-900 bg-red-950/20 p-4">
-        <h2 className="font-semibold text-red-300">Delete account</h2>
+      <div className="space-y-3 rounded-lg border border-danger/50 bg-danger-surface/40 p-4">
+        <h2 className="font-semibold text-danger-text">Delete account</h2>
         <p className="text-sm text-muted">
           Permanently removes everything: your profile, personal time blocks, RSVPs, poll votes,
           group memberships, and every event you organised. Immediate and irreversible.
@@ -194,7 +194,7 @@ export default function SettingsPage() {
         <button
           disabled={deleting}
           onClick={handleDelete}
-          className="rounded-md border border-red-700 bg-red-900/40 px-3 py-1.5 text-sm text-red-200 hover:bg-red-900/70 disabled:opacity-50"
+          className="rounded-md border border-danger/70 bg-danger-surface/55 px-3 py-1.5 text-sm text-danger-text hover:bg-danger-surface/80 disabled:opacity-50"
         >
           {deleting ? 'Deleting…' : 'Delete my account'}
         </button>

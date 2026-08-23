@@ -489,7 +489,7 @@ export default function EventFormPage() {
             </div>
           </div>
           {!singleRangeValid ? (
-            <p className="text-xs text-red-400">End must be after the start.</p>
+            <p className="text-xs text-danger-text">End must be after the start.</p>
           ) : (
             endDate !== date && (
               <p className="text-xs text-faint">
@@ -571,13 +571,13 @@ export default function EventFormPage() {
                       {pollSlots.length > 1 && (
                         <button
                           onClick={() => removePollSlot(slot.key)}
-                          className="text-xs text-red-400 hover:underline"
+                          className="text-xs text-danger-text hover:underline"
                         >
                           Remove
                         </button>
                       )}
                     </div>
-                    {!slotValid && <p className="mt-1 text-xs text-red-400">End must be after the start.</p>}
+                    {!slotValid && <p className="mt-1 text-xs text-danger-text">End must be after the start.</p>}
                   </div>
                 );
               })}
@@ -642,7 +642,7 @@ export default function EventFormPage() {
                 </div>
               </div>
               {!windowRangeValid && (
-                <p className="text-xs text-red-400">Window end must be after the window start.</p>
+                <p className="text-xs text-danger-text">Window end must be after the window start.</p>
               )}
             </div>
           )}
@@ -780,7 +780,7 @@ export default function EventFormPage() {
         </div>
       )}
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && <p className="text-sm text-danger-text">{error}</p>}
 
       <div className="flex justify-end gap-2">
         <button

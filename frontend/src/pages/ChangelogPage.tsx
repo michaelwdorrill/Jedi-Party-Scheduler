@@ -12,7 +12,7 @@ function Entry({ entry }: { entry: ChangelogEntry }) {
     <Section heading={`v${entry.version} — ${entry.date}`}>
       <p className="text-muted">
         {entry.summary}
-        {isCurrent && <span className="ml-2 text-xs text-emerald-400">current</span>}
+        {isCurrent && <span className="ml-2 text-xs text-success-text">current</span>}
       </p>
       {entry.added && (
         <>

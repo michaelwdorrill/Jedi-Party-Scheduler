@@ -20,17 +20,17 @@ export default function PollOptionRow({
   return (
     <div
       className={`rounded-md border p-3 ${
-        option.confirmedAt ? 'border-emerald-800 bg-emerald-950/30' : 'border-edge bg-surface'
+        option.confirmedAt ? 'border-success/60 bg-success-surface/50' : 'border-edge bg-surface'
       }`}
     >
       <div className="flex items-center justify-between">
         <span className="font-medium">{formatTimeRange(option.startAt, option.endAt, zone)}</span>
         <span className="text-sm text-muted">
-          {option.confirmedAt ? <span className="text-emerald-400">Confirmed</span> : `${option.tally.yes} in`}
+          {option.confirmedAt ? <span className="text-success-text">Confirmed</span> : `${option.tally.yes} in`}
         </span>
       </div>
       <div className="my-2 h-1.5 rounded-full bg-raised">
-        <div className="h-1.5 rounded-full bg-emerald-500" style={{ width: `${yesPct}%` }} />
+        <div className="h-1.5 rounded-full bg-success" style={{ width: `${yesPct}%` }} />
       </div>
       {option.confirmedAt && option.confirmedUsers.length > 0 && (
         <p className="mb-2 text-xs text-muted">

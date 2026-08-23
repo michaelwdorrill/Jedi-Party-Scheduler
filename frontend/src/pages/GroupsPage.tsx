@@ -179,7 +179,7 @@ export default function GroupsPage() {
                   </button>
                   <button
                     onClick={() => handleDelete(g)}
-                    className="rounded-md border border-red-800 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
+                    className="rounded-md border border-danger/60 px-2 py-1 text-xs text-danger-text hover:bg-danger-surface"
                   >
                     Delete
                   </button>

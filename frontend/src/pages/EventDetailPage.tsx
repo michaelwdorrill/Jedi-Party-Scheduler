@@ -168,14 +168,14 @@ export default function EventDetailPage() {
             {event.status === 'active' && event.isRecurring && occurrenceDate && (
               <button
                 onClick={handleCancelOccurrence}
-                className="rounded-md border border-amber-800 px-3 py-1.5 text-sm text-amber-400 hover:bg-amber-950"
+                className="rounded-md border border-warning/60 px-3 py-1.5 text-sm text-warning-text hover:bg-warning-surface"
               >
                 Cancel this occurrence
               </button>
             )}
             <button
               onClick={handleCancelEvent}
-              className="rounded-md border border-red-800 px-3 py-1.5 text-sm text-red-400 hover:bg-red-950"
+              className="rounded-md border border-danger/60 px-3 py-1.5 text-sm text-danger-text hover:bg-danger-surface"
             >
               Cancel event
             </button>
@@ -299,8 +299,8 @@ export default function EventDetailPage() {
         )}
 
       {event.eventType === 'poll' && event.status === 'resolved' && event.startAt && event.endAt && (
-        <div className="rounded-lg border border-emerald-900 bg-emerald-950/40 p-4">
-          <p className="mb-1 text-sm text-emerald-400">This session is confirmed.</p>
+        <div className="rounded-lg border border-success/50 bg-success-surface/60 p-4">
+          <p className="mb-1 text-sm text-success-text">This session is confirmed.</p>
           <p className="font-medium">{formatTimeRange(event.startAt, event.endAt, zone)}</p>
         </div>
       )}

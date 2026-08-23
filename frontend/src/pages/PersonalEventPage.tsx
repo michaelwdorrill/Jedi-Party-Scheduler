@@ -148,7 +148,7 @@ export default function PersonalEventPage() {
         {isEdit && (
           <button
             onClick={handleDelete}
-            className="rounded-md border border-red-800 px-3 py-1.5 text-sm text-red-400 hover:bg-red-950"
+            className="rounded-md border border-danger/60 px-3 py-1.5 text-sm text-danger-text hover:bg-danger-surface"
           >
             Delete
           </button>
@@ -273,7 +273,7 @@ export default function PersonalEventPage() {
         </div>
       </div>
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && <p className="text-sm text-danger-text">{error}</p>}
 
       <div className="flex justify-end gap-2">
         <button

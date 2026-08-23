@@ -72,7 +72,7 @@ export default function MonthCalendarGrid({
             <div
               key={key}
               className={`min-h-20 rounded border p-1 text-left align-top text-xs ${
-                inMonth ? 'border-edge' : 'border-surface opacity-40'
+                inMonth ? 'border-edge bg-ground/25' : 'border-surface/60 opacity-40'
               // The hover step, not the base accent: today's ring was indigo-500
               // while buttons were indigo-600, and this branch preserves that
               // difference rather than quietly closing it. 0009 unifies both

@@ -88,9 +88,9 @@ export default function SchedulingAssistant({
 
   if (error) {
     return (
-      <div className="rounded border border-amber-700/50 bg-amber-950/40 p-3 text-sm text-amber-200">
+      <div className="rounded border border-warning/50 bg-warning-surface/60 p-3 text-sm text-warning-text">
         <p className="font-medium">Couldn't check availability</p>
-        <p className="mt-1 text-amber-300/90">{error}</p>
+        <p className="mt-1 text-warning-text/90">{error}</p>
       </div>
     );
   }
@@ -155,12 +155,12 @@ export default function SchedulingAssistant({
       </div>
 
       {conflicting.length > 0 && (
-        <p className="text-xs text-amber-400">
+        <p className="text-xs text-warning-text">
           Busy at the time you've picked: {conflicting.map((e) => e.globalName ?? e.username).join(', ')}
         </p>
       )}
       {conflicting.length === 0 && proposedStart != null && entries.some((e) => e.visible) && (
-        <p className="text-xs text-emerald-400">Everyone with visible availability is free then.</p>
+        <p className="text-xs text-success-text">Everyone with visible availability is free then.</p>
       )}
     </div>
   );

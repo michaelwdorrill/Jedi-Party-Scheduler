@@ -107,7 +107,7 @@ function MoveRequestForm({
           />
         </div>
       </div>
-      {!rangeValid && <p className="text-xs text-red-400">End must be after the start.</p>}
+      {!rangeValid && <p className="text-xs text-danger-text">End must be after the start.</p>}
       <textarea
         value={message}
         onChange={(e) => setMessage(e.target.value)}
@@ -339,7 +339,7 @@ export default function ChangeRequestSection({
                 </p>
               </div>
               {r.status === 'pending' && (
-                <button onClick={() => onWithdraw(r.id)} className="text-xs text-muted hover:text-red-400">
+                <button onClick={() => onWithdraw(r.id)} className="text-xs text-muted hover:text-danger-text">
                   Withdraw
                 </button>
               )}
@@ -363,20 +363,20 @@ export default function ChangeRequestSection({
               </p>
               {r.message && <p className="text-muted">“{r.message}”</p>}
               {r.stale && (
-                <p className="text-xs text-amber-400">
+                <p className="text-xs text-warning-text">
                   This event has changed since the request was made — re-check before accepting.
                 </p>
               )}
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => onAccept(r.id)}
-                  className="rounded-md border border-emerald-800 px-2 py-1 text-xs text-emerald-400 hover:bg-emerald-950"
+                  className="rounded-md border border-success/60 px-2 py-1 text-xs text-success-text hover:bg-success-surface"
                 >
                   Accept
                 </button>
                 <button
                   onClick={() => onDecline(r.id)}
-                  className="rounded-md border border-red-800 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
+                  className="rounded-md border border-danger/60 px-2 py-1 text-xs text-danger-text hover:bg-danger-surface"
                 >
                   Decline
                 </button>

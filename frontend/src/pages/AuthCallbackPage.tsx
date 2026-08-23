@@ -26,7 +26,7 @@ export default function AuthCallbackPage() {
   if (error) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-4">
-        <p className="text-red-400">{error}</p>
+        <p className="text-danger-text">{error}</p>
         <a href="#/login" className="text-accent-text underline">
           Back to login
         </a>
