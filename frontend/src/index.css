@@ -244,31 +244,49 @@ body {
   );
 }
 
-.uo-layer {
+/* The suns. Separate elements on separate timings, because they are at
+ * different distances -- moving them together made them read as one painted
+ * backdrop rather than as two bodies. */
+.uo-sun {
+  position: absolute;
+  border-radius: 9999px;
+  will-change: transform;
+}
+
+.uo-sun-i {
+  right: 26%;
+  bottom: 9%;
+  width: 19vw;
+  min-width: 150px;
+  aspect-ratio: 1;
+  background: radial-gradient(circle at 42% 38%, #f2a855, #d97b28 68%, #c26a20 100%);
+  opacity: 0.55;
+  filter: blur(0.5px);
+}
+
+.uo-sun-ii {
+  right: 15%;
+  bottom: 6%;
+  width: 9vw;
+  min-width: 74px;
+  aspect-ratio: 1;
+  background: radial-gradient(circle at 40% 36%, #ffe4a8, #e8c07a 70%, #d3a95f 100%);
+  opacity: 0.45;
+}
+
+.uo-haze {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
 }
 
-/* Ground and vaporators are pinned to the bottom edge rather than scaled with
- * the viewport, so the horizon sits at a consistent height on any screen. */
-.uo-ground {
+/* Every craft starts offscreen left and is translated across in `vw`. */
+.uo-craft {
   position: absolute;
-  bottom: 0;
   left: 0;
-  width: 100%;
-  height: 15vh;
-  min-height: 90px;
-}
-
-.uo-vaporators {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  width: 100%;
-  height: 13vh;
-  min-height: 78px;
+  will-change: transform;
+  transform: translate3d(-30vw, 0, 0);
 }
 
 /* Content rides above the scene. */
@@ -281,58 +299,108 @@ body {
 
 @keyframes uo-drift {
   from {
-    transform: translate3d(-8%, 0, 0);
+    transform: translate3d(-6%, 0, 0);
   }
   to {
-    transform: translate3d(8%, 0, 0);
+    transform: translate3d(6%, 0, 0);
   }
 }
 
-/* Crosses in the first 34% of the cycle and waits offscreen for the rest, so
- * the sky is usually empty. Same shape as the condensate: mostly idle. */
+@keyframes uo-drift-far {
+  from {
+    transform: translate3d(3%, 0, 0);
+  }
+  to {
+    transform: translate3d(-4%, 0, 0);
+  }
+}
+
 @keyframes uo-cross {
-  0% {
-    transform: translate3d(-22vw, 0, 0);
+  from {
+    transform: translate3d(-30vw, 0, 0);
   }
-  34% {
-    transform: translate3d(118vw, 0, 0);
-  }
-  100% {
-    transform: translate3d(118vw, 0, 0);
+  to {
+    transform: translate3d(125vw, 0, 0);
   }
 }
 
 @keyframes uo-cross-back {
-  0% {
-    transform: translate3d(118vw, 0, 0) scaleX(-1);
+  from {
+    transform: translate3d(125vw, 0, 0) scaleX(-1);
   }
-  30% {
-    transform: translate3d(-22vw, 0, 0) scaleX(-1);
-  }
-  100% {
-    transform: translate3d(-22vw, 0, 0) scaleX(-1);
+  to {
+    transform: translate3d(-30vw, 0, 0) scaleX(-1);
   }
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  /* The suns are the anchor of the scene, so they barely move -- a slow sway
-   * that reads as air rather than as travel. */
-  .uo-layer-suns {
-    animation: uo-drift 240s ease-in-out infinite alternate;
+  .uo-sun-i {
+    animation: uo-drift 260s ease-in-out infinite alternate;
   }
-  .uo-layer-cloud {
-    animation: uo-drift 150s ease-in-out infinite alternate;
+  .uo-sun-ii {
+    animation: uo-drift-far 155s ease-in-out infinite alternate;
+  }
+  .uo-haze {
+    animation: uo-drift 90s ease-in-out infinite alternate;
   }
 
-  /* Nearer things cross faster. A Star Destroyer is enormous and far away, so
-   * it is the slowest thing in the sky despite being the biggest. */
-  .uo-ship-destroyer {
-    animation: uo-cross 420s linear infinite;
+  /* `backwards` is the whole reason this looks right on load.
+   *
+   * Every craft below is staggered with a delay so the sky fills in over time
+   * rather than launching everything at once. Without a backwards fill, an
+   * element with a delay renders at its *authored* position for the length of
+   * that delay -- which put a static TIE and X-wing against the left edge of
+   * the screen on every page load until the animation finally started. The
+   * fill makes the 0% keyframe apply during the delay instead, so they wait
+   * offscreen where they belong. */
+  .uo-craft {
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+    animation-fill-mode: backwards;
   }
-  .uo-ship-tie {
-    animation: uo-cross-back 95s linear 40s infinite;
+
+  .uo-craft-destroyer {
+    animation-name: uo-cross;
+    animation-duration: 190s;
   }
-  .uo-ship-xwing {
-    animation: uo-cross 68s linear 18s infinite;
+  .uo-craft-freighter {
+    animation-name: uo-cross-back;
+    animation-duration: 78s;
+    animation-delay: 26s;
+  }
+  .uo-craft-xwing-a {
+    animation-name: uo-cross;
+    animation-duration: 27s;
+    animation-delay: 4s;
+  }
+  .uo-craft-xwing-b {
+    animation-name: uo-cross;
+    animation-duration: 27s;
+    animation-delay: 5.6s;
+  }
+  .uo-craft-xwing-c {
+    animation-name: uo-cross;
+    animation-duration: 21s;
+    animation-delay: 38s;
+  }
+  .uo-craft-tie-a {
+    animation-name: uo-cross-back;
+    animation-duration: 23s;
+    animation-delay: 12s;
+  }
+  .uo-craft-tie-b {
+    animation-name: uo-cross-back;
+    animation-duration: 23s;
+    animation-delay: 13.4s;
+  }
+  .uo-craft-tie-c {
+    animation-name: uo-cross-back;
+    animation-duration: 31s;
+    animation-delay: 52s;
+  }
+  .uo-craft-skimmer {
+    animation-name: uo-cross;
+    animation-duration: 13s;
+    animation-delay: 20s;
   }
 }
