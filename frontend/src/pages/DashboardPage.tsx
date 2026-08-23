@@ -6,7 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
 import { formatTimeRange } from '../lib/datetime';
 import type { EventOccurrence } from '../types';
-import { Button, Card, PageHeader } from '../components/ui';
+import { Button, Card, PageHeader, focusRing } from '../components/ui';
 
 export default function DashboardPage() {
   const { user } = useAuth();
@@ -63,7 +63,7 @@ export default function DashboardPage() {
                 <li key={occ.occurrenceId}>
                   <Link
                     to={occ.isPersonal ? `/personal/${occ.eventId}` : `/events/${occ.eventId}`}
-                    className="flex items-center justify-between rounded px-2 py-1.5 hover:bg-raised"
+                    className={`flex items-center justify-between rounded px-2 py-1.5 hover:bg-raised ${focusRing}`}
                   >
                     <span>{occ.title}</span>
                     <span className="text-sm text-muted">

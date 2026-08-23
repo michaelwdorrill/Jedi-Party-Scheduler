@@ -48,7 +48,7 @@ export default function RecurrenceForm({
         <select
           value={value.freq}
           onChange={(e) => set({ freq: e.target.value as RecurrenceFreq })}
-          className="rounded-md border border-edge-strong bg-raised px-2 py-1 text-sm"
+          className={controlClass('sm-tight')}
         >
           <option value="DAILY">Daily</option>
           <option value="WEEKLY">Weekly</option>
@@ -108,7 +108,7 @@ export default function RecurrenceForm({
             disabled={value.endType !== 'on_date'}
             value={value.endDate}
             onChange={(e) => set({ endDate: e.target.value })}
-            className="rounded-md border border-edge-strong bg-raised px-2 py-1 text-xs disabled:opacity-50"
+            className={controlClass('xs')}
           />
         </label>
         <label className="flex items-center gap-1">

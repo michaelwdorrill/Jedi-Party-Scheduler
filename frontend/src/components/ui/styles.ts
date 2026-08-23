@@ -5,8 +5,8 @@
 // keyboard can reach composes this in, so it can't be forgotten one component
 // at a time again.
 
-// ring-accent-text, not ring-accent: the primary button is *filled* with
-// `accent`, so an `accent` ring around it is the same colour as the thing it
+// The ring takes the accent-text step, not the base accent: the primary
+// button is *filled* with accent, so an accent ring is the same colour as it
 // is meant to be marking, separated only by the 2px offset band. It reads as
 // an odd dark hairline rather than as a focus indicator. The lighter step
 // contrasts against both the page ground and the accent fill.
@@ -74,6 +74,23 @@ const CONTROL_SIZES = {
   sm: 'px-2 py-1.5 text-sm',
   md: 'px-3 py-1.5 text-sm',
   lg: 'px-3 py-2 text-sm',
+  // lg geometry, but leaves the font at the inherited 16px. Exactly two
+  // inputs use it -- the event title and the personal-event title -- and they
+  // are the reason it exists: they were the only controls in the app with no
+  // text-size class, so folding them into `lg` would have shrunk them. That
+  // made them the only two the first migration skipped, which made them the
+  // only two with no focus ring, which is how it got spotted -- they fell
+  // back to the browser's white outline while everything around them showed
+  // the app's. Whether 16px there is intent or drift is a type-scale
+  // question, and 0009's identity branch is where the scale gets decided.
+  'lg-base': 'px-3 py-2',
+  // Likewise preserved rather than rounded off: one recurrence control sits
+  // at sm's type on xs's padding. A 2px difference, almost certainly drift
+  // rather than intent -- but this branch's entire claim is that it changes
+  // nothing on screen, and quietly restyling it would trade that for tidiness.
+  // The hyphenated variants are exactly the drift 0009 collapses once there
+  // is a real scale to collapse them onto.
+  'sm-tight': 'px-2 py-1 text-sm',
 } as const;
 
 export type ControlSize = keyof typeof CONTROL_SIZES;

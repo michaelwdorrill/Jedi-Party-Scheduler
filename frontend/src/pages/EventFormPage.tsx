@@ -426,7 +426,7 @@ export default function EventFormPage() {
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="Title (e.g. Raid night)"
-          className="w-full rounded-md border border-edge-strong bg-raised px-3 py-2"
+          className={controlClass('lg-base', 'w-full')}
         />
         <input
           value={game}
@@ -661,7 +661,7 @@ export default function EventFormPage() {
                 disabled={pollStrategy !== 'threshold'}
                 value={pollThreshold}
                 onChange={(e) => setPollThreshold(Math.max(1, Number(e.target.value)))}
-                className="w-14 rounded-md border border-edge-strong bg-raised px-2 py-1 text-xs disabled:opacity-50"
+                className={controlClass('xs', 'w-14')}
               />
               people say yes
             </label>

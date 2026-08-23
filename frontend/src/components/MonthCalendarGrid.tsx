@@ -57,9 +57,6 @@ export default function MonthCalendarGrid({
           const key = day.toISODate()!;
           const inMonth = day.hasSame(monthStart, 'month');
           const isToday = day.equals(today);
-          // ring-accent-hover, not ring-accent: today's ring was indigo-500 while
-          // buttons were indigo-600, and this branch preserves that difference
-          // rather than quietly closing it. 0009 unifies them on --tatoo-i.
           const dayEvents = (byDay.get(key) ?? []).sort((a, b) => (a.startAt! - b.startAt!));
 
           // The cell is a container, not a control. It used to be a <button>
@@ -77,6 +74,10 @@ export default function MonthCalendarGrid({
               key={key}
               className={`min-h-20 rounded border p-1 text-left align-top text-xs ${
                 inMonth ? 'border-edge' : 'border-surface opacity-40'
+              // The hover step, not the base accent: today's ring was indigo-500
+              // while buttons were indigo-600, and this branch preserves that
+              // difference rather than quietly closing it. 0009 unifies both
+              // on --tatoo-i, where the values move anyway.
               } ${isToday ? 'ring-1 ring-accent-hover' : ''}`}
             >
               <div className="mb-1 text-right">

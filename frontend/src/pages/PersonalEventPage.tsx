@@ -164,7 +164,7 @@ export default function PersonalEventPage() {
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="What is it? (e.g. Work, Travel, Dinner)"
-          className="w-full rounded-md border border-edge-strong bg-raised px-3 py-2"
+          className={controlClass('lg-base', 'w-full')}
         />
         <textarea
           value={description}
