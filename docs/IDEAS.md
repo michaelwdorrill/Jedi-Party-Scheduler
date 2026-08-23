@@ -463,6 +463,20 @@ roadmap gets revisited between phases.
     which only Michael can do, and which leaves no artifact anyone else can
     look at.
 
+    Sharper than first written: `deploy-sandbox.yml`'s push trigger also
+    carries `paths: ['worker/**', '.github/workflows/deploy-sandbox.yml']`, so
+    a frontend-only push to `sandbox` is not merely unhelpful — it is a
+    complete no-op, and the Actions tab shows no run at all. That path filter
+    is *correct* (deploying an unchanged Worker achieves nothing), which is
+    what makes this a design gap rather than a bug: there is simply no branch
+    you can push a frontend change to and have anything happen.
+
+    Worth knowing alongside it: `ci.yml` runs on `push: branches: [main]` and
+    on `pull_request`, so a feature branch with no PR open gets no CI either.
+    A frontend branch therefore has *zero* automated verification until a PR
+    exists — which is fine if you know it, and misleading if you assume
+    pushing a branch ran something.
+
     Found while pushing v0.4 branch 1. Worth deciding between:
     - **A sandbox Pages project.** Cleanest, and makes "go look at it" a link
       rather than a local build. Cost is a second Pages deployment plus the
