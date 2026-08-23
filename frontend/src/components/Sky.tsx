@@ -3,64 +3,67 @@
 // Everything is anchored to the *viewport*, not the document, which is what
 // makes the ground the bottom of the screen at any window size.
 //
-// Traffic is positioned by CSS rather than inside the SVG coordinate space:
-// each craft is an absolutely-placed element translated in `vw`, so its travel
-// is in the same units as the screen and does not have to survive the viewBox
-// mapping. That also makes an offscreen start expressible, which matters --
-// see the note on fill-mode in index.css.
+// Clouds and craft are Michael's silhouette art, cut out of the source sheet
+// and recoloured into /public/sky (originals kept in /assets). They stay dark
+// rather than being tinted, because a backlit cloud at sunset *is* a
+// silhouette -- warm near-black, so they belong to the sand palette rather
+// than sitting on top of it.
+//
+// Craft are positioned and translated in CSS `vw` rather than inside an SVG
+// coordinate space, so their travel is in the same units as the screen and an
+// offscreen start is expressible -- see the fill-mode note in index.css.
 //
 // Inert by construction: fixed, behind the content, pointer-events-none.
 
-type CraftProps = { className: string; top: string; scale?: number };
+type Placed = {
+  src: string;
+  className: string;
+  top: string;
+  width: string;
+  opacity: number;
+};
 
-function StarDestroyer({ className, top, scale = 1 }: CraftProps) {
-  return (
-    <div className={className} style={{ top, width: `${300 * scale}px` }}>
-      <svg viewBox="0 0 300 44" className="w-full" fill="#120C08" opacity="0.34">
-        <path d="M2 30 L232 6 L296 20 L232 34 Z" />
-        <path d="M150 14 L214 7 L224 12 L160 19 Z" opacity="0.75" />
-        <rect x="196" y="8" width="7" height="4" rx="1" opacity="0.9" />
-      </svg>
-    </div>
-  );
-}
+// Cloud height is deliberately bounded to the middle and lower sky. High up the
+// gradient is dark violet, where a dark silhouette is invisible; near the
+// horizon it is bright, which is where backlit cloud actually reads. Putting
+// them everywhere was what made the first attempt look like grey smudges.
+const CLOUDS: Placed[] = [
+  { src: 'cloud-bank-b', className: 'uo-cloud uo-cloud-1', top: '38%', width: 'min(38vw, 460px)', opacity: 0.5 },
+  { src: 'cloud-wisp', className: 'uo-cloud uo-cloud-9', top: '43%', width: 'min(8vw, 90px)', opacity: 0.4 },
+  { src: 'cloud-streak-b', className: 'uo-cloud uo-cloud-2', top: '46%', width: 'min(30vw, 340px)', opacity: 0.45 },
+  { src: 'cloud-bank-c', className: 'uo-cloud uo-cloud-3', top: '52%', width: 'min(22vw, 250px)', opacity: 0.5 },
+  { src: 'cloud-streak-a', className: 'uo-cloud uo-cloud-4', top: '58%', width: 'min(34vw, 400px)', opacity: 0.55 },
+  { src: 'cloud-bank-a', className: 'uo-cloud uo-cloud-5', top: '63%', width: 'min(20vw, 230px)', opacity: 0.5 },
+  { src: 'cloud-streak-e', className: 'uo-cloud uo-cloud-6', top: '68%', width: 'min(22vw, 250px)', opacity: 0.6 },
+  { src: 'cloud-streak-c', className: 'uo-cloud uo-cloud-7', top: '72%', width: 'min(21vw, 240px)', opacity: 0.6 },
+  { src: 'cloud-streak-d', className: 'uo-cloud uo-cloud-8', top: '76%', width: 'min(23vw, 250px)', opacity: 0.55 },
+];
 
-function Freighter({ className, top, scale = 1 }: CraftProps) {
-  return (
-    <div className={className} style={{ top, width: `${86 * scale}px` }}>
-      <svg viewBox="0 0 86 30" className="w-full" fill="#140D08" opacity="0.42">
-        <ellipse cx="40" cy="16" rx="34" ry="10" />
-        <path d="M60 10 L86 13 L86 19 L60 22 Z" />
-        <rect x="24" y="3" width="26" height="6" rx="3" />
-      </svg>
-    </div>
-  );
-}
+// Slower and higher reads as further away, so the Destroyer is the slowest
+// thing up there despite being the largest. The TIE is a hexagon because a TIE
+// in profile *is* a hexagon -- flat panels, near one facing you, ball hidden
+// behind it -- and profile is the right angle for something crossing your view.
+const CRAFT: Placed[] = [
+  { src: 'star-destroyer', className: 'uo-craft uo-craft-destroyer', top: '13%', width: 'min(26vw, 300px)', opacity: 0.34 },
+  { src: 'star-destroyer', className: 'uo-craft uo-craft-destroyer-2', top: '27%', width: 'min(13vw, 150px)', opacity: 0.2 },
+  { src: 'x-wing', className: 'uo-craft uo-craft-xwing-a', top: '21%', width: '58px', opacity: 0.5 },
+  { src: 'x-wing', className: 'uo-craft uo-craft-xwing-b', top: '24%', width: '48px', opacity: 0.45 },
+  { src: 'x-wing', className: 'uo-craft uo-craft-xwing-c', top: '49%', width: '70px', opacity: 0.55 },
+  { src: 'x-wing', className: 'uo-craft uo-craft-skimmer', top: '66%', width: '38px', opacity: 0.5 },
+  { src: 'tie', className: 'uo-craft uo-craft-tie-a', top: '34%', width: '26px', opacity: 0.46 },
+  { src: 'tie', className: 'uo-craft uo-craft-tie-b', top: '37%', width: '22px', opacity: 0.42 },
+  { src: 'tie', className: 'uo-craft uo-craft-tie-c', top: '17%', width: '18px', opacity: 0.36 },
+];
 
-function XWing({ className, top, scale = 1 }: CraftProps) {
+function Sprite({ src, className, top, width, opacity }: Placed) {
   return (
-    <div className={className} style={{ top, width: `${52 * scale}px` }}>
-      <svg viewBox="0 0 52 26" className="w-full" fill="#170F0A" opacity="0.5">
-        <path d="M2 13 L34 10 L48 13 L34 16 Z" />
-        <path d="M12 11 L42 2 L45 5 L18 12 Z" />
-        <path d="M12 15 L42 24 L45 21 L18 14 Z" />
-        <path d="M10 10 L36 4 L38 7 L14 12 Z" />
-        <path d="M10 16 L36 22 L38 19 L14 14 Z" />
-      </svg>
-    </div>
-  );
-}
-
-function Tie({ className, top, scale = 1 }: CraftProps) {
-  return (
-    <div className={className} style={{ top, width: `${34 * scale}px` }}>
-      <svg viewBox="0 0 34 30" className="w-full" fill="#150E09" opacity="0.46">
-        <path d="M2 3 L8 8 L8 22 L2 27 Z" />
-        <path d="M32 3 L26 8 L26 22 L32 27 Z" />
-        <rect x="8" y="13" width="18" height="4" />
-        <circle cx="17" cy="15" r="6" />
-      </svg>
-    </div>
+    <img
+      src={`/sky/${src}.png`}
+      alt=""
+      decoding="async"
+      className={className}
+      style={{ top, width, opacity }}
+    />
   );
 }
 
@@ -70,35 +73,16 @@ export default function Sky() {
       <div className="uo-sky-grad" />
 
       {/* The two suns drift independently -- they are different distances away,
-          so tying them to one layer made them read as a painted backdrop. */}
+          so tying them to one timing made them read as a painted backdrop. */}
       <div className="uo-sun uo-sun-i" />
       <div className="uo-sun uo-sun-ii" />
 
-      {/* Dust haze, not cloud. Tatooine has no weather to speak of; these are
-          thin bands catching the low light, kept near the horizon where the
-          warmth is. The previous version put fat ellipses high in the dark part
-          of the sky, where they read as grey smudges. */}
-      <svg className="uo-haze" viewBox="0 0 1000 700" preserveAspectRatio="xMidYMax slice">
-        <g fill="#F2C879">
-          <rect x="60" y="470" width="420" height="2" rx="1" opacity="0.10" />
-          <rect x="180" y="486" width="260" height="1.5" rx="1" opacity="0.07" />
-          <rect x="540" y="452" width="360" height="2" rx="1" opacity="0.08" />
-          <rect x="620" y="500" width="300" height="1.5" rx="1" opacity="0.06" />
-          <rect x="300" y="518" width="480" height="2" rx="1" opacity="0.05" />
-        </g>
-      </svg>
-
-      {/* Traffic. Slower and higher reads as further away, so the Destroyer is
-          the slowest thing up there despite being the largest. */}
-      <StarDestroyer className="uo-craft uo-craft-destroyer" top="14%" />
-      <Freighter className="uo-craft uo-craft-freighter" top="30%" />
-      <XWing className="uo-craft uo-craft-xwing-a" top="22%" />
-      <XWing className="uo-craft uo-craft-xwing-b" top="25%" scale={0.86} />
-      <XWing className="uo-craft uo-craft-xwing-c" top="45%" scale={1.2} />
-      <Tie className="uo-craft uo-craft-tie-a" top="36%" />
-      <Tie className="uo-craft uo-craft-tie-b" top="39%" scale={0.82} />
-      <Tie className="uo-craft uo-craft-tie-c" top="18%" scale={0.7} />
-      <XWing className="uo-craft uo-craft-skimmer" top="63%" scale={0.6} />
+      {CLOUDS.map((c) => (
+        <Sprite key={c.className} {...c} />
+      ))}
+      {CRAFT.map((c) => (
+        <Sprite key={c.className} {...c} />
+      ))}
 
       {/* The ground, pinned to the bottom edge at every window size. */}
       <svg className="uo-ground" viewBox="0 0 1000 150" preserveAspectRatio="none">

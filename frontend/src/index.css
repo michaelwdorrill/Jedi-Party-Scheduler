@@ -274,19 +274,16 @@ body {
   opacity: 0.45;
 }
 
-.uo-haze {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-}
-
-/* Every craft starts offscreen left and is translated across in `vw`. */
-.uo-craft {
+/* Craft and clouds alike start offscreen left and are translated across in
+ * `vw`. Both are <img>, so their intrinsic size would otherwise lay them out
+ * in flow. */
+.uo-craft,
+.uo-cloud {
   position: absolute;
   left: 0;
+  max-width: none;
   will-change: transform;
-  transform: translate3d(-30vw, 0, 0);
+  transform: translate3d(-40vw, 0, 0);
 }
 
 /* Content rides above the scene. */
@@ -317,19 +314,19 @@ body {
 
 @keyframes uo-cross {
   from {
-    transform: translate3d(-30vw, 0, 0);
+    transform: translate3d(-40vw, 0, 0);
   }
   to {
-    transform: translate3d(125vw, 0, 0);
+    transform: translate3d(135vw, 0, 0);
   }
 }
 
 @keyframes uo-cross-back {
   from {
-    transform: translate3d(125vw, 0, 0) scaleX(-1);
+    transform: translate3d(135vw, 0, 0) scaleX(-1);
   }
   to {
-    transform: translate3d(-30vw, 0, 0) scaleX(-1);
+    transform: translate3d(-40vw, 0, 0) scaleX(-1);
   }
 }
 
@@ -339,9 +336,6 @@ body {
   }
   .uo-sun-ii {
     animation: uo-drift-far 155s ease-in-out infinite alternate;
-  }
-  .uo-haze {
-    animation: uo-drift 90s ease-in-out infinite alternate;
   }
 
   /* `backwards` is the whole reason this looks right on load.
@@ -402,5 +396,32 @@ body {
     animation-name: uo-cross;
     animation-duration: 13s;
     animation-delay: 20s;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .uo-cloud {
+    animation-name: uo-cross;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+    animation-fill-mode: backwards;
+  }
+
+  /* Negative delays start each cloud mid-crossing, so the sky is populated on
+   * the very first frame instead of filling in over the next few minutes. */
+  .uo-cloud-1 { animation-duration: 420s; animation-delay: -90s; }
+  .uo-cloud-9 { animation-duration: 380s; animation-delay: -260s; }
+  .uo-cloud-2 { animation-duration: 360s; animation-delay: -210s; }
+  .uo-cloud-3 { animation-duration: 330s; animation-delay: -40s; }
+  .uo-cloud-4 { animation-duration: 300s; animation-delay: -180s; }
+  .uo-cloud-5 { animation-duration: 280s; animation-delay: -95s; }
+  .uo-cloud-6 { animation-duration: 250s; animation-delay: -215s; }
+  .uo-cloud-7 { animation-duration: 230s; animation-delay: -60s; }
+  .uo-cloud-8 { animation-duration: 210s; animation-delay: -160s; }
+
+  .uo-craft-destroyer-2 {
+    animation-name: uo-cross-back;
+    animation-duration: 300s;
+    animation-delay: 70s;
   }
 }
