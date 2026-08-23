@@ -563,4 +563,25 @@ roadmap gets revisited between phases.
       you're counted as attending". Matches the model as built, cheap, and
       loses the ability to say you can't make your own event.
 
+    **Refined on the sandbox, and decided.** It is narrower than first
+    written: an organiser who *also* invites themselves gets a row like anyone
+    else and can RSVP normally. `inviteStatements` in `lib/eventWrites.ts`
+    inserts only the invitees it is given, all at `'pending'` — so the 403
+    only strikes an organiser who did not add themselves, which is the common
+    case and the one that looks broken.
+
+    **Decision: give the organiser a real `event_invites` row at creation,
+    defaulted to `'accepted'`** rather than `'pending'` — they are the one
+    person whose attendance is not in question. That keeps "I can't make my
+    own session" possible, which hiding the buttons would have cost.
+
+    The care is all in the audit that comes with it. Every
+    `... UNION SELECT ?` that folds the organiser in by hand
+    (`attendance.ts`, `reminders.ts`, `changeRequests.ts`) has to be
+    revisited: with a real row present, a union that forces the organiser
+    into the accepted set would override a decline and report them as
+    attending anyway. `changeRequests.ts` also counts
+    `COUNT(*) FROM event_invites` for its thresholds, and those counts move by
+    one. Plus a migration to backfill existing events.
+
     Found while verifying v0.4 branch 1 on the sandbox.
