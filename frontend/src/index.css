@@ -23,17 +23,8 @@ body {
   .tabular {
     @apply font-mono tabular-nums;
   }
-}
 
-@layer base {
   /* One rule, every focusable element.
-   *
-   * This replaces an earlier attempt that composed a ring into the shared
-   * Button/control class builders. That only ever reached what went through
-   * those builders, which left nav links, footer links, the segmented
-   * fixed-time/poll toggle, and native checkboxes still showing the browser's
-   * white default -- so the app displayed two different focus styles at once
-   * and read as broken rather than as a considered distinction.
    *
    * `outline` rather than a ring, deliberately: it draws outside the border
    * box without affecting layout, it does not collide with box-shadow the way
@@ -53,4 +44,65 @@ body {
   .focus-inset:focus-visible {
     outline-offset: -3px;
   }
+}
+
+/* ===========================================================================
+   SCENERY — the homestead layer (spec 0009)
+   ===========================================================================
+   Everything below is additive and gated on the attribute the pre-paint script
+   in index.html stamps on <html>. `twin-suns` is simply this minus the
+   scenery: no separate design, no second set of tokens, nothing to keep in
+   sync. Settings → Scenery toggles the attribute.
+   =========================================================================== */
+
+/* The binary sunset itself, washed behind the top of the page. Fixed rather
+ * than scrolling, so it reads as sky the content moves under rather than as a
+ * banner that slides away. Fades fully into the ground before any body text
+ * reaches it -- the gradient is the one part of this that could cost contrast,
+ * so it is kept off the reading area entirely. */
+[data-scenery='homestead'] body {
+  background-image: linear-gradient(
+    to bottom,
+    #3a2440 0%,
+    #56382f 26%,
+    #7a4f2a 48%,
+    rgba(26, 20, 16, 0.6) 76%,
+    rgba(26, 20, 16, 0) 100%
+  );
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+  background-size: 100% 300px;
+}
+
+/* Sand grain. An inline SVG turbulence filter, so no asset enters the build
+ * and it costs no request. Sits above the content at 4% and is inert -- at
+ * that weight it reads as tooth on the surface rather than as texture on top
+ * of the words. */
+[data-scenery='homestead'] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Stencilled panel rules. A short brass bar before a heading, the way a label
+ * is stamped onto equipment rather than printed on a page. */
+[data-scenery='homestead'] h2:not(.no-stencil)::before,
+[data-scenery='homestead'] .stencil::before {
+  content: '';
+  display: inline-block;
+  width: 0.7em;
+  height: 2px;
+  margin-right: 0.55em;
+  vertical-align: middle;
+  background: theme('colors.accent');
+}
+
+/* Vaporators on the horizon, at the foot of the page. Rendered by Layout and
+ * simply not shown under twin-suns. */
+[data-scenery='twin-suns'] .horizon-foot {
+  display: none;
 }

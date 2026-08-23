@@ -408,7 +408,7 @@ export default function EventFormPage() {
         <div className="flex gap-1 rounded-md bg-surface p-1 w-fit">
           <button
             onClick={() => setEventType('single')}
-            className={`rounded px-3 py-1 text-sm ${eventType === 'single' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
+            className={`rounded px-3 py-1 font-display text-sm uppercase tracking-wide ${eventType === 'single' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
           >
             Fixed time
           </button>

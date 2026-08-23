@@ -43,8 +43,8 @@ export default function MonthCalendarGrid({
 
   return (
     <div className={cardClass('sm')}>
-      <div className="mb-2 text-center font-semibold">{monthStart.toFormat('MMMM yyyy')}</div>
-      <div className="grid grid-cols-7 gap-1 text-xs text-faint">
+      <h2 className="no-stencil mb-3 text-center text-lg">{monthStart.toFormat('MMMM yyyy')}</h2>
+      <div className="grid grid-cols-7 gap-1 font-mono text-[10px] uppercase tracking-widest text-faint">
         {WEEKDAY_LABELS.map((d) => (
           <div key={d} className="p-1 text-center">
             {d}
@@ -85,14 +85,14 @@ export default function MonthCalendarGrid({
                     type="button"
                     onClick={() => onDayClick(day)}
                     aria-label={`New event on ${day.toFormat('cccc d LLLL yyyy')}`}
-                    className={`rounded px-1 hover:bg-raised hover:text-ink ${
+                    className={`rounded px-1 font-mono tabular-nums hover:bg-raised hover:text-ink ${
                       isToday ? 'font-semibold text-accent-text' : 'text-muted'
                     }`}
                   >
                     {day.day}
                   </button>
                 ) : (
-                  <span className={isToday ? 'font-semibold text-accent-text' : 'text-muted'}>
+                  <span className={`font-mono tabular-nums ${isToday ? 'font-semibold text-accent-text' : 'text-muted'}`}>
                     {day.day}
                   </span>
                 )}

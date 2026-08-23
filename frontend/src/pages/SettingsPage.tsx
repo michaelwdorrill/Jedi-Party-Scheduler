@@ -5,9 +5,11 @@ import { useAuth } from '../auth/AuthContext';
 import { clearToken, getToken } from '../auth/tokenStorage';
 import TimezoneSelect from '../components/TimezoneSelect';
 import { buttonClass, cardClass } from '../components/ui';
+import { getScenery, setScenery, type Scenery } from '../lib/scenery';
 
 export default function SettingsPage() {
   const { user, refreshUser, logout } = useAuth();
+  const [scenery, setSceneryState] = useState<Scenery>(getScenery);
   const [timezone, setTimezone] = useState(user?.timezone ?? 'America/New_York');
   const [notificationsEnabled, setNotificationsEnabled] = useState(
     user?.notificationsEnabled ?? true,
@@ -120,6 +122,40 @@ export default function SettingsPage() {
           {saving ? 'Saving…' : 'Save'}
         </button>
         {saved && <p className="text-sm text-emerald-400">Saved.</p>}
+      </div>
+
+      <div className={cardClass('md', 'space-y-3')}>
+        <h2 className="font-semibold">Scenery</h2>
+        <p className="text-sm text-muted">
+          How much desert the app carries. Colours, type and layout are the same either way
+          &mdash; this only adds or removes the scenery.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {(
+            [
+              ['homestead', 'Homestead'],
+              ['twin-suns', 'Twin suns'],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              aria-pressed={scenery === value}
+              onClick={() => {
+                setScenery(value);
+                setSceneryState(value);
+              }}
+              className={buttonClass(scenery === value ? 'primary' : 'secondary', 'lg', 'flex-1')}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="text-xs text-faint">
+          {scenery === 'homestead'
+            ? 'Sunset behind the header, sand grain, and vaporators on the horizon.'
+            : 'Just the mark. Quieter, and kinder to a low-contrast screen.'}
+        </p>
       </div>
 
       <div className={cardClass('md', 'space-y-3')}>

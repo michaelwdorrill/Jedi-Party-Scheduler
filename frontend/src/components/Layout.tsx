@@ -5,7 +5,7 @@ import { APP_VERSION, PUBLISHED_AT } from '../lib/legal';
 import { buttonClass } from './ui';
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-  `rounded-md px-3 py-2 text-sm font-medium ${
+  `rounded-md px-3 py-2 font-display text-sm uppercase tracking-wide ${
     isActive ? 'bg-accent text-on-accent' : 'text-ink-dim hover:bg-raised hover:text-ink'
   }`;
 
@@ -42,7 +42,17 @@ export default function Layout() {
       <header className="border-b border-edge bg-surface">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
           <div className="flex items-center gap-4">
-            <span className="text-lg font-semibold">Uncle Owen</span>
+            <span className="flex items-center gap-2">
+              {/* The twin-sun mark. Two circles, one larger and warmer than
+                  the other -- the whole identity in 20 pixels. */}
+              <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" className="shrink-0">
+                <circle cx="8" cy="10" r="6" fill="#E8913A" />
+                <circle cx="14.5" cy="13" r="3.2" fill="#F2C879" />
+              </svg>
+              <span className="font-display text-xl font-bold uppercase tracking-widest">
+                Uncle Owen
+              </span>
+            </span>
             <nav className="flex gap-1">
               <NavLink to="/" end className={navLinkClass}>
                 Dashboard

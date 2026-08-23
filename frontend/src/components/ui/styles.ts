@@ -48,7 +48,7 @@ export function buttonClass(
   className?: string,
 ) {
   return cn(
-    'rounded-md disabled:opacity-50',
+    'rounded-md font-display uppercase tracking-wide disabled:opacity-50',
     BUTTON_VARIANTS[variant],
     BUTTON_SIZES[size],
     className,
