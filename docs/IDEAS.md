@@ -490,3 +490,30 @@ roadmap gets revisited between phases.
       "sandbox-first" as promising something it can't do for them.
 
     The third is free and should happen regardless of whether the first two do.
+
+24. **A failed API call is displayed as "you have nothing scheduled".**
+    `CalendarPage` does
+    `api.get(...).then(setOccurrences).finally(() => setLoading(false))` —
+    no `.catch`. `api.get` *does* throw an `ApiError` on a non-ok response
+    (`client.ts`), so the rejection goes unhandled, `occurrences` stays `[]`,
+    `loading` flips to false, and the user is shown the cheerful empty state:
+    "Nothing scheduled in this window yet."
+
+    So a 404, a 500, an expired session or an unreachable Worker all render
+    identically to a genuinely empty calendar. Only `AuthCallbackPage` and
+    `EventFormPage` have a `.catch` anywhere in `pages/`.
+
+    Found the expensive way: the sandbox Worker predated v0.3 and had no
+    `/me/events` route at all, so every calendar request 404'd — and the app
+    said, confidently and in a friendly tone, that there was nothing on. It
+    cost a long detour of testing a *frontend* branch against what looked
+    like missing data. The screen that is supposed to tell you what is
+    happening was the one actively hiding it.
+
+    Wants: an error state distinct from the empty state, on every page that
+    loads data. Probably a small `useAsync`-style hook rather than a `.catch`
+    bolted onto each call, since `DashboardPage`, `GroupsPage`,
+    `EventDetailPage`, `PersonalEventPage` and `AdminUsersPage` all have the
+    same shape. Worth doing alongside v0.4's design pass — an error state is
+    a surface that needs designing, and `specs/0009` is already deciding what
+    empty states look like.
