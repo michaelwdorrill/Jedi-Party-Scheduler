@@ -21,6 +21,22 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.4.1',
+    date: '24 August 2026',
+    summary: 'The things v0.4 turned up while it was being built.',
+    fixed: [
+      'When something goes wrong loading a page, the app now says so. It used to show the same cheerful “nothing scheduled” as a genuinely empty calendar, whether the problem was a dropped connection, an expired session or a server fault.',
+      'If you organise an event, you can RSVP to it. “I’m in / Maybe / Can’t make it” used to do nothing at all on your own events — you were never actually on your own invite list — unless you happened to invite a group you were in.',
+      'Buttons that fail now tell you why instead of appearing to do nothing. Cancelling an event, saving a group, voting on a poll and copying an invite link all used to fail silently.',
+      'Saving an edit no longer closes the form and discards your work if the save is refused.',
+    ],
+    changed: [
+      'Sessions that have already finished are faded on the month calendar, so what is still ahead stands out. Cancelled ones keep their strike-through — the two mean different things.',
+      'Creating an event with a start date in the past now shows a note saying reminders won’t be sent for it. It is still allowed: logging a session that already happened is a perfectly reasonable thing to want.',
+      'You appear on your own event’s invite list, marked as the organizer, with whatever answer you have given.',
+    ],
+  },
+  {
     version: '0.4',
     date: '23 August 2026',
     summary: 'Uncle Owen looks like Tatooine, and the calendar is the whole app.',

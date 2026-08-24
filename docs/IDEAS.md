@@ -491,6 +491,19 @@ roadmap gets revisited between phases.
 
     The third is free and should happen regardless of whether the first two do.
 
+    **Partially done** — the third option shipped in v0.4.1: CLAUDE.md now
+    says plainly that the sandbox is the Worker only, that a frontend-only
+    push to `sandbox` produces no workflow run at all, and that frontend
+    changes are verified locally against the deployed sandbox Worker. It also
+    records the two adjacent traps (no CI on a branch without a PR; a mixed
+    branch deploys its worker half only, which is the more confusing of the
+    two because something *does* run).
+
+    **This stays open.** Writing the rule down is not closing the gap — there
+    is still no branch you can push a frontend change to and have anything
+    happen, and the choice between a sandbox Pages project and a CI preview
+    bundle is still unmade.
+
 24. **A failed API call is displayed as "you have nothing scheduled".**
     `CalendarPage` does
     `api.get(...).then(setOccurrences).finally(() => setLoading(false))` —
@@ -518,6 +531,24 @@ roadmap gets revisited between phases.
     a surface that needs designing, and `specs/0009` is already deciding what
     empty states look like.
 
+    **Done** — shipped in v0.4.1 as the guessed shape: `lib/async.ts`
+    (`useAsync`, `useAction`, `describeError`) plus an `ErrorState`/
+    `InlineError` pair beside `EmptyState`. Three cases turned out to be
+    *worse* than a wrong empty state rather than equal to it, and are worth
+    recording because none was visible from the original capture:
+
+    - A failed load on an **edit** form (event or personal event) left the
+      form at its blank defaults, where saving would overwrite the real
+      record with them.
+    - A failed `/guilds` left `guilds` empty, which the calendar rendered as
+      "you don't share any allow-listed Discord servers with this app yet" —
+      a false statement about the user's standing with the app, not a missing
+      list. `GuildContext` now carries an error of its own.
+    - Mutations, not just loads. Every handler on `EventDetailPage` was
+      `await api.post(...); await load();` with no catch, so a refused
+      request became an unhandled rejection and the button appeared inert.
+      That is the half that made idea 26 so confusing to hit.
+
 25. **CI actions are on a deprecated Node runtime.** Every workflow pins
     `actions/checkout@v4` and `actions/setup-node@v4` — ten call sites across
     `ci.yml`, `deploy-pages.yml`, `deploy-sandbox.yml` and
@@ -531,6 +562,14 @@ roadmap gets revisited between phases.
 
     Worth pairing with a decision about whether to pin action versions by
     major at all, since this will recur every couple of years.
+
+    **Done** — shipped in v0.4.1. The pinning decision was made rather than
+    deferred, and written into `ci.yml` as a comment: **stay on major tags,
+    not commit SHAs.** SHA-pinning is genuinely stronger (a major tag is
+    mutable) but is a standing maintenance cost forever, on a repo maintained
+    by one person in their spare time; the realistic threat here is a broken
+    deploy on a blocked release day, not a compromised upstream action. What
+    the choice obliges is bumping *early*, which is what this was.
 
 26. **The organizer is shown RSVP buttons they get a 403 for.** On a
     fixed-time event you organised, "I'm in / Maybe / Can't make it" render
@@ -607,6 +646,17 @@ roadmap gets revisited between phases.
 
     Found while verifying v0.4 branch 1 on the sandbox.
 
+    **Done** — shipped in v0.4.1, exactly as decided above. The audit was the
+    expensive half and turned up one more than expected: `sweepNewInvites`
+    reads a backfilled row as a fresh invite, so without a guard every
+    organiser would have been DM'd "You've been invited to <your own event>",
+    once per event they had ever run, the first tick after migration 0019
+    landed. The migration therefore writes its own settled `notification_log`
+    rows *before* the invites they suppress, because migrations apply minutes
+    before the Worker that guards against them deploys. One knock-on worth
+    knowing: `MAX_RESOLVED_INVITEES` now counts the organiser, so an organiser
+    who is not themselves an invitee can name 24 others rather than 25.
+
 
 27. **Fade events that have already happened.** A past session on the month
     grid renders exactly like an upcoming one, so the eye has to read dates to
@@ -627,6 +677,11 @@ roadmap gets revisited between phases.
 
     Also worth deciding: does an in-progress event (started, not yet ended)
     count as past? It should not.
+
+    **Done** — shipped in v0.4.1, with both calls as guessed above: past is
+    opacity alone, cancelled keeps the strike, and past means *ended* rather
+    than *started*. The grid/agenda asymmetry is now a comment in
+    `MonthCalendarGrid` rather than an accident.
 
 28. **Warn — but do not block — when an event is created in the past.**
     Nothing stops you dating an event yesterday today.
@@ -649,3 +704,67 @@ roadmap gets revisited between phases.
     Timezones make the case stronger: "tonight at 7" can already be in the past
     in the organiser's own zone by the time the form is submitted, and a hard
     block would reject it with no way forward.
+
+    **Done** — shipped in v0.4.1 as an inline warning next to idea 12's hard
+    block, so the block-the-incoherent / warn-on-the-unusual distinction is
+    visible in the markup too. One case the capture didn't anticipate:
+    **recurring events are excluded rather than warned about.** Their start
+    date is the series start, routinely in the past on any established series,
+    and the warning's own claim — that no reminders will be sent — is false
+    there, since future occurrences still get them.
+
+29. **`IDEAS.md` doesn't say which of its items have shipped, which breaks
+    the definition of 1.0.** `ROADMAP.md` states it plainly: "**v1.0 is
+    defined by the backlog, not by a feature set: when `IDEAS.md` is empty,
+    we leave Beta.**" But nothing clears this file. Only items 17 and 18
+    carry a `**Done**` marker; ideas 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15,
+    16, 20 and 21 all shipped across v0.1–v0.4 and are still written here in
+    the present tense, as though they were open.
+
+    So the list can never empty, and the one test 1.0 is defined by can never
+    pass. Worse for anyone reading, the file currently reads as a backlog of
+    ~25 open items when the real number is closer to a dozen — which makes it
+    look far more daunting than it is, and makes "what's left" a question you
+    have to answer by cross-referencing the roadmap's status column.
+
+    Noticed while marking 23–28 in v0.4.1, which is when the convention
+    became visible by being followed.
+
+    Two ways to fix it, and they are not equivalent:
+    - **Mark in place** (what 17, 18 and 23–28 do): keep the entry, strike or
+      annotate it with the version it shipped in. Preserves the reasoning,
+      which is often the most valuable part — several entries here record a
+      decision and *why the alternative was rejected*, and that is worth more
+      after shipping than before.
+    - **Move to an archive** (`IDEAS-done.md`, or a section at the bottom).
+      Actually empties the list, so the 1.0 test can pass, at the cost of a
+      second file to keep in step.
+
+    Leaning towards the second *plus* the first — annotate, then move the
+    annotated entry down into an "Already built" section in the same file, so
+    there is one file, the reasoning survives, and the open list is genuinely
+    the open list. Either way this is a docs-only change with no code in it,
+    and it should probably happen before the next release rather than after,
+    since every release makes the gap wider.
+
+30. **The `sandbox` branch is behind `main` and nobody would notice.**
+    `origin/sandbox` currently sits at v0.4 *branch 1*; branches 2 and 3 went
+    to `main` without passing through it. Nothing reports this — there is no
+    check that says "sandbox is N commits behind production", and the
+    advisory note on the production deploy answers a different question (was
+    *this commit* deployed to sandbox first), which is easy to read past and
+    was read past for all of v0.4.
+
+    The consequence is quiet rather than dramatic: the next person to verify
+    something on the sandbox is verifying it against a Worker several
+    releases old, and will attribute anything odd to their own change. That
+    is exactly how idea 24 cost a long detour — a sandbox Worker predating
+    v0.3 had no `/me/events` route, and the app reported the resulting 404 as
+    an empty calendar.
+
+    Cheap fix shape: have `deploy-sandbox.yml` (or a tiny scheduled workflow)
+    report the sandbox branch's distance from `main`, and say so in the job
+    summary. Alternatively make the *production* deploy fast-forward
+    `sandbox` to the commit it just shipped, so the sandbox is never behind
+    production even when a change skipped it — which is a different claim
+    from "this was tested on sandbox", but a much easier one to keep true.

@@ -166,6 +166,48 @@ stays anchored to now, what happens on mobile, where the header and action
 buttons live) are layout calls, so they get answered *by* the chosen pitch
 rather than before it.
 
+### Phase 3.6 — What v0.4 turned up (ideas 24, 26, 25, 23, 27, 28) → **v0.4.1** ✅ shipped
+
+No spec. Six items captured *during* v0.4 — four of them found by building
+and verifying it, which is the sandbox working as intended — and they are
+here rather than at the back of the queue because this roadmap's own rules
+put them here:
+
+- **Rule 2 (cheap and already-understood ships immediately)** covers 26, 25,
+  27 and 28. None of them had a design question left in them: 26's had been
+  argued out in `IDEAS.md` down to which of two fixes and why, and 27 and 28
+  arrived with their calls already made (opacity not strike; warn not block).
+  These are exactly the class of item that otherwise sits in a backlog for a
+  year.
+- **Rule 1 (anything that changes how we ship comes before the things it
+  would ship)** covers 23 and 24. 23 is a gap in the promotion path itself.
+  24 is the app's ability to tell you it is broken — and v0.5 adds a whole
+  new inbound surface to be broken. Shipping that on a frontend that reports
+  every failure as an empty calendar means debugging it the same expensive
+  way 24 was found in the first place.
+
+The two halves that turned out to be one item are worth recording, because
+they are why this shipped as one release rather than six errands. **24 and 26
+are the same bug seen from both ends**: the organiser's RSVP returned a 403,
+and the client swallowed it, so the buttons looked inert rather than refused.
+Fixing either alone leaves the other looking like a different bug.
+
+What actually cost the time was neither of the headline fixes but 26's
+*audit*. A real `event_invites` row for the organiser touched every
+`... UNION SELECT <organizer>` that had been folding them in by hand — one of
+which would have overridden a decline — plus a vote threshold that had been
+counting them against spec 0003, plus an invite sweep that would have DM'd
+every organiser about every event they had ever run the moment the backfill
+landed. The lesson for scheduling, not just for this item: "give it a row"
+was a one-line change with a day of consequences, and the consequences were
+all in code that had been written *around* the row's absence.
+
+**23 is only half-done and stays open.** Its free third option shipped — the
+rule is now written down in CLAUDE.md — but the two real fixes (a sandbox
+Pages project, or a downloadable preview bundle from CI) are still
+undecided, and the underlying gap is unchanged: there is still no branch you
+can push a frontend change to and have anything happen.
+
 ### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ← next
 
 One new inbound surface (a Discord interactions endpoint) turns the bot from
@@ -234,6 +276,7 @@ shifts.
 | **0.2** | Phase 2 — invitee change requests, poll date consistency, invite links; plus the dependency upgrades and the version stamp | Shipped 22 Aug 2026 |
 | **0.3** | Phase 3 — calendar-first (5), group creator membership (16), admin list gaps (15), changelog page | **Shipped 22 Aug 2026** |
 | **0.4** | Phase 3.5 — visual design pass (8), Dashboard/Calendar merged into one landing page (20) | **Shipped 23 Aug 2026** |
+| **0.4.1** | Phase 3.6 — error states (24), organizer RSVP (26), CI action majors (25), the sandbox-frontend rule written down (23, partial), past events faded (27), past-date warning (28) | **Shipped 24 Aug 2026** |
 | 0.5 | Interactive bot (19) | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
@@ -265,12 +308,35 @@ shifts.
 | 2 | Google Calendar sync | XL | 5 | 0.7 | 1, 5, 10 | TBD |
 | 21 | Calendar chip click opens New Event | S | 3.5 | 0.4 | — | 0009 — done |
 | 22 | Calendar can only show 2 months | M | — | — | — | deferred out of 0009 |
+| 24 | A failed API call renders as "nothing scheduled" | M | 3.6 | 0.4.1 | — | none needed |
+| 26 | Organizer gets a 403 from their own RSVP buttons | M | 3.6 | 0.4.1 | 24 | none needed |
+| 25 | CI actions on a deprecated Node runtime | XS | 3.6 | 0.4.1 | — | none needed |
+| 23 | No sandbox frontend (rule written down only) | S | 3.6 | 0.4.1 | — | still open |
+| 27 | Fade events that have already happened | XS | 3.6 | 0.4.1 | — | none needed |
+| 28 | Warn on an event created in the past | XS | 3.6 | 0.4.1 | — | none needed |
 
 Ideas 15–19 were captured after this roadmap was first written and had never
 been scheduled; they're placed above. Ideas 21 and 22 were found while writing
 the v0.4 pitches: 21 is a live bug that all three pitches force a fix for, so
 it rides along in 0.4; 22 is a behaviour change rather than a design one and is
 deliberately left unscheduled. 17 and 18 are struck through as done.
+
+Ideas 23–28 were all captured during v0.4 and are placed in Phase 3.6 above,
+with the argument for putting them ahead of v0.5 rather than behind it. Three
+notes on that placement:
+
+- **23 ships partially and stays open.** Only its free third option (write the
+  rule down) is done; the gap itself is undecided. It still counts against 1.0.
+- **22 remains unscheduled**, and this is now the second release it has sat
+  out. It is a real constraint — you cannot look at a month more than one
+  ahead — but it is a behaviour change with a cost (`GET /me/events` is bounded
+  by `MAX_QUERY_RANGE_MS`, and the two-month window is what makes the landing
+  page one query), so it wants a spec rather than a slot.
+- **The tail did not shift.** v0.4.1 is inserted, not substituted: 0.5 through
+  0.7 keep their contents. That is the roadmap behaving as designed — a new
+  idea gets a phase like everything else — but it is worth saying plainly,
+  because six new items landing in one release cycle is also the mechanism by
+  which 1.0 keeps moving away.
 
 ## Things this roadmap is not
 
