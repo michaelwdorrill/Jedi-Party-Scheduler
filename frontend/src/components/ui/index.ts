@@ -1,6 +1,7 @@
 export { default as Button } from './Button';
 export { default as Card } from './Card';
 export { default as EmptyState } from './EmptyState';
+export { default as ErrorState, InlineError } from './ErrorState';
 export { default as Loading } from './Loading';
 export { default as Field, TextInput, Select, Textarea } from './Field';
 export { default as PageHeader } from './PageHeader';

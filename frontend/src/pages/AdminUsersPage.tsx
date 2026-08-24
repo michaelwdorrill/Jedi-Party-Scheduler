@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { DateTime } from 'luxon';
 import { api, ApiError } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
-import { Loading, buttonClass } from '../components/ui';
+import { describeError } from '../lib/async';
+import { ErrorState, InlineError, Loading, buttonClass } from '../components/ui';
 
 interface AdminUser {
   id: string;
@@ -34,15 +35,21 @@ export default function AdminUsersPage() {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [forbidden, setForbidden] = useState(false);
+  // Paginated and accumulating, so this keeps its own state rather than using
+  // `useAsync` -- but it owes the user the same answer when a page fails to
+  // arrive (idea 24). Before, anything that wasn't a 403 was rethrown into an
+  // unhandled rejection and the list simply stopped growing.
+  const [error, setError] = useState<string | null>(null);
 
   const loadPage = async (after?: string) => {
+    setError(null);
     try {
       const page = await api.get<UsersPage>(`/admin/users${after ? `?after=${after}` : ''}`);
       setUsers((prev) => (after ? [...prev, ...page.users] : page.users));
       setCursor(page.nextCursor);
     } catch (e) {
       if (e instanceof ApiError && e.status === 403) setForbidden(true);
-      else throw e;
+      else setError(describeError(e));
     }
   };
 
@@ -61,6 +68,15 @@ export default function AdminUsersPage() {
     }
   };
 
+  const retry = () => {
+    setLoading(true);
+    // Retries the first page: a failed "load more" leaves the cursor pointing
+    // into a list whose tail we never saw, so starting over is the honest
+    // recovery rather than resuming from it.
+    setCursor(null);
+    loadPage().finally(() => setLoading(false));
+  };
+
   if (forbidden || (user && !user.isOwner)) {
     return <p className="text-sm text-muted">You don't have access to this page.</p>;
   }
@@ -75,6 +91,8 @@ export default function AdminUsersPage() {
 
       {loading ? (
         <Loading />
+      ) : error && users.length === 0 ? (
+        <ErrorState message={error} onRetry={retry} />
       ) : (
         <div className="overflow-hidden rounded-lg border border-edge">
           <table className="w-full text-left text-sm">
@@ -131,6 +149,10 @@ export default function AdminUsersPage() {
           </table>
         </div>
       )}
+
+      {/* A page that failed *after* the first one keeps the rows already on
+          screen and says why the list stopped, rather than replacing them. */}
+      {error && users.length > 0 && <InlineError message={error} />}
 
       {cursor && (
         <button

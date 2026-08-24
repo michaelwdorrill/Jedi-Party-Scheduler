@@ -8,7 +8,29 @@ import PollOptionRow from '../components/PollOptionRow';
 import RsvpButtons from '../components/RsvpButtons';
 import WindowAvailabilityPicker from '../components/WindowAvailabilityPicker';
 import type { ChangeRequestView, EventDetail, Friend, PollVote, RsvpStatus, WindowInfo } from '../types';
-import { Loading, buttonClass, cardClass } from '../components/ui';
+import { useAction, useAsync } from '../lib/async';
+import { ErrorState, InlineError, Loading, buttonClass, cardClass } from '../components/ui';
+
+type WindowDraft = { startAt: number; endAt: number };
+
+// Hoisted out of the component so the draft-sync effect below can depend on
+// `windowInfo` alone rather than on a closure rebuilt every render.
+function defaultWindowDraft(w: WindowInfo): WindowDraft | null {
+  if (w.windowStartAt == null || w.windowEndAt == null || w.windowBlockMinutes == null) return null;
+  return {
+    startAt: w.windowStartAt,
+    endAt: Math.min(w.windowEndAt, w.windowStartAt + w.windowBlockMinutes * 60000),
+  };
+}
+
+// The three requests this page needs, as one unit -- a page drawn from the
+// event but without its change requests would be quietly wrong, so they
+// succeed or fail together (idea 24).
+interface EventBundle {
+  event: EventDetail;
+  windowInfo: WindowInfo | null;
+  changeRequests: ChangeRequestView[];
+}
 
 export default function EventDetailPage() {
   const { eventId } = useParams();
@@ -16,45 +38,42 @@ export default function EventDetailPage() {
   const occurrenceDate = searchParams.get('occurrence');
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [event, setEvent] = useState<EventDetail | null>(null);
-  const [windowInfo, setWindowInfo] = useState<WindowInfo | null>(null);
-  const [windowDraft, setWindowDraft] = useState<{ startAt: number; endAt: number } | null>(null);
-  const [changeRequests, setChangeRequests] = useState<ChangeRequestView[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [windowDraft, setWindowDraft] = useState<WindowDraft | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
 
-  const load = async () => {
-    if (!eventId) return;
-    setLoading(true);
-    try {
-      const ev = await api.get<EventDetail>(`/events/${eventId}`);
-      setEvent(ev);
-      if (ev.eventType === 'poll' && ev.pollMode === 'window') {
-        const w = await api.get<WindowInfo>(`/events/${eventId}/window`);
-        setWindowInfo(w);
-        setWindowDraft((prev) => prev ?? w.mySubmission ?? defaultWindowDraft(w));
-      }
-      if (ev.status === 'active') {
-        setChangeRequests(await api.get<ChangeRequestView[]>(`/events/${eventId}/change-requests`));
-      } else {
-        setChangeRequests([]);
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  function defaultWindowDraft(w: WindowInfo): { startAt: number; endAt: number } | null {
-    if (w.windowStartAt == null || w.windowEndAt == null || w.windowBlockMinutes == null) return null;
-    return { startAt: w.windowStartAt, endAt: Math.min(w.windowEndAt, w.windowStartAt + w.windowBlockMinutes * 60000) };
-  }
-
-  useEffect(() => {
-    void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const { data, error, loading, reload } = useAsync<EventBundle | null>(async () => {
+    if (!eventId) return null;
+    const ev = await api.get<EventDetail>(`/events/${eventId}`);
+    const windowInfo =
+      ev.eventType === 'poll' && ev.pollMode === 'window'
+        ? await api.get<WindowInfo>(`/events/${eventId}/window`)
+        : null;
+    const changeRequests =
+      ev.status === 'active'
+        ? await api.get<ChangeRequestView[]>(`/events/${eventId}/change-requests`)
+        : [];
+    return { event: ev, windowInfo, changeRequests };
   }, [eventId]);
 
+  // Every mutation on this page was `await api.post(...); await load();` with
+  // no catch, so a refused request became an unhandled rejection and the
+  // button that made it appeared inert. That is what made idea 26's organiser
+  // 403 so hard to read: the buttons did nothing, rather than saying no.
+  const action = useAction();
+
+  const event = data?.event ?? null;
+  const windowInfo = data?.windowInfo ?? null;
+  const changeRequests = data?.changeRequests ?? [];
+
+  // Seeds the draft from the server's copy once, then leaves it alone -- a
+  // reload after voting must not throw away a selection in progress.
+  useEffect(() => {
+    if (!windowInfo) return;
+    setWindowDraft((prev) => prev ?? windowInfo.mySubmission ?? defaultWindowDraft(windowInfo));
+  }, [windowInfo]);
+
   if (loading) return <Loading />;
+  if (error) return <ErrorState message={error} onRetry={reload} />;
   if (!event) return <p className="text-muted">Event not found.</p>;
 
   const isOrganizer = event.organizerId === user?.id;
@@ -62,26 +81,32 @@ export default function EventDetailPage() {
   const deadlinePassed = !!event.pollDeadlineAt && Date.now() > event.pollDeadlineAt;
   const isMultiWinner = event.pollResolutionMode === 'multi_winner';
 
-  const handleRsvp = async (status: RsvpStatus) => {
-    await api.post(`/events/${event.eventId}/rsvp`, { status });
-    await load();
-  };
+  const handleRsvp = (status: RsvpStatus) =>
+    action.run(async () => {
+      await api.post(`/events/${event.eventId}/rsvp`, { status });
+      reload();
+    });
 
-  const handleVote = async (optionId: string, vote: PollVote) => {
-    await api.post(`/events/${event.eventId}/poll/vote`, { optionId, vote });
-    await load();
-  };
+  const handleVote = (optionId: string, vote: PollVote) =>
+    action.run(async () => {
+      await api.post(`/events/${event.eventId}/poll/vote`, { optionId, vote });
+      reload();
+    });
 
   const handleSubmitWindow = async () => {
     if (!windowDraft) return;
-    await api.post(`/events/${event.eventId}/window`, windowDraft);
-    await load();
+    await action.run(async () => {
+      await api.post(`/events/${event.eventId}/window`, windowDraft);
+      reload();
+    });
   };
 
   const handleCancelEvent = async () => {
     if (!confirm('Cancel this event for everyone?')) return;
-    await api.delete(`/events/${event.eventId}`);
-    await load();
+    await action.run(async () => {
+      await api.delete(`/events/${event.eventId}`);
+      reload();
+    });
   };
 
   const loadFriends = () => api.get<Friend[]>(`/me/friends?guild_id=${event.guildId}`);
@@ -92,40 +117,55 @@ export default function EventDetailPage() {
     occurrenceDate?: string;
     message: string | null;
   }) => {
-    await api.post(`/events/${event.eventId}/change-requests`, { kind: 'time_change', ...input });
-    await load();
+    await action.run(async () => {
+      await api.post(`/events/${event.eventId}/change-requests`, { kind: 'time_change', ...input });
+      reload();
+    });
   };
 
   const handleFileAddInvitee = async (input: { targetUserId: string; message: string | null }) => {
-    await api.post(`/events/${event.eventId}/change-requests`, { kind: 'add_invitee', ...input });
-    await load();
+    await action.run(async () => {
+      await api.post(`/events/${event.eventId}/change-requests`, { kind: 'add_invitee', ...input });
+      reload();
+    });
   };
 
   const handleVoteChangeRequest = async (requestId: string, vote: PollVote) => {
-    await api.post(`/events/${event.eventId}/change-requests/${requestId}/vote`, { vote });
-    await load();
+    await action.run(async () => {
+      await api.post(`/events/${event.eventId}/change-requests/${requestId}/vote`, { vote });
+      reload();
+    });
   };
 
   const handleAcceptChangeRequest = async (requestId: string) => {
-    await api.post(`/events/${event.eventId}/change-requests/${requestId}/accept`);
-    await load();
+    await action.run(async () => {
+      await api.post(`/events/${event.eventId}/change-requests/${requestId}/accept`);
+      reload();
+    });
   };
 
   const handleDeclineChangeRequest = async (requestId: string) => {
-    await api.post(`/events/${event.eventId}/change-requests/${requestId}/decline`);
-    await load();
+    await action.run(async () => {
+      await api.post(`/events/${event.eventId}/change-requests/${requestId}/decline`);
+      reload();
+    });
   };
 
   const handleWithdrawChangeRequest = async (requestId: string) => {
-    await api.delete(`/events/${event.eventId}/change-requests/${requestId}`);
-    await load();
+    await action.run(async () => {
+      await api.delete(`/events/${event.eventId}/change-requests/${requestId}`);
+      reload();
+    });
   };
 
   const handleCancelOccurrence = async () => {
     if (!occurrenceDate) return;
     if (!confirm(`Cancel just the ${occurrenceDate} occurrence?`)) return;
-    await api.post(`/events/${event.eventId}/occurrences/${occurrenceDate}/cancel`, {});
-    navigate('/calendar');
+    // Only navigates away if the cancel actually took -- the old version left
+    // for the calendar regardless, so a refused cancel looked like a done one.
+    if (await action.run(() => api.post(`/events/${event.eventId}/occurrences/${occurrenceDate}/cancel`, {}))) {
+      navigate('/calendar');
+    }
   };
 
   // Reconstructed rather than location.href verbatim, so a copied link never
@@ -134,7 +174,9 @@ export default function EventDetailPage() {
   // "this specific occurrence I happened to be looking at" (spec 0005).
   const handleCopyInviteLink = async () => {
     const link = `${location.origin}${location.pathname}#/events/${event.eventId}`;
-    await navigator.clipboard.writeText(link);
+    // `writeText` rejects when the document isn't focused or the permission is
+    // refused, which would otherwise show "Copied!" over an empty clipboard.
+    if (!(await action.run(() => navigator.clipboard.writeText(link)))) return;
     setLinkCopied(true);
     setTimeout(() => setLinkCopied(false), 4000);
   };
@@ -182,6 +224,8 @@ export default function EventDetailPage() {
           </div>
         )}
       </div>
+
+      {action.error && <InlineError message={action.error} onDismiss={action.clearError} />}
 
       {linkCopied && (
         <p className="-mt-3 text-xs text-faint">

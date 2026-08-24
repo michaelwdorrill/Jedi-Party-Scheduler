@@ -10,7 +10,8 @@ import TimezoneSelect from '../components/TimezoneSelect';
 import SchedulingAssistant from '../components/SchedulingAssistant';
 import { isValidRange } from '../lib/datetime';
 import type { EventDetail, Friend, Group, PollMode, PollStrategy, VoiceChannel } from '../types';
-import { buttonClass, cardClass, controlClass } from '../components/ui';
+import { describeError } from '../lib/async';
+import { ErrorState, InlineError, buttonClass, cardClass, controlClass } from '../components/ui';
 
 interface PollSlotDraft {
   key: string;
@@ -90,6 +91,12 @@ export default function EventFormPage() {
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A failed *load* on the edit route is not the same as a failed save: the
+  // form would sit at its blank defaults, and saving it would overwrite the
+  // real event with them (idea 24). So it replaces the form rather than
+  // appearing beside it.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [inviteesError, setInviteesError] = useState<string | null>(null);
 
   // The guild whatever's currently loaded/selected actually belongs to: the
   // form picker's choice on create, the loaded event's own guild on edit
@@ -113,10 +120,21 @@ export default function EventFormPage() {
     Promise.all([
       api.get<Friend[]>(`/me/friends?guild_id=${effectiveGuildId}`),
       api.get<Group[]>(`/guilds/${effectiveGuildId}/groups`),
-    ]).then(([f, g]) => {
-      setFriends(f);
-      setGroups(g);
-    });
+    ]).then(
+      ([f, g]) => {
+        setFriends(f);
+        setGroups(g);
+        setInviteesError(null);
+      },
+      (e: unknown) => {
+        // Not fatal to the form -- an event with no invitees is legal -- but
+        // it has to say so, because an empty picker otherwise reads as "there
+        // is nobody here to invite".
+        setFriends([]);
+        setGroups([]);
+        setInviteesError(describeError(e));
+      },
+    );
   }, [effectiveGuildId]);
 
   useEffect(() => {
@@ -200,7 +218,7 @@ export default function EventFormPage() {
           );
         }
       }
-    });
+    }, (e: unknown) => setLoadError(describeError(e)));
   }, [isEdit, eventId]);
 
   const addPollSlot = () =>
@@ -370,15 +388,29 @@ export default function EventFormPage() {
         navigate(`/events/${created.id}`);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save event.');
+      setError(describeError(e));
     } finally {
       setSaving(false);
     }
   };
 
+  if (loadError) {
+    return (
+      <ErrorState
+        title="Couldn't open that event"
+        message={loadError}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
+
   return (
     <div className="mx-auto max-w-2xl space-y-5">
       <h1 className="text-2xl font-semibold">{isEdit ? 'Edit Event' : 'New Event'}</h1>
+
+      {inviteesError && (
+        <InlineError message={`Couldn't load who you can invite. ${inviteesError}`} />
+      )}
 
       <div>
         <label className="mb-1 block text-sm text-muted">Server</label>
@@ -780,7 +812,7 @@ export default function EventFormPage() {
         </div>
       )}
 
-      {error && <p className="text-sm text-danger-text">{error}</p>}
+      {error && <InlineError message={error} onDismiss={() => setError(null)} />}
 
       <div className="flex justify-end gap-2">
         <button
