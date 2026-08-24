@@ -151,8 +151,13 @@ describe('invite writes at the configured maxima', () => {
     endAt: Date.now() + DAY_MS + 3600_000,
   };
 
-  it('creates an event with the full MAX_INVITEES maximum', async () => {
-    const { db, env, userIds } = await seedGuildWithMembers(LIMITS.MAX_INVITEES);
+  // Invites one short of the cap, because the organizer's own row (idea 26)
+  // is the last one and the cap is on rows written, not on names submitted.
+  // That is the correct reading of MAX_RESOLVED_INVITEES' own rationale -- a
+  // guild's whole population is about 25, and the organizer is one of it, so
+  // 25 *other* people implies a 26-person guild outside the supported profile.
+  it('writes the full MAX_RESOLVED_INVITEES maximum, organizer included', async () => {
+    const { db, env, userIds } = await seedGuildWithMembers(LIMITS.MAX_INVITEES - 1);
     fetchStub = stubFetch([]);
 
     const eventId = await createEventWithInvites(env, 'guild-1', 'organizer', {
@@ -163,7 +168,19 @@ describe('invite writes at the configured maxima', () => {
     const row = await db.prepare(`SELECT COUNT(*) AS n FROM event_invites WHERE event_id = ?`)
       .bind(eventId)
       .first<{ n: number }>();
-    expect(row?.n).toBe(LIMITS.MAX_INVITEES);
+    expect(row?.n).toBe(LIMITS.MAX_RESOLVED_INVITEES);
+  });
+
+  it('counts the organizer against the resolved cap rather than silently exceeding it', async () => {
+    const { env, userIds } = await seedGuildWithMembers(LIMITS.MAX_RESOLVED_INVITEES);
+    fetchStub = stubFetch([]);
+
+    await expect(
+      createEventWithInvites(env, 'guild-1', 'organizer', {
+        ...baseInput,
+        invites: { userIds, groupIds: [] },
+      }),
+    ).rejects.toThrow(/too large/);
   });
 
   // The replacement path used to build `NOT IN (...every invitee...)`, which
@@ -172,7 +189,9 @@ describe('invite writes at the configured maxima', () => {
   // sizes means going through groups, which is also how a real organizer
   // would: nobody hand-picks two hundred people.
   it('replaces a full-group invite list without a NOT IN blowup', async () => {
-    const groupSize = LIMITS.MAX_GROUP_MEMBERS;
+    // One short of MAX_GROUP_MEMBERS so that each group plus the organizer's
+    // own row lands exactly on MAX_RESOLVED_INVITEES rather than one over it.
+    const groupSize = LIMITS.MAX_GROUP_MEMBERS - 1;
     const { db, env, userIds } = await seedGuildWithMembers(groupSize * 2);
     fetchStub = stubFetch([]);
 
@@ -199,17 +218,20 @@ describe('invite writes at the configured maxima', () => {
     });
     expect(
       (await db.prepare(`SELECT COUNT(*) AS n FROM event_invites WHERE event_id = ?`).bind(eventId).first<{ n: number }>())?.n,
-    ).toBe(groupSize);
+    ).toBe(groupSize + 1);
 
     await updateEvent(env, eventId, 'guild-1', { invites: { userIds: [], groupIds: ['grp-b'] } }, await loadEventRow(db, eventId));
 
     const remaining = await db.prepare(`SELECT user_id FROM event_invites WHERE event_id = ?`)
       .bind(eventId)
       .all<{ user_id: string }>();
-    // True replacement: group A's members are gone, group B's are in.
-    expect(remaining.results).toHaveLength(groupSize);
+    // True replacement: group A's members are gone, group B's are in -- and
+    // the organizer survives it, which is the half idea 26 added. Without
+    // that, saving an edit would delete their row and restore the 403.
+    expect(remaining.results).toHaveLength(groupSize + 1);
     expect(remaining.results.some((r) => r.user_id === 'u-0')).toBe(false);
     expect(remaining.results.some((r) => r.user_id === `u-${groupSize + 5}`)).toBe(true);
+    expect(remaining.results.some((r) => r.user_id === 'organizer')).toBe(true);
   });
 
   it('preserves an existing invitee\'s RSVP through a replacement', async () => {

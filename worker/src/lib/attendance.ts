@@ -67,10 +67,32 @@ function membershipCutoff(): number {
   return Date.now() - MEMBERSHIP_GRACE_MS;
 }
 
-// Who actually committed to a given occurrence -- the organizer always
-// counts, plus (for single events) accepted invitees, or (for polls) whoever
-// voted yes on the winning option / submitted availability covering the
-// resolved window. Used to scope the voice-channel-invite DM to people who
+// The organizer is folded into every one of the three subqueries below by a
+// `UNION SELECT <organizer>`, which used to be unconditional: the model had no
+// `event_invites` row for them, so there was nothing else to read.
+//
+// Idea 26 gives them a real row, which makes an unconditional union actively
+// wrong -- an organizer who declined their own session would be put straight
+// back into the confirmed set and sent the voice-channel DM anyway, silently
+// overriding the answer the new row exists to let them give.
+//
+// So: the organizer still counts unless they have explicitly declined. Not
+// "unless they have a row", because a poll's organizer has no vote to read and
+// a single event's organizer may sit at 'pending' or 'tentative'; in both of
+// those the old behaviour (they are running it, they are there) is still the
+// right reading. Only an actual decline overturns it. Written as NOT EXISTS
+// rather than a join so events predating the backfill -- with no organizer row
+// at all -- behave exactly as they did before.
+const ORGANIZER_UNLESS_DECLINED = `UNION
+       SELECT ? WHERE NOT EXISTS (
+         SELECT 1 FROM event_invites
+         WHERE event_id = ? AND user_id = ? AND rsvp_status = 'declined'
+       )`;
+
+// Who actually committed to a given occurrence -- the organizer counts unless
+// they declined, plus (for single events) accepted invitees, or (for polls)
+// whoever voted yes on the winning option / submitted availability covering
+// the resolved window. Used to scope the voice-channel-invite DM to people who
 // said they'd be there, not everyone who was ever invited.
 export async function getConfirmedAttendeeIds(
   env: Env,
@@ -89,10 +111,19 @@ export async function getConfirmedAttendeeIds(
     const { results } = await env.DB.prepare(
       membershipJoin(
         `SELECT user_id FROM event_window_availability WHERE event_id = ? AND avail_start_at <= ? AND avail_end_at >= ?
-         UNION SELECT ?`,
+         ${ORGANIZER_UNLESS_DECLINED}`,
       ),
     )
-      .bind(...attendeeBinds(event, pending, [event.id, event.start_at, event.end_at, event.organizer_id]))
+      .bind(
+        ...attendeeBinds(event, pending, [
+          event.id,
+          event.start_at,
+          event.end_at,
+          event.organizer_id,
+          event.id,
+          event.organizer_id,
+        ]),
+      )
       .all<AttendeeRow>();
     return results;
   }
@@ -100,17 +131,27 @@ export async function getConfirmedAttendeeIds(
   if (event.event_type === 'poll') {
     if (!optionId) return [];
     const { results } = await env.DB.prepare(
-      membershipJoin(`SELECT user_id FROM event_poll_votes WHERE option_id = ? AND vote = 'yes' UNION SELECT ?`),
+      membershipJoin(
+        `SELECT user_id FROM event_poll_votes WHERE option_id = ? AND vote = 'yes'
+         ${ORGANIZER_UNLESS_DECLINED}`,
+      ),
     )
-      .bind(...attendeeBinds(event, pending, [optionId, event.organizer_id]))
+      .bind(
+        ...attendeeBinds(event, pending, [optionId, event.organizer_id, event.id, event.organizer_id]),
+      )
       .all<AttendeeRow>();
     return results;
   }
 
   const { results } = await env.DB.prepare(
-    membershipJoin(`SELECT user_id FROM event_invites WHERE event_id = ? AND rsvp_status = 'accepted' UNION SELECT ?`),
+    membershipJoin(
+      `SELECT user_id FROM event_invites WHERE event_id = ? AND rsvp_status = 'accepted'
+       ${ORGANIZER_UNLESS_DECLINED}`,
+    ),
   )
-    .bind(...attendeeBinds(event, pending, [event.id, event.organizer_id]))
+    .bind(
+      ...attendeeBinds(event, pending, [event.id, event.organizer_id, event.id, event.organizer_id]),
+    )
     .all<AttendeeRow>();
   return results;
 }

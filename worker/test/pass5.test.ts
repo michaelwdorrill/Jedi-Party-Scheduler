@@ -536,7 +536,10 @@ describe('quota guards are all-or-nothing (R6/R7)', () => {
       .prepare(`SELECT user_id FROM event_invites WHERE event_id = ?`)
       .bind(eventId)
       .all<{ user_id: string }>();
-    expect(invites.results.map((r) => r.user_id)).toEqual(['old-user']);
+    // 'organizer' is there from creation (idea 26), not from this edit --
+    // what matters is that the losing edit swapped nobody: old-user stayed
+    // and new-user never arrived.
+    expect(invites.results.map((r) => r.user_id).sort()).toEqual(['old-user', 'organizer']);
   });
 });
 

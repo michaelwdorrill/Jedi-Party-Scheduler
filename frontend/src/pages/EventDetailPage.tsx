@@ -372,7 +372,15 @@ export default function EventDetailPage() {
         <ul className="space-y-1 text-sm">
           {event.invites.map((inv) => (
             <li key={inv.userId} className="flex items-center justify-between">
-              <span>{inv.globalName ?? inv.username}</span>
+              <span>
+                {inv.globalName ?? inv.username}
+                {/* The organizer has a real row now (idea 26), so they appear
+                    here like everyone else. Saying which one they are stops
+                    that reading as an odd duplicate of "Organized by". */}
+                {inv.userId === event.organizerId && (
+                  <span className="ml-2 rounded bg-raised px-1.5 py-0.5 text-xs text-muted">organizer</span>
+                )}
+              </span>
               <span className="text-muted">
                 {event.eventType === 'single' ? inv.rsvpStatus : ''}
               </span>

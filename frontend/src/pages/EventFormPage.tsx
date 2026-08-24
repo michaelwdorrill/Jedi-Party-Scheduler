@@ -156,8 +156,17 @@ export default function EventFormPage() {
       setLoadedGuildId(ev.guildId);
       setLoadedRevision(ev.revision);
       setVoiceChannelId(ev.voiceChannelId ?? '');
+      // The organizer's own row (idea 26) is not an invitee choice, so it is
+      // not one of the picker's selections either. It is also not in the
+      // picker at all -- `listFriends` excludes the caller -- so leaving it in
+      // would mean submitting a chip nobody can see or untick, and resubmitting
+      // the organizer as a *direct* invitee, which is the one class of invitee
+      // that fails the whole edit if their membership cache has gone stale.
+      // The server adds them back regardless of what this list says.
       setSelectedUserIds(
-        ev.invites.filter((i) => i.invitedVia === 'individual').map((i) => i.userId),
+        ev.invites
+          .filter((i) => i.invitedVia === 'individual' && i.userId !== ev.organizerId)
+          .map((i) => i.userId),
       );
       setSelectedGroupIds(
         Array.from(new Set(ev.invites.map((i) => i.sourceGroupId).filter(Boolean))) as string[],

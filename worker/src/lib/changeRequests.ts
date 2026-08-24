@@ -154,8 +154,19 @@ export async function createChangeRequest(
   let inviteeCount = 0;
 
   if (isTimeChange) {
-    const countRow = await env.DB.prepare(`SELECT COUNT(*) AS n FROM event_invites WHERE event_id = ?`)
-      .bind(event.id)
+    // Excludes the organizer, per the spec's "Who votes, and the threshold":
+    // voters are the invitees, "not the organizer, who has the override
+    // instead". Counting them would inflate the majority by one person who
+    // cannot vote toward it.
+    //
+    // This was already wrong before idea 26, for group events whose organizer
+    // was a member of an invited group -- they got a row through group
+    // resolution and were counted. Idea 26 gives every organizer a row, which
+    // would have made it uniformly wrong instead of intermittently.
+    const countRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM event_invites WHERE event_id = ? AND user_id != ?`,
+    )
+      .bind(event.id, event.organizer_id)
       .first<{ n: number }>();
     inviteeCount = countRow?.n ?? 0;
   } else {
