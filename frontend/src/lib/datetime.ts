@@ -68,3 +68,38 @@ export function formatTimeRange(startMs: number, endMs: number, zone: string): s
   // as the same day it started.
   return `${startDate} ${startTime} – ${end.toFormat('ccc, LLL d')} ${endTime}`;
 }
+
+// Has this occurrence already finished? (Idea 27.)
+//
+// Deliberately *ended*, not *started*: a session that is running right now is
+// the single most current thing on the calendar, and fading it would be
+// exactly backwards. So an occurrence is past only once its end has gone by --
+// and where there is no end (a poll with no resolved time), its start stands
+// in, since that is all there is to judge it by.
+export function hasEnded(
+  occurrence: { startAt: number | null; endAt: number | null },
+  now: number = Date.now(),
+): boolean {
+  const finish = occurrence.endAt ?? occurrence.startAt;
+  return finish != null && finish <= now;
+}
+
+// Is a form's chosen start already behind us? (Idea 28.)
+//
+// Used for a warning, never for a block. Nothing breaks when an event is dated
+// in the past -- every reminder query in the worker's cron bounds on
+// `start_at >= now`, so a past event is simply never picked up: no overdue
+// DMs, no stuck outbox rows. And there are good reasons to do it, from logging
+// a session that already happened to fixing a mistyped year. Contrast idea 12,
+// which *does* hard-block an end before its start: block the incoherent, warn
+// on the merely unusual.
+export function startsInPast(
+  startDate: string,
+  startTime: string,
+  zone: string,
+  now: number = Date.now(),
+): boolean {
+  const start = DateTime.fromISO(`${startDate}T${startTime}`, { zone });
+  if (!start.isValid) return false; // incomplete input, not this guard's job
+  return start.toMillis() < now;
+}
