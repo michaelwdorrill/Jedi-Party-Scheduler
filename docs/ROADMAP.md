@@ -442,6 +442,8 @@ shifts.
 | 35 | Discord avatars where people are listed | S | 3.8 | 0.4.3 | — | none needed |
 | 34 | Groups are visible to server members who aren't in them | S | 3.8 | 0.4.3 | — | none needed |
 | 38 | Sandbox seed could not be re-run (its own cron broke it) | S | 3.8 | 0.4.3 | — | none needed |
+| 39 | Availability grid shows one candidate, fixed 8am-2am | M | — | — | — | TBD |
+| 40 | Candidate polls and window polls merged into windowed candidates | L | — | — | 39 | TBD |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
 | 37 | Re-agree to the Policy/Terms when they change | M | 3.9 | 0.4.4 | — | 0012 |
 
@@ -531,6 +533,16 @@ notes on that placement:
   the bot "only sends direct messages", since it starts receiving button
   presses and editing its own messages. So 37 goes in front of the
   interactive bot, whichever order the rest take.
+
+- **39 and 40 were found using the app to run a real poll**, which is the
+  third distinct source of backlog items after the security-review cycle and
+  building the previous release. 39 is a bug with two halves (the grid shows
+  only the first candidate, and a fixed 8am-2am slice of it); 40 is a model
+  change that makes today's two poll modes special cases of one general one —
+  a candidate that is a window, with a minimum duration. **40 subsumes 39**,
+  so 39 is not wasted work done first, and 40 without it would ship a mode
+  nobody can read. Both want scheduling against v0.5 rather than ahead of it,
+  since neither changes how we ship.
 
 - **The tail did not shift.** v0.4.1 is inserted, not substituted: 0.5 through
   0.7 keep their contents. That is the roadmap behaving as designed — a new
