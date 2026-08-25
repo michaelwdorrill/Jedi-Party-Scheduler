@@ -24,4 +24,4 @@
 //
 // Bumped by hand to exercise the mechanism somewhere with no real users,
 // which is step 3 of spec 0012's rollout. Production ships at 1 and dormant.
-export const CURRENT_POLICY_VERSION = 2;
+export const CURRENT_POLICY_VERSION = 1;
