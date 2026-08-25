@@ -52,13 +52,20 @@ export default function EventChip({
   // apart, but a month grid cell has no room to spend on a label that is the
   // same for most of what's in it. Colour already separates groups; this
   // answers "which server is this one?" on demand.
+  // Two lines, not one. On one line the time consumed the whole width of a
+  // seventh-of-a-grid cell and `truncate` ate the title entirely, so every
+  // chip in a month rendered as "7:30 PM …" and the only thing telling two
+  // events apart was their colour (idea 42). The title is what someone is
+  // actually looking for; the time is the qualifier, so it goes above in a
+  // smaller, dimmer weight and each line truncates on its own.
   return (
     <Link
       to={to}
-      className={`block truncate rounded px-1.5 py-0.5 text-xs ${color} hover:opacity-90 focus-inset`}
-      title={`${occurrence.title}${occurrence.isPersonal ? ' (personal time)' : occurrence.guildName ? ` — ${occurrence.guildName}` : ''}`}
+      className={`block rounded px-1.5 py-0.5 text-xs leading-tight ${color} hover:opacity-90 focus-inset`}
+      title={`${occurrence.title}${occurrence.game ? ` — ${occurrence.game}` : ''}${occurrence.isPersonal ? ' (personal time)' : occurrence.guildName ? ` — ${occurrence.guildName}` : ''}`}
     >
-      <span className="font-medium">{time}</span> {occurrence.title}
+      <span className="block truncate text-[0.65rem] opacity-75">{time}</span>
+      <span className="block truncate font-medium">{occurrence.title}</span>
     </Link>
   );
 }

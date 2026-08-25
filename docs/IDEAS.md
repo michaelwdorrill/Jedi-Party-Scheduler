@@ -538,12 +538,12 @@ is five, and the leading zero-padded `h:mm a` format is the widest option
 available.
 
 The game is the other half of the ask ("nothing to show the event name or
-game"). It is *not* currently on the occurrence at all — `mapOccurrence`
-carries title, times, group and guild, but not `game` — so showing it needs
-a field added to the payload, unlike the title which is already there and
-merely invisible. Given colour already encodes the group, the game may be
-better as a second line only when there is room, or left to the tooltip
-alongside the server name.
+game"), and — correcting this entry's first draft — it is **already on the
+occurrence**: `mapOccurrence` sets `game: event.game` and `EventOccurrence`
+types it. So it needs no payload change either; it is the same problem as
+the title, one step further along. A month cell has no room for a third
+line, so it belongs in the tooltip beside the server name, which is where
+the colour-encoded group information already lives.
 
 ### 43. A constant that must only ever change deliberately has nothing stopping it changing by accident
 

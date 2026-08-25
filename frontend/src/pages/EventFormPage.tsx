@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { DateTime } from 'luxon';
 import { api, ApiError } from '../api/client';
@@ -7,11 +7,22 @@ import { useGuild } from '../auth/GuildContext';
 import InviteePicker from '../components/InviteePicker';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
-import SchedulingAssistant from '../components/SchedulingAssistant';
+import SchedulingAssistant, { type AssistantSlot } from '../components/SchedulingAssistant';
 import { isValidRange, startsInPast } from '../lib/datetime';
 import type { EventDetail, Friend, Group, PollMode, PollStrategy, VoiceChannel } from '../types';
 import { describeError } from '../lib/async';
 import { ErrorState, InlineError, buttonClass, cardClass, controlClass } from '../components/ui';
+
+// Module scope on purpose: the availability memo below needs this during the
+// first render pass, and the component-scoped `toUtcMillis` is a `const`
+// declared two hundred lines further down -- reading it from a useMemo that
+// runs earlier is a temporal-dead-zone ReferenceError, which TypeScript does
+// not catch across a closure and which kills the whole New Event page.
+// Verified: the version that read `toUtcMillis` here failed with
+// "Cannot access 'nt' before initialization" and rendered nothing.
+function localToMillis(date: string, time: string, zone: string): number {
+  return DateTime.fromISO(`${date}T${time}`, { zone }).toMillis();
+}
 
 interface PollSlotDraft {
   key: string;
@@ -111,6 +122,42 @@ export default function EventFormPage() {
   // since-superseded read, rather than the two of them racing to overwrite
   // each other's changes in whatever order their requests happen to land.
   const [loadedRevision, setLoadedRevision] = useState<number | null>(null);
+
+  // Every slot being proposed, so the availability strip can show all of them
+  // rather than only the first (idea 39). One entry for a fixed-time event,
+  // one per candidate for an options poll, one for a window poll's span --
+  // which is also the shape windowed candidates want, being a candidate list
+  // too.
+  const assistantSlots: AssistantSlot[] = useMemo(() => {
+    const range = (key: string, sd: string, st: string, ed: string, et: string): AssistantSlot | null => {
+      const startAt = localToMillis(sd, st, timezone);
+      const endAt = localToMillis(ed, et, timezone);
+      return Number.isFinite(startAt) && Number.isFinite(endAt) && endAt > startAt
+        ? { key, startAt, endAt }
+        : null;
+    };
+    const keep = (s: AssistantSlot | null): s is AssistantSlot => s !== null;
+    if (eventType === 'single') {
+      return [range('single', date, startTime, endDate, endTime)].filter(keep);
+    }
+    if (pollMode === 'window') {
+      return [range('window', windowStartDate, windowStartTime, windowEndDate, windowEndTime)].filter(keep);
+    }
+    return pollSlots.map((slot) => range(slot.key, slot.date, slot.startTime, slot.endDate, slot.endTime)).filter(keep);
+  }, [
+    timezone,
+    eventType,
+    pollMode,
+    date,
+    startTime,
+    endDate,
+    endTime,
+    windowStartDate,
+    windowStartTime,
+    windowEndDate,
+    windowEndTime,
+    pollSlots,
+  ]);
 
   useEffect(() => {
     // Keyed on effectiveGuildId, not the raw ?guild= param, so this also runs
@@ -829,26 +876,8 @@ export default function EventFormPage() {
           <SchedulingAssistant
             guildId={effectiveGuildId}
             userIds={inviteeIds}
-            date={eventType === 'single' ? date : pollMode === 'window' ? windowStartDate : (pollSlots[0]?.date ?? date)}
+            slots={assistantSlots}
             zone={timezone}
-            proposedStart={
-              eventType === 'single'
-                ? toUtcMillis(date, startTime)
-                : pollMode === 'window'
-                  ? toUtcMillis(windowStartDate, windowStartTime)
-                  : pollSlots[0]
-                    ? toUtcMillis(pollSlots[0].date, pollSlots[0].startTime)
-                    : null
-            }
-            proposedEnd={
-              eventType === 'single'
-                ? toUtcMillis(endDate, endTime)
-                : pollMode === 'window'
-                  ? toUtcMillis(windowEndDate, windowEndTime)
-                  : pollSlots[0]
-                    ? toUtcMillis(pollSlots[0].endDate, pollSlots[0].endTime)
-                    : null
-            }
           />
         </div>
       )}
