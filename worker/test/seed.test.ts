@@ -106,3 +106,77 @@ describe('seed-sandbox.sql', () => {
     expect(counts()).toEqual(after1);
   });
 });
+
+// scripts/seed-poll-demo.sql -- the v0.4.5 demo data (ideas 39, 41, 42).
+//
+// Unlike seed-sandbox.sql it attaches to a *real* account, because a poll
+// nobody is invited to appears on nobody's calendar. It therefore looks up
+// the operator's id and whichever server they are actually in, and every
+// insert is guarded so that finding neither is a clean no-op rather than a
+// foreign-key error -- which is how the other seed failed when it was first
+// run for real.
+const DEMO_SQL = readFileSync(join(__dirname, '..', 'scripts', 'seed-poll-demo.sql'), 'utf8');
+const OWNER = '346042183486537730';
+
+function count(db: ReturnType<typeof createTestDb>, sql: string): number {
+  return (db.raw.prepare(sql).get() as { n: number }).n;
+}
+
+describe('seed-poll-demo.sql', () => {
+  it('is a clean no-op when the operator has never logged in', () => {
+    const db = createTestDb();
+    seed(db);
+    expect(() => db.raw.exec(DEMO_SQL)).not.toThrow();
+    expect(count(db, `SELECT COUNT(*) AS n FROM events WHERE id LIKE 'demo-%'`)).toBe(0);
+  });
+
+  it('builds the poll, its candidates, invites and busy time once they have', () => {
+    const db = createTestDb();
+    seed(db);
+    const now = Date.now();
+    db.raw.exec(`
+      INSERT INTO guilds (id, name, is_active, added_at) VALUES ('real-guild', 'Sandbox Test Server', 1, ${now});
+      INSERT INTO users (id, username, timezone, notifications_enabled, created_at, updated_at)
+        VALUES ('${OWNER}', 'michael', 'America/New_York', 1, ${now}, ${now});
+      INSERT INTO user_guild_membership (user_id, guild_id, is_member, verified_at)
+        VALUES ('${OWNER}', 'real-guild', 1, ${now});
+    `);
+
+    expect(() => db.raw.exec(DEMO_SQL)).not.toThrow();
+
+    expect(count(db, `SELECT COUNT(*) AS n FROM events WHERE id = 'demo-poll-nights'`)).toBe(1);
+    expect(count(db, `SELECT COUNT(*) AS n FROM event_poll_options WHERE event_id = 'demo-poll-nights'`)).toBe(3);
+    // The organiser holds a real invite row too (migration 0019).
+    expect(count(db, `SELECT COUNT(*) AS n FROM event_invites WHERE event_id = 'demo-poll-nights'`)).toBe(4);
+    expect(count(db, `SELECT COUNT(*) AS n FROM personal_events WHERE id LIKE 'demo-busy-%'`)).toBe(3);
+    // The seed users must share the operator's real server or they cannot be
+    // invited there and free/busy will not return them.
+    expect(
+      count(db, `SELECT COUNT(*) AS n FROM user_guild_membership WHERE guild_id = 'real-guild' AND user_id LIKE 'seed-user-%'`),
+    ).toBe(3);
+    // Everything lands in the guild the operator is actually in, not the
+    // synthetic one -- otherwise none of it reaches their calendar.
+    expect(count(db, `SELECT COUNT(*) AS n FROM events WHERE id LIKE 'demo-%' AND guild_id = 'real-guild'`)).toBe(2);
+  });
+
+  it('is re-runnable, and the candidate times stay in the future', () => {
+    const db = createTestDb();
+    seed(db);
+    const now = Date.now();
+    db.raw.exec(`
+      INSERT INTO guilds (id, name, is_active, added_at) VALUES ('real-guild', 'g', 1, ${now});
+      INSERT INTO users (id, username, timezone, notifications_enabled, created_at, updated_at)
+        VALUES ('${OWNER}', 'michael', 'America/New_York', 1, ${now}, ${now});
+      INSERT INTO user_guild_membership (user_id, guild_id, is_member, verified_at)
+        VALUES ('${OWNER}', 'real-guild', 1, ${now});
+    `);
+    db.raw.exec(DEMO_SQL);
+    expect(() => db.raw.exec(DEMO_SQL)).not.toThrow();
+    expect(count(db, `SELECT COUNT(*) AS n FROM event_poll_options WHERE event_id = 'demo-poll-nights'`)).toBe(3);
+
+    const earliest = db.raw
+      .prepare(`SELECT MIN(start_at) AS n FROM event_poll_options WHERE event_id = 'demo-poll-nights'`)
+      .get() as { n: number };
+    expect(earliest.n).toBeGreaterThan(now);
+  });
+});

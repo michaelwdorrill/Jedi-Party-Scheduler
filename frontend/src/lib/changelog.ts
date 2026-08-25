@@ -21,6 +21,19 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.4.5',
+    date: '25 August 2026',
+    summary: 'The calendar and the availability view stop hiding what a poll is asking.',
+    added: [
+      'A poll\u2019s candidate days now appear on the calendar, outlined and marked \u201cMaybe\u201d. Previously an open poll showed up once, on the day voting closed, and the nights it was actually proposing appeared nowhere \u2014 so the calendar could not tell you what you were being asked about.',
+    ],
+    changed: [
+      'The availability view shows every option you are proposing, one strip each, instead of only the first. Each strip is scaled to its own slot, so a two-hour evening and a ten-hour Saturday are both readable.',
+      'It also stops assuming the day runs 8am to 2am. Someone busy at 7am used to look free, and a slot outside those hours had nowhere to appear.',
+      'Calendar entries show the event name. They were a single line, and the time used all of it \u2014 so every entry in a month read the same and you had to hover to tell them apart. The game now shows in the tooltip too.',
+    ],
+  },
+  {
     version: '0.4.4',
     date: '25 August 2026',
     summary: 'Changes to the Terms or Privacy Policy now ask you to agree again.',

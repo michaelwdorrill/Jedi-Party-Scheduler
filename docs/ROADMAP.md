@@ -314,6 +314,32 @@ Two things worth carrying forward:
   people to click through the screen before the first time it meant anything —
   the same lesson item 31 cost, in a different costume.
 
+### Phase 3.10 — What running a real poll turned up (39, 41, 42) → **v0.4.5** ✅ shipped
+
+No spec. Three items found the third way things get found here — using the app
+to run an actual poll, after the security-review cycle and building-the-last-
+release — and all three are the same complaint from different angles: **the
+screens hid what a poll was asking.** The availability view showed the first
+candidate of three; the calendar showed the poll on the day voting *closed*
+and not on any of the nights it proposed; and every chip in a month rendered
+as its time with the title truncated to nothing.
+
+**Idea 40 was specified and deliberately not built here.** `specs/0013`
+records the design — candidates become windows with a minimum length, and both
+current poll modes fall out as special cases needing no new columns — but the
+build recreates `event_window_availability`, rewrites live rows, changes the
+resolution algorithm and touches five files of a thousand lines each. Landing
+that on top of three untested changes at the end of a long session is how a
+data migration goes wrong. It is v0.4.6, and it is a better candidate for an
+unhurried run than v0.5 is, precisely because of the migration.
+
+Also worth recording: `scripts/seed-poll-demo.sql` was added for verifying
+this release, and is the first fixture that attaches to a *real* account
+rather than synthetic ones — a poll nobody is invited to appears on nobody's
+calendar. It looks up the operator's id and whichever server they are actually
+in, and every insert is guarded so that finding neither is a clean no-op
+rather than the foreign-key error item 38 was.
+
 ### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ← next
 
 **Spec:** `specs/0010-interactive-bot.md` (Draft). It scopes v0.5 down to the
@@ -397,6 +423,8 @@ shifts.
 | **0.4.2** | Phase 3.7 — the sandbox advisory made meaningful (31), sandbox drift reported (30), `IDEAS.md` split into open and built (29). Repo only: the deployed app stays 0.4.1 | **Shipped 25 Aug 2026** |
 | **0.4.3** | Phase 3.8 — group visibility restricted to members (34), the horizon re-pinned (33), Discord avatars (35) | **Shipped 25 Aug 2026** |
 | **0.4.4** | Phase 3.9 — Policy/Terms re-acceptance (37) | **Shipped 25 Aug 2026** |
+| **0.4.5** | Phase 3.10 — every candidate's availability (39), poll candidates on the calendar (41), readable chips (42) | **Shipped 25 Aug 2026** |
+| 0.4.6 | Windowed candidates (40), per `specs/0013` | Planned |
 | 0.5 | Interactive bot (19), and the message-id cost it turned out to carry (32) | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
@@ -442,10 +470,10 @@ shifts.
 | 35 | Discord avatars where people are listed | S | 3.8 | 0.4.3 | — | none needed |
 | 34 | Groups are visible to server members who aren't in them | S | 3.8 | 0.4.3 | — | none needed |
 | 38 | Sandbox seed could not be re-run (its own cron broke it) | S | 3.8 | 0.4.3 | — | none needed |
-| 39 | Availability grid shows one candidate, fixed 8am-2am | M | — | — | — | TBD |
-| 40 | Candidate polls and window polls merged into windowed candidates | L | — | — | 39 | TBD |
-| 41 | Polls render on their deadline, not their candidate days | M | — | — | — | TBD |
-| 42 | Month chips show the time and truncate the title away | S | — | — | — | none needed |
+| 39 | Availability grid shows one candidate, fixed 8am-2am | M | 3.10 | 0.4.5 | — | none needed |
+| 40 | Candidate polls and window polls merged into windowed candidates | L | 3.11 | 0.4.6 | 39 | 0013 |
+| 41 | Polls render on their deadline, not their candidate days | M | 3.10 | 0.4.5 | — | none needed |
+| 42 | Month chips show the time and truncate the title away | S | 3.10 | 0.4.5 | — | none needed |
 | 43 | Nothing guards CURRENT_POLICY_VERSION against an accidental bump | S | — | — | 37 | TBD |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
 | 37 | Re-agree to the Policy/Terms when they change | M | 3.9 | 0.4.4 | — | 0012 |
