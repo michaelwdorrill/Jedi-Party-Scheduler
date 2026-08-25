@@ -3,6 +3,7 @@ import { MEMBERSHIP_GRACE_MS } from './db';
 import type { EventRow } from './events';
 import {
   loadConfirmedOptionsForEvents,
+  loadPendingOptionsForEvents,
   loadMyRsvpForEvents,
   loadOverridesForEvents,
   loadPrimaryGroupForEvents,
@@ -106,6 +107,8 @@ export async function buildCalendarOccurrences(
      LEFT JOIN event_invites i ON i.event_id = e.id AND i.user_id = ?
      LEFT JOIN event_poll_options mw
        ON mw.event_id = e.id AND mw.confirmed_at IS NOT NULL AND mw.start_at <= ? AND mw.end_at >= ?
+     LEFT JOIN event_poll_options pend
+       ON pend.event_id = e.id AND pend.confirmed_at IS NULL AND pend.start_at <= ? AND pend.end_at >= ?
      WHERE ${scoped.sql} AND (e.organizer_id = ? OR i.user_id IS NOT NULL)
        AND (
          -- Only *active* recurring series. A cancelled series has no
@@ -121,10 +124,16 @@ export async function buildCalendarOccurrences(
            e.event_type = 'poll' AND e.poll_resolution_mode != 'multi_winner' AND e.status != 'resolved'
            AND e.poll_deadline_at IS NOT NULL AND e.poll_deadline_at BETWEEN ? AND ?
          )
+         -- A poll is also worth loading when the days it is *proposing* fall
+         -- in range, not only when its deadline does (idea 41). Without this
+         -- an unresolved poll appeared on the calendar once, on the day
+         -- voting closed, and the candidate days -- the entire content of the
+         -- poll -- appeared nowhere at all.
+         OR (e.event_type = 'poll' AND e.status = 'active' AND pend.id IS NOT NULL)
          OR (e.start_at IS NOT NULL AND e.start_at <= ? AND COALESCE(e.end_at, e.start_at) >= ?)
        )`,
   )
-    .bind(userId, to, from, ...scoped.binds, userId, from, to, to, from)
+    .bind(userId, to, from, to, from, ...scoped.binds, userId, from, to, to, from)
     .all<EventRow>();
 
   const eventIds = events.map((e) => e.id);
@@ -144,6 +153,21 @@ export async function buildCalendarOccurrences(
     env,
     events.filter((e) => e.event_type === 'poll' && e.poll_resolution_mode === 'multi_winner').map((e) => e.id),
   );
+  // The candidate days of every still-open poll, so they can be drawn as
+  // provisional (idea 41). One bulk query for the whole visible list, same
+  // shape as the confirmed loader above and for the same reason.
+  const pendingOptionsByEvent = await loadPendingOptionsForEvents(
+    env,
+    events.filter((e) => e.event_type === 'poll' && e.status === 'active').map((e) => e.id),
+    from,
+    to,
+  );
+
+  // How many candidate days one poll may contribute to the calendar.
+  // MAX_POLL_OPTIONS is 20 and a month cell shows three chips before
+  // collapsing to "+N more", so an unbounded poll could bury a month of real
+  // events under its own maybes. The soonest ones are the ones worth seeing.
+  const MAX_PROVISIONAL_PER_POLL = 6;
 
   const withGuild = (event: EventRow, occ: ReturnType<typeof mapOccurrence>) => ({
     ...occ,
@@ -155,6 +179,22 @@ export async function buildCalendarOccurrences(
   for (const event of events) {
     const rsvp = rsvpByEvent.get(event.id) ?? null;
     const group = groupByEvent.get(event.id) ?? null;
+
+    // Candidate days of a poll that has not settled. Emitted for every open
+    // poll regardless of resolution mode, before the mode-specific branches
+    // below, since "these are the days on offer" means the same thing for
+    // both.
+    if (event.event_type === 'poll' && event.status === 'active') {
+      for (const opt of (pendingOptionsByEvent.get(event.id) ?? []).slice(0, MAX_PROVISIONAL_PER_POLL)) {
+        occurrences.push({
+          ...withGuild(
+            event,
+            mapOccurrence(event, `${event.id}::pending:${opt.id}`, opt.start_at, opt.end_at, rsvp, group),
+          ),
+          isProvisional: true,
+        });
+      }
+    }
 
     if (event.event_type === 'poll' && event.poll_resolution_mode === 'multi_winner') {
       // Each independently-confirmed day is its own occurrence, and stays on

@@ -203,3 +203,59 @@ describe('the per-guild calendar still behaves as it did', () => {
     expect((await myEvents(env, 'me')).map((e) => e.eventId).sort()).toEqual(['e1', 'e2']);
   });
 });
+
+// Idea 41: an unresolved poll used to appear on the calendar exactly once, on
+// the day voting *closed*, and the days it was proposing appeared nowhere --
+// so the content of the poll was invisible on the calendar it was for.
+describe('a still-open poll puts its candidate days on the calendar', () => {
+  it('returns one provisional occurrence per candidate slot', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    const now = Date.now();
+
+    await db
+      .prepare(
+        `INSERT INTO events (id, guild_id, organizer_id, title, event_type, timezone, status,
+           poll_strategy, poll_threshold_count, poll_deadline_at, poll_mode, poll_resolution_mode,
+           is_recurring, created_at, updated_at)
+         VALUES ('p1','guild-1','organizer','Which night?','poll','America/New_York','active',
+           'threshold', 2, ?, 'options', 'single_winner', 0, ?, ?)`,
+      )
+      .bind(now + 20 * DAY_MS, now, now)
+      .run();
+    for (const [id, offset] of [
+      ['o1', 1],
+      ['o2', 2],
+      ['o3', 5],
+    ] as const) {
+      await db
+        .prepare(
+          `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order)
+           VALUES (?, 'p1', ?, ?, 0)`,
+        )
+        .bind(id, now + offset * DAY_MS, now + offset * DAY_MS + 2 * HOUR_MS)
+        .run();
+    }
+
+    const occ = await myEvents(env, 'organizer');
+    const provisional = occ.filter((o) => (o as unknown as { isProvisional: boolean }).isProvisional);
+
+    // All three candidate days, each with real times -- not one "Poll open"
+    // chip on the deadline.
+    expect(provisional).toHaveLength(3);
+    expect(provisional.every((o) => o.eventId === 'p1')).toBe(true);
+  });
+
+  it('does not mark a confirmed or fixed-time event as provisional', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedEvent(db, { id: 'e1', organizerId: 'organizer', startAt: Date.now() + HOUR_MS });
+
+    const occ = await myEvents(env, 'organizer');
+    expect(occ.every((o) => !(o as unknown as { isProvisional: boolean }).isProvisional)).toBe(true);
+  });
+});

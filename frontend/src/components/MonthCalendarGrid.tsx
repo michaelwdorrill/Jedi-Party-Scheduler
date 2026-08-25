@@ -108,6 +108,7 @@ export default function MonthCalendarGrid({
                     any time, and the agenda is what is next (idea 27). */}
                 {dayEvents.slice(0, 3).map((occ) => (
                   <EventChip
+                    compact
                     key={occ.occurrenceId}
                     occurrence={occ}
                     zone={zone}

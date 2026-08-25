@@ -7,6 +7,7 @@ export default function EventChip({
   occurrence,
   zone,
   past = false,
+  compact = false,
 }: {
   occurrence: EventOccurrence;
   zone: string;
@@ -14,6 +15,11 @@ export default function EventChip({
   // out here, because it is a per-view decision -- see MonthCalendarGrid,
   // which is the only caller that passes it (idea 27).
   past?: boolean;
+  // A month cell is a seventh of a grid; an agenda row is the width of the
+  // page. Same per-view reasoning as `past`: the month grid cannot afford
+  // "Maybe · 7:30 PM" on one line and truncates the time away, so there it
+  // shows the qualifier that matters most for a day that might not happen.
+  compact?: boolean;
 }) {
   const palette = occurrence.isPersonal
     ? PERSONAL_COLOR
@@ -26,15 +32,29 @@ export default function EventChip({
   // cancelled event further would collapse the two into one indistinct grey,
   // so cancelled wins outright where an event is both.
   const cancelled = occurrence.status === 'cancelled';
+  // A third state, and deliberately a different *kind* of mark rather than a
+  // third shade (idea 41). A candidate day on an open poll is a day this
+  // might happen -- so it gets its hue as a dashed outline over a faint fill
+  // (`palette.pending`), which composes with "past" (a candidate day already
+  // gone by is both) in a way another opacity step could not.
+  const provisional = !cancelled && occurrence.isProvisional === true;
   const color = cancelled
     ? 'bg-raised-hi line-through opacity-60'
-    : past
-      ? `${palette.bg} opacity-45`
-      : palette.bg;
+    : provisional
+      ? `${palette.pending}${past ? ' opacity-45' : ''}`
+      : past
+        ? `${palette.bg} opacity-45`
+        : palette.bg;
 
   const time = occurrence.startAt
     ? DateTime.fromMillis(occurrence.startAt).setZone(zone).toFormat('h:mm a')
     : 'Poll open';
+  // Said in words as well as in the outline: a dashed border is a hint, and
+  // "maybe" is too important to leave to one. Where there is no room for
+  // both, the word wins over the time -- a candidate day's exact start is
+  // the less useful half while it is still only a proposal, and both are in
+  // the tooltip and the agenda regardless.
+  const qualifier = provisional ? (compact ? 'Maybe' : `Maybe · ${time}`) : time;
 
   const occurrenceDate =
     occurrence.isRecurring && occurrence.occurrenceId.includes('::')
@@ -62,9 +82,11 @@ export default function EventChip({
     <Link
       to={to}
       className={`block rounded px-1.5 py-0.5 text-xs leading-tight ${color} hover:opacity-90 focus-inset`}
-      title={`${occurrence.title}${occurrence.game ? ` — ${occurrence.game}` : ''}${occurrence.isPersonal ? ' (personal time)' : occurrence.guildName ? ` — ${occurrence.guildName}` : ''}`}
+      title={`${provisional ? 'Proposed: ' : ''}${occurrence.title}${occurrence.game ? ` — ${occurrence.game}` : ''}${occurrence.isPersonal ? ' (personal time)' : occurrence.guildName ? ` — ${occurrence.guildName}` : ''}`}
     >
-      <span className="block truncate text-[0.65rem] opacity-75">{time}</span>
+      <span className="block truncate text-[0.65rem] opacity-75">
+        {qualifier}
+      </span>
       <span className="block truncate font-medium">{occurrence.title}</span>
     </Link>
   );

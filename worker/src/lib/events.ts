@@ -112,6 +112,12 @@ export function mapOccurrence(
     endAt,
     isRecurring: !!event.is_recurring,
     isPersonal: false,
+    // A candidate slot on a poll that has not resolved: a day this event
+    // *might* happen, not one it will (idea 41). The calendar draws these
+    // differently -- opacity already means "past" and strike-through means
+    // "cancelled", so pending needs a mark of its own rather than a third
+    // shade. Defaults false; only the poll-candidate path sets it.
+    isProvisional: false,
     organizerId: event.organizer_id,
     myRsvpStatus: (myRsvpStatus as 'pending' | 'accepted' | 'declined' | 'tentative' | null) ?? null,
     pollDeadlineAt: event.poll_deadline_at,
@@ -147,6 +153,36 @@ export interface ConfirmedPollOptionRow {
   event_id: string;
   start_at: number;
   end_at: number;
+}
+
+// Candidate slots on a poll that has not resolved -- the days a poll is
+// *proposing*, as opposed to the ones it has settled on (idea 41).
+//
+// Bounded the same way the confirmed loader is (chunked, and the caller only
+// ever passes events it already loaded), plus a range filter, so a poll whose
+// candidates all sit outside the month being viewed costs nothing to skip.
+export async function loadPendingOptionsForEvents(
+  env: Env,
+  eventIds: string[],
+  from: number,
+  to: number,
+): Promise<Map<string, ConfirmedPollOptionRow[]>> {
+  const map = new Map<string, ConfirmedPollOptionRow[]>();
+  for (const chunk of chunkIds(eventIds, 2)) {
+    const { results } = await env.DB.prepare(
+      `SELECT id, event_id, start_at, end_at FROM event_poll_options
+       WHERE event_id IN (${placeholders(chunk.length)}) AND confirmed_at IS NULL
+         AND start_at <= ? AND end_at >= ?
+       ORDER BY start_at`,
+    )
+      .bind(...chunk, to, from)
+      .all<ConfirmedPollOptionRow>();
+    for (const row of results) {
+      if (!map.has(row.event_id)) map.set(row.event_id, []);
+      map.get(row.event_id)!.push(row);
+    }
+  }
+  return map;
 }
 
 // Bulk-loads confirmed options for many multi-winner polls at once. Loading

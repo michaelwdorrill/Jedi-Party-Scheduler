@@ -115,6 +115,9 @@ export interface EventOccurrence {
   endAt: number | null;
   isRecurring: boolean;
   isPersonal: boolean;
+  // A candidate day on a poll that has not resolved -- something that might
+  // happen, not something that will (idea 41).
+  isProvisional?: boolean;
   organizerId: string;
   // Which server this event belongs to, for labelling and filtering on the
   // cross-guild calendar (spec 0006). Null for personal time, which isn't
