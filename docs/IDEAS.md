@@ -487,6 +487,64 @@ grid that shows every candidate is the same view this needs, so doing 39 first
 is not wasted, and doing 40 without it would leave the new mode unusable for
 the same reason the old one is.
 
+### 41. A poll shows up on its deadline date, not on the days it might actually happen
+
+Asked (Aug 2026): "I'd also like to see pending events on the calendar."
+
+They are on it — but not where you would look. `lib/calendar.ts` returns an
+unresolved single-winner poll only when its **`poll_deadline_at`** falls in
+the queried range, so it renders as one "Poll open" chip on the day voting
+closes. The candidate days it is actually proposing — the whole content of
+the poll — put nothing on the calendar at all. A poll offering the 25th, 26th
+and 30th is invisible on all three.
+
+(Multi-winner polls are different again: any active one is returned, and its
+*confirmed* options render on their own days. Its unconfirmed options are the
+same gap.)
+
+So the ask is really: **render each candidate slot as a provisional chip on
+its own day**, marked as not-yet-confirmed.
+
+**The visual language is already half-built, and the suggestion fits it
+exactly.** `EventChip` has two "not happening" treatments and keeps them
+deliberately apart: opacity means *past* (item 27), strike-through means
+*cancelled*, and the comment there explains that fading a cancelled event
+would collapse the two into one indistinct grey. Pending is a third,
+orthogonal state, so it needs a third mark rather than a shade — dashed
+border or a diagonal hatch, as asked. It also has to compose: a candidate day
+that has already gone by is both past *and* pending.
+
+The cost to design rather than discover: **fan-out**. `MAX_POLL_OPTIONS` is
+20, so one poll can put twenty provisional chips across a month, and
+`MonthCalendarGrid` already caps a cell at three with a "+N more". A poll
+with many candidates could bury real events under its own maybes. Worth a
+rule — perhaps provisional chips lose to confirmed ones for the three slots,
+or a poll contributes at most one chip per day.
+
+### 42. A month-grid chip has room for the time or the title, and spends it all on the time
+
+Asked in the same breath, and it is a layout bug rather than missing data.
+`EventChip` renders `{time} {title}` — the title is already there. But the
+chip is a single `truncate` line in a seventh-of-a-grid cell, and "7:30 PM "
+eats the whole width, so what renders is `7:30 PM …` with the title cut to
+nothing. Every chip in a month therefore looks identical except for colour.
+
+Fix shape: two lines rather than one — time small and dim on top, title
+below, each truncating independently. The cell is `min-h-20` and caps at
+three chips, so there is vertical room at the usual density; the trade is
+that a very busy day hits "+N more" sooner. Worth also asking whether the
+time needs the space it takes: `7:30 PM` is seven characters where `7:30p`
+is five, and the leading zero-padded `h:mm a` format is the widest option
+available.
+
+The game is the other half of the ask ("nothing to show the event name or
+game"). It is *not* currently on the occurrence at all — `mapOccurrence`
+carries title, times, group and guild, but not `game` — so showing it needs
+a field added to the payload, unlike the title which is already there and
+merely invisible. Given colour already encodes the group, the game may be
+better as a second line only when there is room, or left to the tooltip
+alongside the server name.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the

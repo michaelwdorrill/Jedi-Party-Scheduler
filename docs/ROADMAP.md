@@ -444,6 +444,8 @@ shifts.
 | 38 | Sandbox seed could not be re-run (its own cron broke it) | S | 3.8 | 0.4.3 | — | none needed |
 | 39 | Availability grid shows one candidate, fixed 8am-2am | M | — | — | — | TBD |
 | 40 | Candidate polls and window polls merged into windowed candidates | L | — | — | 39 | TBD |
+| 41 | Polls render on their deadline, not their candidate days | M | — | — | — | TBD |
+| 42 | Month chips show the time and truncate the title away | S | — | — | — | none needed |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
 | 37 | Re-agree to the Policy/Terms when they change | M | 3.9 | 0.4.4 | — | 0012 |
 
@@ -543,6 +545,16 @@ notes on that placement:
   so 39 is not wasted work done first, and 40 without it would ship a mode
   nobody can read. Both want scheduling against v0.5 rather than ahead of it,
   since neither changes how we ship.
+
+- **41 and 42 came from the same session as 39 and 40** — using the app to
+  run a real poll and then looking at the month it produced. 42 is the
+  cheapest item on this list (a one-line chip that spends its whole width on
+  the time, so every event in a month looks the same) and is worth taking
+  whenever the frontend is next open. 41 is a genuine gap rather than a
+  styling one: an unresolved poll is rendered on the day *voting closes*, and
+  the candidate days it proposes appear nowhere, so the content of the poll is
+  invisible on the calendar. Its design cost is fan-out, not appearance —
+  twenty candidates could bury a month's real events under one poll's maybes.
 
 - **The tail did not shift.** v0.4.1 is inserted, not substituted: 0.5 through
   0.7 keep their contents. That is the roadmap behaving as designed — a new
