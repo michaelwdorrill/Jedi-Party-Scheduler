@@ -23,38 +23,122 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      # Full history, because the two sandbox-reporting steps below both need
+      # commits that aren't reachable from a depth-1 checkout: the trees of
+      # earlier sandbox deployments, and origin/sandbox itself.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       # Guardrail 3 (docs/specs/0002-sandbox-and-promotion.md): advisory,
       # not blocking -- a hard gate on a single-maintainer project is the
       # kind of thing that eventually gets bypassed wholesale, and a bypassed
-      # gate protects nothing. This never fails the job; it just says
-      # whether this exact commit was deployed to sandbox first, sourced from
-      # the GitHub Deployment deploy-sandbox.yml's `environment: sandbox` job
-      # records automatically. `continue-on-error` plus the internal `set +e`
-      # both exist for the same reason stated twice: nothing here -- a flaky
-      # API call, a missing jq, a rate limit -- is allowed to block the
-      # deploy this step is only ever meant to comment on.
-      - name: Check whether this commit was sandboxed first
+      # gate protects nothing. This never fails the job; it just says whether
+      # the Worker being deployed here was deployed to sandbox first, sourced
+      # from the GitHub Deployment records deploy-sandbox.yml's
+      # `environment: sandbox` job writes automatically. `continue-on-error`
+      # plus the internal `set +e` both exist for the same reason stated
+      # twice: nothing here -- a flaky API call, a missing jq, a rate limit --
+      # is allowed to block the deploy this step is only ever meant to
+      # comment on.
+      #
+      # It compares **trees, not commit SHAs** (IDEAS.md item 31). The
+      # original version asked the Deployments API for this exact
+      # `github.sha`, which on a push to main is the *merge* commit -- a
+      # commit that by construction did not exist when the sandbox was
+      # deployed from the feature branch's head. It therefore reported "no
+      # matching sandbox deployment" on a release that went through the
+      # sandbox properly and on one that skipped it, identically, and it did
+      # that on every release from v0.3 to v0.4.1. A check that fires the
+      # same way whether or not you did the right thing trains the reader to
+      # ignore it, and they are right to.
+      #
+      # Specifically it compares the `worker/` subtree rather than the whole
+      # repository tree, because the sandbox deploys the Worker and nothing
+      # else. "Was this exact Worker code run on sandbox" is the question the
+      # guardrail always meant to ask, and a subtree hash answers it
+      # regardless of merge commits, rebases, squashes, or frontend and docs
+      # commits landing on main in between.
+      - name: Check whether this Worker was sandboxed first
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
+          worker_tree=$(git rev-parse "HEAD:worker" 2>/dev/null)
+          if [ -z "$worker_tree" ]; then
+            echo "::warning::Could not resolve this commit's worker/ tree; skipping the sandbox check."
+            exit 0
+          fi
+
           response=$(curl -sS \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/deployments?environment=sandbox&sha=${{ github.sha }}")
-          count=$(echo "$response" | jq 'length' 2>/dev/null)
-          if ! [[ "$count" =~ ^[0-9]+$ ]]; then
-            echo "::warning::Could not determine sandbox deployment status for this commit (unexpected API response)."
+            "https://api.github.com/repos/${{ github.repository }}/deployments?environment=sandbox&per_page=100")
+          # Guard against the API returning an error *object* rather than the
+          # expected array -- `.[].sha` over an object would otherwise emit
+          # its values and produce nonsense SHAs to look up.
+          shas=$(echo "$response" | jq -r 'if type == "array" then .[].sha else empty end' 2>/dev/null)
+          if [ -z "$shas" ]; then
+            echo "::warning::Could not read sandbox deployments (unexpected API response, or none recorded yet)."
             exit 0
           fi
-          if [ "$count" -eq 0 ]; then
-            echo "::warning::Commit ${{ github.sha }} has no matching sandbox deployment. Consider running the Deploy Sandbox workflow against changes like this before merging, once the sandbox is in routine use."
+
+          matched=""
+          checked=0
+          unresolved=0
+          for sha in $shas; do
+            checked=$((checked + 1))
+            tree=$(git rev-parse -q --verify "$sha:worker" 2>/dev/null)
+            if [ -z "$tree" ]; then
+              # A sandbox deploy of a branch that was never merged, and whose
+              # branch has since been deleted, is unreachable from here. Not
+              # an error -- just something this check cannot speak to.
+              unresolved=$((unresolved + 1))
+              continue
+            fi
+            if [ "$tree" = "$worker_tree" ]; then
+              matched="$sha"
+              break
+            fi
+          done
+
+          if [ -n "$matched" ]; then
+            echo "This Worker tree ($worker_tree) was deployed to sandbox at commit $matched."
+            echo "Sandbox check: this Worker tree (\`$worker_tree\`) was deployed to sandbox at \`$matched\`." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Commit ${{ github.sha }} was deployed to sandbox first ($count matching deployment(s))."
+            detail=""
+            if [ "$unresolved" -gt 0 ]; then
+              detail=" ($unresolved of $checked recorded sandbox deployments are on commits not reachable from this checkout, so they could not be compared.)"
+            fi
+            echo "::warning::No sandbox deployment matches this Worker tree ($worker_tree). This release's worker/ code does not appear to have been run on the sandbox first.$detail"
+            echo "Sandbox check: **no sandbox deployment matches this Worker tree** (\`$worker_tree\`).$detail" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      # IDEAS.md item 30: the `sandbox` branch drifting behind `main` is
+      # silent, and the cost lands on whoever next verifies something against
+      # a sandbox Worker several releases old and attributes the oddities to
+      # their own change. (That is exactly how item 24 cost a long detour: a
+      # sandbox Worker predating v0.3 had no /me/events route.) Reporting the
+      # distance here rather than fast-forwarding the branch is deliberate --
+      # a push to `sandbox` from this workflow would redeploy the sandbox out
+      # from under whatever feature is currently parked on it.
+      - name: Report the sandbox branch's distance from this release
+        continue-on-error: true
+        run: |
+          set +e
+          if ! git rev-parse -q --verify origin/sandbox >/dev/null; then
+            echo "No origin/sandbox branch; nothing to compare."
+            exit 0
+          fi
+          behind=$(git rev-list --count "origin/sandbox..HEAD" 2>/dev/null)
+          ahead=$(git rev-list --count "HEAD..origin/sandbox" 2>/dev/null)
+          sandbox_sha=$(git rev-parse --short origin/sandbox)
+          echo "sandbox branch is at $sandbox_sha: $behind commit(s) behind this release, $ahead ahead."
+          {
+            echo ""
+            echo "Sandbox branch: \`$sandbox_sha\` — **$behind commit(s) behind** this release, $ahead ahead."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-node@v5
         with:

@@ -12,8 +12,10 @@
 # Setting `environment: sandbox` on the job records a GitHub Deployment
 # against the commit this run built. That's the data source
 # deploy-worker.yml's advisory check (Guardrail 3) reads to answer "was this
-# commit sandboxed first?" -- nothing else in this workflow needs to call the
-# Deployments API directly.
+# Worker sandboxed first?" -- it resolves each recorded deployment's commit
+# to its `worker/` subtree and compares, so what matters here is only that
+# the commit stays reachable (i.e. eventually merged, or its branch kept).
+# Nothing else in this workflow needs to call the Deployments API directly.
 
 name: Deploy Sandbox
 
@@ -39,9 +41,42 @@ jobs:
     runs-on: ubuntu-latest
     environment: sandbox
     steps:
+      # Full history so the freshness step below can measure this commit
+      # against origin/main.
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.branch || github.ref }}
+          fetch-depth: 0
+
+      # IDEAS.md item 30, from the side that matters most: a sandbox Worker
+      # built from a branch that is months behind main is a Worker whose
+      # oddities you will attribute to your own change. That is exactly what
+      # item 24 cost -- a sandbox predating v0.3 had no /me/events route, and
+      # the frontend reported the resulting 404 as an empty calendar. Nothing
+      # said so then; this says so now, before the verification rather than
+      # after it. Advisory only, like every other sandbox report.
+      - name: Report how current this sandbox build is
+        continue-on-error: true
+        run: |
+          set +e
+          if ! git rev-parse -q --verify origin/main >/dev/null; then
+            echo "No origin/main to compare against."
+            exit 0
+          fi
+          behind=$(git rev-list --count "HEAD..origin/main" 2>/dev/null)
+          ahead=$(git rev-list --count "origin/main..HEAD" 2>/dev/null)
+          worker_behind=$(git rev-list --count "HEAD..origin/main" -- worker 2>/dev/null)
+          echo "This build is $behind commit(s) behind origin/main ($worker_behind of them touching worker/), $ahead ahead."
+          {
+            echo "### Sandbox freshness"
+            echo ""
+            echo "- **$behind commit(s) behind \`origin/main\`**, $worker_behind of which touch \`worker/\`"
+            echo "- $ahead commit(s) ahead of \`origin/main\` (the change being verified)"
+            if [ "$worker_behind" -gt 0 ]; then
+              echo ""
+              echo "The sandbox Worker you are about to verify against is missing $worker_behind Worker commit(s) that are already in production. Merge \`main\` into this branch first if anything looks wrong for reasons unrelated to your change."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-node@v5
         with:

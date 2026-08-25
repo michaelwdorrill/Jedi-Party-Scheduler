@@ -607,8 +607,18 @@ rather than found by hand later — all detailed in spec 0002:
    schema doesn't match what `worker/migrations/*.sql` should have produced,
    in either environment.
 3. **"Was this sandboxed first?"** (advisory only, in `deploy-worker.yml`):
-   notes in the production deploy's log whether the commit being deployed
-   was previously deployed to sandbox. Never blocks the deploy.
+   notes in the production deploy's log and job summary whether the Worker
+   being deployed was previously deployed to sandbox. Never blocks the
+   deploy. It matches on the `worker/` **subtree hash**, not on the commit
+   SHA: the SHA reaching production is a merge commit that by construction
+   never existed on the sandbox, which is why the original SHA-matched
+   version of this check warned on every release regardless (IDEAS item 31,
+   fixed in v0.4.2). The same workflow also reports how far the `sandbox`
+   branch has drifted behind the release, and `deploy-sandbox.yml` reports
+   how far the branch it is building has drifted behind `main` — so
+   "verifying against a sandbox several releases old" is visible before the
+   verification instead of being inferred from odd behaviour afterwards
+   (IDEAS item 30).
 
 ## Running the tests
 
