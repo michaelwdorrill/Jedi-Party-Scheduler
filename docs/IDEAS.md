@@ -443,76 +443,101 @@ Three things to get right rather than discover:
 
 Asked (Aug 2026) alongside the decision on 34, and it is the more interesting
 half: rather than a group belonging to one server, let a group be just a list
-of people, with the rule that you can only put someone in it if you share at
-least one server with them.
+of people, with the rule that membership requires sharing a server.
 
 **Why this is directionally right.** It finishes what idea 5 started. v0.3
 made *viewing* server-agnostic (the calendar spans every server; the switcher
 went away; server became a label). Idea 5's spec drew the boundary explicitly
 and said which half was not moving: "server stays load-bearing for
 *invitation*... Servers stop mattering for *viewing*; they keep mattering for
-*who you can add*." This asks whether that remaining half can move too, and
-the answer is: it can, provided the property being protected is stated
-correctly. The guild is not a filing category — it is *proof that these people
-already know each other*. `filterActiveGuildMembers` exists so that knowing a
-user's ID is not enough to graft them onto a roster or DM them a private
-event's title.
+*who you can add*." This asks whether that half can move too, and the answer
+is yes, provided the property being protected is stated correctly. The guild
+is not a filing category — it is *proof that these people already know each
+other*. `filterActiveGuildMembers` exists so that knowing a user's ID is not
+enough to graft them onto a roster or DM them a private event's title.
 
-**"Shares a server" with whom, though — this is the whole design.** Three
-readings, and they are not close to equivalent:
-- **Pairwise** (every member shares a server with every other member).
-  Preserves today's guarantee exactly, and is the only one that does. It is
-  also O(n²) to check, and unstable in a way that has no good repair: one
-  person leaving one server can invalidate a group that was legal when it was
-  built, and there is no sensible answer to "which of these twelve people
-  should the app now eject".
-- **Star, anchored on the adder** (you may add someone if *you* share a server
-  with them). Cheap — one self-join on `user_guild_membership`, which is
-  already indexed `(user_id, is_member)` — stable, and it matches how people
-  actually think about it: I added them, I know them.
-- **Star, anchored on the group owner.** Same shape, but the boundary silently
-  changes if ownership transfers (which item 16 made a real event).
+**Decided (Aug 2026): the intersection rule.** A group is valid when there
+exists at least one server containing *every* member. Michael chose "pairwise"
+over the cheaper adder-anchored star, with the reason that settles the whole
+design: *"otherwise where is everyone playing?"* — and that reason is worth
+more than the rule it was given for, because **pairwise does not actually
+deliver it**. Pairwise says every *pair* shares a server: A–B share X, B–C
+share Y, A–C share Z satisfies it, and there is no server all three are in, so
+there is no voice channel they can all join. The intersection rule is what
+"where is everyone playing" means. It is strictly stronger than pairwise, and
+it happens to be cheaper: one `GROUP BY guild_id HAVING COUNT(*) = <members>`
+over `user_guild_membership` (already indexed `(user_id, is_member)`) instead
+of n² pairs.
 
-**The recommendation is the adder-anchored star, and the honest cost of it is
-one sentence: two people in the same group may share no server, and will see
-each other's names on an event's invite list.** That is a genuine loosening of
-today's privacy model and must be written in the Privacy Policy in those
-words, not implied. It is also how every group chat anyone has ever been in
-works — you meet friends of friends — which is an argument for it, not an
-excuse to skip saying it.
+It also repairs the repair problem. Under pairwise, one person leaving one
+server can invalidate a group with no sensible answer to which of twelve
+people the app should eject. Under the intersection rule the group simply has
+**no venue** — a state you can show, and block event creation on, without
+ejecting anybody.
 
-**What replaces the guild in the code**, roughly:
-- `groups.guild_id` goes away, and with it `assertValidGroupMemberTargets`'s
-  "not current members of this server" check, replaced by a shared-server
-  check between adder and addee.
-- `resolveInvitees` currently filters group-derived invitees against the
-  *event's* guild and silently drops anyone who has drifted out. The natural
-  analogue is to filter against **the organizer** — drop group members who no
-  longer share any server with them — which keeps the same shape (silently
-  drop group-derived, reject directly-chosen) and the same live-revalidation
-  discipline.
-- `events.guild_id` is the hard part, and it is `NOT NULL REFERENCES
-  guilds(id)`. It is load-bearing for the server label/filter and for
-  `specs/0007-server-noticeboard.md`'s entire scope ("what else is on in this
-  server"). Either it becomes nullable and means "filed under", or a
-  cross-server group's event has to nominate a server, which puts the filter
-  back. **0007 is not yet built, so this is the cheap moment to decide it** —
-  after 0007 ships, this becomes a change to a shipped surface.
+So: a group is a list of people, plus the invariant that their common-server
+set is non-empty. An event picks its venue from that set.
+
+**`events.guild_id` stays, and stays `NOT NULL`.** An earlier draft of this
+entry framed it as "either it becomes nullable or a cross-server group's event
+has to nominate a server, which puts the filter back", and concluded this had
+to be decided before `specs/0007-server-noticeboard.md` was built. That was a
+false choice. The event's guild is the *venue* — `voiceChannelLink(guildId,
+channelId)` is `discord.com/channels/{guild}/{channel}`, the actual link
+people click to go and play — and under the intersection rule the venue is
+always a server every member is in. Only *groups* lose their `guild_id`.
+That makes this item substantially smaller than first priced, and it means
+0007 is not blocked by it.
+
+**The five things `events.guild_id` holds up**, all of which survive:
+1. **The venue** (`cron/reminders.ts`'s `voiceChannelLink`, and
+   `fetchGuildVoiceChannels` for the picker).
+2. **The invitation boundary** (`lib/eventWrites.ts` — direct invitees
+   rejected, group-derived silently dropped).
+3. **Control of the event** — `routes/events.ts` requires active guild
+   membership to view one event, edit, cancel, add invitees or RSVP, *on top
+   of* holding an invite row.
+4. **Continuing visibility** — `lib/calendar.ts`'s `/me/events` predicate
+   joins membership on `e.guild_id`, so leaving a server removes its events
+   from your calendar even though the invite row survives. This is a
+   deliberate revocation mechanism, not an accident of the query.
+5. **Label, filter, and 0007's entire scope.**
+
+**Still to decide, and each is small:**
+- **More than one common server.** Who picks the venue? Leaning: the
+  organizer, at creation, defaulting to the venue of the group's last event.
+- **Someone leaves the venue server after the event exists.** Today they
+  silently vanish from the event (role 4) and get no voice link. Leave it,
+  auto-re-anchor to another common server, or warn the organizer? Leaning
+  leave-it-and-warn: silently moving where people are meeting is worse than
+  saying one person can't reach it.
+- **A group member who left the venue server but still shares another.**
+  Leaning: drop them from *that event* (matching today's silent drop for
+  group-derived invitees), never from the group.
+- **Does leaving a server still revoke your view of events you were invited
+  to?** Today yes, deliberately. Leaning keep — and it stays coherent here,
+  since every member is in the venue server at creation by construction.
+
+**What changes in the code**, roughly: `groups.guild_id` goes away, along with
+`assertValidGroupMemberTargets`'s "not current members of this server" check,
+replaced by an intersection check over the proposed roster. `resolveInvitees`
+keeps filtering group-derived invitees against the event's guild, which is now
+redundant-but-stricter rather than the primary boundary. Both frontend group
+surfaces lose their server picker. The Privacy Policy needs a pass: the
+guarantee it can still make is that you are never in a group with someone you
+share no server with — which the intersection rule preserves exactly, and
+which the adder-anchored alternative would have lost.
 
 **One genuinely nice property, worth noting because it is counterintuitive:
 the membership *freshness* check gets cheaper, not dearer.** Today the event's
 guild is fixed, so a stale cached row for that one guild must be revalidated
 against Discord or the request is refused (`MembershipUnavailableError`, 20
-live revalidations per request). Under "share at least one server", the
-question is *does there exist* a shared guild — so any one fresh cached row
-among several shared servers answers it, and only the all-stale case needs a
-live call. More shared servers means more chances to answer from cache.
+live revalidations per request). Asking "which servers do all of these people
+share" can be answered from whichever cached rows are fresh, and only needs a
+live call when a candidate venue's rows are all stale.
 
-**Not small, and not v0.5.** It touches groups, invites, the event/guild
-relationship, both frontend pickers, the Privacy Policy and 0007's premise. It
-wants a spec, and the spec's first job is the `events.guild_id` question
-above, because that is the one that gets more expensive the longer it waits.
-
+Wants a spec — not for the rule, which is now decided, but for the four open
+calls above and the migration. Not v0.5.
 
 ## Already built
 

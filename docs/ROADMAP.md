@@ -379,7 +379,7 @@ shifts.
 | 33 | Ground and vaporators unpinned since v0.4 | S | 3.8 | TBD | — | none needed |
 | 35 | Discord avatars where people are listed | S | 3.8 | TBD | — | none needed |
 | 34 | Groups are visible to server members who aren't in them | S | 3.8 | TBD | — | decided, none needed |
-| 36 | Should groups be server-agnostic (share-a-server rule)? | L | — | — | 5, 34, 0007's premise | TBD |
+| 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34 | TBD |
 
 Ideas 15–19 were captured after this roadmap was first written and had never
 been scheduled; they're placed above. Ideas 21 and 22 were found while writing
@@ -434,24 +434,31 @@ notes on that placement:
   invitee picker is fed by `GET /guilds/:id/groups`, so an organizer will no
   longer be able to invite a group they are not part of.
 
-- **36 is the same question asked properly, and it is the one worth a spec.**
-  If a group need not belong to a server at all — just a list of people, with
-  the rule that you can only add someone you share a server with — then "the
-  groups you can see" and "the groups you are in" are the same set by
-  construction, and 34 stops being a patch. It also finishes what idea 5
-  started: v0.3 moved *viewing* off servers and its spec said explicitly which
-  half was staying put ("server stays load-bearing for invitation"). This moves
-  that half. The recommendation in `IDEAS.md` is the adder-anchored rule (you
-  may add someone if you share a server with them), whose honest cost is that
-  two people in one group may share no server and will see each other on an
-  invite list — a real loosening that belongs in the Privacy Policy in those
-  words. **The reason it should not sit in the backlog indefinitely:** its
-  hardest question is what happens to `events.guild_id`, which is
-  `NOT NULL REFERENCES guilds(id)` and is the whole premise of 0007's
-  noticeboard scope. 0007 is specced but unbuilt, so this is the cheap moment
-  to decide it; after 0007 ships it becomes a change to a shipped surface.
-  Sequenced after v0.5 unless the noticeboard is brought forward, in which case
-  they should be designed together.
+- **36 is the same question asked properly, and its rule is now decided.** A
+  group becomes a list of people, valid when there exists at least one server
+  containing *every* member — the **intersection rule**. That is stronger than
+  the "pairwise" it was asked for, and for the reason pairwise was asked for:
+  pairwise lets A–B, B–C and A–C each share a different server, leaving no
+  server all three are in and therefore no voice channel they can all join.
+  Since the event's guild is the venue people actually click through to,
+  "where is everyone playing" is the requirement, and the intersection rule is
+  its literal statement. It is also cheaper to check than pairwise, and it has
+  a repair story pairwise lacks: a group with no common server has no venue,
+  which can be shown and blocked on, rather than requiring the app to eject
+  somebody.
+
+  **`events.guild_id` stays `NOT NULL`; only groups lose theirs.** An earlier
+  reading of this had the event's guild becoming nullable and therefore
+  colliding with `specs/0007-server-noticeboard.md`'s premise, making 36
+  urgent to decide before 0007 was built. That was wrong, and correcting it
+  removes the sequencing pressure: the venue is always a server every member
+  is in, so all five things the event's guild holds up survive untouched.
+  36 is a group-side change plus one intersection check, and 0007 is not
+  blocked by it. Four small calls remain open (which server when several
+  qualify, what happens when someone leaves the venue afterwards, whether a
+  departed member is dropped from the event or the group, and whether leaving
+  a server still revokes your view of its events) — they want a spec, after
+  v0.5.
 
 - **The tail did not shift.** v0.4.1 is inserted, not substituted: 0.5 through
   0.7 keep their contents. That is the roadmap behaving as designed — a new
