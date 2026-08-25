@@ -7,6 +7,12 @@ export interface User {
   notificationsEnabled: boolean;
   freeBusyVisible: boolean;
   isOwner: boolean;
+  // The policy version in force, and the one this person last agreed to
+  // (docs/specs/0012). The server owns the first: a client-side copy of it
+  // would be a second constant that has to agree with the Worker's, which is
+  // exactly the drift this avoids having at all.
+  policyVersion: number;
+  acceptedPolicyVersion: number;
 }
 
 export interface Guild {

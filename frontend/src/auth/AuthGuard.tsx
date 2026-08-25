@@ -1,9 +1,10 @@
 import { Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import { ErrorState, Loading } from '../components/ui';
+import PolicyGatePage from '../pages/PolicyGatePage';
 
 export default function AuthGuard() {
-  const { isAuthenticated, loading, error, refreshUser } = useAuth();
+  const { user, isAuthenticated, loading, error, refreshUser } = useAuth();
 
   if (loading) {
     return <Loading className="h-screen" />;
@@ -35,6 +36,17 @@ export default function AuthGuard() {
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
+  }
+
+  // The Terms or Privacy Policy have moved since this person agreed
+  // (docs/specs/0012). The Worker refuses every gated route regardless, so
+  // this is not the enforcement -- it is how someone finds out *why*, instead
+  // of meeting a 403 on whatever page they happened to open.
+  //
+  // Read from /me rather than from a client-side constant: the version in
+  // force is the server's to state.
+  if (user && user.acceptedPolicyVersion < user.policyVersion) {
+    return <PolicyGatePage />;
   }
 
   return <Outlet />;

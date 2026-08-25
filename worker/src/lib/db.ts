@@ -1,4 +1,5 @@
 import type { Env } from '../env';
+import { CURRENT_POLICY_VERSION } from './policy';
 import { chunkIds, chunkRows, placeholders } from './d1';
 import { checkGuildMembership } from './discord';
 import { revokeAllSessionsForUser } from './sessions';
@@ -46,6 +47,9 @@ export interface UserRow {
   timezone: string;
   notifications_enabled: number;
   free_busy_visible?: number;
+  // Only selected by GET /me, which is why these are optional here.
+  accepted_policy_version?: number;
+  accepted_policy_at?: number | null;
 }
 
 export interface GuildRow {
@@ -322,10 +326,21 @@ export interface UpsertUserInput {
 // `markLoginSucceeded` below is what records the real thing.
 export async function upsertUser(env: Env, input: UpsertUserInput): Promise<void> {
   const now = Date.now();
+  // `accepted_policy_version` and `accepted_policy_at` appear in the INSERT
+  // list and NOT in the DO UPDATE list, and that asymmetry is the whole point
+  // (docs/specs/0012). This function runs on *every* login, not only on
+  // account creation -- so re-stamping the current version here would mean
+  // logging in counts as agreeing, the gate would never fire for anybody, and
+  // the feature would appear to work while doing nothing at all.
+  // test/policyAcceptance.test.ts has a test named for exactly this.
+  //
+  // New accounts are stamped at creation because the alternative is showing
+  // someone an acceptance screen as the first thing after the login that
+  // created their account, asking them to agree to what they just agreed to.
   await env.DB.prepare(
     `INSERT INTO users (id, username, global_name, avatar_hash, timezone, notifications_enabled,
-       created_at, updated_at, last_login_attempt_at)
-     VALUES (?, ?, ?, ?, 'America/New_York', 1, ?, ?, ?)
+       created_at, updated_at, last_login_attempt_at, accepted_policy_version, accepted_policy_at)
+     VALUES (?, ?, ?, ?, 'America/New_York', 1, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        username = excluded.username,
        global_name = excluded.global_name,
@@ -333,7 +348,17 @@ export async function upsertUser(env: Env, input: UpsertUserInput): Promise<void
        updated_at = excluded.updated_at,
        last_login_attempt_at = excluded.last_login_attempt_at`,
   )
-    .bind(input.id, input.username, input.globalName, input.avatarHash, now, now, now)
+    .bind(
+      input.id,
+      input.username,
+      input.globalName,
+      input.avatarHash,
+      now,
+      now,
+      now,
+      CURRENT_POLICY_VERSION,
+      now,
+    )
     .run();
 }
 

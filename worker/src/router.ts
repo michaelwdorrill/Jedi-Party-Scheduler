@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { AppEnv } from './lib/authMiddleware';
-import { requireAuth } from './lib/authMiddleware';
+import { requireAuth, requirePolicyAcceptance } from './lib/authMiddleware';
 import { authRoutes } from './routes/auth';
 import { meRoutes } from './routes/me';
 import { guildRoutes } from './routes/guilds';
@@ -71,24 +71,27 @@ export function buildApp() {
 
   app.route('/auth', authRoutes);
 
+  // Everything authenticated is also gated on having agreed to the current
+  // Terms and Privacy Policy (docs/specs/0012), with four routes under /me
+  // deliberately left reachable while ungated -- see the exemptions below.
   app.use('/me/*', requireAuth);
   app.route('/me', meRoutes);
 
-  app.use('/guilds/*', requireAuth);
+  app.use('/guilds/*', requireAuth, requirePolicyAcceptance);
   app.route('/guilds', guildRoutes);
 
-  app.use('/groups/*', requireAuth);
+  app.use('/groups/*', requireAuth, requirePolicyAcceptance);
   app.route('/groups', groupRoutes);
 
-  app.use('/events/*', requireAuth);
+  app.use('/events/*', requireAuth, requirePolicyAcceptance);
   app.route('/events', eventRoutes);
   app.route('/events', pollRoutes);
   app.route('/events', changeRequestRoutes);
 
-  app.use('/personal-events/*', requireAuth);
+  app.use('/personal-events/*', requireAuth, requirePolicyAcceptance);
   app.route('/personal-events', personalRoutes);
 
-  app.use('/admin/*', requireAuth);
+  app.use('/admin/*', requireAuth, requirePolicyAcceptance);
   app.route('/admin', adminRoutes);
 
   return app;
