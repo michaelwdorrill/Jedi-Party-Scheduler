@@ -629,6 +629,14 @@ with the current version at signup (`upsertUser`), or someone who has just
 created an account meets an acceptance gate as the first screen after the
 login that created it.
 
+**Specced as `specs/0012-policy-reacceptance.md`.** The design that made it
+cheap: rather than a mass `UPDATE sessions` triggered by a deploy step
+somebody has to remember, the session row records the policy version it was
+issued under and `isSessionActive` requires it to still match. Bumping the
+constant then invalidates every outstanding session lazily, on each holder's
+next request — no mass write, nothing to run twice, and no extra query, since
+`isSessionActive` already selects that row.
+
 **Why this is worth doing before the next policy change rather than after.**
 Two scheduled items rewrite the Privacy Policy:
 `specs/0007-server-noticeboard.md` (blocked on it) and

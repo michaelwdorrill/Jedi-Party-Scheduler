@@ -380,7 +380,7 @@ shifts.
 | 35 | Discord avatars where people are listed | S | 3.8 | TBD | — | none needed |
 | 34 | Groups are visible to server members who aren't in them | S | 3.8 | TBD | — | decided, none needed |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
-| 37 | Re-agree to the Policy/Terms when they change | M | — | — | — | decided, spec TBD |
+| 37 | Re-agree to the Policy/Terms when they change | M | — | — | — | 0012 |
 
 Ideas 15–19 were captured after this roadmap was first written and had never
 been scheduled; they're placed above. Ideas 21 and 22 were found while writing
@@ -469,11 +469,13 @@ notes on that placement:
   old one with no mechanism to notice. That is the same argument Phase 3.7
   made for the sandbox guardrails, applied to policy instead of code — which
   means it wants a slot before the noticeboard or the group model, not after
-  them. All four of its open calls were settled in Aug 2026 (see
-  `IDEAS.md`): a logout plus an unaccepted-session gate that keeps export and
-  deletion reachable, DMs unaffected, a hand-maintained version constant, and
-  one version covering both documents. What is left is a short spec and the
-  build.
+  them. All four of its open calls were settled in Aug 2026, and
+  `specs/0012-policy-reacceptance.md` writes them up. **v0.5 is one of the
+  releases that needs it**, not just 0007 and 0011: `specs/0010`'s
+  interactions endpoint falsifies the Privacy Policy's current promise that
+  the bot "only sends direct messages", since it starts receiving button
+  presses and editing its own messages. So 37 goes in front of the
+  interactive bot, whichever order the rest take.
 
 - **The tail did not shift.** v0.4.1 is inserted, not substituted: 0.5 through
   0.7 keep their contents. That is the roadmap behaving as designed — a new
