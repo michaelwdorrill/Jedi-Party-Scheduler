@@ -82,14 +82,25 @@ export interface WindowSubmission {
   endAt: number;
 }
 
-// As returned by GET /events/:eventId/window
-export interface WindowInfo {
-  windowStartAt: number | null;
-  windowEndAt: number | null;
-  windowBlockMinutes: number | null;
+// One candidate of a windowed poll (specs/0013). A poll used to have exactly
+// one window; it now has one per candidate, each answered separately.
+export interface WindowCandidateInfo {
+  optionId: string;
+  windowStartAt: number;
+  windowEndAt: number;
+  displayOrder: number;
+  confirmedAt: number | null;
   mySubmission: { startAt: number; endAt: number } | null;
   submissions: WindowSubmission[];
   bestCandidate: { startAt: number; endAt: number; count: number } | null;
+}
+
+// As returned by GET /events/:eventId/window
+export interface WindowInfo {
+  // The minimum session length for the whole poll -- the floor every
+  // candidate's best span has to clear.
+  blockMinutes: number;
+  candidates: WindowCandidateInfo[];
 }
 
 export interface EventInvite {

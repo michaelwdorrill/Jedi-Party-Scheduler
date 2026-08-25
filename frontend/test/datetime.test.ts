@@ -1,6 +1,6 @@
 import { DateTime } from 'luxon';
 import { describe, expect, it } from 'vitest';
-import { buildMonthGrid, hasEnded, isValidRange, startsInPast } from '../src/lib/datetime';
+import { buildMonthGrid, formatDuration, hasEnded, isValidRange, startsInPast } from '../src/lib/datetime';
 
 describe('buildMonthGrid', () => {
   it('starts on a Sunday and ends on a Saturday for a month starting on a Sunday', () => {
@@ -116,5 +116,23 @@ describe('startsInPast', () => {
   it('stays quiet on incomplete input rather than warning about a half-typed date', () => {
     expect(startsInPast('', '19:00', 'UTC', now)).toBe(false);
     expect(startsInPast('2026-08-24', '', 'UTC', now)).toBe(false);
+  });
+});
+
+// specs/0013's minimum session length, which the API carries in minutes.
+// "150 minutes" is not how anyone describes an evening.
+describe('formatDuration', () => {
+  it('says hours once there are any', () => {
+    expect(formatDuration(150)).toBe('2.5 hours');
+    expect(formatDuration(180)).toBe('3 hours');
+  });
+
+  it('says minutes below an hour', () => {
+    expect(formatDuration(30)).toBe('30 minutes');
+    expect(formatDuration(45)).toBe('45 minutes');
+  });
+
+  it('is singular at exactly one hour', () => {
+    expect(formatDuration(60)).toBe('1 hour');
   });
 });

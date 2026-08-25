@@ -52,6 +52,17 @@ export function isValidRange(
   return end > start;
 }
 
+// A minimum session length, said the way someone would say it: "2.5 hours",
+// "90 minutes", "3 hours". Minutes are what the API stores (specs/0013's
+// window_block_minutes), and "150 minutes" is not how anyone describes an
+// evening.
+export function formatDuration(minutes: number): string {
+  if (minutes < 60) return `${minutes} minutes`;
+  const hours = minutes / 60;
+  const rounded = Math.round(hours * 10) / 10;
+  return `${rounded} ${rounded === 1 ? 'hour' : 'hours'}`;
+}
+
 // Always leads with the date -- a time-only range ("7:30 PM - 1:00 AM") reads
 // fine for something happening today, but gives no way to tell one candidate
 // poll option from another, or today's session from one three weeks out.
