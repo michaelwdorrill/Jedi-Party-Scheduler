@@ -219,7 +219,7 @@ describe('bestWindowSpan', () => {
 // That is a hopeful claim until both special cases are pinned, so they are
 // the first two tests here.
 import { checkThresholdAndResolve, checkWindowThresholdAndResolve, resolvePastDeadlinePolls } from '../src/lib/polls';
-import { createEventWithInvites } from '../src/lib/eventWrites';
+import { createEventWithInvites, updateEvent } from '../src/lib/eventWrites';
 import { ValidationError } from '../src/lib/validate';
 import { DAY_MS, HOUR_MS, loadEventRow, seedGuild, seedMembership, seedUser, setup } from './helpers';
 
@@ -467,5 +467,39 @@ describe('creating a windowed poll', () => {
     expect(options.results).toEqual([{ start_at: base, end_at: base + 8 * HOUR_MS }]);
     const event = await loadEventRow(ctx.db, eventId);
     expect(event.window_block_minutes).toBe(120);
+  });
+});
+
+describe('editing a windowed poll', () => {
+  it('does not un-window it when only the candidates are re-ordered', async () => {
+    // The same F-08-A trap the strategy/threshold/deadline fields already
+    // carry, and a sharper version of it: this field decides what the
+    // candidates *mean*, so losing it silently turns every window into a
+    // fixed slot and makes every submitted range meaningless.
+    const ctx = await pollFixture({ blockMinutes: 150 });
+    const stored = await loadEventRow(ctx.db, ctx.eventId);
+    await updateEvent(ctx.env, ctx.eventId, 'guild-1', {
+      pollOptions: [...ctx.options].reverse().map((o) => ({ startAt: o.start_at, endAt: o.end_at })),
+      revision: stored.revision,
+    }, stored);
+
+    expect((await loadEventRow(ctx.db, ctx.eventId)).window_block_minutes).toBe(150);
+  });
+
+  it('turns the windows off when the minimum is explicitly cleared', async () => {
+    const ctx = await pollFixture({ blockMinutes: 150 });
+    const [first] = ctx.options;
+    await submit(ctx, first.id, 'a', first.start_at, first.start_at + 5 * HOUR_MS);
+    const stored = await loadEventRow(ctx.db, ctx.eventId);
+    await updateEvent(ctx.env, ctx.eventId, 'guild-1', { windowBlockMinutes: null, revision: stored.revision }, stored);
+
+    expect((await loadEventRow(ctx.db, ctx.eventId)).window_block_minutes).toBeNull();
+    // The submitted ranges go with it: the candidate is the session now, and
+    // there is nothing left to have submitted a range within.
+    const left = await ctx.db
+      .prepare(`SELECT COUNT(*) AS n FROM event_window_availability WHERE event_id = ?`)
+      .bind(ctx.eventId)
+      .first<{ n: number }>();
+    expect(left?.n).toBe(0);
   });
 });
