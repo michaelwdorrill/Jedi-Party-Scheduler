@@ -256,6 +256,15 @@ nothing.
 
 ### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ← next
 
+**Spec:** `specs/0010-interactive-bot.md` (Draft). It scopes v0.5 down to the
+endpoint, the three response widgets, the edit-on-resolve and embeds on the
+DMs that gain components — and pushes slash commands and Discord Scheduled
+Events sync out to specs of their own, on the grounds that each is a separate
+surface with its own permission model rather than a detail of this one. It
+also absorbs idea 32: the sent message's id is discarded today, so
+edit-on-resolve carries a migration and a cross-application editability rule
+that idea 19's capture assumed away.
+
 One new inbound surface (a Discord interactions endpoint) turns the bot from
 a megaphone into something you can answer. Sequenced after the design pass
 because the in-Discord flows should mirror a settled in-app model, not a
