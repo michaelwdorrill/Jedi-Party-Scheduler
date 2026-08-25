@@ -290,6 +290,30 @@ live and wrong since v0.4 without anyone noticing. That is an argument for
 item 23 (there is still no way to put a frontend change in front of anyone but
 Michael) and, more cheaply, for watching someone else use it more often.
 
+### Phase 3.9 — Consent that means something (idea 37) → **v0.4.4** ✅ shipped
+
+**Spec:** `specs/0012-policy-reacceptance.md` (Built).
+
+Rule 1 again, applied to policy rather than to code: nothing in the app
+recorded agreement to anything, so any of the three scheduled items that
+rewrite the Privacy Policy — 0007, 0011, and **v0.5**, whose interactions
+endpoint falsifies the current promise that the bot "only sends direct
+messages" — would have shipped a materially different policy to people who had
+only ever agreed to the previous one, with no mechanism to notice.
+
+Two things worth carrying forward:
+
+- **The bump self-executes.** `sessions.policy_version` records the version in
+  force when a session was issued; `isSessionActive` requires it to match. So
+  a bump invalidates every outstanding session lazily, on each holder's next
+  request, with no mass write and no deploy step. The alternative — an
+  `UPDATE sessions` fired by something a person has to remember — is the class
+  of manual step `specs/0002` exists to remove.
+- **It shipped dormant**, at version 1 with matching defaults. Logging out the
+  whole user base to agree to a policy that had not changed would have taught
+  people to click through the screen before the first time it meant anything —
+  the same lesson item 31 cost, in a different costume.
+
 ### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ← next
 
 **Spec:** `specs/0010-interactive-bot.md` (Draft). It scopes v0.5 down to the
@@ -372,7 +396,7 @@ shifts.
 | **0.4.1** | Phase 3.6 — error states (24), organizer RSVP (26), CI action majors (25), the sandbox-frontend rule written down (23, partial), past events faded (27), past-date warning (28) | **Shipped 24 Aug 2026** |
 | **0.4.2** | Phase 3.7 — the sandbox advisory made meaningful (31), sandbox drift reported (30), `IDEAS.md` split into open and built (29). Repo only: the deployed app stays 0.4.1 | **Shipped 25 Aug 2026** |
 | **0.4.3** | Phase 3.8 — group visibility restricted to members (34), the horizon re-pinned (33), Discord avatars (35) | **Shipped 25 Aug 2026** |
-| 0.4.4 | Policy/Terms re-acceptance (37), per `specs/0012` | Planned |
+| **0.4.4** | Phase 3.9 — Policy/Terms re-acceptance (37) | **Shipped 25 Aug 2026** |
 | 0.5 | Interactive bot (19), and the message-id cost it turned out to carry (32) | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
@@ -419,7 +443,7 @@ shifts.
 | 34 | Groups are visible to server members who aren't in them | S | 3.8 | 0.4.3 | — | none needed |
 | 38 | Sandbox seed could not be re-run (its own cron broke it) | S | 3.8 | 0.4.3 | — | none needed |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
-| 37 | Re-agree to the Policy/Terms when they change | M | — | — | — | 0012 |
+| 37 | Re-agree to the Policy/Terms when they change | M | 3.9 | 0.4.4 | — | 0012 |
 
 Ideas 15–19 were captured after this roadmap was first written and had never
 been scheduled; they're placed above. Ideas 21 and 22 were found while writing

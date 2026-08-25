@@ -21,6 +21,18 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.4.4',
+    date: '25 August 2026',
+    summary: 'Changes to the Terms or Privacy Policy now ask you to agree again.',
+    added: [
+      'When the Terms of Service or Privacy Policy change in a way that matters, you will be signed out and asked to read and agree to them before carrying on. Until now, logging in counted as agreeing \u2014 which meant an updated policy quietly applied to people who had only ever agreed to the previous one.',
+      'If you decide not to agree, you can still download everything we hold about you, or delete your account, from that same screen. You are never locked out of your own data by declining.',
+    ],
+    changed: [
+      'Nothing changes for you today. This release only puts the mechanism in place \u2014 no one is signed out, and no one is asked to agree to anything, because the documents have not changed. It takes effect the next time they do.',
+    ],
+  },
+  {
     version: '0.4.3',
     date: '25 August 2026',
     summary: 'Faces on the names, and groups stop being visible to the whole server.',

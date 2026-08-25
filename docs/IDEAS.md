@@ -408,113 +408,6 @@ live call when a candidate venue's rows are all stale.
 Wants a spec — not for the rule, which is now decided, but for the four open
 calls above and the migration. Not v0.5.
 
-### 37. Updating the Privacy Policy or Terms should force everyone to re-agree
-
-Asked (Aug 2026): every time the Privacy Policy or the Terms change, people
-should be logged out before their next visit, so they have to agree to the
-updated version before using the app again.
-
-**Nothing in the app records agreement to anything today.** There is no
-`accepted_*` column, no policy version server-side, and no consent check
-anywhere — logging in *is* the implicit agreement, and the policy's own
-"last updated" is `LAST_UPDATED`, a hand-maintained string constant in
-`frontend/src/lib/legal.ts`. So this is two mechanisms, not one, and the
-second is the one that makes it mean something:
-
-1. **Revoke.** `revokeAllSessionsForUser` already exists in `lib/sessions.ts`
-   — the logout half is a single call per user, or one `UPDATE sessions SET
-   revoked_at = ?` across the table.
-2. **Record.** A logout on its own does not capture consent; it just puts the
-   login page in front of someone, which is where the agreement is already
-   implicit. Getting the thing actually asked for ("they have to agree")
-   needs a recorded acceptance: `users.accepted_policy_version`, set when
-   they agree, and refused service until it matches.
-
-**The version has to live in the Worker, not the frontend.** Enforcement is
-server-side or it is decorative — a client-side check is bypassed by not
-being the client. That means the current arrangement inverts: the Worker owns
-`CURRENT_POLICY_VERSION`, the frontend reads it (from `/me`, which the app
-already calls on every load) rather than holding its own copy. Two constants
-that must agree, in two deployables, is exactly the drift
-`scripts/check-env-parity.mjs` exists to catch elsewhere.
-
-**Shape that fits what is already there:** bump a Worker-side
-`CURRENT_POLICY_VERSION`; `requireAuth` (or a middleware just after it)
-returns a distinct status — 403 with a machine-readable code, not a bare
-403 — when `users.accepted_policy_version` is behind it; the frontend shows
-the agreement screen and calls `POST /me/accept-policy`; every other route
-stays refused until it does. Revoking sessions at the same time is then the
-belt to that braces, and it is what makes it a *logout* as asked rather than
-a quiet interstitial.
-
-**Decided (Aug 2026), all four, after a walkthrough.** The finding that
-shaped the first two: `DELETE /me` and `GET /me/export` both sit behind
-`requireAuth`, so **a logged-out person cannot leave properly or take their
-data with them.** "Agree or you cannot use the app" needs an answer for
-someone who genuinely will not agree, and the only honest answers are *leave*
-and *export*, both of which need a session. So the shape is a hybrid rather
-than either extreme:
-
-1. A version bump revokes every session — the logout, unambiguously.
-2. Their next visit is the login page (public, and it links both documents).
-   They log in, and the session issued is **unaccepted**: a check just after
-   `requireAuth` refuses every route except `GET /me`, `GET /me/export`,
-   `DELETE /me` and `POST /me/accept-policy`.
-3. Accepting unlocks everything. Declining leaves them able to export, to
-   delete, and to change their mind later.
-
-Logging in therefore stops implying agreement, which is the thing that is
-wrong today.
-
-- **Declining keeps the exit door open**, as above. One caveat on
-  presentation: `deleteUserCompletely` revokes sessions and then deletes
-  **every event that person organised**, not only their own rows — so
-  "delete my account" has blast radius on other people's calendars and must
-  not sit one click from "I don't agree". Link to the existing Settings flow
-  with its confirmation.
-- **DMs keep going.** This is the architectural default rather than a new
-  behaviour: the cron never reads sessions (its only reference is
-  `pruneStaleSessions`, housekeeping), and recipients come from
-  `event_invites` and `users.notifications_enabled`. Suppressing them is the
-  option that costs work, and its cost lands on the wrong person — someone
-  misses a session because they have not opened the website yet, and so does
-  whoever organised it. Revisit only if a policy change is specifically about
-  notifications.
-- **The version is a hand-maintained constant**, not derived from the
-  documents' contents. `legal.ts` already argues this case for `APP_VERSION`:
-  a derived value makes "published" mean "last redeployed". Deriving this one
-  from a content hash would log out every user for a typo fix. A CI guard
-  against the forgotten bump was considered and left out for now — if it is
-  ever added it has to be able to *fail usefully*, with a documented override
-  for non-substantive edits, per what item 31 cost.
-- **One version covering both documents.** They change rarely and almost
-  always together; two counters double the bookkeeping and force the
-  acceptance screen to explain which document moved. Accepted cost: splitting
-  them later needs a migration, which is cheap in a repo that does them
-  routinely and may never be needed.
-
-**One more thing, small and easy to get wrong:** new users must be stamped
-with the current version at signup (`upsertUser`), or someone who has just
-created an account meets an acceptance gate as the first screen after the
-login that created it.
-
-**Specced as `specs/0012-policy-reacceptance.md`.** The design that made it
-cheap: rather than a mass `UPDATE sessions` triggered by a deploy step
-somebody has to remember, the session row records the policy version it was
-issued under and `isSessionActive` requires it to still match. Bumping the
-constant then invalidates every outstanding session lazily, on each holder's
-next request — no mass write, nothing to run twice, and no extra query, since
-`isSessionActive` already selects that row.
-
-**Why this is worth doing before the next policy change rather than after.**
-Two scheduled items rewrite the Privacy Policy:
-`specs/0007-server-noticeboard.md` (blocked on it) and
-`specs/0011-groups-without-servers.md` (changes what a group is). Both would
-ship a materially different policy to people who agreed to the old one, with
-no mechanism to notice. That is this roadmap's Rule 1 — a change to how we
-ship comes before the things it would ship — applied to policy rather than
-to code.
-
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
@@ -1425,3 +1318,130 @@ someone added to a real group stays on that roster.
 exercise a background job will, once that job runs, contain state the fixture
 did not create. "Delete everything with my prefix" is only true before the
 first tick.
+
+### 37. Updating the Privacy Policy or Terms should force everyone to re-agree — shipped in v0.4.4
+
+Asked (Aug 2026): every time the Privacy Policy or the Terms change, people
+should be logged out before their next visit, so they have to agree to the
+updated version before using the app again.
+
+**Nothing in the app records agreement to anything today.** There is no
+`accepted_*` column, no policy version server-side, and no consent check
+anywhere — logging in *is* the implicit agreement, and the policy's own
+"last updated" is `LAST_UPDATED`, a hand-maintained string constant in
+`frontend/src/lib/legal.ts`. So this is two mechanisms, not one, and the
+second is the one that makes it mean something:
+
+1. **Revoke.** `revokeAllSessionsForUser` already exists in `lib/sessions.ts`
+   — the logout half is a single call per user, or one `UPDATE sessions SET
+   revoked_at = ?` across the table.
+2. **Record.** A logout on its own does not capture consent; it just puts the
+   login page in front of someone, which is where the agreement is already
+   implicit. Getting the thing actually asked for ("they have to agree")
+   needs a recorded acceptance: `users.accepted_policy_version`, set when
+   they agree, and refused service until it matches.
+
+**The version has to live in the Worker, not the frontend.** Enforcement is
+server-side or it is decorative — a client-side check is bypassed by not
+being the client. That means the current arrangement inverts: the Worker owns
+`CURRENT_POLICY_VERSION`, the frontend reads it (from `/me`, which the app
+already calls on every load) rather than holding its own copy. Two constants
+that must agree, in two deployables, is exactly the drift
+`scripts/check-env-parity.mjs` exists to catch elsewhere.
+
+**Shape that fits what is already there:** bump a Worker-side
+`CURRENT_POLICY_VERSION`; `requireAuth` (or a middleware just after it)
+returns a distinct status — 403 with a machine-readable code, not a bare
+403 — when `users.accepted_policy_version` is behind it; the frontend shows
+the agreement screen and calls `POST /me/accept-policy`; every other route
+stays refused until it does. Revoking sessions at the same time is then the
+belt to that braces, and it is what makes it a *logout* as asked rather than
+a quiet interstitial.
+
+**Decided (Aug 2026), all four, after a walkthrough.** The finding that
+shaped the first two: `DELETE /me` and `GET /me/export` both sit behind
+`requireAuth`, so **a logged-out person cannot leave properly or take their
+data with them.** "Agree or you cannot use the app" needs an answer for
+someone who genuinely will not agree, and the only honest answers are *leave*
+and *export*, both of which need a session. So the shape is a hybrid rather
+than either extreme:
+
+1. A version bump revokes every session — the logout, unambiguously.
+2. Their next visit is the login page (public, and it links both documents).
+   They log in, and the session issued is **unaccepted**: a check just after
+   `requireAuth` refuses every route except `GET /me`, `GET /me/export`,
+   `DELETE /me` and `POST /me/accept-policy`.
+3. Accepting unlocks everything. Declining leaves them able to export, to
+   delete, and to change their mind later.
+
+Logging in therefore stops implying agreement, which is the thing that is
+wrong today.
+
+- **Declining keeps the exit door open**, as above. One caveat on
+  presentation: `deleteUserCompletely` revokes sessions and then deletes
+  **every event that person organised**, not only their own rows — so
+  "delete my account" has blast radius on other people's calendars and must
+  not sit one click from "I don't agree". Link to the existing Settings flow
+  with its confirmation.
+- **DMs keep going.** This is the architectural default rather than a new
+  behaviour: the cron never reads sessions (its only reference is
+  `pruneStaleSessions`, housekeeping), and recipients come from
+  `event_invites` and `users.notifications_enabled`. Suppressing them is the
+  option that costs work, and its cost lands on the wrong person — someone
+  misses a session because they have not opened the website yet, and so does
+  whoever organised it. Revisit only if a policy change is specifically about
+  notifications.
+- **The version is a hand-maintained constant**, not derived from the
+  documents' contents. `legal.ts` already argues this case for `APP_VERSION`:
+  a derived value makes "published" mean "last redeployed". Deriving this one
+  from a content hash would log out every user for a typo fix. A CI guard
+  against the forgotten bump was considered and left out for now — if it is
+  ever added it has to be able to *fail usefully*, with a documented override
+  for non-substantive edits, per what item 31 cost.
+- **One version covering both documents.** They change rarely and almost
+  always together; two counters double the bookkeeping and force the
+  acceptance screen to explain which document moved. Accepted cost: splitting
+  them later needs a migration, which is cheap in a repo that does them
+  routinely and may never be needed.
+
+**One more thing, small and easy to get wrong:** new users must be stamped
+with the current version at signup (`upsertUser`), or someone who has just
+created an account meets an acceptance gate as the first screen after the
+login that created it.
+
+**Specced as `specs/0012-policy-reacceptance.md`.** The design that made it
+cheap: rather than a mass `UPDATE sessions` triggered by a deploy step
+somebody has to remember, the session row records the policy version it was
+issued under and `isSessionActive` requires it to still match. Bumping the
+constant then invalidates every outstanding session lazily, on each holder's
+next request — no mass write, nothing to run twice, and no extra query, since
+`isSessionActive` already selects that row.
+
+**Why this is worth doing before the next policy change rather than after.**
+Two scheduled items rewrite the Privacy Policy:
+`specs/0007-server-noticeboard.md` (blocked on it) and
+`specs/0011-groups-without-servers.md` (changes what a group is). Both would
+ship a materially different policy to people who agreed to the old one, with
+no mechanism to notice. That is this roadmap's Rule 1 — a change to how we
+ship comes before the things it would ship — applied to policy rather than
+to code.
+
+**Done in v0.4.4**, per `specs/0012-policy-reacceptance.md`, and the build
+found a cheaper mechanism than the capture assumed. The obvious version is a
+mass `UPDATE sessions SET revoked_at` fired by a deploy step somebody has to
+remember; instead the session row records the policy version it was issued
+under and `isSessionActive` requires it to still match. Bumping the constant
+invalidates every outstanding session lazily, on each holder's next request —
+no write, no deploy step, nothing to run twice, and no extra query, because
+that function already reads the row.
+
+Ships **dormant** at version 1 with matching migration defaults, so nobody was
+logged out on the day it deployed. The mechanism was exercised on the sandbox
+by bumping the constant there by hand.
+
+The trap the spec named was real and is now pinned: `upsertUser` runs on every
+login, so `accepted_policy_version` is in its INSERT list and not in its
+`ON CONFLICT DO UPDATE` list. Verified by introducing exactly that mutation —
+the named test fails and nothing else in the suite does, which is the whole
+reason it exists. Without it the feature would have looked finished and done
+nothing.
