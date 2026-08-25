@@ -378,7 +378,8 @@ shifts.
 | 32 | `sendBotDm` discards the sent message id | S | 3.75 | 0.5 | 19 | in 19's spec |
 | 33 | Ground and vaporators unpinned since v0.4 | S | 3.8 | TBD | — | none needed |
 | 35 | Discord avatars where people are listed | S | 3.8 | TBD | — | none needed |
-| 34 | Groups are visible to server members who aren't in them | M | — | — | the 0007 privacy call | TBD |
+| 34 | Groups are visible to server members who aren't in them | S | 3.8 | TBD | — | decided, none needed |
+| 36 | Should groups be server-agnostic (share-a-server rule)? | L | — | — | 5, 34, 0007's premise | TBD |
 
 Ideas 15–19 were captured after this roadmap was first written and had never
 been scheduled; they're placed above. Ideas 21 and 22 were found while writing
@@ -422,18 +423,35 @@ notes on that placement:
   per the rule item 23 wrote down — which is item 23 continuing to cost
   something on every frontend change, and an argument for finally closing it.
 
-- **34 is unscheduled on purpose, and it is a decision rather than a task.**
-  A server member currently sees every group in that server, and every one of
-  those groups' full member lists — not through a leak but because both group
-  routes join on guild membership alone. That is arguably the same call
-  `specs/0007-server-noticeboard.md` already made for events (a server is "more
-  public noticeboard type thing than anything"), in which case the fix is a
-  Privacy Policy line and a note on the Groups page rather than a query change.
-  But it was never decided for groups; it fell out of the query. It shares
-  0007's blocker — the Privacy Policy currently promises something else — so
-  the two want deciding together, and that decision is Michael's rather than
-  the roadmap's. If it lands as "restrict", the cheap middle option (show
-  groups, hide rosters) is the one that keeps the invitee picker working.
+- **34 was a decision rather than a task, and the decision has been made:
+  you see only the groups you are in.** The strictest of the three options,
+  chosen over consistency with `specs/0007-server-noticeboard.md` on the
+  grounds that 0007's noticeboard argument is about *events* — things that
+  happen at a time — and a group roster is a list of people. That makes it a
+  small, understood change, so Rule 2 puts it in **Phase 3.8** with the other
+  frontend-adjacent errands, with one caveat that belongs in the changelog in
+  plain words: it restricts *inviting*, not just viewing. The New Event form's
+  invitee picker is fed by `GET /guilds/:id/groups`, so an organizer will no
+  longer be able to invite a group they are not part of.
+
+- **36 is the same question asked properly, and it is the one worth a spec.**
+  If a group need not belong to a server at all — just a list of people, with
+  the rule that you can only add someone you share a server with — then "the
+  groups you can see" and "the groups you are in" are the same set by
+  construction, and 34 stops being a patch. It also finishes what idea 5
+  started: v0.3 moved *viewing* off servers and its spec said explicitly which
+  half was staying put ("server stays load-bearing for invitation"). This moves
+  that half. The recommendation in `IDEAS.md` is the adder-anchored rule (you
+  may add someone if you share a server with them), whose honest cost is that
+  two people in one group may share no server and will see each other on an
+  invite list — a real loosening that belongs in the Privacy Policy in those
+  words. **The reason it should not sit in the backlog indefinitely:** its
+  hardest question is what happens to `events.guild_id`, which is
+  `NOT NULL REFERENCES guilds(id)` and is the whole premise of 0007's
+  noticeboard scope. 0007 is specced but unbuilt, so this is the cheap moment
+  to decide it; after 0007 ships it becomes a change to a shipped surface.
+  Sequenced after v0.5 unless the noticeboard is brought forward, in which case
+  they should be designed together.
 
 - **The tail did not shift.** v0.4.1 is inserted, not substituted: 0.5 through
   0.7 keep their contents. That is the roadmap behaving as designed — a new

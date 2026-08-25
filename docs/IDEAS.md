@@ -380,6 +380,31 @@ is what makes option 3 implementable at all.
 The Privacy Policy needs reading before any of the three is chosen; it is
 already the blocker on 0007, and this touches the same promise.
 
+**Decided (Aug 2026): option 3 — you see only the groups you are in**, even
+when the group is on a server you are in. That is the strictest of the three
+and it was chosen over the noticeboard-consistency argument deliberately: a
+group roster is a list of *people*, and spec 0007's reasoning about a server
+being a public noticeboard was about *events*, which are things that happen at
+a time. "Who is in this D&D party" is not a listing on a noticeboard.
+
+**The consequence to go in with eyes open: it restricts inviting, not just
+viewing.** `GET /guilds/:id/groups` is what feeds the New Event form's
+invitee picker, so an organizer who can only see groups they are in can only
+*invite* groups they are in. Today they can invite any group on the server.
+That is a real behaviour change, and it is the right one — inviting twelve
+people you cannot name, by picking a group you are not part of, is the same
+leak from the other side — but it will be noticed, and it should be in the
+changelog in those words rather than as "improved privacy".
+
+It also removes the "browse the server's groups and ask to be added" path,
+which was option 3's stated cost. Accepted: asking happens in Discord, where
+these people already are, and the app is not where that conversation belongs.
+
+This makes 34 a small, decided change rather than an open question, so it
+moves onto the roadmap. Note it lands naturally as part of item 36 too — if
+groups stop being server-scoped at all, "the groups you can see" and "the
+groups you are in" become the same set by construction.
+
 ### 35. Show Discord avatars where people are listed
 
 Requested: people's Discord profile pictures when looking at who to add to a
@@ -413,6 +438,81 @@ Three things to get right rather than discover:
   loading these tells Discord the IP of everyone viewing the page, which is
   worth a Privacy Policy line even though every user here is already a Discord
   user.
+
+### 36. Should a group be server-agnostic, requiring only that people share a server?
+
+Asked (Aug 2026) alongside the decision on 34, and it is the more interesting
+half: rather than a group belonging to one server, let a group be just a list
+of people, with the rule that you can only put someone in it if you share at
+least one server with them.
+
+**Why this is directionally right.** It finishes what idea 5 started. v0.3
+made *viewing* server-agnostic (the calendar spans every server; the switcher
+went away; server became a label). Idea 5's spec drew the boundary explicitly
+and said which half was not moving: "server stays load-bearing for
+*invitation*... Servers stop mattering for *viewing*; they keep mattering for
+*who you can add*." This asks whether that remaining half can move too, and
+the answer is: it can, provided the property being protected is stated
+correctly. The guild is not a filing category — it is *proof that these people
+already know each other*. `filterActiveGuildMembers` exists so that knowing a
+user's ID is not enough to graft them onto a roster or DM them a private
+event's title.
+
+**"Shares a server" with whom, though — this is the whole design.** Three
+readings, and they are not close to equivalent:
+- **Pairwise** (every member shares a server with every other member).
+  Preserves today's guarantee exactly, and is the only one that does. It is
+  also O(n²) to check, and unstable in a way that has no good repair: one
+  person leaving one server can invalidate a group that was legal when it was
+  built, and there is no sensible answer to "which of these twelve people
+  should the app now eject".
+- **Star, anchored on the adder** (you may add someone if *you* share a server
+  with them). Cheap — one self-join on `user_guild_membership`, which is
+  already indexed `(user_id, is_member)` — stable, and it matches how people
+  actually think about it: I added them, I know them.
+- **Star, anchored on the group owner.** Same shape, but the boundary silently
+  changes if ownership transfers (which item 16 made a real event).
+
+**The recommendation is the adder-anchored star, and the honest cost of it is
+one sentence: two people in the same group may share no server, and will see
+each other's names on an event's invite list.** That is a genuine loosening of
+today's privacy model and must be written in the Privacy Policy in those
+words, not implied. It is also how every group chat anyone has ever been in
+works — you meet friends of friends — which is an argument for it, not an
+excuse to skip saying it.
+
+**What replaces the guild in the code**, roughly:
+- `groups.guild_id` goes away, and with it `assertValidGroupMemberTargets`'s
+  "not current members of this server" check, replaced by a shared-server
+  check between adder and addee.
+- `resolveInvitees` currently filters group-derived invitees against the
+  *event's* guild and silently drops anyone who has drifted out. The natural
+  analogue is to filter against **the organizer** — drop group members who no
+  longer share any server with them — which keeps the same shape (silently
+  drop group-derived, reject directly-chosen) and the same live-revalidation
+  discipline.
+- `events.guild_id` is the hard part, and it is `NOT NULL REFERENCES
+  guilds(id)`. It is load-bearing for the server label/filter and for
+  `specs/0007-server-noticeboard.md`'s entire scope ("what else is on in this
+  server"). Either it becomes nullable and means "filed under", or a
+  cross-server group's event has to nominate a server, which puts the filter
+  back. **0007 is not yet built, so this is the cheap moment to decide it** —
+  after 0007 ships, this becomes a change to a shipped surface.
+
+**One genuinely nice property, worth noting because it is counterintuitive:
+the membership *freshness* check gets cheaper, not dearer.** Today the event's
+guild is fixed, so a stale cached row for that one guild must be revalidated
+against Discord or the request is refused (`MembershipUnavailableError`, 20
+live revalidations per request). Under "share at least one server", the
+question is *does there exist* a shared guild — so any one fresh cached row
+among several shared servers answers it, and only the all-stale case needs a
+live call. More shared servers means more chances to answer from cache.
+
+**Not small, and not v0.5.** It touches groups, invites, the event/guild
+relationship, both frontend pickers, the Privacy Policy and 0007's premise. It
+wants a spec, and the spec's first job is the `events.guild_id` question
+above, because that is the one that gets more expensive the longer it waits.
+
 
 ## Already built
 
