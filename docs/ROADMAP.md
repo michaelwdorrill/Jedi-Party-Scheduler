@@ -380,7 +380,7 @@ shifts.
 | 35 | Discord avatars where people are listed | S | 3.8 | TBD | — | none needed |
 | 34 | Groups are visible to server members who aren't in them | S | 3.8 | TBD | — | decided, none needed |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
-| 37 | Re-agree to the Policy/Terms when they change | M | — | — | — | TBD |
+| 37 | Re-agree to the Policy/Terms when they change | M | — | — | — | decided, spec TBD |
 
 Ideas 15–19 were captured after this roadmap was first written and had never
 been scheduled; they're placed above. Ideas 21 and 22 were found while writing
@@ -461,15 +461,19 @@ notes on that placement:
   a server still revokes your view of its events) — they want a spec, after
   v0.5.
 
-- **37 is a Rule 1 item and should go in front of the two specs that need
-  it.** Nothing in the app records agreement to anything: there is no policy
+- **37 is a Rule 1 item, is now fully decided, and should go in front of the
+  two specs that need it.** Nothing in the app records agreement to anything: there is no policy
   version server-side, no acceptance column, and login is the implicit
   consent. Both `specs/0007` and `specs/0011` rewrite the Privacy Policy, so
   either would ship a materially different policy to people who agreed to the
   old one with no mechanism to notice. That is the same argument Phase 3.7
   made for the sandbox guardrails, applied to policy instead of code — which
   means it wants a slot before the noticeboard or the group model, not after
-  them.
+  them. All four of its open calls were settled in Aug 2026 (see
+  `IDEAS.md`): a logout plus an unaccepted-session gate that keeps export and
+  deletion reachable, DMs unaffected, a hand-maintained version constant, and
+  one version covering both documents. What is left is a short spec and the
+  build.
 
 - **The tail did not shift.** v0.4.1 is inserted, not substituted: 0.5 through
   0.7 keep their contents. That is the roadmap behaving as designed — a new

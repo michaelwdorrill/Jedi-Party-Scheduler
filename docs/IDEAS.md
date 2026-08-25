@@ -578,30 +578,56 @@ stays refused until it does. Revoking sessions at the same time is then the
 belt to that braces, and it is what makes it a *logout* as asked rather than
 a quiet interstitial.
 
-**Four calls this needs before it is built:**
-- **What happens if someone declines.** They cannot use the app; the honest
-  paths are "stay logged out" and "delete my account" (`DELETE /me` already
-  exists and already does a full erase). The screen should offer both rather
-  than trapping them on a wall.
-- **Do the bot's DMs keep going to someone who has not re-agreed?** The cron
-  does not read sessions at all, so by default: yes. Arguably right — they
-  are still an invitee and the reminder is the service working — and
-  arguably not, if the policy change is about what we do with their data.
-  Needs an answer, not a default.
-- **Does every edit bump the version?** Fixing a typo should not log out the
-  world. So the version is bumped deliberately, like `APP_VERSION` is, and is
-  not derived from the file's contents or its `LAST_UPDATED` string.
-- **Terms and Policy: one version or two?** One is simpler and over-fires;
-  two is honest and doubles the bookkeeping. Leaning one, on the grounds that
-  this app changes both rarely and usually together.
+**Decided (Aug 2026), all four, after a walkthrough.** The finding that
+shaped the first two: `DELETE /me` and `GET /me/export` both sit behind
+`requireAuth`, so **a logged-out person cannot leave properly or take their
+data with them.** "Agree or you cannot use the app" needs an answer for
+someone who genuinely will not agree, and the only honest answers are *leave*
+and *export*, both of which need a session. So the shape is a hybrid rather
+than either extreme:
 
-**Considered and not chosen: a soft in-app gate with no logout.** Blocking
-the API until acceptance would achieve consent without discarding sessions or
-forcing an OAuth round trip, which is gentler and equally enforceable. The
-ask was specifically for a logout, and there is a real argument for it — a
-logout is unambiguous, and it puts the login page (which links both
-documents) in front of the person rather than a dialog they can learn to
-dismiss. Recording both here so the choice is visible rather than assumed.
+1. A version bump revokes every session — the logout, unambiguously.
+2. Their next visit is the login page (public, and it links both documents).
+   They log in, and the session issued is **unaccepted**: a check just after
+   `requireAuth` refuses every route except `GET /me`, `GET /me/export`,
+   `DELETE /me` and `POST /me/accept-policy`.
+3. Accepting unlocks everything. Declining leaves them able to export, to
+   delete, and to change their mind later.
+
+Logging in therefore stops implying agreement, which is the thing that is
+wrong today.
+
+- **Declining keeps the exit door open**, as above. One caveat on
+  presentation: `deleteUserCompletely` revokes sessions and then deletes
+  **every event that person organised**, not only their own rows — so
+  "delete my account" has blast radius on other people's calendars and must
+  not sit one click from "I don't agree". Link to the existing Settings flow
+  with its confirmation.
+- **DMs keep going.** This is the architectural default rather than a new
+  behaviour: the cron never reads sessions (its only reference is
+  `pruneStaleSessions`, housekeeping), and recipients come from
+  `event_invites` and `users.notifications_enabled`. Suppressing them is the
+  option that costs work, and its cost lands on the wrong person — someone
+  misses a session because they have not opened the website yet, and so does
+  whoever organised it. Revisit only if a policy change is specifically about
+  notifications.
+- **The version is a hand-maintained constant**, not derived from the
+  documents' contents. `legal.ts` already argues this case for `APP_VERSION`:
+  a derived value makes "published" mean "last redeployed". Deriving this one
+  from a content hash would log out every user for a typo fix. A CI guard
+  against the forgotten bump was considered and left out for now — if it is
+  ever added it has to be able to *fail usefully*, with a documented override
+  for non-substantive edits, per what item 31 cost.
+- **One version covering both documents.** They change rarely and almost
+  always together; two counters double the bookkeeping and force the
+  acceptance screen to explain which document moved. Accepted cost: splitting
+  them later needs a migration, which is cheap in a repo that does them
+  routinely and may never be needed.
+
+**One more thing, small and easy to get wrong:** new users must be stamped
+with the current version at signup (`upsertUser`), or someone who has just
+created an account meets an acceptance gate as the first screen after the
+login that created it.
 
 **Why this is worth doing before the next policy change rather than after.**
 Two scheduled items rewrite the Privacy Policy:
