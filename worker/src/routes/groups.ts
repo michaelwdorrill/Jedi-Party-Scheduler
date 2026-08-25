@@ -34,6 +34,24 @@ async function loadGroupMembers(db: D1Database, groupId: string) {
   }));
 }
 
+// A group's roster is a list of people, so being in the same server as those
+// people is not a reason to be handed it (IDEAS item 34). Every read and
+// every write below requires membership of the group itself.
+//
+// This does not replace the guild check it sits beside, and the two are not
+// redundant: `group_members` rows survive someone leaving a server, so
+// membership of the group alone would let a departed member keep their
+// access forever. Both must hold -- in the group, and still in the server it
+// belongs to.
+async function isGroupMember(env: Env, groupId: string, userId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT 1 AS ok FROM group_members WHERE group_id = ? AND user_id = ?`,
+  )
+    .bind(groupId, userId)
+    .first<{ ok: number }>();
+  return !!row;
+}
+
 // Validates every target ID is a current active member of the group's guild
 // and rejects the whole request atomically if any isn't -- a caller
 // shouldn't be able to graft a user from another guild onto this roster.
@@ -49,10 +67,14 @@ groupRoutes.get('/:groupId', async (c) => {
   const userId = c.get('userId');
   const groupId = c.req.param('groupId');
   const group = await c.env.DB.prepare(`SELECT * FROM groups WHERE id = ?`).bind(groupId).first<GroupRow>();
-  // A group UUID alone must not be enough to read the roster -- the caller
-  // has to be a current active member of the group's own guild, not just
-  // logged in as *someone*.
-  if (!group || !(await requireActiveGuildMember(c.env, userId, group.guild_id))) {
+  // A group UUID alone must not be enough to read the roster -- and neither
+  // is being in the same server as it. The caller has to be in the group,
+  // and still an active member of the server it belongs to.
+  if (
+    !group ||
+    !(await isGroupMember(c.env, group.id, userId)) ||
+    !(await requireActiveGuildMember(c.env, userId, group.guild_id))
+  ) {
     return c.text('Not found', 404);
   }
 
@@ -71,7 +93,11 @@ groupRoutes.patch('/:groupId', async (c) => {
   const userId = c.get('userId');
   const groupId = c.req.param('groupId');
   const group = await c.env.DB.prepare(`SELECT * FROM groups WHERE id = ?`).bind(groupId).first<GroupRow>();
-  if (!group || !(await requireActiveGuildMember(c.env, userId, group.guild_id))) {
+  if (
+    !group ||
+    !(await isGroupMember(c.env, group.id, userId)) ||
+    !(await requireActiveGuildMember(c.env, userId, group.guild_id))
+  ) {
     return c.text('Not found', 404);
   }
   if (group.created_by !== userId) return c.text('Forbidden', 403);
@@ -150,7 +176,11 @@ groupRoutes.delete('/:groupId', async (c) => {
   const userId = c.get('userId');
   const groupId = c.req.param('groupId');
   const group = await c.env.DB.prepare(`SELECT * FROM groups WHERE id = ?`).bind(groupId).first<GroupRow>();
-  if (!group || !(await requireActiveGuildMember(c.env, userId, group.guild_id))) {
+  if (
+    !group ||
+    !(await isGroupMember(c.env, group.id, userId)) ||
+    !(await requireActiveGuildMember(c.env, userId, group.guild_id))
+  ) {
     return c.text('Not found', 404);
   }
   if (group.created_by !== userId) return c.text('Forbidden', 403);
@@ -176,7 +206,11 @@ groupRoutes.post('/:groupId/members', async (c) => {
   const userId = c.get('userId');
   const groupId = c.req.param('groupId');
   const group = await c.env.DB.prepare(`SELECT * FROM groups WHERE id = ?`).bind(groupId).first<GroupRow>();
-  if (!group || !(await requireActiveGuildMember(c.env, userId, group.guild_id))) {
+  if (
+    !group ||
+    !(await isGroupMember(c.env, group.id, userId)) ||
+    !(await requireActiveGuildMember(c.env, userId, group.guild_id))
+  ) {
     return c.text('Not found', 404);
   }
   if (group.created_by !== userId) return c.text('Forbidden', 403);
@@ -198,7 +232,11 @@ groupRoutes.delete('/:groupId/members/:userId', async (c) => {
   const groupId = c.req.param('groupId');
   const targetUserId = c.req.param('userId');
   const group = await c.env.DB.prepare(`SELECT * FROM groups WHERE id = ?`).bind(groupId).first<GroupRow>();
-  if (!group || !(await requireActiveGuildMember(c.env, requesterId, group.guild_id))) {
+  if (
+    !group ||
+    !(await isGroupMember(c.env, group.id, requesterId)) ||
+    !(await requireActiveGuildMember(c.env, requesterId, group.guild_id))
+  ) {
     return c.text('Not found', 404);
   }
   if (group.created_by !== requesterId) return c.text('Forbidden', 403);

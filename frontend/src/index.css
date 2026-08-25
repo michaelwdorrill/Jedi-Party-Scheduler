@@ -82,10 +82,33 @@ body {
   background: theme('colors.accent');
 }
 
-/* Vaporators on the horizon, at the foot of the page. Rendered by Layout and
- * simply not shown under twin-suns. */
-[data-scenery='twin-suns'] .horizon-foot {
-  display: none;
+/* The ground and its vaporators, pinned to the bottom edge of the fixed sky
+ * layer rather than scaled with the viewport, so the horizon sits at a
+ * consistent height on any screen.
+ *
+ * This rule is load-bearing and was missing for two releases: 4a0ee7e reused
+ * the .uo-ground and .uo-vaporators blocks for other classes, and because the
+ * markup still carried the old names nothing broke loudly -- both elements
+ * silently became position: static and rendered in flow at the top of the
+ * layer. The whole scene is one element now, which is one fewer name that can
+ * be orphaned this way.
+ *
+ * (The old .horizon-foot rule that lived here went with it. It had been dead
+ * since the scene moved into Sky.tsx -- nothing rendered that class. Twin-suns
+ * hides the entire .uo-sky, so it needs no separate opt-out.) */
+.uo-horizon {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  /* The viewBox is 400 units tall and its sand is the bottom 150, so 40vh
+   * here keeps the sand itself at the 15vh the original ground had, and
+   * spends the rest on headroom for the masts. Sizing this to the dunes
+   * alone is what made the vaporators stubs: a mast can only ever be a
+   * fraction of the box it is drawn in. Everything above the sand is
+   * transparent, so this is taller without covering anything. */
+  height: 40vh;
+  min-height: 240px;
 }
 
 

@@ -84,30 +84,47 @@ export default function Sky() {
         <Sprite key={c.className} {...c} />
       ))}
 
-      {/* The ground, pinned to the bottom edge at every window size. */}
-      <svg className="uo-ground" viewBox="0 0 1000 150" preserveAspectRatio="none">
+      {/* The ground and the vaporators standing on it, in ONE svg.
+          They were two, with viewBoxes of different heights, both carrying
+          preserveAspectRatio="none" -- so each was stretched by a different
+          factor at every window size and a vaporator's foot could only meet
+          the dune line at one aspect ratio. One viewBox puts the feet and the
+          dunes in the same coordinate space, so they stretch together and
+          stay joined at any size.
+
+          The rules that positioned these were deleted by 4a0ee7e, which
+          reused their declaration blocks for .uo-haze and .uo-craft while the
+          markup kept the class names -- so from v0.4 until now both were
+          position: static, in flow at the *top* of the sky layer rather than
+          at the foot of it. Hence a single .uo-horizon that is pinned here
+          and cannot be silently orphaned by a class rename again. */}
+      <svg className="uo-horizon" viewBox="0 0 1000 400" preserveAspectRatio="none">
+        {/* Vaporators first, so the near dune below overlaps their feet and
+            they read as standing *in* the sand rather than on top of it. The
+            masts end at y=340, below the lowest point of both dune paths, so
+            they cannot rise out of the sand however the dunes are reshaped. */}
+        <g fill="#0D0805">
+          <rect x="117" y="150" width="6" height="190" />
+          <ellipse cx="120" cy="147" rx="9" ry="11" />
+          <rect x="157" y="196" width="5" height="144" />
+          <ellipse cx="159.5" cy="193" rx="6.5" ry="8" />
+          <rect x="841" y="170" width="5.5" height="170" />
+          <ellipse cx="844" cy="167" rx="8" ry="9.5" />
+        </g>
+        <circle className="uo-drop-a" cx="120" cy="160" r="3" fill="#6FA8A8" opacity="0" />
+        <circle className="uo-drop-b" cx="844" cy="180" r="2.6" fill="#6FA8A8" opacity="0" />
+
+        {/* The sand occupies the bottom 150 of 400 units. The 250 above it is
+            empty on purpose: it is the headroom the masts need. Confining the
+            whole scene to the height of the dunes is what made them stubs. */}
         <path
-          d="M0 44 C 160 24, 340 40, 520 32 C 700 24, 860 42, 1000 34 L1000 150 L0 150 Z"
+          d="M0 294 C 160 274, 340 290, 520 282 C 700 274, 860 292, 1000 284 L1000 400 L0 400 Z"
           fill="#170F0A"
         />
         <path
-          d="M0 66 C 200 52, 420 64, 640 56 C 820 50, 920 62, 1000 58 L1000 150 L0 150 Z"
+          d="M0 316 C 200 302, 420 314, 640 306 C 820 300, 920 312, 1000 308 L1000 400 L0 400 Z"
           fill="#120B07"
         />
-      </svg>
-
-      {/* Vaporators standing on that ground, with condensate. */}
-      <svg className="uo-vaporators" viewBox="0 0 1000 120" preserveAspectRatio="none">
-        <g fill="#0D0805">
-          <rect x="118" y="34" width="4" height="86" />
-          <ellipse cx="120" cy="32" rx="8.5" ry="10" />
-          <rect x="158" y="52" width="3" height="68" />
-          <ellipse cx="159.5" cy="50" rx="6" ry="7.5" />
-          <rect x="842" y="44" width="3.6" height="76" />
-          <ellipse cx="844" cy="42" rx="7.5" ry="9" />
-        </g>
-        <circle className="uo-drop-a" cx="120" cy="42" r="2.6" fill="#6FA8A8" opacity="0" />
-        <circle className="uo-drop-b" cx="844" cy="52" r="2.3" fill="#6FA8A8" opacity="0" />
       </svg>
     </div>
   );

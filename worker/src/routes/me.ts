@@ -108,26 +108,37 @@ meRoutes.get('/events', async (c) => {
   return c.json(await buildCalendarOccurrences(c.env, userId, from, to));
 });
 
-// Every group across every server the caller is still an active member of.
-// The per-guild equivalent (GET /guilds/:id/groups) still exists for the
-// event form's invitee picker, which is legitimately server-scoped -- this
-// one exists so the Groups page doesn't need a server chosen up front, the
-// same reason /me/events does (spec 0006).
+// Every group the caller is a member of, across every server they are still
+// an active member of. The only group-listing endpoint there is: the
+// per-guild GET /guilds/:id/groups was removed in v0.4.3 (IDEAS item 34),
+// which is why the event form's invitee picker now reads this one too.
 meRoutes.get('/groups', async (c) => {
   const userId = c.get('userId');
 
-  // Same membership predicate as the calendar: leaving a server has to take
-  // its groups off your list, and a membership row nothing has confirmed
-  // within the grace window stops counting.
+  // Two predicates doing two different jobs, and both are load-bearing.
+  //
+  // `group_members` is the visibility rule (item 34): a group's roster is a
+  // list of people, and being in the same server as those people is not a
+  // reason to be handed it. Before this, any member of a server received
+  // every group in it *and* every one of those groups' full member lists --
+  // not through a leak, but because the query only ever joined on guild
+  // membership.
+  //
+  // The `user_guild_membership` join stays anyway, and is not made redundant
+  // by the first: `group_members` rows are not deleted when someone leaves a
+  // server, so without it a departed member would keep seeing that server's
+  // groups forever. Same freshness bound the calendar and the cron's
+  // recipient queries use, rather than trusting a row of unbounded age.
   const { results: groups } = await c.env.DB.prepare(
     `SELECT gr.id, gr.guild_id, gr.name, gr.game, gr.idle_reminder_days, gr.created_by, g.name AS guild_name
      FROM groups gr
+     JOIN group_members mine ON mine.group_id = gr.id AND mine.user_id = ?
      JOIN user_guild_membership m
        ON m.guild_id = gr.guild_id AND m.user_id = ? AND m.is_member = 1 AND m.verified_at >= ?
      JOIN guilds g ON g.id = gr.guild_id AND g.is_active = 1
      ORDER BY g.name, gr.name`,
   )
-    .bind(userId, Date.now() - MEMBERSHIP_GRACE_MS)
+    .bind(userId, userId, Date.now() - MEMBERSHIP_GRACE_MS)
     .all<{
       id: string;
       guild_id: string;

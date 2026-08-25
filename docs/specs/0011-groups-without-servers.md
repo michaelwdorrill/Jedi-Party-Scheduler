@@ -46,6 +46,14 @@ Three candidate rules were considered. The chosen one is the third.
 So: a group is a list of people, plus the invariant that its **common-server
 set** is non-empty. An event picks its venue from that set.
 
+The plainest statement of what that buys, from the person who asked for it:
+*"If all 5 are on server A and B, that group should be selectable for both
+servers."* Today it is selectable for exactly one — whichever server it was
+created on — because `groups.guild_id` is a single column and the event form
+filters by it. Under this rule the group's common-server set is {A, B} and it
+is offered for an event on either. Read the rest of this spec against that
+sentence.
+
 ## The common-server set
 
 For a roster, one query, and it is the whole mechanism:

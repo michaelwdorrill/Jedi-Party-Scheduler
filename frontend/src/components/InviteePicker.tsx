@@ -1,3 +1,4 @@
+import { Avatar } from './ui';
 import type { Friend, Group } from '../types';
 
 export default function InviteePicker({
@@ -57,12 +58,13 @@ export default function InviteePicker({
                   type="button"
                   key={f.id}
                   onClick={() => onToggleUser(f.id)}
-                  className={`rounded-full border px-3 py-1 text-sm ${
+                  className={`flex items-center gap-2 rounded-full border py-1 pl-1 pr-3 text-sm ${
                     checked
                       ? 'border-accent-hover bg-accent text-on-accent'
                       : 'border-edge-strong text-ink-dim hover:bg-raised'
                   }`}
                 >
+                  <Avatar userId={f.id} name={f.globalName ?? f.username} avatarHash={f.avatarHash} />
                   {f.globalName ?? f.username}
                 </button>
               );

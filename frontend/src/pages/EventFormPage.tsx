@@ -119,11 +119,17 @@ export default function EventFormPage() {
     if (!effectiveGuildId) return;
     Promise.all([
       api.get<Friend[]>(`/me/friends?guild_id=${effectiveGuildId}`),
-      api.get<Group[]>(`/guilds/${effectiveGuildId}/groups`),
+      // The groups you are in, not every group on this server (IDEAS item
+      // 34) -- the per-guild listing is gone. Filtering client-side is safe
+      // rather than merely convenient: the server re-checks every group
+      // against the event's guild when it resolves the invite list
+      // (resolveInvitees), so a group id from the wrong server invites
+      // nobody however it got into the request.
+      api.get<Group[]>('/me/groups'),
     ]).then(
       ([f, g]) => {
         setFriends(f);
-        setGroups(g);
+        setGroups(g.filter((group) => group.guildId === effectiveGuildId));
         setInviteesError(null);
       },
       (e: unknown) => {
