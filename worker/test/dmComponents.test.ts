@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runReminderSweep } from '../src/cron/reminders';
 import { parseCustomId } from '../src/lib/interactions';
@@ -6,6 +8,7 @@ import {
   DM_CHANNEL_RULE,
   dmSendRule,
   HOUR_MS,
+  membershipRule,
   seedEvent,
   seedGuild,
   seedInvite,
@@ -211,5 +214,53 @@ describe('components survive a failed delivery', () => {
     const retried = sentMessages(fetchStub).find((m) => m.content.includes('Game night'));
     expect(retried).toBeDefined();
     expect(firstRow<Button>(retried!).map((b) => b.custom_id)).toContain('uo:v1:rsvp:accepted:e3');
+  });
+});
+
+// The fixture, end to end: does scripts/seed-button-demo.sql actually cause a
+// DM with controls to be addressed to the operator? Asserting it here is
+// cheaper than discovering it fifteen minutes later by staring at Discord.
+describe('scripts/seed-button-demo.sql', () => {
+  const OPERATOR = '346042183486537730';
+
+  it('produces a DM to the operator carrying controls, on the next tick', async () => {
+    const { db, env } = setup();
+    const now = Date.now();
+    // The operator and a real guild they are in -- what the seed chain hangs
+    // everything off.
+    await db.prepare(`INSERT INTO guilds (id, name, is_active, added_at) VALUES ('real-guild', 'Real', 1, ?)`).bind(now).run();
+    await seedUser(db, OPERATOR);
+    await db
+      .prepare(`INSERT INTO user_guild_membership (user_id, guild_id, is_member, verified_at) VALUES (?, 'real-guild', 1, ?)`)
+      .bind(OPERATOR, now)
+      .run();
+
+    for (const file of ['seed-sandbox.sql', 'seed-poll-demo.sql', 'seed-button-demo.sql']) {
+      db.raw.exec(readFileSync(join(__dirname, '..', 'scripts', file), 'utf8'));
+    }
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    // Several ticks, not one, and that is the fixture's real behaviour rather
+    // than a concession: a freshly re-run seed-sandbox.sql leaves a backlog of
+    // notifications for synthetic users, and on the Free plan's allowance the
+    // first tick spends itself on those before it reaches these. The outbox is
+    // resumable by construction, so the rest follow on the next ticks -- which
+    // on the real sandbox means the second DM can be fifteen minutes behind
+    // the first.
+    for (let tick = 0; tick < 4; tick++) await runReminderSweep(env);
+
+    const messages = sentMessages(fetchStub);
+    const withControls = messages.filter((m) => m.components && m.components.length > 0);
+    expect(withControls.length).toBeGreaterThan(0);
+
+    const fixed = messages.find((m) => m.content.includes('Button check (fixed time)'));
+    expect(fixed).toBeDefined();
+    expect(firstRow<Button>(fixed!).map((b) => b.label)).toEqual(["I'm in", 'Maybe', "Can't make it"]);
+
+    const poll = messages.find((m) => m.content.includes('Button check (which nights?)'));
+    expect(poll).toBeDefined();
+    const [select] = firstRow<Select>(poll!);
+    expect(parseCustomId(select.custom_id)).toEqual({ kind: 'vote', eventId: 'demo-btn-poll' });
+    expect(select.options).toHaveLength(3);
   });
 });

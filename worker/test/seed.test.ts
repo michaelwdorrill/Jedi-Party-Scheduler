@@ -200,3 +200,89 @@ describe('seed-poll-demo.sql', () => {
     expect(earliest.n).toBeGreaterThan(now);
   });
 });
+
+// scripts/seed-button-demo.sql, tested the same way and for the same reason:
+// a seed that fails does so against the real sandbox, minutes after you have
+// switched context to look at Discord.
+describe('seed-button-demo.sql', () => {
+  const BUTTON_SQL = readFileSync(join(__dirname, '..', 'scripts', 'seed-button-demo.sql'), 'utf8');
+  const POLL_DEMO_SQL = readFileSync(join(__dirname, '..', 'scripts', 'seed-poll-demo.sql'), 'utf8');
+  // seed-sandbox.sql is what creates the seed users; seed-poll-demo.sql only
+  // gives them membership of the operator's real guild. Running the chain in
+  // the test is what proves the order documented in the file is the real one.
+  const OPERATOR = '346042183486537730';
+
+  // What seed-poll-demo.sql needs to find before it does anything: the
+  // operator, and an active guild they are actually in.
+  function seedOperator(db: ReturnType<typeof createTestDb>) {
+    const now = Date.now();
+    db.raw.exec(`INSERT INTO guilds (id, name, is_active, added_at) VALUES ('real-guild', 'Real', 1, ${now})`);
+    db.raw.exec(
+      `INSERT INTO users (id, username, global_name, avatar_hash, timezone, notifications_enabled,
+         created_at, updated_at, last_login_at, last_login_attempt_at)
+       VALUES ('${OPERATOR}', 'michael', NULL, NULL, 'America/New_York', 1, ${now}, ${now}, ${now}, ${now})`,
+    );
+    db.raw.exec(
+      `INSERT INTO user_guild_membership (user_id, guild_id, is_member, verified_at)
+       VALUES ('${OPERATOR}', 'real-guild', 1, ${now})`,
+    );
+  }
+
+  it('applies to a schema built from the migrations, and is re-runnable', () => {
+    const db = createTestDb();
+    seedOperator(db);
+    db.raw.exec(SEED_SQL);
+    db.raw.exec(POLL_DEMO_SQL);
+
+    expect(() => db.raw.exec(BUTTON_SQL)).not.toThrow();
+    expect(() => db.raw.exec(BUTTON_SQL)).not.toThrow();
+
+    const events = db.raw.prepare(`SELECT COUNT(*) AS n FROM events WHERE id LIKE 'demo-btn-%'`).get() as { n: number };
+    expect(events.n).toBe(2);
+  });
+
+  it('invites the operator to events someone else organises, which is the whole point', () => {
+    const db = createTestDb();
+    seedOperator(db);
+    db.raw.exec(SEED_SQL);
+    db.raw.exec(POLL_DEMO_SQL);
+    db.raw.exec(BUTTON_SQL);
+
+    // If the operator were the organizer, sweepNewInvites would skip them and
+    // no DM would ever arrive -- which is exactly why seed-poll-demo.sql does
+    // not serve this purpose.
+    const organizers = db.raw
+      .prepare(`SELECT DISTINCT organizer_id AS o FROM events WHERE id LIKE 'demo-btn-%'`)
+      .all() as { o: string }[];
+    expect(organizers.map((r) => r.o)).toEqual(['seed-user-alice']);
+
+    const invited = db.raw
+      .prepare(`SELECT COUNT(*) AS n FROM event_invites WHERE event_id LIKE 'demo-btn-%' AND user_id = '${OPERATOR}'`)
+      .get() as { n: number };
+    expect(invited.n).toBe(2);
+  });
+
+  it('puts the poll deadline inside the window the deadline sweep scans', () => {
+    const db = createTestDb();
+    seedOperator(db);
+    db.raw.exec(SEED_SQL);
+    db.raw.exec(POLL_DEMO_SQL);
+    db.raw.exec(BUTTON_SQL);
+
+    const poll = db.raw
+      .prepare(`SELECT poll_deadline_at AS d FROM events WHERE id = 'demo-btn-poll'`)
+      .get() as { d: number };
+    // sweepPollDeadlineReminders looks 24 hours ahead; a deadline outside it
+    // is why seed-poll-demo.sql's week-out poll never nudges anyone.
+    expect(poll.d).toBeGreaterThan(Date.now());
+    expect(poll.d).toBeLessThan(Date.now() + 24 * 60 * 60 * 1000);
+  });
+
+  it('is a clean no-op when the operator is not in any active guild', () => {
+    const db = createTestDb();
+    // No operator, no guild: nothing to hang the fixtures off.
+    expect(() => db.raw.exec(BUTTON_SQL)).not.toThrow();
+    const events = db.raw.prepare(`SELECT COUNT(*) AS n FROM events WHERE id LIKE 'demo-btn-%'`).get() as { n: number };
+    expect(events.n).toBe(0);
+  });
+});
