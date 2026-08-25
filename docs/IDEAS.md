@@ -790,3 +790,51 @@ roadmap gets revisited between phases.
     `sandbox` to the commit it just shipped, so the sandbox is never behind
     production even when a change skipped it — which is a different claim
     from "this was tested on sandbox", but a much easier one to keep true.
+
+31. **The sandbox advisory on the production deploy can never pass under a
+    merge-commit workflow, so it fires on every release regardless.**
+    Guardrail 3 in `deploy-worker.yml` asks the GitHub Deployments API
+    `?environment=sandbox&sha=${{ github.sha }}` — that is, *this exact
+    commit*. But `github.sha` on a push to `main` is the **merge commit**,
+    which by construction did not exist when the sandbox was deployed: the
+    sandbox is deployed from the feature branch's head, and merging creates
+    a new commit with the same tree and a different SHA.
+
+    So the check compares a SHA that cannot match. It reports "no matching
+    sandbox deployment" on a release that went through the sandbox properly,
+    and on one that skipped it entirely, and there is no way to tell the two
+    apart from its output.
+
+    Found on the v0.4.1 production deploy, which was verified on the sandbox
+    at `692eb89` and merged as `ec8b33d`. The advisory fired anyway.
+
+    This reframes what `CLAUDE.md` currently says about it. The existing text
+    treats "it fired on every production deploy of v0.3 and was read past" as
+    a discipline problem — read it more carefully. It is not: a check that
+    fires identically whether or not you did the right thing is training the
+    reader to ignore it, and they are correct to. The advisory has been
+    crying wolf since it was written, and nobody noticed because its output
+    was never *wrong* in a way anyone could point at, only uninformative.
+
+    Worth noting the design intent survives this: `specs/0002` chose advisory
+    over blocking deliberately (a hard gate on a single-maintainer project
+    gets bypassed wholesale, and a bypassed gate protects nothing). That call
+    is still right. The problem is the predicate, not the severity.
+
+    Three possible fixes, in rough order of cost:
+    - **Check the PR's head commit, not the merge commit.** On a
+      `pull_request`-merged push, the merged branch head is recoverable
+      (`github.event.head_commit` is the merge; the PR's head SHA needs an
+      API call or the merge commit's second parent, `HEAD^2`). That is a
+      few lines and makes the check mean what it always claimed to mean.
+    - **Compare trees rather than commits.** `git rev-parse HEAD^{tree}`
+      against the sandbox deployment's tree answers "was this exact code
+      deployed to sandbox", which is the real question and is immune to
+      rebases, squashes and merge commits alike.
+    - **Fast-forward merges only**, so main's SHA is the branch head that
+      was sandboxed. Cheapest to implement, but it constrains how every
+      future PR lands to make one check work, which is backwards.
+
+    Related to idea 30 — both are cases of the sandbox's relationship to
+    production being unreported rather than wrong. Doing them together is
+    probably cheaper than doing either alone.

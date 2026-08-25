@@ -332,6 +332,12 @@ notes on that placement:
   ahead — but it is a behaviour change with a cost (`GET /me/events` is bounded
   by `MAX_QUERY_RANGE_MS`, and the two-month window is what makes the landing
   page one query), so it wants a spec rather than a slot.
+- **Ideas 29-31 are captured but unscheduled.** All three are about the
+  project's own machinery rather than the app: the backlog never marks
+  shipped items (29), sandbox/main drift goes unreported (30), and the
+  production deploy's sandbox advisory fires on every merge whether or not
+  the sandbox was used (31). 30 and 31 are the same surface and are probably
+  cheaper together. None of them blocks v0.5.
 - **The tail did not shift.** v0.4.1 is inserted, not substituted: 0.5 through
   0.7 keep their contents. That is the roadmap behaving as designed — a new
   idea gets a phase like everything else — but it is worth saying plainly,

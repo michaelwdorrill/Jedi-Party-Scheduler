@@ -139,11 +139,20 @@ CI rather than by hand later — don't route around them:
   drift incidents in production before this existed (see `docs/SETUP.md`).
 - An advisory (non-blocking) note on the production deploy about whether
   the commit was deployed to sandbox first. It is deliberately advisory —
-  see `deploy-worker.yml` for why — which makes it *easy* to read past.
-  It fired on every production deploy of v0.3 and was read past. If a
-  production deploy's summary says the commit has no matching sandbox
-  deployment, that is a thing to report to Michael, not a thing to note
-  and move on from.
+  see `deploy-worker.yml` for why — and that call is still right.
+
+  **But do not read this note as meaning anything yet.** It queries the
+  Deployments API for `sha=${{ github.sha }}`, which on a push to `main` is
+  the *merge commit* — a commit that by construction never existed when the
+  sandbox was deployed from the feature branch's head. So it reports "no
+  matching sandbox deployment" on a release that went through the sandbox
+  correctly and on one that skipped it, identically. It fired on every
+  production deploy of v0.3 and v0.4.1; v0.4.1 was sandbox-verified at
+  `692eb89` and merged as `ec8b33d`, and the note fired anyway.
+
+  That is IDEAS.md item 31, still open. Until it is fixed, a warning from
+  this step is not evidence of anything — and a *clean* result from it would
+  be genuinely surprising and worth investigating.
 
 There is also a local guardrail that fires at the moment of the mistake
 rather than after it: `.claude/hooks/block-push-to-main.mjs`, wired up as a
