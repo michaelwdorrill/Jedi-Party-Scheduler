@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState, ReactNode } from 'react';
 import { api } from '../api/client';
+import { describeError } from '../lib/async';
 import type { Guild } from '../types';
 import { useAuth } from './AuthContext';
 
@@ -10,6 +11,12 @@ interface GuildContextValue {
   selectedGuildId: string | null;
   selectGuild: (guildId: string) => void;
   loading: boolean;
+  // Set when the server list could not be fetched, so a page can tell "you
+  // are in no allow-listed servers" apart from "we could not find out"
+  // (idea 24). Those two render the same otherwise -- an empty `guilds` --
+  // and the first of them is a message about the user's standing with the
+  // app, which is a bad thing to say wrongly.
+  error: string | null;
   refreshGuilds: () => Promise<void>;
 }
 
@@ -22,15 +29,18 @@ export function GuildProvider({ children }: { children: ReactNode }) {
     () => localStorage.getItem(SELECTED_GUILD_KEY),
   );
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const refreshGuilds = useMemo(
     () => async () => {
       if (!isAuthenticated) {
         setGuilds([]);
+        setError(null);
         setLoading(false);
         return;
       }
       setLoading(true);
+      setError(null);
       try {
         const list = await api.get<Guild[]>('/guilds');
         setGuilds(list);
@@ -38,6 +48,9 @@ export function GuildProvider({ children }: { children: ReactNode }) {
           if (current && list.some((g) => g.id === current)) return current;
           return list[0]?.id ?? null;
         });
+      } catch (e) {
+        setGuilds([]);
+        setError(describeError(e));
       } finally {
         setLoading(false);
       }
@@ -55,7 +68,7 @@ export function GuildProvider({ children }: { children: ReactNode }) {
 
   return (
     <GuildContext.Provider
-      value={{ guilds, selectedGuildId, selectGuild: setSelectedGuildId, loading, refreshGuilds }}
+      value={{ guilds, selectedGuildId, selectGuild: setSelectedGuildId, loading, error, refreshGuilds }}
     >
       {children}
     </GuildContext.Provider>

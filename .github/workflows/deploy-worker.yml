@@ -23,7 +23,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Guardrail 3 (docs/specs/0002-sandbox-and-promotion.md): advisory,
       # not blocking -- a hard gate on a single-maintainer project is the
@@ -56,7 +56,7 @@ jobs:
             echo "Commit ${{ github.sha }} was deployed to sandbox first ($count matching deployment(s))."
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm

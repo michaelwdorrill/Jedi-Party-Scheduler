@@ -84,6 +84,16 @@ async function resolveInviteeUserIds(
   guildId: string,
   userIds: string[],
   groupIds: string[],
+  // The organizer, folded into the resolved list unless they are already in
+  // it (idea 26). `null` only for the additive "invite more people" path,
+  // which is adding named people to an event that already has its organizer
+  // row -- see addInvitesToEvent.
+  //
+  // Passed in and applied here, rather than at each call site, because
+  // updateEvent's replaceInviteStatements deletes every row not in the list
+  // it is handed: a call site that forgot would not fail to add the row, it
+  // would delete the existing one on the next edit.
+  organizerId: string | null,
 ): Promise<ResolvedInvitee[]> {
   // `source` is `null` for a directly-chosen invitee and the winning group ID
   // for a group-derived one. Built up front, before any membership check
@@ -151,9 +161,36 @@ async function resolveInviteeUserIds(
     out.set(
       userId,
       groupId === null
-        ? { userId, invitedVia: 'individual', sourceGroupId: null }
-        : { userId, invitedVia: 'group', sourceGroupId: groupId },
+        ? { userId, invitedVia: 'individual', sourceGroupId: null, rsvpStatus: 'pending' }
+        : { userId, invitedVia: 'group', sourceGroupId: groupId, rsvpStatus: 'pending' },
     );
+  }
+
+  // Idea 26: the organizer needs a real row or POST /events/:id/rsvp -- which
+  // is `UPDATE event_invites ... WHERE event_id = ? AND user_id = ?`, then a
+  // 403 when nothing matched -- tells them they are not invited to their own
+  // event. It only ever struck an organizer who did not invite themselves: a
+  // group event whose organizer is in the invited group already gets a row
+  // through group resolution above (and since idea 16, a group's creator is
+  // always a member of it), which is why this looked so arbitrary.
+  //
+  // Added *after* the membership filter, not before: their right to a place on
+  // their own event does not depend on a cached membership row being fresh,
+  // and routing them through `invalidDirect` would turn a stale cache into a
+  // rejected event creation. The cron's own membership joins still exclude an
+  // organizer who has actually left.
+  //
+  // 'accepted', not 'pending': they are the one person whose attendance is not
+  // in question. Keeping the row (rather than hiding the buttons) is what
+  // preserves the genuine case of an organizer who cannot make their own
+  // session -- the DM can be ill.
+  if (organizerId !== null && !out.has(organizerId)) {
+    out.set(organizerId, {
+      userId: organizerId,
+      invitedVia: 'individual',
+      sourceGroupId: null,
+      rsvpStatus: 'accepted',
+    });
   }
 
   if (out.size > LIMITS.MAX_RESOLVED_INVITEES) {
@@ -163,7 +200,15 @@ async function resolveInviteeUserIds(
   return [...out.values()];
 }
 
-type ResolvedInvitee = { userId: string; invitedVia: 'individual' | 'group'; sourceGroupId: string | null };
+type ResolvedInvitee = {
+  userId: string;
+  invitedVia: 'individual' | 'group';
+  sourceGroupId: string | null;
+  // Everyone starts 'pending'; only the organizer's own row starts 'accepted'.
+  // On an edit this is written through ON CONFLICT DO NOTHING, so an organizer
+  // who has since declined keeps that answer rather than being re-accepted.
+  rsvpStatus: 'pending' | 'accepted';
+};
 
 // Applied to every create/update -- both callers pass user-controlled JSON
 // bodies with only compile-time typing (which enforces nothing at runtime).
@@ -467,7 +512,7 @@ function inviteStatements(
       invitee.userId,
       invitee.invitedVia,
       invitee.sourceGroupId,
-      'pending',
+      invitee.rsvpStatus,
       now,
     ]);
     if (!guarded) {
@@ -583,7 +628,11 @@ export async function addInvitesToEvent(
 ): Promise<void> {
   assertStringArray(userIds, 'userIds', LIMITS.MAX_INVITEES, 64);
   assertStringArray(groupIds, 'groupIds', LIMITS.MAX_GROUP_IDS, 64);
-  const invitees = await resolveInviteeUserIds(env, guildId, userIds, groupIds);
+  // `null`: additive-only, and the organizer's row was written at creation.
+  // Folding them in here would be harmless (ON CONFLICT DO NOTHING) but would
+  // also mean this path silently invites the organizer to an event they might
+  // deliberately have been removed from -- so it stays out of it.
+  const invitees = await resolveInviteeUserIds(env, guildId, userIds, groupIds, null);
   if (invitees.length === 0) return;
   await env.DB.batch(inviteStatements(env, eventId, invitees, false));
 }
@@ -612,6 +661,7 @@ export async function createEventWithInvites(
     guildId,
     input.invites?.userIds ?? [],
     input.invites?.groupIds ?? [],
+    organizerId,
   );
 
   // Everything below is one D1 batch -- a failure partway through (a full
@@ -848,8 +898,17 @@ export async function updateEvent(
   // Invitee resolution (and possible rejection -- F-05) happens before any
   // statement is queued, same reasoning as createEventWithInvites: a request
   // that's going to fail validation shouldn't partially apply first.
+  // The organizer goes back in on every edit, because replaceInviteStatements
+  // removes anyone absent from this list -- without them here, saving the edit
+  // form would delete the organizer's own row and put the 403 straight back.
   const invitees = input.invites
-    ? await resolveInviteeUserIds(env, guildId, input.invites.userIds, input.invites.groupIds)
+    ? await resolveInviteeUserIds(
+        env,
+        guildId,
+        input.invites.userIds,
+        input.invites.groupIds,
+        stored.organizer_id,
+      )
     : null;
 
   // Every conditional block below queues its statements instead of running

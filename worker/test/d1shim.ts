@@ -147,6 +147,14 @@ export const D1_PAID_PLAN_QUERY_BUDGET = 1000;
 
 const MIGRATIONS_DIR = join(import.meta.dirname, '..', 'migrations');
 
+// Applies one migration by filename, for a test that needs to see the state
+// on either side of it -- a data backfill has nothing to assert unless the
+// rows it operates on exist first. Re-running the whole set is not an option
+// there: the early migrations are CREATE TABLE.
+export function applyMigration(db: DatabaseSync, filename: string): void {
+  db.exec(readFileSync(join(MIGRATIONS_DIR, filename), 'utf8'));
+}
+
 // Applies every migration in filename order, exactly as docs/SETUP.md
 // instructs an operator to. A migration that doesn't apply cleanly on top of
 // its predecessors fails the whole suite here rather than in production.

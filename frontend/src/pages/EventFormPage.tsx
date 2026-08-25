@@ -8,9 +8,10 @@ import InviteePicker from '../components/InviteePicker';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
 import SchedulingAssistant from '../components/SchedulingAssistant';
-import { isValidRange } from '../lib/datetime';
+import { isValidRange, startsInPast } from '../lib/datetime';
 import type { EventDetail, Friend, Group, PollMode, PollStrategy, VoiceChannel } from '../types';
-import { buttonClass, cardClass, controlClass } from '../components/ui';
+import { describeError } from '../lib/async';
+import { ErrorState, InlineError, buttonClass, cardClass, controlClass } from '../components/ui';
 
 interface PollSlotDraft {
   key: string;
@@ -90,6 +91,12 @@ export default function EventFormPage() {
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A failed *load* on the edit route is not the same as a failed save: the
+  // form would sit at its blank defaults, and saving it would overwrite the
+  // real event with them (idea 24). So it replaces the form rather than
+  // appearing beside it.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [inviteesError, setInviteesError] = useState<string | null>(null);
 
   // The guild whatever's currently loaded/selected actually belongs to: the
   // form picker's choice on create, the loaded event's own guild on edit
@@ -113,10 +120,21 @@ export default function EventFormPage() {
     Promise.all([
       api.get<Friend[]>(`/me/friends?guild_id=${effectiveGuildId}`),
       api.get<Group[]>(`/guilds/${effectiveGuildId}/groups`),
-    ]).then(([f, g]) => {
-      setFriends(f);
-      setGroups(g);
-    });
+    ]).then(
+      ([f, g]) => {
+        setFriends(f);
+        setGroups(g);
+        setInviteesError(null);
+      },
+      (e: unknown) => {
+        // Not fatal to the form -- an event with no invitees is legal -- but
+        // it has to say so, because an empty picker otherwise reads as "there
+        // is nobody here to invite".
+        setFriends([]);
+        setGroups([]);
+        setInviteesError(describeError(e));
+      },
+    );
   }, [effectiveGuildId]);
 
   useEffect(() => {
@@ -138,8 +156,17 @@ export default function EventFormPage() {
       setLoadedGuildId(ev.guildId);
       setLoadedRevision(ev.revision);
       setVoiceChannelId(ev.voiceChannelId ?? '');
+      // The organizer's own row (idea 26) is not an invitee choice, so it is
+      // not one of the picker's selections either. It is also not in the
+      // picker at all -- `listFriends` excludes the caller -- so leaving it in
+      // would mean submitting a chip nobody can see or untick, and resubmitting
+      // the organizer as a *direct* invitee, which is the one class of invitee
+      // that fails the whole edit if their membership cache has gone stale.
+      // The server adds them back regardless of what this list says.
       setSelectedUserIds(
-        ev.invites.filter((i) => i.invitedVia === 'individual').map((i) => i.userId),
+        ev.invites
+          .filter((i) => i.invitedVia === 'individual' && i.userId !== ev.organizerId)
+          .map((i) => i.userId),
       );
       setSelectedGroupIds(
         Array.from(new Set(ev.invites.map((i) => i.sourceGroupId).filter(Boolean))) as string[],
@@ -200,7 +227,7 @@ export default function EventFormPage() {
           );
         }
       }
-    });
+    }, (e: unknown) => setLoadError(describeError(e)));
   }, [isEdit, eventId]);
 
   const addPollSlot = () =>
@@ -283,6 +310,24 @@ export default function EventFormPage() {
     pollMode !== 'window' ||
     isValidRange(windowStartDate, windowStartTime, windowEndDate, windowEndTime, timezone);
   const rangeValid = singleRangeValid && pollSlotsValid && windowRangeValid;
+
+  // Idea 28, and note what it is *not*: this never gates `rangeValid`, so it
+  // cannot stop a submit. Dating an event in the past is unusual, not
+  // incoherent -- it does no operational harm (the cron's reminder queries all
+  // bound on `start_at >= now`, so it is simply never picked up) and there are
+  // legitimate reasons for it: logging a session that already happened, or
+  // correcting a mistyped year on one that has since passed.
+  //
+  // Timezones make blocking worse still: "tonight at 7" can already be in the
+  // past in the organiser's own zone by the time the form is submitted, and a
+  // hard stop would reject that with no way forward.
+  //
+  // Recurring is excluded rather than warned about. Its `date` is the series
+  // start, which is *routinely* in the past on any established series, and the
+  // warning's own claim -- that no reminders will be sent -- would be false
+  // there, since future occurrences still get them.
+  const pastStartWarning =
+    eventType === 'single' && !isRecurring && startsInPast(date, startTime, timezone);
 
   const handleSubmit = async () => {
     setError(null);
@@ -370,15 +415,29 @@ export default function EventFormPage() {
         navigate(`/events/${created.id}`);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save event.');
+      setError(describeError(e));
     } finally {
       setSaving(false);
     }
   };
 
+  if (loadError) {
+    return (
+      <ErrorState
+        title="Couldn't open that event"
+        message={loadError}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
+
   return (
     <div className="mx-auto max-w-2xl space-y-5">
       <h1 className="text-2xl font-semibold">{isEdit ? 'Edit Event' : 'New Event'}</h1>
+
+      {inviteesError && (
+        <InlineError message={`Couldn't load who you can invite. ${inviteesError}`} />
+      )}
 
       <div>
         <label className="mb-1 block text-sm text-muted">Server</label>
@@ -488,6 +547,9 @@ export default function EventFormPage() {
               />
             </div>
           </div>
+          {/* Danger for the incoherent, warning for the merely unusual --
+              the two sit next to each other so the difference is visible in
+              the code as well as on screen. */}
           {!singleRangeValid ? (
             <p className="text-xs text-danger-text">End must be after the start.</p>
           ) : (
@@ -496,6 +558,11 @@ export default function EventFormPage() {
                 Runs overnight / across {DateTime.fromISO(endDate).diff(DateTime.fromISO(date), 'days').days + 1} days.
               </p>
             )
+          )}
+          {pastStartWarning && (
+            <p className="text-xs text-warning-text">
+              This starts in the past. That's allowed — it just won't send anyone a reminder.
+            </p>
           )}
 
           <label className="flex items-center gap-2 text-sm text-ink-dim">
@@ -780,7 +847,7 @@ export default function EventFormPage() {
         </div>
       )}
 
-      {error && <p className="text-sm text-danger-text">{error}</p>}
+      {error && <InlineError message={error} onDismiss={() => setError(null)} />}
 
       <div className="flex justify-end gap-2">
         <button

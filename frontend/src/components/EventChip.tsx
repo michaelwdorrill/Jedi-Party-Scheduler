@@ -6,9 +6,14 @@ import { groupColor, PERSONAL_COLOR, UNGROUPED_COLOR } from '../lib/colors';
 export default function EventChip({
   occurrence,
   zone,
+  past = false,
 }: {
   occurrence: EventOccurrence;
   zone: string;
+  // Whether to draw this as already over. A prop rather than something worked
+  // out here, because it is a per-view decision -- see MonthCalendarGrid,
+  // which is the only caller that passes it (idea 27).
+  past?: boolean;
 }) {
   const palette = occurrence.isPersonal
     ? PERSONAL_COLOR
@@ -16,8 +21,16 @@ export default function EventChip({
       ? groupColor(occurrence.groupId)
       : UNGROUPED_COLOR;
 
+  // Two states that both mean "not happening", kept apart on purpose. The
+  // strike-through is what says *cancelled*; past is opacity alone. Fading a
+  // cancelled event further would collapse the two into one indistinct grey,
+  // so cancelled wins outright where an event is both.
   const cancelled = occurrence.status === 'cancelled';
-  const color = cancelled ? 'bg-raised-hi line-through opacity-60' : palette.bg;
+  const color = cancelled
+    ? 'bg-raised-hi line-through opacity-60'
+    : past
+      ? `${palette.bg} opacity-45`
+      : palette.bg;
 
   const time = occurrence.startAt
     ? DateTime.fromMillis(occurrence.startAt).setZone(zone).toFormat('h:mm a')

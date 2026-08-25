@@ -255,6 +255,10 @@ async function pendingRecipients(
        ON nl.user_id = u.id AND nl.event_id = ?
        AND nl.notification_type = ? AND nl.occurrence_date = ?
      WHERE u.id IN (SELECT user_id FROM event_invites WHERE event_id = ? UNION SELECT ?)
+       -- The union stays unconditional here, unlike attendance.ts's: this is
+       -- "everyone with a stake in the event", which already includes people
+       -- who declined (a moved session is still news to them), so an organizer
+       -- row cannot change the set either way.
        AND u.notifications_enabled = 1
        AND (
          nl.id IS NULL
@@ -327,6 +331,11 @@ async function sweepNewInvites(env: Env, budget: TickBudget): Promise<void> {
   //    entry. Under the outbox model a transient failure leaves a pending
   //    row behind, and `nl.id IS NULL` would never match it again -- the
   //    first failed invite DM was the last one anyone would ever get.
+  // 3. It skips the organizer's own row. Idea 26 gives every organizer an
+  //    `event_invites` row, and without this that row is indistinguishable
+  //    from a real invite -- so every organizer would be DM'd "You've been
+  //    invited to <the event you created>", once per event they have ever
+  //    run, the first time the sweep saw the backfilled rows.
   const { results } = await env.DB.prepare(
     `SELECT ei.event_id, ei.user_id, e.title,
             u.notifications_enabled, u.dm_channel_id, u.timezone
@@ -340,6 +349,7 @@ async function sweepNewInvites(env: Env, budget: TickBudget): Promise<void> {
        ON nl.user_id = ei.user_id AND nl.event_id = ei.event_id
        AND nl.notification_type = 'invite' AND nl.occurrence_date = ''
      WHERE e.status != 'cancelled'
+       AND ei.user_id != e.organizer_id
        AND (
          nl.id IS NULL
          OR (nl.delivered_at IS NULL AND nl.failed_at IS NULL

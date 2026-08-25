@@ -4,14 +4,14 @@ import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
 import GroupEditor from '../components/GroupEditor';
 import type { Friend, Group } from '../types';
-import { Loading, buttonClass, cardClass, controlClass } from '../components/ui';
+import { describeError, useAction, useAsync } from '../lib/async';
+import { ErrorState, InlineError, Loading, buttonClass, cardClass, controlClass } from '../components/ui';
 
 export default function GroupsPage() {
   const { user } = useAuth();
   const { guilds } = useGuild();
-  const [groups, setGroups] = useState<Group[]>([]);
   const [friends, setFriends] = useState<Friend[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [friendsError, setFriendsError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Group | 'new' | null>(null);
   // Which server a *new* group belongs to. Groups are genuinely per-server
   // (their members have to share one), so unlike the calendar this can't just
@@ -23,18 +23,9 @@ export default function GroupsPage() {
   // the one chosen for a new group.
   const editorGuildId = editing && editing !== 'new' ? editing.guildId : newGroupGuildId;
 
-  const load = async () => {
-    setLoading(true);
-    try {
-      setGroups(await api.get<Group[]>('/me/groups'));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void load();
-  }, []);
+  const { data, error, loading, reload } = useAsync<Group[]>(() => api.get<Group[]>('/me/groups'), []);
+  const groups = data ?? [];
+  const action = useAction();
 
   useEffect(() => {
     if (!newGroupGuildId && guilds.length > 0) setNewGroupGuildId(guilds[0].id);
@@ -44,7 +35,18 @@ export default function GroupsPage() {
   // share a server with -- so this reloads whenever the editor's server does.
   useEffect(() => {
     if (!editorGuildId) return;
-    api.get<Friend[]>(`/me/friends?guild_id=${editorGuildId}`).then(setFriends);
+    // A failed roster fetch used to leave the member picker silently empty,
+    // which reads as "this server has nobody in it" (idea 24).
+    api.get<Friend[]>(`/me/friends?guild_id=${editorGuildId}`).then(
+      (list) => {
+        setFriends(list);
+        setFriendsError(null);
+      },
+      (e: unknown) => {
+        setFriends([]);
+        setFriendsError(describeError(e));
+      },
+    );
   }, [editorGuildId]);
 
   if (guilds.length === 0) {
@@ -71,29 +73,28 @@ export default function GroupsPage() {
     idleReminderDays: number;
     memberUserIds: string[];
   }) => {
-    if (editing === 'new') {
-      await api.post(`/guilds/${newGroupGuildId}/groups`, {
-        name: data.name,
-        game: data.game,
-        idle_reminder_days: data.idleReminderDays,
-        member_user_ids: data.memberUserIds,
-      });
-    } else if (editing) {
-      await api.patch(`/groups/${editing.id}`, {
-        name: data.name,
-        game: data.game,
-        idle_reminder_days: data.idleReminderDays,
-        member_user_ids: data.memberUserIds,
-      });
-    }
+    if (editing === null) return;
+    const body = {
+      name: data.name,
+      game: data.game,
+      idle_reminder_days: data.idleReminderDays,
+      member_user_ids: data.memberUserIds,
+    };
+    // The editor is only closed once the save lands. It used to close first,
+    // so a rejected save threw away everything just typed and said nothing.
+    const saved = await action.run(() =>
+      editing === 'new'
+        ? api.post(`/guilds/${newGroupGuildId}/groups`, body)
+        : api.patch(`/groups/${editing.id}`, body),
+    );
+    if (!saved) return;
     setEditing(null);
-    await load();
+    reload();
   };
 
   const handleDelete = async (group: Group) => {
     if (!confirm(`Delete group "${group.name}"?`)) return;
-    await api.delete(`/groups/${group.id}`);
-    await load();
+    if (await action.run(() => api.delete(`/groups/${group.id}`))) reload();
   };
 
   return (
@@ -139,8 +140,15 @@ export default function GroupsPage() {
         />
       )}
 
+      {action.error && <InlineError message={action.error} onDismiss={action.clearError} />}
+      {friendsError && editing !== null && (
+        <InlineError message={`Couldn't load who you can add. ${friendsError}`} />
+      )}
+
       {loading ? (
         <Loading />
+      ) : error ? (
+        <ErrorState message={error} onRetry={reload} />
       ) : groups.length === 0 ? (
         <p className="text-muted">
           No groups yet. Groups let you invite a whole crew (e.g. "Raid Team") to an event at

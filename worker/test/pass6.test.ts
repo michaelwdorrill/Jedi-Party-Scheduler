@@ -91,7 +91,10 @@ describe('a maximum-size option poll fits inside one Free-plan invocation', () =
   it('creates one with the maximum options AND the maximum invitees', async () => {
     const { db, env } = setup();
     await seedOrganizer(db);
-    const invitees = ids('invitee', LIMITS.MAX_INVITEES);
+    // One short of the cap: the organizer's own row (idea 26) is the last of
+    // the MAX_RESOLVED_INVITEES rows, and the budget this asserts is for that
+    // full set of rows, not for the names submitted.
+    const invitees = ids('invitee', LIMITS.MAX_INVITEES - 1);
     for (const id of invitees) {
       await seedUser(db, id);
       await seedMembership(db, id, 'guild-1');
@@ -199,7 +202,9 @@ describe('overlapping maximum groups resolve without one query per group', () =>
     const { db, env } = setup();
     await seedOrganizer(db);
 
-    const members = ids('member', LIMITS.MAX_GROUP_MEMBERS);
+    // Likewise one short: the groups fan into MAX_GROUP_MEMBERS - 1 people,
+    // and the organizer's own row makes the resolved set exactly the cap.
+    const members = ids('member', LIMITS.MAX_GROUP_MEMBERS - 1);
     for (const id of members) {
       await seedUser(db, id);
       await seedMembership(db, id, 'guild-1');
@@ -458,11 +463,13 @@ describe('a failed write leaves the event exactly as it was (F-08)', () => {
       invites: { userIds: ['friend'], groupIds: [] },
     } as unknown as EventWriteInput);
 
-    // The conditional form must not quietly suppress the normal case.
+    // The conditional form must not quietly suppress the normal case. Both
+    // rows are the point: the invitee it was given, and the organizer it adds
+    // for itself (idea 26).
     const invites = await db
       .prepare(`SELECT user_id FROM event_invites WHERE event_id = ?`)
       .bind(eventId)
       .all<{ user_id: string }>();
-    expect(invites.results.map((r) => r.user_id).sort()).toEqual(['friend']);
+    expect(invites.results.map((r) => r.user_id).sort()).toEqual(['friend', 'organizer']);
   });
 });

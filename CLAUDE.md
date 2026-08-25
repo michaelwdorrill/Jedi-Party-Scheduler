@@ -101,6 +101,33 @@ result, which is what step 2 needs Michael for. "I couldn't reach the
 sandbox from here" is not true; it was true of `npm run deploy:sandbox` and
 that is a different thing.
 
+**The sandbox is the Worker only — there is no sandbox frontend, and
+pushing a frontend-only change to `sandbox` does nothing at all.** Every
+step in `deploy-sandbox.yml` runs with `working-directory: worker`, and its
+push trigger carries `paths: ['worker/**', '.github/workflows/deploy-sandbox.yml']`
+— so a branch that touches only `frontend/` produces no workflow run
+whatsoever, and the Actions tab shows nothing rather than showing a
+failure. That path filter is correct (redeploying an unchanged Worker
+achieves nothing), which is what makes this a gap in the route rather than
+a bug to fix.
+
+So, plainly: **frontend-only changes are verified locally, not on the
+sandbox.** The route is `VITE_API_BASE_URL=<sandbox worker url> npm run dev`
+in `frontend/`, run by Michael, against the deployed sandbox Worker. A
+remote session cannot do that step and should say so specifically —
+"this is frontend-only, so it needs a local run against the sandbox
+Worker" — rather than reporting a sandbox deploy that never happened.
+
+Two related traps worth knowing before assuming a push ran something:
+`ci.yml` triggers on `push` to `main` and on `pull_request`, so a feature
+branch with no PR open gets **no CI either** — a frontend branch has zero
+automated verification until a PR exists. And a *mixed* branch (worker and
+frontend) pushed to `sandbox` deploys the worker half only, which is the
+more confusing case of the two, because something does run.
+
+Whether to close this properly — a second Pages project for the sandbox, or
+a downloadable preview bundle from CI — is IDEAS.md item 23, still open.
+
 Three automated guardrails exist so sandbox/production drift is caught by
 CI rather than by hand later — don't route around them:
 - `check:env-parity` (CI, every push/PR): fails if `[vars]` and

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DateTime } from 'luxon';
 import { api } from '../api/client';
@@ -6,10 +6,21 @@ import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
 import { formatTimeRange, fullWindow, monthWindow } from '../lib/datetime';
 import { getView, setView, type CalendarView } from '../lib/view';
+import { useAsync } from '../lib/async';
 import MonthCalendarGrid from '../components/MonthCalendarGrid';
 import AgendaList from '../components/AgendaList';
 import EventChip from '../components/EventChip';
-import { Button, Card, EmptyState, Loading, buttonClass, cardClass, controlClass } from '../components/ui';
+import {
+  Button,
+  Card,
+  EmptyState,
+  ErrorState,
+  InlineError,
+  Loading,
+  buttonClass,
+  cardClass,
+  controlClass,
+} from '../components/ui';
 import type { EventOccurrence } from '../types';
 
 // The merged landing page (idea 20, spec 0009).
@@ -36,23 +47,26 @@ function matchesFilter(occ: EventOccurrence, filter: Filter): boolean {
 
 export default function HomePage() {
   const { user } = useAuth();
-  const { guilds } = useGuild();
+  const { guilds, error: guildsError, refreshGuilds } = useGuild();
   const navigate = useNavigate();
   const [view, setViewState] = useState<CalendarView>(getView);
   const [tab, setTab] = useState<0 | 1>(0);
   const [filter, setFilter] = useState<Filter>('all');
-  const [occurrences, setOccurrences] = useState<EventOccurrence[]>([]);
-  const [loading, setLoading] = useState(true);
   const zone = user?.timezone ?? 'America/New_York';
 
-  useEffect(() => {
-    setLoading(true);
+  // This call is the one idea 24 was found on: with no `.catch`, a 404 from a
+  // Worker without `/me/events` rendered as "nothing scheduled".
+  const {
+    data,
+    error,
+    loading,
+    reload,
+  } = useAsync<EventOccurrence[]>(() => {
     const { from, to } = fullWindow(zone);
-    api
-      .get<EventOccurrence[]>(`/me/events?from=${from.toMillis()}&to=${to.toMillis()}`)
-      .then(setOccurrences)
-      .finally(() => setLoading(false));
+    return api.get<EventOccurrence[]>(`/me/events?from=${from.toMillis()}&to=${to.toMillis()}`);
   }, [zone]);
+
+  const occurrences = useMemo(() => data ?? [], [data]);
 
   const visible = useMemo(
     () => occurrences.filter((occ) => matchesFilter(occ, filter)),
@@ -79,7 +93,11 @@ export default function HomePage() {
 
   const filterValue = typeof filter === 'object' ? filter.guildId : filter;
 
-  const noServers = guilds.length === 0;
+  // `guilds` being empty means one of two very different things, and only one
+  // of them is safe to say out loud: telling someone they share no allow-listed
+  // servers, when really the request for that list failed, is a false statement
+  // about their standing with the app (idea 24).
+  const noServers = guilds.length === 0 && !guildsError;
   const emptyBody = noServers
     ? "You don't share any allow-listed Discord servers with this app yet. Ask the owner to add your server."
     : 'No sessions scheduled in this window.';
@@ -163,8 +181,25 @@ export default function HomePage() {
         </div>
       </div>
 
+      {/* A failed server list does not stop the calendar drawing -- the events
+          are already here and carry their own guild ids. It only means the
+          filter and the labels are incomplete, which is worth saying without
+          taking the page away. */}
+      {guildsError && !error && (
+        <InlineError
+          message={`Couldn't load your server list, so the filter may be incomplete. ${guildsError}`}
+          onRetry={() => void refreshGuilds()}
+        />
+      )}
+
       {loading ? (
         <Loading />
+      ) : error ? (
+        // Before the empty state, never instead of it: an empty calendar and a
+        // calendar that failed to load are different facts about the day.
+        <Card padding="md">
+          <ErrorState message={error} onRetry={reload} />
+        </Card>
       ) : view === 'agenda' ? (
         <Card padding="md">
           {upNext.length === 0 ? (

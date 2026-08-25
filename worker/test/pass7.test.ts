@@ -186,8 +186,11 @@ describe('combined direct/group invitee resolution fits the Free-plan budget (F-
     // both sources sharing the one combined revalidation pass (see
     // resolveInviteeUserIds) -- MAX_LIVE_REVALIDATIONS_PER_REQUEST (20) is a
     // request-wide budget, not per source.
+    //
+    // The organizer's own row (idea 26) is one of those 25, so the two sources
+    // share 24 between them rather than 25.
     const directCount = 10;
-    const groupOnlyCount = LIMITS.MAX_RESOLVED_INVITEES - directCount; // 15
+    const groupOnlyCount = LIMITS.MAX_RESOLVED_INVITEES - directCount - 1; // 14
     const direct = ids('direct', directCount);
     for (const [i, id] of direct.entries()) {
       await seedUser(db, id);

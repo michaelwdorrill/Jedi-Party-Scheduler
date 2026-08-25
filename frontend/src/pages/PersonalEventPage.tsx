@@ -6,7 +6,8 @@ import { useAuth } from '../auth/AuthContext';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
 import type { PersonalEvent, PersonalAvailability } from '../types';
-import { Loading, buttonClass, cardClass, controlClass } from '../components/ui';
+import { describeError } from '../lib/async';
+import { ErrorState, InlineError, Loading, buttonClass, cardClass, controlClass } from '../components/ui';
 
 // Personal time: private to you, never shown to anyone else, and (unless you
 // untick "show me as busy") it makes you look unavailable in other people's
@@ -39,9 +40,16 @@ export default function PersonalEventPage() {
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Distinct from `error`, which is the save/validation message shown beside
+  // the form. This one means the form was never filled in from the server, so
+  // there is nothing safe to show at all.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadNonce, setLoadNonce] = useState(0);
 
   useEffect(() => {
     if (!isEdit) return;
+    setLoading(true);
+    setLoadError(null);
     api
       .get<PersonalEvent>(`/personal-events/${personalEventId}`)
       .then((pe) => {
@@ -74,8 +82,14 @@ export default function PersonalEventPage() {
           if (pe.recurrence.startTime) setStartTime(pe.recurrence.startTime);
         }
       })
+      .catch((e: unknown) => {
+        // Silently failing here is worse than a wrong empty state: the form
+        // would sit at its blank defaults, and saving it would overwrite the
+        // real block with them (idea 24).
+        setLoadError(describeError(e));
+      })
       .finally(() => setLoading(false));
-  }, [isEdit, personalEventId]);
+  }, [isEdit, personalEventId, loadNonce]);
 
   const toUtc = (d: string, t: string) => DateTime.fromISO(`${d}T${t}`, { zone: timezone }).toMillis();
 
@@ -135,11 +149,27 @@ export default function PersonalEventPage() {
 
   const handleDelete = async () => {
     if (!confirm('Delete this personal time block?')) return;
-    await api.delete(`/personal-events/${personalEventId}`);
+    setError(null);
+    try {
+      await api.delete(`/personal-events/${personalEventId}`);
+    } catch (e) {
+      // Navigating regardless made a refused delete look like a done one.
+      setError(describeError(e));
+      return;
+    }
     navigate('/calendar');
   };
 
   if (loading) return <Loading />;
+  if (loadError) {
+    return (
+      <ErrorState
+        title="Couldn't open that block"
+        message={loadError}
+        onRetry={() => setLoadNonce((n) => n + 1)}
+      />
+    );
+  }
 
   return (
     <div className="mx-auto max-w-2xl space-y-5">
@@ -273,7 +303,7 @@ export default function PersonalEventPage() {
         </div>
       </div>
 
-      {error && <p className="text-sm text-danger-text">{error}</p>}
+      {error && <InlineError message={error} onDismiss={() => setError(null)} />}
 
       <div className="flex justify-end gap-2">
         <button

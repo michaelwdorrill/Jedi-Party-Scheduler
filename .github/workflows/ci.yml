@@ -11,13 +11,31 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Actions are pinned by major version, and that is a deliberate choice rather
+# than a default (IDEAS.md item 25). The alternative -- pinning to a commit SHA
+# -- is what a supply-chain-conscious repo does, and it is genuinely stronger:
+# a major tag is mutable, so `@v5` today and `@v5` next month need not be the
+# same code. It is also a standing maintenance cost, because every action then
+# needs a SHA bump for every patch release, forever, on a repo maintained by
+# one person in their spare time.
+#
+# Pinned by major, the cost is instead one bump every couple of years, at a
+# moment of GitHub's choosing. That is the trade being made knowingly: these
+# workflows deploy a hobby scheduler for a friend group, and the realistic
+# threat is a broken deploy on the day a release is already blocked, not a
+# compromised upstream action.
+#
+# What the choice obliges us to do is bump *early*. v4 -> v5 here was
+# deprecation-warning-only for months (GitHub forced those actions onto Node 24
+# and said so on every run) and would have become a hard failure the day the
+# substitution stopped -- the exact "trivial now, emergency later" shape.
 jobs:
   worker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           # Node 22, not 20: the pinned Wrangler declares an engine of
           # >=22.0.0, and the test harness uses the built-in node:sqlite
@@ -54,9 +72,9 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm

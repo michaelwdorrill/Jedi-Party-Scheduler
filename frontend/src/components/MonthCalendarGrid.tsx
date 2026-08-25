@@ -1,5 +1,5 @@
 import { DateTime } from 'luxon';
-import { buildMonthGrid } from '../lib/datetime';
+import { buildMonthGrid, hasEnded } from '../lib/datetime';
 import type { EventOccurrence } from '../types';
 import EventChip from './EventChip';
 import { cardClass } from './ui';
@@ -18,7 +18,9 @@ export default function MonthCalendarGrid({
   onDayClick?: (day: DateTime) => void;
 }) {
   const days = buildMonthGrid(monthStart);
-  const today = DateTime.now().setZone(zone).startOf('day');
+  const now = DateTime.now().setZone(zone);
+  const today = now.startOf('day');
+  const nowMs = now.toMillis();
 
   // An occurrence lands on every day it overlaps, not just its start day, so
   // overnight sessions and multi-day blocks (travel, holidays) show across the
@@ -98,8 +100,19 @@ export default function MonthCalendarGrid({
                 )}
               </div>
               <div className="space-y-0.5">
+                {/* The grid fades what has already happened; the agenda
+                    view does not, because it never shows it in the first
+                    place -- it filters to today onwards. The two views being
+                    different here is the intent, not an oversight: the grid
+                    is the shape of a month, half of which is behind you at
+                    any time, and the agenda is what is next (idea 27). */}
                 {dayEvents.slice(0, 3).map((occ) => (
-                  <EventChip key={occ.occurrenceId} occurrence={occ} zone={zone} />
+                  <EventChip
+                    key={occ.occurrenceId}
+                    occurrence={occ}
+                    zone={zone}
+                    past={hasEnded(occ, nowMs)}
+                  />
                 ))}
                 {dayEvents.length > 3 && (
                   <div className="text-faint">+{dayEvents.length - 3} more</div>
