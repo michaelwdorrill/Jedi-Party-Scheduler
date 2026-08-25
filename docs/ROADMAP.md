@@ -340,6 +340,33 @@ calendar. It looks up the operator's id and whichever server they are actually
 in, and every insert is guarded so that finding neither is a clean no-op
 rather than the foreign-key error item 38 was.
 
+### Phase 3.15 — Windowed candidates (idea 40) → **v0.4.6** ✅ shipped
+
+**Spec:** `specs/0013-windowed-candidates.md` (Built). Held back from v0.4.5
+on purpose — see the phase above — and it earned the wait: the build turned
+out to need less schema than the spec predicted and one more special case
+than it predicted, which is not a combination that survives being rushed.
+
+What actually shipped is smaller than the design suggested, because the
+merge is real. `event_poll_options.start_at`/`end_at` change *meaning*
+rather than shape: with a minimum set they are the window a session may fall
+in, without one the candidate is the session. So there is one nullable
+column deciding what a poll is, one tab in the form, and a checkbox on it.
+`poll_mode` is no longer read by anything and stays in the schema only
+because dropping a column the deployed Worker reads is a two-release change.
+
+The one genuinely new behaviour is the longer session, and its two
+objectives had to be ordered: **most people first, then longest.** A poll
+that traded a player for an extra half hour would be choosing a longer
+session with fewer people in it, which is the wrong way round for this app.
+
+Migration 0021 is the piece that wanted the unhurried run. It converts every
+existing window poll into a single-candidate poll *before* recreating
+`event_window_availability` on `(option_id, user_id)`, because a window poll
+with no candidate row would lose its submissions; and it recreates both
+indexes explicitly, since rebuilding a table in SQLite drops them — the
+mistake migration 0016 exists to repair.
+
 ### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ← next
 
 **Spec:** `specs/0010-interactive-bot.md` (Draft). It scopes v0.5 down to the
@@ -424,7 +451,7 @@ shifts.
 | **0.4.3** | Phase 3.8 — group visibility restricted to members (34), the horizon re-pinned (33), Discord avatars (35) | **Shipped 25 Aug 2026** |
 | **0.4.4** | Phase 3.9 — Policy/Terms re-acceptance (37) | **Shipped 25 Aug 2026** |
 | **0.4.5** | Phase 3.10 — every candidate's availability (39), poll candidates on the calendar (41), readable chips (42) | **Shipped 25 Aug 2026** |
-| 0.4.6 | Windowed candidates (40), per `specs/0013` | Planned |
+| **0.4.6** | Phase 3.15 — windowed candidates (40), per `specs/0013` | **Shipped 25 Aug 2026** |
 | 0.5 | Interactive bot (19), and the message-id cost it turned out to carry (32) | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
@@ -471,7 +498,7 @@ shifts.
 | 34 | Groups are visible to server members who aren't in them | S | 3.8 | 0.4.3 | — | none needed |
 | 38 | Sandbox seed could not be re-run (its own cron broke it) | S | 3.8 | 0.4.3 | — | none needed |
 | 39 | Availability grid shows one candidate, fixed 8am-2am | M | 3.10 | 0.4.5 | — | none needed |
-| 40 | Candidate polls and window polls merged into windowed candidates | L | 3.11 | 0.4.6 | 39 | 0013 |
+| 40 | Candidate polls and window polls merged into windowed candidates | L | 3.15 | 0.4.6 | 39 | 0013 |
 | 41 | Polls render on their deadline, not their candidate days | M | 3.10 | 0.4.5 | — | none needed |
 | 42 | Month chips show the time and truncate the title away | S | 3.10 | 0.4.5 | — | none needed |
 | 44 | Agenda's group-colour gutter never rendered (runtime-built class) | XS | 3.10 | 0.4.5 | — | none needed |

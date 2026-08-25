@@ -1,5 +1,6 @@
--- Demo data for v0.4.5: a multi-candidate poll with real availability behind
--- it, so ideas 39, 41 and 42 have something to show.
+-- Demo data for v0.4.5 and v0.4.6: two multi-candidate polls with real
+-- availability behind them -- one fixed-slot, one windowed -- so ideas 39,
+-- 41, 42 and 40 all have something to show, side by side.
 --
 -- Separate from seed-sandbox.sql on purpose. That file exists to make the
 -- *cron* fire (idle groups, due reminders, resolving deadlines) and its
@@ -179,3 +180,94 @@ SELECT 'demo-cinv-' || u.id, 'demo-confirmed', u.id, 'individual', NULL,
   FROM users u
  WHERE u.id IN ('346042183486537730', 'seed-user-alice', 'seed-user-bob')
    AND EXISTS (SELECT 1 FROM events WHERE id = 'demo-confirmed');
+
+-- ---------------------------------------------------------------------------
+-- v0.4.6 (idea 40, specs/0013): the same three candidates, as *windows*.
+--
+-- Deliberately alongside the fixed-slot poll above rather than replacing it,
+-- because the whole claim of specs/0013 is that these are the same object
+-- with one column set differently -- and that is only checkable if both are
+-- on screen at once. The only thing that makes this poll windowed is
+-- `window_block_minutes`; every other column is identical in kind.
+--
+-- 150 minutes: long enough that the two evening windows have real slack in
+-- them (2.5h inside a 4h window) and the Saturday has a lot (2.5h inside
+-- 10h), which is what makes "if everyone can stay, the session gets longer"
+-- visible rather than theoretical.
+INSERT INTO events (id, guild_id, organizer_id, title, description, game, event_type, timezone,
+  status, poll_strategy, poll_threshold_count, poll_deadline_at, poll_mode, poll_resolution_mode,
+  window_block_minutes, is_recurring, created_at, updated_at)
+SELECT 'demo-poll-windows', e.guild_id, '346042183486537730',
+       'Blades in the Dark — when can you play?',
+       'Three windows. Say which part of each you could make; we need 2.5 hours.',
+       'Blades in the Dark',
+       'poll', 'America/New_York', 'active', 'threshold', 3,
+       (CAST(strftime('%s','now') AS INTEGER) * 1000) + 7 * 86400000,
+       'options', 'single_winner', 150, 0,
+       (CAST(strftime('%s','now') AS INTEGER) * 1000),
+       (CAST(strftime('%s','now') AS INTEGER) * 1000)
+  FROM events e WHERE e.id = 'demo-poll-nights';
+
+-- Wider than the fixed poll's slots, because a window that is exactly the
+-- session length has no slack to choose within -- that is the fixed-slot
+-- preset, and it is already on screen above.
+INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order)
+SELECT 'demo-win-1', 'demo-poll-windows',
+       (CAST(strftime('%s', date('now','+1 day') || ' 22:00:00') AS INTEGER) * 1000),
+       (CAST(strftime('%s', date('now','+2 day') || ' 03:00:00') AS INTEGER) * 1000), 0
+ WHERE EXISTS (SELECT 1 FROM events WHERE id = 'demo-poll-windows');
+INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order)
+SELECT 'demo-win-2', 'demo-poll-windows',
+       (CAST(strftime('%s', date('now','+2 day') || ' 22:00:00') AS INTEGER) * 1000),
+       (CAST(strftime('%s', date('now','+3 day') || ' 03:00:00') AS INTEGER) * 1000), 1
+ WHERE EXISTS (SELECT 1 FROM events WHERE id = 'demo-poll-windows');
+INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order)
+SELECT 'demo-win-3', 'demo-poll-windows',
+       (CAST(strftime('%s', date('now','+5 day') || ' 16:00:00') AS INTEGER) * 1000),
+       (CAST(strftime('%s', date('now','+6 day') || ' 04:00:00') AS INTEGER) * 1000), 2
+ WHERE EXISTS (SELECT 1 FROM events WHERE id = 'demo-poll-windows');
+
+INSERT INTO event_invites (id, event_id, user_id, invited_via, source_group_id, rsvp_status, invited_at)
+SELECT 'demo-winv-' || u.id, 'demo-poll-windows', u.id, 'individual', NULL, 'pending',
+       (CAST(strftime('%s','now') AS INTEGER) * 1000)
+  FROM users u
+ WHERE u.id IN ('346042183486537730', 'seed-user-alice', 'seed-user-bob', 'seed-user-carol')
+   AND EXISTS (SELECT 1 FROM events WHERE id = 'demo-poll-windows');
+
+-- Submitted availability, arranged so each window resolves to a *different*
+-- answer -- otherwise the three strips say the same thing and the feature
+-- looks like it does one trick:
+--
+--   window 1  all three free for the same 2.5 hours -> resolves to exactly
+--             the minimum, which is the boring-but-correct case
+--   window 2  all three free for four hours -> resolves to four hours, which
+--             is the whole point of idea 40
+--   window 3  three free for a long afternoon but a fourth only for the
+--             evening -> the coverage-beats-length rule has something to
+--             actually decide
+INSERT INTO event_window_availability (option_id, event_id, user_id, avail_start_at, avail_end_at, submitted_at)
+SELECT 'demo-win-1', 'demo-poll-windows', u.id,
+       (CAST(strftime('%s', date('now','+1 day') || ' 23:00:00') AS INTEGER) * 1000),
+       (CAST(strftime('%s', date('now','+2 day') || ' 01:30:00') AS INTEGER) * 1000),
+       (CAST(strftime('%s','now') AS INTEGER) * 1000)
+  FROM users u
+ WHERE u.id IN ('seed-user-alice', 'seed-user-bob', 'seed-user-carol')
+   AND EXISTS (SELECT 1 FROM event_poll_options WHERE id = 'demo-win-1');
+
+INSERT INTO event_window_availability (option_id, event_id, user_id, avail_start_at, avail_end_at, submitted_at)
+SELECT 'demo-win-2', 'demo-poll-windows', u.id,
+       (CAST(strftime('%s', date('now','+2 day') || ' 22:00:00') AS INTEGER) * 1000),
+       (CAST(strftime('%s', date('now','+3 day') || ' 02:00:00') AS INTEGER) * 1000),
+       (CAST(strftime('%s','now') AS INTEGER) * 1000)
+  FROM users u
+ WHERE u.id IN ('seed-user-alice', 'seed-user-bob')
+   AND EXISTS (SELECT 1 FROM event_poll_options WHERE id = 'demo-win-2');
+
+INSERT INTO event_window_availability (option_id, event_id, user_id, avail_start_at, avail_end_at, submitted_at)
+SELECT 'demo-win-3', 'demo-poll-windows', u.id,
+       (CAST(strftime('%s', date('now','+5 day') || ' 17:00:00') AS INTEGER) * 1000),
+       (CAST(strftime('%s', date('now','+5 day') || ' 23:00:00') AS INTEGER) * 1000),
+       (CAST(strftime('%s','now') AS INTEGER) * 1000)
+  FROM users u
+ WHERE u.id IN ('seed-user-alice', 'seed-user-bob', 'seed-user-carol')
+   AND EXISTS (SELECT 1 FROM event_poll_options WHERE id = 'demo-win-3');

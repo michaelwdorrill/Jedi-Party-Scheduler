@@ -408,54 +408,6 @@ live call when a candidate venue's rows are all stale.
 Wants a spec — not for the rule, which is now decided, but for the four open
 calls above and the migration. Not v0.5.
 
-### 40. Merge candidate polls and window polls into one thing: candidates that are windows
-
-Asked (Aug 2026), and it is the better model rather than a third mode. Today
-there are two:
-
-- **`poll_mode = 'options'`** — `event_poll_options` rows with fixed
-  start/end, voted yes/no/maybe.
-- **`poll_mode = 'window'`** — one `window_start_at`/`window_end_at` on the
-  event plus `window_block_minutes`, and people submit the sub-range they can
-  commit to. `bestWindowBlock` slides a block across the window and picks the
-  position the most people cover.
-
-The ask: let each *candidate* carry its own window, with one minimum duration
-across the poll. "25th 7:30-10, 26th 7:30-10, 30th 1-11, any 2.5-hour block in
-any of those qualifies — and if everyone is free the whole time on the 30th,
-we get a longer session."
-
-**Why this is a merge and not an addition: both current modes are special
-cases of it.** A candidate whose window is exactly the block length is
-today's options poll. A poll with exactly one candidate is today's window
-poll. That is the argument for one tab with a checkbox rather than three
-modes to choose between — and for the two existing modes becoming presets of
-the general one rather than surviving alongside it.
-
-**The one genuinely new behaviour is the longer session.** `bestWindowBlock`
-returns a block of *exactly* `blockMinutes` — it slides a fixed-width window
-and maximises the count. "2.5 hours is a minimum, and if you're all free
-longer you get longer" needs it to return the maximal span that still clears
-the threshold, which is a different search: for each start, extend while the
-covering set stays above the bar. That is a change to the resolution
-algorithm, not just to the schema, and it needs its own bound — the existing
-`MAX_WINDOW_CANDIDATES` ceiling exists because work already scales with span
-x submissions, and this adds a dimension.
-
-Rough shape of the rest: `window_start_at`/`window_end_at` move from `events`
-onto `event_poll_options` (per candidate), `window_block_minutes` stays on the
-event (one minimum for the whole poll), and `event_window_availability` keys
-on the option rather than the event. It composes with
-`poll_resolution_mode = 'multi_winner'` for free: each candidate resolves
-independently once its best block clears the threshold, which is exactly what
-multi-winner already means for options.
-
-Not small — schema, resolution algorithm, the creation form, the voting UI and
-the DM copy — and it wants a spec. It also subsumes **39**: an availability
-grid that shows every candidate is the same view this needs, so doing 39 first
-is not wasted, and doing 40 without it would leave the new mode unusable for
-the same reason the old one is.
-
 ### 43. A constant that must only ever change deliberately has nothing stopping it changing by accident
 
 Found the hard way, an hour after `specs/0012` was built (Aug 2026).
@@ -1558,6 +1510,81 @@ login, so `accepted_policy_version` is in its INSERT list and not in its
 the named test fails and nothing else in the suite does, which is the whole
 reason it exists. Without it the feature would have looked finished and done
 nothing.
+
+### 40. Merge candidate polls and window polls into one thing: candidates that are windows — shipped in v0.4.6
+
+Asked (Aug 2026), and it is the better model rather than a third mode. Today
+there are two:
+
+- **`poll_mode = 'options'`** — `event_poll_options` rows with fixed
+  start/end, voted yes/no/maybe.
+- **`poll_mode = 'window'`** — one `window_start_at`/`window_end_at` on the
+  event plus `window_block_minutes`, and people submit the sub-range they can
+  commit to. `bestWindowBlock` slides a block across the window and picks the
+  position the most people cover.
+
+The ask: let each *candidate* carry its own window, with one minimum duration
+across the poll. "25th 7:30-10, 26th 7:30-10, 30th 1-11, any 2.5-hour block in
+any of those qualifies — and if everyone is free the whole time on the 30th,
+we get a longer session."
+
+**Why this is a merge and not an addition: both current modes are special
+cases of it.** A candidate whose window is exactly the block length is
+today's options poll. A poll with exactly one candidate is today's window
+poll. That is the argument for one tab with a checkbox rather than three
+modes to choose between — and for the two existing modes becoming presets of
+the general one rather than surviving alongside it.
+
+**The one genuinely new behaviour is the longer session.** `bestWindowBlock`
+returns a block of *exactly* `blockMinutes` — it slides a fixed-width window
+and maximises the count. "2.5 hours is a minimum, and if you're all free
+longer you get longer" needs it to return the maximal span that still clears
+the threshold, which is a different search: for each start, extend while the
+covering set stays above the bar. That is a change to the resolution
+algorithm, not just to the schema, and it needs its own bound — the existing
+`MAX_WINDOW_CANDIDATES` ceiling exists because work already scales with span
+x submissions, and this adds a dimension.
+
+Rough shape of the rest: `window_start_at`/`window_end_at` move from `events`
+onto `event_poll_options` (per candidate), `window_block_minutes` stays on the
+event (one minimum for the whole poll), and `event_window_availability` keys
+on the option rather than the event. It composes with
+`poll_resolution_mode = 'multi_winner'` for free: each candidate resolves
+independently once its best block clears the threshold, which is exactly what
+multi-winner already means for options.
+
+Not small — schema, resolution algorithm, the creation form, the voting UI and
+the DM copy — and it wants a spec. It also subsumes **39**: an availability
+grid that shows every candidate is the same view this needs, so doing 39 first
+is not wasted, and doing 40 without it would leave the new mode unusable for
+the same reason the old one is.
+
+**Shipped in v0.4.6**, as `specs/0013`. What landed, and the two places it
+differs from the sketch above:
+
+- **`window_start_at`/`window_end_at` did not move onto
+  `event_poll_options`** — the candidate's existing `start_at`/`end_at`
+  simply changed meaning. Set a minimum and they are the window a session may
+  fall in; leave it unset and the candidate *is* the session. So the whole
+  shape of a poll is decided by one nullable column that already existed, and
+  the checkbox in the form is literally "is `window_block_minutes` set?".
+  `poll_mode` stops being read but stays in the schema: dropping a column the
+  deployed Worker still reads is a two-release change.
+- **The longer session orders its two objectives, and the order is
+  load-bearing: most people first, then longest.** A poll that traded a
+  person for an extra half hour would be choosing a longer session with fewer
+  players. `bestWindowSpan` fixes coverage to what a minimum-length block can
+  achieve, then stretches; it stays `O(grid x N log N)` because for a given
+  start, the latest end `c` people can reach is just the `c`-th largest
+  `endAt` among those who begin by then — no search over pairs.
+
+`event_window_availability` moved to `(option_id, user_id)` in migration
+0021, which is what lets one person answer about each candidate separately;
+existing window polls were converted to single-candidate polls first so their
+submissions had something to point at. Multi-winner composed as predicted,
+with one wrinkle worth recording: confirming a *windowed* candidate has to
+narrow its row from the window to the span that won, since unlike a fixed
+slot it does not know its own session time until it resolves.
 
 ### 39. The availability grid shows one candidate day, and a fixed 8am-2am slice of it — shipped in v0.4.5
 

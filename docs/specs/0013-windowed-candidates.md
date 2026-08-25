@@ -1,8 +1,9 @@
 # 0013 — Windowed candidates
 
-**Status:** Draft
-**Covers:** `IDEAS.md` item 40, and 39 and 41 which render its result
-**Phase:** 3.10 → **v0.4.5**
+**Status:** Built
+**Covers:** `IDEAS.md` item 40. Items 39 and 41, which render its result,
+shipped ahead of it in v0.4.5.
+**Phase:** 3.10 → **v0.4.6**
 
 ## The change in one sentence
 
@@ -39,7 +40,9 @@ So the shape of a poll is decided by one nullable column that already exists:
 
 **The checkbox in the form is literally "is `window_block_minutes` set?"**
 
-One table does need changing. `event_window_availability` is keyed
+Only one table needs changing, and it is not `event_poll_options`: the
+candidate's `start_at`/`end_at` change *meaning*, not shape.
+`event_window_availability` is keyed
 `(event_id, user_id)` — one submission per person per *poll*. Windowed
 candidates need one per person per *candidate*, so it gains `option_id` and
 the uniqueness moves to `(option_id, user_id)`. SQLite cannot alter a
@@ -151,12 +154,36 @@ Two ordering requirements, both learned the hard way in this repo:
 - **The ceiling holds per option**, so a 20-candidate poll is not 20× the
   work of a 1-candidate one.
 
-## Open questions
+## Open questions, as built
 
-1. **Does an existing window poll's DM copy need rewriting?** Its meaning has
-   not changed, but "the window" is now "a candidate". Leaning: leave live
-   polls alone, change the copy for new ones.
-2. **Can a poll mix windowed and fixed candidates?** The model allows it
-   (per-candidate minimum rather than per-poll). Leaning no — one minimum per
-   poll is the thing that was asked for, and per-candidate minimums are a
-   second decision to explain in the form.
+1. **Does an existing window poll's DM copy need rewriting?** Settled by
+   doing something narrower and more useful than rewording: a windowed poll's
+   resolution DM now names the **span**, not just the start. "We found two
+   and a half hours" and "everyone can stay until eleven" are different
+   outcomes and the old copy could not tell them apart. Live polls are
+   otherwise left alone, as the leaning said.
+2. **Can a poll mix windowed and fixed candidates?** Answered no, as leaned.
+   One minimum per poll, on the event.
+
+## What the build changed about this spec
+
+Two things above were written before the code existed and are wrong in the
+file as originally drafted; they are corrected in place, and recorded here so
+the diff between plan and result is legible:
+
+- **`window_start_at`/`window_end_at` did not move onto the option.** The
+  candidate's existing `start_at`/`end_at` changed meaning instead, which is
+  why the migration only had to touch one table.
+- **Multi-winner needed one special case after all.** Confirming a windowed
+  candidate narrows its row from the window to the span that won, in the same
+  compare-and-set that sets `confirmed_at` — a fixed slot already knows its
+  session time, and a window does not until it resolves. Everything else
+  composed as claimed.
+
+One consequence worth stating plainly, since it is the thing most likely to
+surprise later: **`event_window_availability` keeps `event_id` alongside
+`option_id`.** Three callers ask "how many people have answered anything on
+this poll" — the submission ceiling, the export, and account deletion — and
+routing those through `event_poll_options` would turn each into a join. It is
+denormalised deliberately, with `ON DELETE CASCADE` on both parents so it
+cannot outlive either.

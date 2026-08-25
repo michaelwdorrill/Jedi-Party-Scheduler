@@ -21,6 +21,21 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.4.6',
+    date: '25 August 2026',
+    summary: 'A poll can ask "any two and a half hours in these" instead of only "this or this".',
+    added: [
+      'A poll\u2019s options can now be windows rather than fixed times. Tick \u201cthese are windows\u201d, set a minimum session length, and each option becomes a range to find a session inside \u2014 \u201cWednesday evening, Thursday evening, or any time Saturday; two and a half hours at least\u201d is one poll.',
+      'If everyone can stay longer than the minimum, the session gets longer. The minimum is a floor, not a length: five people free all Saturday afternoon get the whole afternoon, not two and a half hours of it.',
+    ],
+    changed: [
+      'The two kinds of poll are now one. \u201cCandidate days/times\u201d and \u201ctime window\u201d were never really different \u2014 a time window was one option with a minimum \u2014 so they are one tab with a checkbox on it. Existing polls of either kind are unaffected and behave exactly as before.',
+      'Invitees answer each window separately, so a poll offering three of them asks three questions instead of one.',
+      'More people always beats a longer session. If four of you could play for five hours but five of you could play for two and a half, the poll picks the one with everyone in it.',
+      'The \u201cit\u2019s on\u201d message for a windowed poll now says how long the session is, not just when it starts.',
+    ],
+  },
+  {
     version: '0.4.5',
     date: '25 August 2026',
     summary: 'The calendar and the availability view stop hiding what a poll is asking.',

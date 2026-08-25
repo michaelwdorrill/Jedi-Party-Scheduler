@@ -156,7 +156,27 @@ describe('seed-poll-demo.sql', () => {
     ).toBe(3);
     // Everything lands in the guild the operator is actually in, not the
     // synthetic one -- otherwise none of it reaches their calendar.
-    expect(count(db, `SELECT COUNT(*) AS n FROM events WHERE id LIKE 'demo-%' AND guild_id = 'real-guild'`)).toBe(2);
+    expect(count(db, `SELECT COUNT(*) AS n FROM events WHERE id LIKE 'demo-%' AND guild_id = 'real-guild'`)).toBe(3);
+
+    // The v0.4.6 half: the same three candidates as windows, with submitted
+    // availability behind each one. Both poll shapes have to be on screen at
+    // once or specs/0013's claim that they are one object is unverifiable.
+    const windowed = db.raw
+      .prepare(`SELECT window_block_minutes AS m FROM events WHERE id = 'demo-poll-windows'`)
+      .get() as { m: number | null };
+    expect(windowed.m).toBe(150);
+    expect(count(db, `SELECT COUNT(*) AS n FROM event_poll_options WHERE event_id = 'demo-poll-windows'`)).toBe(3);
+    expect(count(db, `SELECT COUNT(*) AS n FROM event_window_availability WHERE event_id = 'demo-poll-windows'`)).toBe(8);
+    // Every window is at least as long as the minimum it demands, or it is a
+    // candidate nobody could ever win -- which the server refuses at write
+    // time and a fixture has no excuse for either.
+    const tooShort = db.raw
+      .prepare(
+        `SELECT COUNT(*) AS n FROM event_poll_options
+          WHERE event_id = 'demo-poll-windows' AND (end_at - start_at) < 150 * 60000`,
+      )
+      .get() as { n: number };
+    expect(tooShort.n).toBe(0);
   });
 
   it('is re-runnable, and the candidate times stay in the future', () => {
