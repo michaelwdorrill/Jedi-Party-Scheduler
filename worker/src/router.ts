@@ -11,6 +11,7 @@ import { pollRoutes } from './routes/polls';
 import { changeRequestRoutes } from './routes/changeRequests';
 import { personalRoutes } from './routes/personal';
 import { adminRoutes } from './routes/admin';
+import { discordProbeRoutes } from './routes/discordProbe';
 import { MembershipUnavailableError } from './lib/db';
 import { BodyTooLargeError, ConflictError, FreeBusyTooLargeError, MAX_BODY_BYTES, ValidationError } from './lib/validate';
 
@@ -93,6 +94,14 @@ export function buildApp() {
 
   app.use('/admin/*', requireAuth, requirePolicyAcceptance);
   app.route('/admin', adminRoutes);
+
+  // Unauthenticated on purpose, and temporary: a Discord interaction arrives
+  // with no cookie and no Authorization header, so the eventual
+  // /discord/interactions endpoint authenticates by signature alone and
+  // cannot sit behind requireAuth. The probe that sizes that work
+  // (routes/discordProbe.ts) sits in the same unauthenticated space, reads
+  // nothing and writes nothing, and goes away with the release it informs.
+  app.route('/discord', discordProbeRoutes);
 
   return app;
 }
