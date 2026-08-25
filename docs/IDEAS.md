@@ -338,6 +338,15 @@ ejecting anybody.
 So: a group is a list of people, plus the invariant that their common-server
 set is non-empty. An event picks its venue from that set.
 
+**The plainest statement of what this buys, from the person who asked for
+it:** *"If all 5 are on server A and B, that group should be selectable for
+both servers."* Today it is selectable for exactly one — whichever server it
+happened to be created on — because `groups.guild_id` is a single column and
+the invitee picker filters by it. Under the intersection rule that group's
+common-server set is {A, B} and it is offered for an event on either. That is
+the concrete symptom to fix, and the sentence spec 0011 should be read
+against.
+
 **`events.guild_id` stays, and stays `NOT NULL`.** An earlier draft of this
 entry framed it as "either it becomes nullable or a cross-server group's event
 has to nominate a server, which puts the filter back", and concluded this had
@@ -1218,6 +1227,23 @@ in the sand rather than on it.
 The dead `.horizon-foot` rule went with it. One element with one name is also
 one fewer class that can be silently orphaned the way `4a0ee7e` orphaned these
 two.
+
+**A second instance, found verifying the first.** The login page never mounts
+`Sky` — its vaporators are `.uo-hero-vaps`, a separate scene drawn inline in
+`LoginPage.tsx` — so it was the one screen where this fix changed nothing, and
+it was also the screen Michael happened to be looking at. It had the same
+symptom for a different reason: the hero is already one SVG, so coordinate
+spaces were never the problem; instead all three masts ended at a constant
+`y=552` while the near dune's surface varies with x, sitting at y≈568 under
+the leftmost vaporator and y≈556 under the right-hand one. The left pair
+floated by up to 16 units.
+
+Fixed by running the masts past the lowest point of both dune paths and
+letting the sand overlap them (they were already drawn first, so they were
+already behind it). That is deliberately not "match the numbers up": two
+numbers that must agree are what came apart here in the first place, and a
+mast that ends underground cannot drift above the surface however the dune is
+later reshaped.
 
 ### 34. A server member can see every group in that server, including ones they are not in — and every group's full member list — shipped in v0.4.3
 

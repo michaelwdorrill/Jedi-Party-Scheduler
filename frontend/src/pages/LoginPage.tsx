@@ -29,12 +29,22 @@ export default function LoginPage() {
           <circle cx="512" cy="430" r="66" fill="#F0A24A" opacity="0.95" />
           <circle cx="610" cy="464" r="31" fill="#FFD98F" opacity="0.9" />
         </g>
+        {/* The masts run past the dune line and are covered by it, rather than
+            stopping on it. They used to all end at y=552, which is a single
+            height for a surface that is not level: the near dune sits at
+            y~568 under the leftmost vaporator and y~556 under the right-hand
+            one, so the left pair visibly floated. Ending them all below the
+            lowest point of both dune paths and letting the sand overlap is
+            what makes them stand *in* it at any width -- and it cannot come
+            apart again the way a matched pair of numbers can.
+            (These are the login hero's own vaporators. The ones inside the
+            app are Sky.tsx's, which had a different fault -- see IDEAS 33.) */}
         <g className="uo-hero-vaps" fill="#1A1008" opacity="0.62">
-          <rect x="104" y="352" width="6" height="200" />
+          <rect x="104" y="352" width="6" height="244" />
           <ellipse cx="107" cy="347" rx="13" ry="16" />
-          <rect x="168" y="396" width="4.5" height="156" />
+          <rect x="168" y="396" width="4.5" height="200" />
           <ellipse cx="170" cy="392" rx="9.5" ry="12" />
-          <rect x="694" y="380" width="5" height="172" />
+          <rect x="694" y="380" width="5" height="216" />
           <ellipse cx="696" cy="375" rx="11" ry="14" />
         </g>
         <path
