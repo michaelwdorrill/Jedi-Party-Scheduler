@@ -279,13 +279,11 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
       return ephemeral(`You're not on the invite list for that one any more. ${siteLink(env)}`);
   }
 
-  // The yes/maybe/no nuance the website offers cannot be expressed in a
-  // select, so the DM says what was actually recorded rather than implying
-  // the unpicked nights were refused.
-  const answer =
-    picked.length === 0
-      ? 'none of these work for you.'
-      : `${picked.length} of these work for you. Anything you didn't pick is left blank rather than refused.`;
+  // Deliberately short, and deliberately not repeating the "anything you
+  // don't pick is left blank" line. That sentence is in the DM's own text,
+  // which stays visible above this one after the edit -- saying it twice in
+  // a message this small reads like the bot is arguing with itself.
+  const answer = picked.length === 0 ? 'none of these work for you.' : `${picked.length} of these work for you.`;
   return updateMessage(original, answer);
 }
 

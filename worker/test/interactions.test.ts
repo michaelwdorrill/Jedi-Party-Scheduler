@@ -282,7 +282,10 @@ describe('POST /discord/interactions -- poll select', () => {
     // Not a `no`: an unticked night is not a statement that it is impossible,
     // and absence is how the tallies already read it.
     expect(await countRows(db, 'event_poll_votes', `user_id = 'u1' AND option_id = 'o2'`)).toBe(0);
-    expect(json.data.content).toContain('2 of these');
+    expect(json.data.content).toContain('2 of these work for you.');
+    // The DM's own text already says this; the recorded line must not repeat
+    // it, because the original stays visible above the edit.
+    expect(json.data.content.split('Recorded:')[1]).not.toContain('left blank');
   });
 
   it('clears a previous yes when the same person re-answers without it', async () => {

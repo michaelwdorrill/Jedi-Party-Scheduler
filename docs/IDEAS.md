@@ -474,6 +474,36 @@ Related to item 31's lesson from the other direction. There the guardrail
 existed and could not fail usefully; here the guardrail does not exist at all
 for the change most in need of one.
 
+### 46. A reminder DM shows the buttons but not the answer already on record
+
+Found by pressing them (v0.5, sandbox, Aug 2026). The invite DM was answered
+"I'm in" at 5:45 and edited itself to say so. The 24-hour reminder for the
+same event arrived at 6:30 carrying all three buttons and no indication that
+an answer exists at all — so the only way to find out what you had said is to
+press something and see what it changes to.
+
+Offering the buttons again is *right*: a reminder is exactly when someone
+changes their mind, and that was the argument for putting controls on
+reminders in the first place. The gap is narrower than "don't show buttons"
+— it is that the message states the event and the time and omits the one
+fact the recipient already gave it.
+
+Cheap version: the reminder's text carries the current answer ("You said:
+I'm in") and the buttons stay as they are. The sweep already loads the
+invite row it filters recipients on, so the status is in hand and needs no
+extra query — worth confirming that claim against `pendingRecipients` before
+building, since it selects users rather than invites.
+
+Sharper version, and probably better: the *pressed* button is styled as the
+current answer, so the DM shows state rather than describing it. Discord has
+no "selected" style for buttons, so this means rebuilding the row with the
+current answer's button disabled or relabelled ("✓ You're in"), which is
+more code and a second thing to keep in step with `rsvp_status`.
+
+Related to the edit-on-resolve work in `specs/0010`, which is the same shape
+from the other end — a message whose controls should reflect state that has
+moved since it was sent.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
