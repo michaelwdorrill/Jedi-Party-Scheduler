@@ -494,9 +494,9 @@ export default function EventFormPage() {
           </button>
           <button
             onClick={() => setEventType('poll')}
-            className={`rounded px-3 py-1 text-sm ${eventType === 'poll' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
+            className={`rounded px-3 py-1 font-display text-sm uppercase tracking-wide ${eventType === 'poll' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
           >
-            Potential invite (poll)
+            Potential Options
           </button>
         </div>
       )}

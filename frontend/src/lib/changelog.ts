@@ -33,6 +33,10 @@ export const CHANGELOG: ChangelogEntry[] = [
       'Invitees answer each window separately, so a poll offering three of them asks three questions instead of one.',
       'More people always beats a longer session. If four of you could play for five hours but five of you could play for two and a half, the poll picks the one with everyone in it.',
       'The \u201cit\u2019s on\u201d message for a windowed poll now says how long the session is, not just when it starts.',
+      'The \u201cpotential invite (poll)\u201d tab on the new-event form is now called \u201cPotential Options\u201d, and matches the \u201cFixed Time\u201d tab beside it.',
+    ],
+    fixed: [
+      'Dragging one end of your availability past the other used to stop the slider dead with nothing on screen saying why. It now moves the other end out of the way \u2014 drag the start from 6:00 to 6:30 on a 6:00\u20138:30 selection and the end follows to 9:00.',
     ],
   },
   {
