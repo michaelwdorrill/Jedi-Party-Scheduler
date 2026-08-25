@@ -539,6 +539,79 @@ live call when a candidate venue's rows are all stale.
 Wants a spec — not for the rule, which is now decided, but for the four open
 calls above and the migration. Not v0.5.
 
+### 37. Updating the Privacy Policy or Terms should force everyone to re-agree
+
+Asked (Aug 2026): every time the Privacy Policy or the Terms change, people
+should be logged out before their next visit, so they have to agree to the
+updated version before using the app again.
+
+**Nothing in the app records agreement to anything today.** There is no
+`accepted_*` column, no policy version server-side, and no consent check
+anywhere — logging in *is* the implicit agreement, and the policy's own
+"last updated" is `LAST_UPDATED`, a hand-maintained string constant in
+`frontend/src/lib/legal.ts`. So this is two mechanisms, not one, and the
+second is the one that makes it mean something:
+
+1. **Revoke.** `revokeAllSessionsForUser` already exists in `lib/sessions.ts`
+   — the logout half is a single call per user, or one `UPDATE sessions SET
+   revoked_at = ?` across the table.
+2. **Record.** A logout on its own does not capture consent; it just puts the
+   login page in front of someone, which is where the agreement is already
+   implicit. Getting the thing actually asked for ("they have to agree")
+   needs a recorded acceptance: `users.accepted_policy_version`, set when
+   they agree, and refused service until it matches.
+
+**The version has to live in the Worker, not the frontend.** Enforcement is
+server-side or it is decorative — a client-side check is bypassed by not
+being the client. That means the current arrangement inverts: the Worker owns
+`CURRENT_POLICY_VERSION`, the frontend reads it (from `/me`, which the app
+already calls on every load) rather than holding its own copy. Two constants
+that must agree, in two deployables, is exactly the drift
+`scripts/check-env-parity.mjs` exists to catch elsewhere.
+
+**Shape that fits what is already there:** bump a Worker-side
+`CURRENT_POLICY_VERSION`; `requireAuth` (or a middleware just after it)
+returns a distinct status — 403 with a machine-readable code, not a bare
+403 — when `users.accepted_policy_version` is behind it; the frontend shows
+the agreement screen and calls `POST /me/accept-policy`; every other route
+stays refused until it does. Revoking sessions at the same time is then the
+belt to that braces, and it is what makes it a *logout* as asked rather than
+a quiet interstitial.
+
+**Four calls this needs before it is built:**
+- **What happens if someone declines.** They cannot use the app; the honest
+  paths are "stay logged out" and "delete my account" (`DELETE /me` already
+  exists and already does a full erase). The screen should offer both rather
+  than trapping them on a wall.
+- **Do the bot's DMs keep going to someone who has not re-agreed?** The cron
+  does not read sessions at all, so by default: yes. Arguably right — they
+  are still an invitee and the reminder is the service working — and
+  arguably not, if the policy change is about what we do with their data.
+  Needs an answer, not a default.
+- **Does every edit bump the version?** Fixing a typo should not log out the
+  world. So the version is bumped deliberately, like `APP_VERSION` is, and is
+  not derived from the file's contents or its `LAST_UPDATED` string.
+- **Terms and Policy: one version or two?** One is simpler and over-fires;
+  two is honest and doubles the bookkeeping. Leaning one, on the grounds that
+  this app changes both rarely and usually together.
+
+**Considered and not chosen: a soft in-app gate with no logout.** Blocking
+the API until acceptance would achieve consent without discarding sessions or
+forcing an OAuth round trip, which is gentler and equally enforceable. The
+ask was specifically for a logout, and there is a real argument for it — a
+logout is unambiguous, and it puts the login page (which links both
+documents) in front of the person rather than a dialog they can learn to
+dismiss. Recording both here so the choice is visible rather than assumed.
+
+**Why this is worth doing before the next policy change rather than after.**
+Two scheduled items rewrite the Privacy Policy:
+`specs/0007-server-noticeboard.md` (blocked on it) and
+`specs/0011-groups-without-servers.md` (changes what a group is). Both would
+ship a materially different policy to people who agreed to the old one, with
+no mechanism to notice. That is this roadmap's Rule 1 — a change to how we
+ship comes before the things it would ship — applied to policy rather than
+to code.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
