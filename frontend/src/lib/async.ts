@@ -47,6 +47,21 @@ export function describeError(e: unknown): string {
   return "Couldn't reach the server. Check your connection and try again.";
 }
 
+/**
+ * The same, for the one request whose failure decides whether the app renders
+ * at all: `GET /me`. Returns `null` for a 401, meaning "say nothing" -- the
+ * API client has already refreshed what it could and bounced to the login
+ * page, which is the right answer to a session that has genuinely ended.
+ *
+ * Every other failure is a message, because "we could not find out who you
+ * are" and "you are not logged in" are different facts, and only the second
+ * one is about the person.
+ */
+export function describeAuthError(e: unknown): string | null {
+  if (e instanceof ApiError && e.status === 401) return null;
+  return describeError(e);
+}
+
 export interface AsyncState<T> {
   data: T | null;
   error: string | null;

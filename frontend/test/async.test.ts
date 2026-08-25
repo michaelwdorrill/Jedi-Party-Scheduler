@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '../src/api/client';
-import { describeError } from '../src/lib/async';
+import { describeAuthError, describeError } from '../src/lib/async';
 
 // The decision this file protects: a failure must never be reportable as
 // "nothing is here" (idea 24). Every branch below has to produce a sentence
@@ -56,5 +56,32 @@ describe('describeError', () => {
     );
     expect(describeError(new ApiError(400, 'x'.repeat(500)))).toBe('That request was refused.');
     expect(describeError(new ApiError(400, '   '))).toBe('That request was refused.');
+  });
+});
+
+// The one request whose failure decides whether the app renders at all.
+// `/me` failing used to set `user = null`, which sent the guard to the login
+// page -- reporting an unreachable server as "you are not logged in". Found on
+// the sandbox, where it also made every other error state unreachable: any way
+// of breaking the API bounced you out before a page could render one.
+describe('describeAuthError', () => {
+  it('says nothing about a 401 -- the client has already bounced to login', () => {
+    expect(describeAuthError(new ApiError(401, 'Session expired, please log in again.'))).toBeNull();
+  });
+
+  it('describes an unreachable server rather than letting it read as a logout', () => {
+    expect(describeAuthError(new TypeError('Failed to fetch'))).toMatch(/couldn't reach the server/i);
+  });
+
+  it('describes a server fault rather than letting it read as a logout', () => {
+    expect(describeAuthError(new ApiError(500, 'Internal error'))).toMatch(/server ran into a problem/i);
+  });
+
+  // A 403 is a real answer about this user (not allow-listed), not a failure
+  // to get one -- so it is shown, not swallowed.
+  it('still reports a 403', () => {
+    expect(describeAuthError(new ApiError(403, 'Not a member of any allow-listed server'))).toBe(
+      'Not a member of any allow-listed server',
+    );
   });
 });

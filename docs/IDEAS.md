@@ -549,6 +549,28 @@ roadmap gets revisited between phases.
       request became an unhandled rejection and the button appeared inert.
       That is the half that made idea 26 so confusing to hit.
 
+    **A fourth case, found on the sandbox after the above had shipped**, and
+    the most important of them: the same bug sat one level *below* every page,
+    in `AuthContext`. `refreshUser` did `try { await api.get('/me') } catch {
+    setUser(null) }`, and `AuthGuard` redirects whenever the user is null — so
+    an unreachable Worker or a 5xx was reported as "you are not logged in",
+    which is a statement about the person rather than about the request. A 401
+    never reaches that catch (the API client refreshes, then bounces on its
+    own), so it was only ever catching failures that meant *we could not find
+    out*.
+
+    It also made the rest of this item unreachable in practice: **any** way of
+    breaking the API bounced you to the login page before a page could render
+    an error state at all. That is what the sandbox review actually
+    demonstrated — the recipe for triggering the new error state could not
+    work, and the reason it could not work was this.
+
+    Fixed in the same release: `AuthContext` carries an `error`, `AuthGuard`
+    checks it *before* the redirect and offers a retry, and the rule lives in
+    a tested `describeAuthError`. The token is untouched throughout, so a
+    retry — or a reload once the server is back — logs straight in with no
+    second OAuth round trip.
+
 25. **CI actions are on a deprecated Node runtime.** Every workflow pins
     `actions/checkout@v4` and `actions/setup-node@v4` — ten call sites across
     `ci.yml`, `deploy-pages.yml`, `deploy-sandbox.yml` and

@@ -26,6 +26,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     summary: 'The things v0.4 turned up while it was being built.',
     fixed: [
       'When something goes wrong loading a page, the app now says so. It used to show the same cheerful “nothing scheduled” as a genuinely empty calendar, whether the problem was a dropped connection, an expired session or a server fault.',
+      'If the app can’t reach the server on startup, it now says that, with a Try again button. It used to send you to the login page as though you had been logged out — you hadn’t been, and a reload would have put you straight back in.',
       'If you organise an event, you can RSVP to it. “I’m in / Maybe / Can’t make it” used to do nothing at all on your own events — you were never actually on your own invite list — unless you happened to invite a group you were in.',
       'Buttons that fail now tell you why instead of appearing to do nothing. Cancelling an event, saving a group, voting on a poll and copying an invite link all used to fail silently.',
       'Saving an edit no longer closes the form and discards your work if the save is refused.',
