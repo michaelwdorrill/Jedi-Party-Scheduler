@@ -474,6 +474,7 @@ shifts.
 | 40 | Candidate polls and window polls merged into windowed candidates | L | 3.11 | 0.4.6 | 39 | 0013 |
 | 41 | Polls render on their deadline, not their candidate days | M | 3.10 | 0.4.5 | — | none needed |
 | 42 | Month chips show the time and truncate the title away | S | 3.10 | 0.4.5 | — | none needed |
+| 44 | Agenda's group-colour gutter never rendered (runtime-built class) | XS | 3.10 | 0.4.5 | — | none needed |
 | 43 | Nothing guards CURRENT_POLICY_VERSION against an accidental bump | S | — | — | 37 | TBD |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
 | 37 | Re-agree to the Policy/Terms when they change | M | 3.9 | 0.4.4 | — | 0012 |

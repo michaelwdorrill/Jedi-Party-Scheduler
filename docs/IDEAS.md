@@ -492,6 +492,35 @@ Related to item 31's lesson from the other direction. There the guardrail
 existed and could not fail usefully; here the guardrail does not exist at all
 for the change most in need of one.
 
+### 44. The agenda's per-group colour gutter has never rendered — shipped in v0.4.5
+
+Found while checking v0.4.5's own work: `AgendaList` colours each row's
+left-hand time gutter with its group's hue, via
+`palette.ring.replace('ring-', 'border-')`. Tailwind generates CSS by scanning
+source text for class names, so a class assembled at runtime is never seen and
+never emitted. Before v0.4.5 `colors.ts` contained exactly **one** literal
+`border-[#…]` — so seven of the eight group colours produced no rule at all,
+and every agenda gutter has quietly been the default border colour since the
+agenda shipped.
+
+**It started working in v0.4.5 by accident**, which is the part worth
+recording. Item 41's `pending` swatch happens to contain the same literals
+(`border-[<ring hex>]` for all eight), so adding it made the agenda's
+long-broken gutter render for the first time. A bug fixed by coincidence is
+one commit away from breaking again.
+
+Fixed properly in the same release: `Swatch` gains a literal `border` field
+and `AgendaList` uses it. Also marked the agenda's provisional rows while
+there — see below.
+
+**This is the second instance of the same mistake in two days**, and the first
+was mine an hour earlier (item 41's first draft did exactly this, caught only
+because the compiled stylesheet was checked). The rule worth writing down:
+**a Tailwind class must exist as literal text somewhere the scanner reads.**
+Anything built with a template string, a `.replace()`, or a lookup is not a
+class — it is a string that looks like one. Worth a lint rule if it happens a
+third time.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the

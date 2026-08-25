@@ -59,22 +59,42 @@ export default function AgendaList({
                     ? groupColor(occ.groupId)
                     : UNGROUPED_COLOR;
                 const cancelled = occ.status === 'cancelled';
+                // A candidate day on a poll that has not resolved (idea 41).
+                // The month grid says this with a dashed outline; here the row
+                // is a full-width card, so it gets a dashed edge and the word
+                // -- an agenda entry that reads exactly like a confirmed one
+                // is the version of this bug that matters most, since the
+                // agenda is what a phone shows by default.
+                const provisional = !cancelled && occ.isProvisional === true;
                 return (
                   <li key={occ.occurrenceId}>
                     <Link
                       to={occ.isPersonal ? `/personal/${occ.eventId}` : `/events/${occ.eventId}`}
-                      className={`grid grid-cols-[4.5rem_1fr_auto] items-center gap-3 rounded border border-edge bg-surface/70 px-3 py-2 hover:bg-raised/70 ${
-                        cancelled ? 'opacity-60' : ''
-                      }`}
+                      className={`grid grid-cols-[4.5rem_1fr_auto] items-center gap-3 rounded border px-3 py-2 hover:bg-raised/70 ${
+                        provisional
+                          ? 'border-dashed border-edge-strong bg-surface/40'
+                          : 'border-edge bg-surface/70'
+                      } ${cancelled ? 'opacity-60' : ''}`}
                     >
                       <span
-                        className={`border-l-2 pl-2 font-mono text-xs tabular-nums text-muted ${palette.ring.replace('ring-', 'border-')}`}
+                        // palette.border, not ring.replace('ring-','border-'):
+                        // Tailwind generates CSS by scanning source text, so a
+                        // class built at runtime is never emitted and this
+                        // gutter had silently never taken its group's colour.
+                        className={`border-l-2 pl-2 font-mono text-xs tabular-nums text-muted ${palette.border} ${
+                          provisional ? 'border-dashed' : ''
+                        }`}
                       >
                         {occ.startAt
                           ? DateTime.fromMillis(occ.startAt).setZone(zone).toFormat('HH:mm')
                           : 'poll'}
                       </span>
                       <span className={`font-medium ${cancelled ? 'line-through' : ''}`}>
+                        {provisional && (
+                          <span className="mr-1.5 rounded bg-raised px-1.5 py-0.5 text-[10px] font-normal uppercase tracking-wide text-muted">
+                            Maybe
+                          </span>
+                        )}
                         {occ.title}
                       </span>
                       <span className="whitespace-nowrap text-xs text-faint">

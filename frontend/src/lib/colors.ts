@@ -21,6 +21,14 @@
 //
 // The hash and the stable-colour-per-group property are unchanged.
 
+// `border` is the same hue as `ring`, spelled as a border utility. It exists
+// because AgendaList wants a coloured left gutter and was building that class
+// with `palette.ring.replace('ring-', 'border-')` -- which Tailwind never sees
+// and never emits, so the agenda's per-group colour had silently never
+// rendered at all. (It started working in v0.4.5 purely by accident, because
+// `pending` below happens to contain the same literals.) Same reason as
+// `pending`: if a class is not written out here, it does not exist.
+//
 // `pending` is the same hue drawn as an outline rather than a fill, for a
 // candidate day on a poll that has not resolved (idea 41).
 //
@@ -31,24 +39,24 @@
 // emitted. The first version of this did exactly that and produced a chip
 // with no background and a default-grey border; the compiled stylesheet
 // contained zero matches for either class.
-export type Swatch = { bg: string; fg: string; ring: string; pending: string };
+export type Swatch = { bg: string; fg: string; ring: string; border: string; pending: string };
 
 const GROUP_PALETTE: Swatch[] = [
-  { bg: 'bg-[#B15139]', fg: 'text-[#FFF1E0]', ring: 'ring-[#C86A50]',
+  { bg: 'bg-[#B15139]', fg: 'text-[#FFF1E0]', ring: 'ring-[#C86A50]', border: 'border-[#C86A50]',
     pending: 'bg-[#B15139]/20 border border-dashed border-[#C86A50]' }, //  12deg rust
-  { bg: 'bg-[#C89434]', fg: 'text-[#1A1008]', ring: 'ring-[#DDAA4B]',
+  { bg: 'bg-[#C89434]', fg: 'text-[#1A1008]', ring: 'ring-[#DDAA4B]', border: 'border-[#DDAA4B]',
     pending: 'bg-[#C89434]/20 border border-dashed border-[#DDAA4B]' }, //  39deg brass
-  { bg: 'bg-[#7C8B3C]', fg: 'text-[#1A1008]', ring: 'ring-[#95A452]',
+  { bg: 'bg-[#7C8B3C]', fg: 'text-[#1A1008]', ring: 'ring-[#95A452]', border: 'border-[#95A452]',
     pending: 'bg-[#7C8B3C]/20 border border-dashed border-[#95A452]' }, //  71deg olive
-  { bg: 'bg-[#408E64]', fg: 'text-[#1A1008]', ring: 'ring-[#58A77C]',
+  { bg: 'bg-[#408E64]', fg: 'text-[#1A1008]', ring: 'ring-[#58A77C]', border: 'border-[#58A77C]',
     pending: 'bg-[#408E64]/20 border border-dashed border-[#58A77C]' }, // 148deg moss
-  { bg: 'bg-[#308B96]', fg: 'text-[#1A1008]', ring: 'ring-[#47A4AF]',
+  { bg: 'bg-[#308B96]', fg: 'text-[#1A1008]', ring: 'ring-[#47A4AF]', border: 'border-[#47A4AF]',
     pending: 'bg-[#308B96]/20 border border-dashed border-[#47A4AF]' }, // 187deg lagoon
-  { bg: 'bg-[#506CA6]', fg: 'text-[#FFF1E0]', ring: 'ring-[#6885BF]',
+  { bg: 'bg-[#506CA6]', fg: 'text-[#FFF1E0]', ring: 'ring-[#6885BF]', border: 'border-[#6885BF]',
     pending: 'bg-[#506CA6]/20 border border-dashed border-[#6885BF]' }, // 220deg steel
-  { bg: 'bg-[#8B5AA0]', fg: 'text-[#FFF1E0]', ring: 'ring-[#A473B9]',
+  { bg: 'bg-[#8B5AA0]', fg: 'text-[#FFF1E0]', ring: 'ring-[#A473B9]', border: 'border-[#A473B9]',
     pending: 'bg-[#8B5AA0]/20 border border-dashed border-[#A473B9]' }, // 282deg plum
-  { bg: 'bg-[#AE4E6D]', fg: 'text-[#FFF1E0]', ring: 'ring-[#C66686]',
+  { bg: 'bg-[#AE4E6D]', fg: 'text-[#FFF1E0]', ring: 'ring-[#C66686]', border: 'border-[#C66686]',
     pending: 'bg-[#AE4E6D]/20 border border-dashed border-[#C66686]' }, // 341deg rose
 ];
 
@@ -73,7 +81,7 @@ export function groupColor(groupId: string): Swatch {
 export const PERSONAL_COLOR: Swatch = {
   bg: 'bg-transparent border border-dashed border-moisture',
   fg: 'text-moisture',
-  ring: 'ring-moisture',
+  ring: 'ring-moisture', border: 'border-moisture',
   // Personal time is already an outline, so its pending form is the same --
   // and personal blocks are never poll candidates anyway.
   pending: 'bg-transparent border border-dashed border-moisture',
@@ -82,7 +90,7 @@ export const PERSONAL_COLOR: Swatch = {
 export const UNGROUPED_COLOR: Swatch = {
   bg: 'bg-raised-hi',
   fg: 'text-ink-dim',
-  ring: 'ring-edge-strong',
+  ring: 'ring-edge-strong', border: 'border-edge-strong',
   pending: 'bg-raised-hi/40 border border-dashed border-edge-strong',
 };
 
@@ -99,7 +107,7 @@ export const UNGROUPED_COLOR: Swatch = {
 export const EXTERNAL_COLOR: Swatch = {
   bg: 'bg-[#4A5560]/70 border border-[#5E6B76]',
   fg: 'text-[#C3CDD6]',
-  ring: 'ring-[#7C8B99]',
+  ring: 'ring-[#7C8B99]', border: 'border-[#7C8B99]',
   // External blocks are never poll candidates -- they come from someone
   // else's calendar, not from anything this app is deciding. Present only to
   // satisfy the shared shape.

@@ -30,6 +30,8 @@ export const CHANGELOG: ChangelogEntry[] = [
     changed: [
       'The availability view shows every option you are proposing, one strip each, instead of only the first. Each strip is scaled to its own slot, so a two-hour evening and a ten-hour Saturday are both readable.',
       'It also stops assuming the day runs 8am to 2am. Someone busy at 7am used to look free, and a slot outside those hours had nowhere to appear.',
+      'The agenda marks a poll\u2019s candidate nights as \u201cMaybe\u201d too, so they no longer read as settled plans there.',
+      'Each agenda entry\u2019s coloured edge now actually shows its group\u2019s colour \u2014 it had been rendering as plain grey for every group since the agenda was added.',
       'Calendar entries show the event name. They were a single line, and the time used all of it \u2014 so every entry in a month read the same and you had to hover to tell them apart. The game now shows in the tooltip too.',
     ],
   },
