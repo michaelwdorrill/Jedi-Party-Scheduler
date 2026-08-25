@@ -20,4 +20,8 @@
 // together; two counters double the bookkeeping and force the acceptance
 // screen to explain which one moved. Splitting them later costs a migration,
 // which is cheap here and may never be needed.
-export const CURRENT_POLICY_VERSION = 1;
+// TEMPORARY, SANDBOX ONLY -- do not merge this commit to main.
+//
+// Bumped by hand to exercise the mechanism somewhere with no real users,
+// which is step 3 of spec 0012's rollout. Production ships at 1 and dormant.
+export const CURRENT_POLICY_VERSION = 2;
