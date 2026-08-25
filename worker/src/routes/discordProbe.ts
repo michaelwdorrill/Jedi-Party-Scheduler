@@ -60,11 +60,19 @@ export async function probeAlgorithm(name: string): Promise<ProbeResult> {
     error: null,
   };
 
+  // The legacy name is not a drop-in for the modern one: it was specified as
+  // an elliptic curve, so it wants a `namedCurve` alongside it and rejects
+  // the bare `{ name }` the native algorithm takes. Asking for it in the
+  // modern shape would report "unsupported" for a Worker that in fact
+  // supports it, which is the one wrong answer this probe must not give.
+  const algorithm =
+    name === 'NODE-ED25519' ? { name, namedCurve: 'NODE-ED25519' } : { name };
+
   try {
     const key = await crypto.subtle.importKey(
       'raw',
       hexToBytes(PUBLIC_KEY_HEX),
-      { name },
+      algorithm,
       false,
       ['verify'],
     );
@@ -72,16 +80,11 @@ export async function probeAlgorithm(name: string): Promise<ProbeResult> {
 
     const message = new TextEncoder().encode(MESSAGE);
     const signature = hexToBytes(SIGNATURE_HEX);
-    result.acceptsValidSignature = await crypto.subtle.verify({ name }, key, signature, message);
+    result.acceptsValidSignature = await crypto.subtle.verify(algorithm, key, signature, message);
 
     const tampered = hexToBytes(SIGNATURE_HEX);
     tampered[0] ^= 0x01;
-    result.rejectsTamperedSignature = !(await crypto.subtle.verify(
-      { name },
-      key,
-      tampered,
-      message,
-    ));
+    result.rejectsTamperedSignature = !(await crypto.subtle.verify(algorithm, key, tampered, message));
   } catch (err) {
     result.error = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
   }

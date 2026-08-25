@@ -126,6 +126,30 @@ which is a materially different amount of work — so this is the first thing to
 put on the sandbox, as a ten-line route, before the rest of the release is
 planned around it.
 
+**Answered (Aug 2026), by the probe route this asks for.** `GET
+/discord/ed25519-probe` (`worker/src/routes/discordProbe.ts`) reports native
+`Ed25519` importing a raw public key, verifying a valid signature and
+rejecting a tampered one, under workerd 1.20260722.1 at this Worker's
+`compatibility_date`. So verification is `crypto.subtle` and nothing more,
+and the userland fallback this paragraph priced is not needed. The legacy
+`NODE-ED25519` works too, once asked for in its own shape — it was specified
+as an elliptic curve, so it wants a `namedCurve` beside the name and rejects
+the bare `{ name }` the native algorithm takes — which means nothing in this
+release depends on which of the two a given compatibility date gets.
+
+Measured against **local workerd**, not the deployed sandbox: the session that
+built the probe could not reach `*.workers.dev` (blocked by its egress
+policy). The route is deployed to the sandbox, and confirming the edge
+runtime agrees with the local one is one command:
+
+```
+curl https://jedi-party-scheduler-worker-sandbox.<you>.workers.dev/discord/ed25519-probe
+```
+
+`{"usable":"Ed25519",...}` is the expected answer, and `"usable":null` would
+mean this section's fallback is back on the table. The probe reads no env, no
+secrets and no D1, and goes away with the release it exists to size.
+
 ### The three-second deadline
 
 Discord requires a response within 3 seconds. Two ways to meet it, and this
@@ -285,8 +309,9 @@ The sandbox is a separate Discord application with its own bot, its own
 public key and its own interactions URL, which is what makes this release
 safe to develop in the open: a wrong endpoint in the sandbox DMs nobody real.
 
-1. Put the ten-line Ed25519 probe route on the sandbox and settle the
-   platform question above. Everything else depends on the answer.
+1. ~~Put the ten-line Ed25519 probe route on the sandbox and settle the
+   platform question above.~~ Done — the route is deployed and the answer is
+   native `Ed25519`, pending the one confirming `curl` above.
 2. Set the sandbox application's **Interactions Endpoint URL** to the sandbox
    Worker's `/discord/interactions` in the Discord developer portal, and save
    — Discord's PING probe must pass before it will accept the URL. This is a
