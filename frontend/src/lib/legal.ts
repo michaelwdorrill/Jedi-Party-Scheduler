@@ -18,8 +18,8 @@ export const LAST_UPDATED = '27 July 2026';
 // rebuild, including rebuilds that ship no user-visible change at all, which
 // would make "published" mean "last redeployed" instead of "last released".
 // Bump both together when cutting a release.
-export const APP_VERSION = '0.4.1';
-export const PUBLISHED_AT = '24 August 2026, 22:00 UTC';
+export const APP_VERSION = '0.4.3';
+export const PUBLISHED_AT = '25 August 2026, 04:00 UTC';
 
 // The person or entity legally responsible for the data ("data controller"
 // under GDPR). For a personally-run project this is just your name.

@@ -5,7 +5,7 @@ import { useGuild } from '../auth/GuildContext';
 import GroupEditor from '../components/GroupEditor';
 import type { Friend, Group } from '../types';
 import { describeError, useAction, useAsync } from '../lib/async';
-import { ErrorState, InlineError, Loading, buttonClass, cardClass, controlClass } from '../components/ui';
+import { Avatar, ErrorState, InlineError, Loading, buttonClass, cardClass, controlClass } from '../components/ui';
 
 export default function GroupsPage() {
   const { user } = useAuth();
@@ -173,9 +173,18 @@ export default function GroupsPage() {
                     </span>
                   )}
                 </div>
-                <div className="text-sm text-muted">
-                  {g.members.map((m) => m.globalName ?? m.username).join(', ') || 'No members'}
-                </div>
+                {g.members.length === 0 ? (
+                  <div className="text-sm text-muted">No members</div>
+                ) : (
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted">
+                    {g.members.map((m) => (
+                      <span key={m.id} className="flex items-center gap-1.5">
+                        <Avatar userId={m.id} name={m.globalName ?? m.username} avatarHash={m.avatarHash} />
+                        {m.globalName ?? m.username}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
               {g.createdBy === user?.id && (
                 <div className="flex gap-2">

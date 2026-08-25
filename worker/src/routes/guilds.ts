@@ -126,54 +126,12 @@ guildRoutes.get('/:guildId/voice-channels', async (c) => {
   }
 });
 
-guildRoutes.get('/:guildId/groups', async (c) => {
-  const userId = c.get('userId');
-  const guildId = c.req.param('guildId');
-  if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
-
-  const { results: groups } = await c.env.DB.prepare(
-    `SELECT id, guild_id, name, game, idle_reminder_days, created_by FROM groups WHERE guild_id = ? ORDER BY name`,
-  )
-    .bind(guildId)
-    .all<{ id: string; guild_id: string; name: string; game: string | null; idle_reminder_days: number; created_by: string }>();
-
-  // One chunked query for every group's members, rather than one query per
-  // group: the previous N+1 shape issued a database round trip per group on
-  // a page that loads on every visit to the groups screen, and D1 also caps
-  // how many queries a single Worker invocation may issue.
-  const membersByGroup = new Map<string, { id: string; username: string; global_name: string | null; avatar_hash: string | null }[]>();
-  for (const chunk of chunkIds(groups.map((g) => g.id))) {
-    const { results } = await c.env.DB.prepare(
-      `SELECT gm.group_id, u.id, u.username, u.global_name, u.avatar_hash
-       FROM group_members gm JOIN users u ON u.id = gm.user_id
-       WHERE gm.group_id IN (${placeholders(chunk.length)})`,
-    )
-      .bind(...chunk)
-      .all<{ group_id: string; id: string; username: string; global_name: string | null; avatar_hash: string | null }>();
-    for (const row of results) {
-      if (!membersByGroup.has(row.group_id)) membersByGroup.set(row.group_id, []);
-      membersByGroup.get(row.group_id)!.push(row);
-    }
-  }
-
-  return c.json(
-    groups.map((g) => ({
-      id: g.id,
-      guildId: g.guild_id,
-      name: g.name,
-      game: g.game,
-      idleReminderDays: g.idle_reminder_days,
-      createdBy: g.created_by,
-      members: (membersByGroup.get(g.id) ?? []).map((m) => ({
-        id: m.id,
-        username: m.username,
-        globalName: m.global_name,
-        avatarHash: m.avatar_hash,
-      })),
-    })),
-  );
-});
-
+// GET /:guildId/groups was removed in v0.4.3 (IDEAS item 34). It returned
+// every group in the server -- and every one of those groups' full member
+// lists -- to anyone in the server, whether or not they were in the group.
+// Groups are now listed only by GET /me/groups, which is scoped to the
+// groups the caller is actually in. Creating one is still server-scoped, so
+// the POST below stays.
 guildRoutes.post('/:guildId/groups', async (c) => {
   const userId = c.get('userId');
   const guildId = c.req.param('guildId');

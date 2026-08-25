@@ -254,6 +254,36 @@ carefully") rather than a predicate problem. A guardrail that cannot fail
 usefully is worse than no guardrail, because it costs attention and returns
 nothing.
 
+### Phase 3.8 — What watching someone else use it turned up (33, 34, 35) → **v0.4.3** ✅ shipped
+
+No spec. Three items captured in one sitting from watching a friend use the
+app, which is a different source from every other phase here — the security
+review cycle, or building the previous release. All three were small and
+already understood, which is Rule 2.
+
+- **34, groups visible to a whole server.** The decided strict option: you see
+  only the groups you are in. `GET /guilds/:guildId/groups` was deleted rather
+  than restricted, since with the invitee picker reading `/me/groups` it had no
+  callers left. **The behaviour change to know about: an organizer can no
+  longer invite a group they are not part of.** That is the same leak from the
+  other side, and the changelog says so in those words rather than calling it
+  "improved privacy".
+- **33, the horizon.** A regression, not a wish: `4a0ee7e` reused the
+  `.uo-ground` and `.uo-vaporators` declaration blocks for other classes while
+  the markup kept the old names, so both silently became `position: static` and
+  rendered at the top of the sky layer for two releases. Fixed by merging them
+  into one `.uo-horizon` — two viewBoxes stretched independently could only
+  line up at one aspect ratio, so restoring the rules alone would not have
+  fixed the complaint.
+- **35, avatars.** Frontend-only: the hash was already stored, already
+  returned, already typed. Nothing rendered it.
+
+**What this phase is really evidence for.** Every one of these was found by a
+person using the app rather than by a review pass or a test, and 33 had been
+live and wrong since v0.4 without anyone noticing. That is an argument for
+item 23 (there is still no way to put a frontend change in front of anyone but
+Michael) and, more cheaply, for watching someone else use it more often.
+
 ### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ← next
 
 **Spec:** `specs/0010-interactive-bot.md` (Draft). It scopes v0.5 down to the
@@ -335,6 +365,8 @@ shifts.
 | **0.4** | Phase 3.5 — visual design pass (8), Dashboard/Calendar merged into one landing page (20) | **Shipped 23 Aug 2026** |
 | **0.4.1** | Phase 3.6 — error states (24), organizer RSVP (26), CI action majors (25), the sandbox-frontend rule written down (23, partial), past events faded (27), past-date warning (28) | **Shipped 24 Aug 2026** |
 | **0.4.2** | Phase 3.7 — the sandbox advisory made meaningful (31), sandbox drift reported (30), `IDEAS.md` split into open and built (29). Repo only: the deployed app stays 0.4.1 | **Shipped 25 Aug 2026** |
+| **0.4.3** | Phase 3.8 — group visibility restricted to members (34), the horizon re-pinned (33), Discord avatars (35) | **Shipped 25 Aug 2026** |
+| 0.4.4 | Policy/Terms re-acceptance (37), per `specs/0012` | Planned |
 | 0.5 | Interactive bot (19), and the message-id cost it turned out to carry (32) | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
@@ -376,9 +408,9 @@ shifts.
 | 30 | Sandbox/`main` drift goes unreported | S | 3.7 | 0.4.2 | — | none needed |
 | 31 | Sandbox advisory can never pass | S | 3.7 | 0.4.2 | 30 | none needed |
 | 32 | `sendBotDm` discards the sent message id | S | 3.75 | 0.5 | 19 | in 19's spec |
-| 33 | Ground and vaporators unpinned since v0.4 | S | 3.8 | TBD | — | none needed |
-| 35 | Discord avatars where people are listed | S | 3.8 | TBD | — | none needed |
-| 34 | Groups are visible to server members who aren't in them | S | 3.8 | TBD | — | decided, none needed |
+| 33 | Ground and vaporators unpinned since v0.4 | S | 3.8 | 0.4.3 | — | none needed |
+| 35 | Discord avatars where people are listed | S | 3.8 | 0.4.3 | — | none needed |
+| 34 | Groups are visible to server members who aren't in them | S | 3.8 | 0.4.3 | — | none needed |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
 | 37 | Re-agree to the Policy/Terms when they change | M | — | — | — | 0012 |
 
@@ -412,28 +444,20 @@ notes on that placement:
   than a queue position: **Phase 3.8**, to ride whichever release is next
   through the frontend. 34 is the one that does not place itself — see below.
 
-- **Phase 3.8 — frontend errands found in use (33, 35).** 33 is a regression
-  with a root cause (the `.uo-ground` and `.uo-vaporators` rules were deleted
-  by `4a0ee7e`, which reused their declaration blocks for other classes while
-  the markup kept the old class names), so restoring them is small — but the
-  entry records that restoring alone does not fix the complaint, because the
-  two SVGs stretch independently and can only line up at one aspect ratio.
-  35 turned out to be frontend-only: `avatarHash` is already stored, already
-  returned by every member-listing route, and already typed in the frontend;
-  nothing renders it. Both are verified locally rather than on the sandbox,
-  per the rule item 23 wrote down — which is item 23 continuing to cost
-  something on every frontend change, and an argument for finally closing it.
+- **Phase 3.8 shipped as v0.4.3**, and the note it was placed with holds up:
+  33 and 35 were both small and already understood, which is Rule 2. Worth
+  recording that 33 was *not* the one-line CSS restore its capture implied —
+  the two SVGs had to be merged, because independently stretched viewBoxes can
+  only line up at one aspect ratio.
 
-- **34 was a decision rather than a task, and the decision has been made:
-  you see only the groups you are in.** The strictest of the three options,
-  chosen over consistency with `specs/0007-server-noticeboard.md` on the
-  grounds that 0007's noticeboard argument is about *events* — things that
-  happen at a time — and a group roster is a list of people. That makes it a
-  small, understood change, so Rule 2 puts it in **Phase 3.8** with the other
-  frontend-adjacent errands, with one caveat that belongs in the changelog in
-  plain words: it restricts *inviting*, not just viewing. The New Event form's
-  invitee picker is fed by `GET /guilds/:id/groups`, so an organizer will no
-  longer be able to invite a group they are not part of.
+- **34 shipped in v0.4.3** as the strict option: you see only the groups you
+  are in. Chosen over consistency with `specs/0007-server-noticeboard.md` on
+  the grounds that 0007's noticeboard argument is about *events* — things that
+  happen at a time — and a group roster is a list of people. It restricted
+  inviting as well as viewing, exactly as flagged: the New Event form's invitee
+  picker was fed by `GET /guilds/:id/groups`, which is now deleted, so an
+  organizer can no longer invite a group they are not part of. The changelog
+  says that in plain words.
 
 - **36 is the same question asked properly, and its rule is now decided.** A
   group becomes a list of people, valid when there exists at least one server

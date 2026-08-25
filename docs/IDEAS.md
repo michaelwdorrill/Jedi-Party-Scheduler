@@ -299,146 +299,6 @@ discovered during it.
 
 Found while surveying the worker for v0.5 readiness, Aug 2026.
 
-### 33. The ground and the vaporators lost their positioning in v0.4 and have been unpinned ever since
-
-Reported from watching someone else use it: the vaporators on the home
-screen are not standing on the ground. They are not standing anywhere —
-neither element has any CSS at all.
-
-`Sky.tsx` renders `.uo-ground` and `.uo-vaporators`, and its own comment says
-"The ground, pinned to the bottom edge at every window size". Nothing pins
-it. Those two rules existed once and were **deleted by `4a0ee7e`** ("Busier
-sky, independent suns, real dust haze"), which reused their declaration
-blocks for `.uo-haze` and `.uo-craft` instead of adding new ones. The markup
-kept the class names, so nothing broke loudly; the styles simply vanished
-from underneath them. They have been missing through v0.4 and v0.4.1.
-
-Measured on the built bundle at 1280x800, with the real stylesheet: both SVGs
-compute to `position: static`, in normal flow at the *top* of the fixed sky
-layer — ground at 0-192px, vaporators at 192-346px — rather than at the foot
-of the viewport. They are also the only two `uo-` classes in `Sky.tsx` with no
-rule anywhere in `index.css`, which is a cheap thing to assert in a test.
-
-Restoring the deleted rules (`position: absolute; bottom: 0; height: 15vh /
-13vh` with the old min-heights) puts them back at the bottom, but does not by
-itself answer the thing being complained about, and this is the part worth
-designing rather than patching: **the two SVGs have independent viewBoxes
-(`0 0 1000 150` and `0 0 1000 120`) and both carry `preserveAspectRatio="none"`,
-so each is stretched by a different factor at every window size.** A foot at
-`y=120` in one coordinate space cannot stay on a dune crest at `y≈44` in
-another that is being scaled differently. Even correctly pinned they only
-line up at one aspect ratio. The honest fix is one SVG containing both, so
-the feet and the dune line are in the same coordinate space and stretch
-together.
-
-Two smaller things found alongside: `.horizon-foot` has a rule in `index.css`
-("Rendered by Layout") and is rendered by nothing — dead since the scene moved
-into `Sky.tsx`. And the login page never mounts `Sky` at all; its vaporators
-are the separate, correctly-styled `.uo-hero-vaps`, which is why the fault is
-invisible until you log in.
-
-Frontend-only, so per CLAUDE.md it is verified locally against the sandbox
-Worker rather than on the sandbox — the gap item 23 is still about.
-
-### 34. A server member can see every group in that server, including ones they are not in — and every group's full member list
-
-Reported from watching someone else use it: "he can see groups he's not a
-part of". Confirmed, and it is the query's design rather than a leak through
-a crack. `GET /me/groups` (`routes/me.ts`) selects every row in `groups`
-joined only on *guild* membership — `user_guild_membership.is_member = 1`
-within the grace window — with no `group_members` predicate on the caller at
-all. `GET /guilds/:id/groups` (`routes/guilds.ts`) has the same shape. So the
-visibility rule today is "if you are in the server, you see all of its
-groups".
-
-The larger half is what comes with each group: both routes then fetch every
-group's **full member list** — id, username, global name, avatar hash — and
-return it. So a server member does not merely learn that a group exists; they
-learn exactly who is in it, for every group in the server.
-
-This needs a decision, not a patch, and it is the same decision
-`specs/0007-server-noticeboard.md` already made for *events* — where the call
-was that a server is "more public noticeboard type thing than anything", so
-titles and attendee lists are visible by default. Groups being visible the
-same way is at least arguable on the same grounds, and if that is the answer
-then this is a documentation gap rather than a bug. But it was never
-*decided* for groups; it fell out of the query. Three options:
-- **Leave it, and say so.** Consistent with 0007's noticeboard model. Costs a
-  line in the Privacy Policy and the Groups page saying what other members can
-  see.
-- **Show groups, hide rosters.** Non-members see a group's name and size but
-  not who is in it. Cheapest change with a real privacy effect, and it keeps
-  the invitee picker working, which is what the per-guild route feeds.
-- **Show only groups you are in.** Strictest, and it breaks the "ask to be
-  added to that group" path, since you cannot ask about something you cannot
-  see.
-
-Note the interaction with item 16: since v0.3 a group's creator is always a
-member, so "groups I am in" is now a well-defined set for every group — which
-is what makes option 3 implementable at all.
-
-The Privacy Policy needs reading before any of the three is chosen; it is
-already the blocker on 0007, and this touches the same promise.
-
-**Decided (Aug 2026): option 3 — you see only the groups you are in**, even
-when the group is on a server you are in. That is the strictest of the three
-and it was chosen over the noticeboard-consistency argument deliberately: a
-group roster is a list of *people*, and spec 0007's reasoning about a server
-being a public noticeboard was about *events*, which are things that happen at
-a time. "Who is in this D&D party" is not a listing on a noticeboard.
-
-**The consequence to go in with eyes open: it restricts inviting, not just
-viewing.** `GET /guilds/:id/groups` is what feeds the New Event form's
-invitee picker, so an organizer who can only see groups they are in can only
-*invite* groups they are in. Today they can invite any group on the server.
-That is a real behaviour change, and it is the right one — inviting twelve
-people you cannot name, by picking a group you are not part of, is the same
-leak from the other side — but it will be noticed, and it should be in the
-changelog in those words rather than as "improved privacy".
-
-It also removes the "browse the server's groups and ask to be added" path,
-which was option 3's stated cost. Accepted: asking happens in Discord, where
-these people already are, and the app is not where that conversation belongs.
-
-This makes 34 a small, decided change rather than an open question, so it
-moves onto the roadmap. Note it lands naturally as part of item 36 too — if
-groups stop being server-scoped at all, "the groups you can see" and "the
-groups you are in" become the same set by construction.
-
-### 35. Show Discord avatars where people are listed
-
-Requested: people's Discord profile pictures when looking at who to add to a
-group and who is already in one. Names alone make an invitee picker hard to
-scan, and the app already looks like Discord-adjacent furniture everywhere
-else.
-
-**The data is already there, all the way through.** `users.avatar_hash` is
-written at login from Discord's `/users/@me` (`routes/auth.ts`), every
-member-listing route already selects it and returns it as `avatarHash`
-(`routes/me.ts`, `routes/guilds.ts`, `routes/groups.ts`), and the frontend
-already types it on both `User` and the group-member shape
-(`types/index.ts`). Nothing renders it — there is no reference to
-`cdn.discordapp.com` anywhere in the frontend. So this is a pure frontend
-change: an `<Avatar>` primitive over
-`https://cdn.discordapp.com/avatars/{id}/{hash}.png?size=64`, with a fallback
-for a null hash (Discord's default avatar endpoint, or initials in the
-group's palette colour — the palette work landed in v0.4).
-
-Three things to get right rather than discover:
-- **The null case is common**, not an edge: `avatar_hash` is null for anyone
-  who has never set an avatar, and the fallback is what most non-Discord-native
-  users will see.
-- **The hash goes stale.** It is refreshed only when someone logs in, so
-  somebody who changes their avatar keeps the old one here until their next
-  login, and a stale hash 404s. That wants an `onError` fallback rather than a
-  broken image.
-- **It is the first third-party asset the app loads.** There is no CSP today
-  (no `_headers` file in `frontend/public`), so nothing blocks it now, but a
-  CSP added later needs `img-src` to include `cdn.discordapp.com` — and
-  loading these tells Discord the IP of everyone viewing the page, which is
-  worth a Privacy Policy line even though every user here is already a Discord
-  user.
-
 ### 36. Should a group be server-agnostic, requiring only that people share a server?
 
 Asked (Aug 2026) alongside the decision on 34, and it is the more interesting
@@ -1302,3 +1162,187 @@ so the new predicate matches where the old one warned. The remaining blind
 spot is stated in the workflow itself: a sandbox deploy of a branch never
 merged and since deleted is unreachable from the production checkout, and the
 step reports how many such deployments it had to skip.
+
+### 33. The ground and the vaporators lost their positioning in v0.4 and have been unpinned ever since — shipped in v0.4.3
+
+Reported from watching someone else use it: the vaporators on the home
+screen are not standing on the ground. They are not standing anywhere —
+neither element has any CSS at all.
+
+`Sky.tsx` renders `.uo-ground` and `.uo-vaporators`, and its own comment says
+"The ground, pinned to the bottom edge at every window size". Nothing pins
+it. Those two rules existed once and were **deleted by `4a0ee7e`** ("Busier
+sky, independent suns, real dust haze"), which reused their declaration
+blocks for `.uo-haze` and `.uo-craft` instead of adding new ones. The markup
+kept the class names, so nothing broke loudly; the styles simply vanished
+from underneath them. They have been missing through v0.4 and v0.4.1.
+
+Measured on the built bundle at 1280x800, with the real stylesheet: both SVGs
+compute to `position: static`, in normal flow at the *top* of the fixed sky
+layer — ground at 0-192px, vaporators at 192-346px — rather than at the foot
+of the viewport. They are also the only two `uo-` classes in `Sky.tsx` with no
+rule anywhere in `index.css`, which is a cheap thing to assert in a test.
+
+Restoring the deleted rules (`position: absolute; bottom: 0; height: 15vh /
+13vh` with the old min-heights) puts them back at the bottom, but does not by
+itself answer the thing being complained about, and this is the part worth
+designing rather than patching: **the two SVGs have independent viewBoxes
+(`0 0 1000 150` and `0 0 1000 120`) and both carry `preserveAspectRatio="none"`,
+so each is stretched by a different factor at every window size.** A foot at
+`y=120` in one coordinate space cannot stay on a dune crest at `y≈44` in
+another that is being scaled differently. Even correctly pinned they only
+line up at one aspect ratio. The honest fix is one SVG containing both, so
+the feet and the dune line are in the same coordinate space and stretch
+together.
+
+Two smaller things found alongside: `.horizon-foot` has a rule in `index.css`
+("Rendered by Layout") and is rendered by nothing — dead since the scene moved
+into `Sky.tsx`. And the login page never mounts `Sky` at all; its vaporators
+are the separate, correctly-styled `.uo-hero-vaps`, which is why the fault is
+invisible until you log in.
+
+Frontend-only, so per CLAUDE.md it is verified locally against the sandbox
+Worker rather than on the sandbox — the gap item 23 is still about.
+
+**Done in v0.4.3.** Both halves: the deleted positioning is restored, and the
+two SVGs became one. The merge is the part that mattered — two viewBoxes of
+different heights, both with `preserveAspectRatio="none"`, are stretched by
+different factors at every window size, so a foot could only meet a dune at
+one aspect ratio. One `.uo-horizon` puts the feet and the dunes in the same
+coordinate space. Measured on the built bundle at 1280x800, 390x844 and
+1920x1080: the band's bottom is the viewport's bottom in all three, and a
+vaporator foot sits at a constant 52% of the band's height rather than
+drifting. The feet are drawn *behind* the near dune so they read as standing
+in the sand rather than on it.
+
+The dead `.horizon-foot` rule went with it. One element with one name is also
+one fewer class that can be silently orphaned the way `4a0ee7e` orphaned these
+two.
+
+### 34. A server member can see every group in that server, including ones they are not in — and every group's full member list — shipped in v0.4.3
+
+Reported from watching someone else use it: "he can see groups he's not a
+part of". Confirmed, and it is the query's design rather than a leak through
+a crack. `GET /me/groups` (`routes/me.ts`) selects every row in `groups`
+joined only on *guild* membership — `user_guild_membership.is_member = 1`
+within the grace window — with no `group_members` predicate on the caller at
+all. `GET /guilds/:id/groups` (`routes/guilds.ts`) has the same shape. So the
+visibility rule today is "if you are in the server, you see all of its
+groups".
+
+The larger half is what comes with each group: both routes then fetch every
+group's **full member list** — id, username, global name, avatar hash — and
+return it. So a server member does not merely learn that a group exists; they
+learn exactly who is in it, for every group in the server.
+
+This needs a decision, not a patch, and it is the same decision
+`specs/0007-server-noticeboard.md` already made for *events* — where the call
+was that a server is "more public noticeboard type thing than anything", so
+titles and attendee lists are visible by default. Groups being visible the
+same way is at least arguable on the same grounds, and if that is the answer
+then this is a documentation gap rather than a bug. But it was never
+*decided* for groups; it fell out of the query. Three options:
+- **Leave it, and say so.** Consistent with 0007's noticeboard model. Costs a
+  line in the Privacy Policy and the Groups page saying what other members can
+  see.
+- **Show groups, hide rosters.** Non-members see a group's name and size but
+  not who is in it. Cheapest change with a real privacy effect, and it keeps
+  the invitee picker working, which is what the per-guild route feeds.
+- **Show only groups you are in.** Strictest, and it breaks the "ask to be
+  added to that group" path, since you cannot ask about something you cannot
+  see.
+
+Note the interaction with item 16: since v0.3 a group's creator is always a
+member, so "groups I am in" is now a well-defined set for every group — which
+is what makes option 3 implementable at all.
+
+The Privacy Policy needs reading before any of the three is chosen; it is
+already the blocker on 0007, and this touches the same promise.
+
+**Decided (Aug 2026): option 3 — you see only the groups you are in**, even
+when the group is on a server you are in. That is the strictest of the three
+and it was chosen over the noticeboard-consistency argument deliberately: a
+group roster is a list of *people*, and spec 0007's reasoning about a server
+being a public noticeboard was about *events*, which are things that happen at
+a time. "Who is in this D&D party" is not a listing on a noticeboard.
+
+**The consequence to go in with eyes open: it restricts inviting, not just
+viewing.** `GET /guilds/:id/groups` is what feeds the New Event form's
+invitee picker, so an organizer who can only see groups they are in can only
+*invite* groups they are in. Today they can invite any group on the server.
+That is a real behaviour change, and it is the right one — inviting twelve
+people you cannot name, by picking a group you are not part of, is the same
+leak from the other side — but it will be noticed, and it should be in the
+changelog in those words rather than as "improved privacy".
+
+It also removes the "browse the server's groups and ask to be added" path,
+which was option 3's stated cost. Accepted: asking happens in Discord, where
+these people already are, and the app is not where that conversation belongs.
+
+This makes 34 a small, decided change rather than an open question, so it
+moves onto the roadmap. Note it lands naturally as part of item 36 too — if
+groups stop being server-scoped at all, "the groups you can see" and "the
+groups you are in" become the same set by construction.
+
+**Done in v0.4.3**, as the strict option decided above. `/me/groups` gains a
+`group_members` join and `GET /guilds/:guildId/groups` is deleted rather than
+restricted — with the invitee picker reading `/me/groups`, it had no callers
+left. Group reads and writes now require membership of the group *and* active
+membership of its server; the second is not made redundant by the first,
+because roster rows survive someone leaving a server.
+
+The whole suite passed the moment the fix went in, which says something worth
+recording: **nothing pinned the old behaviour**. `test/groupVisibility.test.ts`
+now does, and it was checked against the pre-fix code — three of its five
+tests fail there, and the two that pass are the ones deliberately pinning
+behaviour that must *not* change (a departed member, a stale membership row).
+
+### 35. Show Discord avatars where people are listed — shipped in v0.4.3
+
+Requested: people's Discord profile pictures when looking at who to add to a
+group and who is already in one. Names alone make an invitee picker hard to
+scan, and the app already looks like Discord-adjacent furniture everywhere
+else.
+
+**The data is already there, all the way through.** `users.avatar_hash` is
+written at login from Discord's `/users/@me` (`routes/auth.ts`), every
+member-listing route already selects it and returns it as `avatarHash`
+(`routes/me.ts`, `routes/guilds.ts`, `routes/groups.ts`), and the frontend
+already types it on both `User` and the group-member shape
+(`types/index.ts`). Nothing renders it — there is no reference to
+`cdn.discordapp.com` anywhere in the frontend. So this is a pure frontend
+change: an `<Avatar>` primitive over
+`https://cdn.discordapp.com/avatars/{id}/{hash}.png?size=64`, with a fallback
+for a null hash (Discord's default avatar endpoint, or initials in the
+group's palette colour — the palette work landed in v0.4).
+
+Three things to get right rather than discover:
+- **The null case is common**, not an edge: `avatar_hash` is null for anyone
+  who has never set an avatar, and the fallback is what most non-Discord-native
+  users will see.
+- **The hash goes stale.** It is refreshed only when someone logs in, so
+  somebody who changes their avatar keeps the old one here until their next
+  login, and a stale hash 404s. That wants an `onError` fallback rather than a
+  broken image.
+- **It is the first third-party asset the app loads.** There is no CSP today
+  (no `_headers` file in `frontend/public`), so nothing blocks it now, but a
+  CSP added later needs `img-src` to include `cdn.discordapp.com` — and
+  loading these tells Discord the IP of everyone viewing the page, which is
+  worth a Privacy Policy line even though every user here is already a Discord
+  user.
+
+**Done in v0.4.3.** A single `<Avatar>` primitive, used on the Groups page
+roster and the invitee picker. No backend change was needed at all — the hash
+was already stored, already returned, already typed.
+
+Both fallbacks the entry called for are real code paths rather than
+hypotheticals: a null hash (anyone who never set a picture) and an `onError`
+(a hash only refreshes at login, so it 404s for anyone who changed their
+avatar since). Both fall back to an initial. The pure parts live in
+`lib/avatar.ts` so they could be tested — the frontend suite has no DOM
+environment — including that a leading emoji is not sliced in half, which
+plain `name[0]` does.
+
+The Privacy Policy needed no amendment: it already said avatars are shown to
+other members of servers you share, "so people can identify who they're
+inviting", which is exactly this.

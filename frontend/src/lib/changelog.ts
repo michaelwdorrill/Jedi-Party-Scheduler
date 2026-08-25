@@ -21,6 +21,19 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.4.3',
+    date: '25 August 2026',
+    summary: 'Faces on the names, and groups stop being visible to the whole server.',
+    changed: [
+      'You now only see the groups you are actually in. Previously anyone in a server could see every group in it, and every one of those groups\u2019 members.',
+      'Because of that, you can no longer invite a group you are not part of \u2014 the New Event form now offers the groups you are in. Inviting people individually is unchanged.',
+      'People\u2019s Discord profile pictures now appear next to their names when you are choosing who to invite and when you are looking at a group.',
+    ],
+    fixed: [
+      'The moisture vaporators stand on the ground again. They had come loose from it in v0.4 and were floating near the top of the screen, which was most noticeable on a short window.',
+    ],
+  },
+  {
     version: '0.4.1',
     date: '24 August 2026',
     summary: 'The things v0.4 turned up while it was being built.',

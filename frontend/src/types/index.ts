@@ -17,8 +17,8 @@ export interface Guild {
 export interface Group {
   id: string;
   guildId: string;
-  // Present on GET /me/groups, which spans every server; the per-guild
-  // listing doesn't carry it because the caller already knows the server.
+  // GET /me/groups spans every server, so it names the one each group
+  // belongs to. It is the only group listing there is since v0.4.3.
   guildName?: string;
   name: string;
   game: string | null;
