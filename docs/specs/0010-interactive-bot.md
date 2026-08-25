@@ -137,18 +137,24 @@ as an elliptic curve, so it wants a `namedCurve` beside the name and rejects
 the bare `{ name }` the native algorithm takes — which means nothing in this
 release depends on which of the two a given compatibility date gets.
 
-Measured against **local workerd**, not the deployed sandbox: the session that
-built the probe could not reach `*.workers.dev` (blocked by its egress
-policy). The route is deployed to the sandbox, and confirming the edge
-runtime agrees with the local one is one command:
+**Confirmed on the deployed sandbox Worker**, 25 Aug 2026, which is what this
+section asked for and what local workerd could only stand in for:
 
 ```
-curl https://jedi-party-scheduler-worker-sandbox.<you>.workers.dev/discord/ed25519-probe
+curl.exe https://jedi-party-scheduler-worker-sandbox.<you>.workers.dev/discord/ed25519-probe
+{"usable":"Ed25519","results":[{"algorithm":"Ed25519","imported":true,
+"acceptsValidSignature":true,"rejectsTamperedSignature":true,"error":null},
+{"algorithm":"NODE-ED25519","imported":true,"acceptsValidSignature":true,
+"rejectsTamperedSignature":true,"error":null}]}
 ```
 
-`{"usable":"Ed25519",...}` is the expected answer, and `"usable":null` would
-mean this section's fallback is back on the table. The probe reads no env, no
-secrets and no D1, and goes away with the release it exists to size.
+The edge runtime agrees with the local one exactly, on both algorithms and
+on both halves of each. Two notes for whoever runs the probe again: it is
+`curl.exe`, not `curl`, in PowerShell — the bare name is an alias for
+`Invoke-WebRequest`, which HTML-parses the response and interrupts with a
+script-execution warning that has nothing to do with this endpoint. And the
+probe reads no env, no secrets and no D1, so it is inert wherever it runs;
+it still goes away with the release it exists to size.
 
 ### The three-second deadline
 
@@ -310,8 +316,9 @@ public key and its own interactions URL, which is what makes this release
 safe to develop in the open: a wrong endpoint in the sandbox DMs nobody real.
 
 1. ~~Put the ten-line Ed25519 probe route on the sandbox and settle the
-   platform question above.~~ Done — the route is deployed and the answer is
-   native `Ed25519`, pending the one confirming `curl` above.
+   platform question above.~~ Done — deployed, and confirmed against the
+   sandbox Worker itself: native `Ed25519`, so verification is
+   `crypto.subtle` and the release is planned around that.
 2. Set the sandbox application's **Interactions Endpoint URL** to the sandbox
    Worker's `/discord/interactions` in the Discord developer portal, and save
    — Discord's PING probe must pass before it will accept the URL. This is a
