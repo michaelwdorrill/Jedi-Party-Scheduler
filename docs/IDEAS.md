@@ -545,6 +545,42 @@ merely invisible. Given colour already encodes the group, the game may be
 better as a second line only when there is room, or left to the tooltip
 alongside the server name.
 
+### 43. A constant that must only ever change deliberately has nothing stopping it changing by accident
+
+Found the hard way, an hour after `specs/0012` was built (Aug 2026).
+`CURRENT_POLICY_VERSION` was bumped to 2 as an uncommitted edit on a scratch
+branch, `git checkout` carried the modified file across to the release
+branch, and `git add -A` swept it into an unrelated commit — which was then
+pushed. Merging it would have logged out every production user and put an
+acceptance gate in front of them, for a policy that had not changed.
+
+Caught by reading the diff afterwards rather than by anything automatic, and
+that is the point: **the one change in this codebase whose entire design
+principle is "this must never happen unintentionally" had nothing at all
+guarding it.** The spec argued at length about not deriving the version from
+a content hash, so that a typo fix would not log the world out — and then a
+stray `git add` did exactly that.
+
+The class of mistake matters more than the instance. Any constant whose
+value is a *decision* rather than a fact — this one, `APP_VERSION`,
+`PUBLISHED_AT` — can be changed by an editor, a merge or a sweep with no
+signal at all, and the blast radius here is every session in production.
+
+Options, roughly in order of cost:
+- **A CI check on `main` pushes** asserting `CURRENT_POLICY_VERSION` matches
+  a value recorded elsewhere (a lockfile-ish `policy.version` committed
+  alongside), so changing it requires changing two files on purpose. Cheap,
+  and it fails loudly at exactly the right moment.
+- **A required note in the changelog.** If the version moved, the release
+  must carry a changelog entry saying so — which is true of every legitimate
+  bump anyway.
+- **Nothing, and rely on review.** Rejected on the evidence: review is what
+  just missed it.
+
+Related to item 31's lesson from the other direction. There the guardrail
+existed and could not fail usefully; here the guardrail does not exist at all
+for the change most in need of one.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
