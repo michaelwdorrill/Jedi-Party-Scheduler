@@ -1,8 +1,8 @@
 # 0012 — Re-agreeing to the Policy and Terms
 
-**Status:** Draft
+**Status:** Built
 **Covers:** `IDEAS.md` item 37
-**Phase:** TBD — before v0.5
+**Phase:** 3.9 → **v0.4.4**
 
 ## The problem
 

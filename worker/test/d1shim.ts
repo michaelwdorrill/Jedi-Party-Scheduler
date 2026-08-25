@@ -158,19 +158,29 @@ export function applyMigration(db: DatabaseSync, filename: string): void {
 // Applies every migration in filename order, exactly as docs/SETUP.md
 // instructs an operator to. A migration that doesn't apply cleanly on top of
 // its predecessors fails the whole suite here rather than in production.
-export function applyMigrations(db: DatabaseSync): string[] {
+//
+// `stopBefore` halts just before the named file, which is the only way to
+// test a migration that is *not* re-runnable. `applyMigration` above covers
+// the idempotent backfills -- run the whole set, then run the backfill again
+// -- but a migration that recreates a table cannot be applied twice (its
+// CREATE INDEX would collide), so its "before" state has to be built by not
+// applying it in the first place.
+export function applyMigrations(db: DatabaseSync, stopBefore?: string): string[] {
   const files = readdirSync(MIGRATIONS_DIR)
     .filter((f) => f.endsWith('.sql'))
     .sort();
+  const applied: string[] = [];
   for (const file of files) {
+    if (stopBefore && file === stopBefore) break;
     db.exec(readFileSync(join(MIGRATIONS_DIR, file), 'utf8'));
+    applied.push(file);
   }
-  return files;
+  return applied;
 }
 
-export function createTestDb(): ShimDatabase {
+export function createTestDb(stopBefore?: string): ShimDatabase {
   const raw = new DatabaseSync(':memory:');
   raw.exec('PRAGMA foreign_keys = ON');
-  applyMigrations(raw);
+  applyMigrations(raw, stopBefore);
   return new ShimDatabase(raw);
 }

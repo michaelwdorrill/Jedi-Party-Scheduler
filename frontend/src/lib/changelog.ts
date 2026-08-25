@@ -21,6 +21,52 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.4.6',
+    date: '25 August 2026',
+    summary: 'A poll can ask "any two and a half hours in these" instead of only "this or this".',
+    added: [
+      'A poll\u2019s options can now be windows rather than fixed times. Tick \u201cthese are windows\u201d, set a minimum session length, and each option becomes a range to find a session inside \u2014 \u201cWednesday evening, Thursday evening, or any time Saturday; two and a half hours at least\u201d is one poll.',
+      'If everyone can stay longer than the minimum, the session gets longer. The minimum is a floor, not a length: five people free all Saturday afternoon get the whole afternoon, not two and a half hours of it.',
+    ],
+    changed: [
+      'The two kinds of poll are now one. \u201cCandidate days/times\u201d and \u201ctime window\u201d were never really different \u2014 a time window was one option with a minimum \u2014 so they are one tab with a checkbox on it. Existing polls of either kind are unaffected and behave exactly as before.',
+      'Invitees answer each window separately, so a poll offering three of them asks three questions instead of one.',
+      'More people always beats a longer session. If four of you could play for five hours but five of you could play for two and a half, the poll picks the one with everyone in it.',
+      'The \u201cit\u2019s on\u201d message for a windowed poll now says how long the session is, not just when it starts.',
+      'The \u201cpotential invite (poll)\u201d tab on the new-event form is now called \u201cPotential Options\u201d, and matches the \u201cFixed Time\u201d tab beside it.',
+    ],
+    fixed: [
+      'Dragging one end of your availability past the other used to stop the slider dead with nothing on screen saying why. It now moves the other end out of the way \u2014 drag the start from 6:00 to 6:30 on a 6:00\u20138:30 selection and the end follows to 9:00.',
+    ],
+  },
+  {
+    version: '0.4.5',
+    date: '25 August 2026',
+    summary: 'The calendar and the availability view stop hiding what a poll is asking.',
+    added: [
+      'A poll\u2019s candidate days now appear on the calendar, outlined and marked \u201cMaybe\u201d. Previously an open poll showed up once, on the day voting closed, and the nights it was actually proposing appeared nowhere \u2014 so the calendar could not tell you what you were being asked about.',
+    ],
+    changed: [
+      'The availability view shows every option you are proposing, one strip each, instead of only the first. Each strip is scaled to its own slot, so a two-hour evening and a ten-hour Saturday are both readable.',
+      'It also stops assuming the day runs 8am to 2am. Someone busy at 7am used to look free, and a slot outside those hours had nowhere to appear.',
+      'The agenda marks a poll\u2019s candidate nights as \u201cMaybe\u201d too, so they no longer read as settled plans there.',
+      'Each agenda entry\u2019s coloured edge now actually shows its group\u2019s colour \u2014 it had been rendering as plain grey for every group since the agenda was added.',
+      'Calendar entries show the event name. They were a single line, and the time used all of it \u2014 so every entry in a month read the same and you had to hover to tell them apart. The game now shows in the tooltip too.',
+    ],
+  },
+  {
+    version: '0.4.4',
+    date: '25 August 2026',
+    summary: 'Changes to the Terms or Privacy Policy now ask you to agree again.',
+    added: [
+      'When the Terms of Service or Privacy Policy change in a way that matters, you will be signed out and asked to read and agree to them before carrying on. Until now, logging in counted as agreeing \u2014 which meant an updated policy quietly applied to people who had only ever agreed to the previous one.',
+      'If you decide not to agree, you can still download everything we hold about you, or delete your account, from that same screen. You are never locked out of your own data by declining.',
+    ],
+    changed: [
+      'Nothing changes for you today. This release only puts the mechanism in place \u2014 no one is signed out, and no one is asked to agree to anything, because the documents have not changed. It takes effect the next time they do.',
+    ],
+  },
+  {
     version: '0.4.3',
     date: '25 August 2026',
     summary: 'Faces on the names, and groups stop being visible to the whole server.',

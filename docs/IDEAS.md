@@ -408,112 +408,70 @@ live call when a candidate venue's rows are all stale.
 Wants a spec — not for the rule, which is now decided, but for the four open
 calls above and the migration. Not v0.5.
 
-### 37. Updating the Privacy Policy or Terms should force everyone to re-agree
+### 43. A constant that must only ever change deliberately has nothing stopping it changing by accident
 
-Asked (Aug 2026): every time the Privacy Policy or the Terms change, people
-should be logged out before their next visit, so they have to agree to the
-updated version before using the app again.
+Found the hard way, an hour after `specs/0012` was built (Aug 2026).
+`CURRENT_POLICY_VERSION` was bumped to 2 as an uncommitted edit on a scratch
+branch, `git checkout` carried the modified file across to the release
+branch, and `git add -A` swept it into an unrelated commit — which was then
+pushed. Merging it would have logged out every production user and put an
+acceptance gate in front of them, for a policy that had not changed.
 
-**Nothing in the app records agreement to anything today.** There is no
-`accepted_*` column, no policy version server-side, and no consent check
-anywhere — logging in *is* the implicit agreement, and the policy's own
-"last updated" is `LAST_UPDATED`, a hand-maintained string constant in
-`frontend/src/lib/legal.ts`. So this is two mechanisms, not one, and the
-second is the one that makes it mean something:
+Caught by reading the diff afterwards rather than by anything automatic, and
+that is the point: **the one change in this codebase whose entire design
+principle is "this must never happen unintentionally" had nothing at all
+guarding it.** The spec argued at length about not deriving the version from
+a content hash, so that a typo fix would not log the world out — and then a
+stray `git add` did exactly that.
 
-1. **Revoke.** `revokeAllSessionsForUser` already exists in `lib/sessions.ts`
-   — the logout half is a single call per user, or one `UPDATE sessions SET
-   revoked_at = ?` across the table.
-2. **Record.** A logout on its own does not capture consent; it just puts the
-   login page in front of someone, which is where the agreement is already
-   implicit. Getting the thing actually asked for ("they have to agree")
-   needs a recorded acceptance: `users.accepted_policy_version`, set when
-   they agree, and refused service until it matches.
+The class of mistake matters more than the instance. Any constant whose
+value is a *decision* rather than a fact — this one, `APP_VERSION`,
+`PUBLISHED_AT` — can be changed by an editor, a merge or a sweep with no
+signal at all, and the blast radius here is every session in production.
 
-**The version has to live in the Worker, not the frontend.** Enforcement is
-server-side or it is decorative — a client-side check is bypassed by not
-being the client. That means the current arrangement inverts: the Worker owns
-`CURRENT_POLICY_VERSION`, the frontend reads it (from `/me`, which the app
-already calls on every load) rather than holding its own copy. Two constants
-that must agree, in two deployables, is exactly the drift
-`scripts/check-env-parity.mjs` exists to catch elsewhere.
+Options, roughly in order of cost:
+- **A CI check on `main` pushes** asserting `CURRENT_POLICY_VERSION` matches
+  a value recorded elsewhere (a lockfile-ish `policy.version` committed
+  alongside), so changing it requires changing two files on purpose. Cheap,
+  and it fails loudly at exactly the right moment.
+- **A required note in the changelog.** If the version moved, the release
+  must carry a changelog entry saying so — which is true of every legitimate
+  bump anyway.
+- **Nothing, and rely on review.** Rejected on the evidence: review is what
+  just missed it.
 
-**Shape that fits what is already there:** bump a Worker-side
-`CURRENT_POLICY_VERSION`; `requireAuth` (or a middleware just after it)
-returns a distinct status — 403 with a machine-readable code, not a bare
-403 — when `users.accepted_policy_version` is behind it; the frontend shows
-the agreement screen and calls `POST /me/accept-policy`; every other route
-stays refused until it does. Revoking sessions at the same time is then the
-belt to that braces, and it is what makes it a *logout* as asked rather than
-a quiet interstitial.
+Related to item 31's lesson from the other direction. There the guardrail
+existed and could not fail usefully; here the guardrail does not exist at all
+for the change most in need of one.
 
-**Decided (Aug 2026), all four, after a walkthrough.** The finding that
-shaped the first two: `DELETE /me` and `GET /me/export` both sit behind
-`requireAuth`, so **a logged-out person cannot leave properly or take their
-data with them.** "Agree or you cannot use the app" needs an answer for
-someone who genuinely will not agree, and the only honest answers are *leave*
-and *export*, both of which need a session. So the shape is a hybrid rather
-than either extreme:
+### 44. The agenda's per-group colour gutter has never rendered — shipped in v0.4.5
 
-1. A version bump revokes every session — the logout, unambiguously.
-2. Their next visit is the login page (public, and it links both documents).
-   They log in, and the session issued is **unaccepted**: a check just after
-   `requireAuth` refuses every route except `GET /me`, `GET /me/export`,
-   `DELETE /me` and `POST /me/accept-policy`.
-3. Accepting unlocks everything. Declining leaves them able to export, to
-   delete, and to change their mind later.
+Found while checking v0.4.5's own work: `AgendaList` colours each row's
+left-hand time gutter with its group's hue, via
+`palette.ring.replace('ring-', 'border-')`. Tailwind generates CSS by scanning
+source text for class names, so a class assembled at runtime is never seen and
+never emitted. Before v0.4.5 `colors.ts` contained exactly **one** literal
+`border-[#…]` — so seven of the eight group colours produced no rule at all,
+and every agenda gutter has quietly been the default border colour since the
+agenda shipped.
 
-Logging in therefore stops implying agreement, which is the thing that is
-wrong today.
+**It started working in v0.4.5 by accident**, which is the part worth
+recording. Item 41's `pending` swatch happens to contain the same literals
+(`border-[<ring hex>]` for all eight), so adding it made the agenda's
+long-broken gutter render for the first time. A bug fixed by coincidence is
+one commit away from breaking again.
 
-- **Declining keeps the exit door open**, as above. One caveat on
-  presentation: `deleteUserCompletely` revokes sessions and then deletes
-  **every event that person organised**, not only their own rows — so
-  "delete my account" has blast radius on other people's calendars and must
-  not sit one click from "I don't agree". Link to the existing Settings flow
-  with its confirmation.
-- **DMs keep going.** This is the architectural default rather than a new
-  behaviour: the cron never reads sessions (its only reference is
-  `pruneStaleSessions`, housekeeping), and recipients come from
-  `event_invites` and `users.notifications_enabled`. Suppressing them is the
-  option that costs work, and its cost lands on the wrong person — someone
-  misses a session because they have not opened the website yet, and so does
-  whoever organised it. Revisit only if a policy change is specifically about
-  notifications.
-- **The version is a hand-maintained constant**, not derived from the
-  documents' contents. `legal.ts` already argues this case for `APP_VERSION`:
-  a derived value makes "published" mean "last redeployed". Deriving this one
-  from a content hash would log out every user for a typo fix. A CI guard
-  against the forgotten bump was considered and left out for now — if it is
-  ever added it has to be able to *fail usefully*, with a documented override
-  for non-substantive edits, per what item 31 cost.
-- **One version covering both documents.** They change rarely and almost
-  always together; two counters double the bookkeeping and force the
-  acceptance screen to explain which document moved. Accepted cost: splitting
-  them later needs a migration, which is cheap in a repo that does them
-  routinely and may never be needed.
+Fixed properly in the same release: `Swatch` gains a literal `border` field
+and `AgendaList` uses it. Also marked the agenda's provisional rows while
+there — see below.
 
-**One more thing, small and easy to get wrong:** new users must be stamped
-with the current version at signup (`upsertUser`), or someone who has just
-created an account meets an acceptance gate as the first screen after the
-login that created it.
-
-**Specced as `specs/0012-policy-reacceptance.md`.** The design that made it
-cheap: rather than a mass `UPDATE sessions` triggered by a deploy step
-somebody has to remember, the session row records the policy version it was
-issued under and `isSessionActive` requires it to still match. Bumping the
-constant then invalidates every outstanding session lazily, on each holder's
-next request — no mass write, nothing to run twice, and no extra query, since
-`isSessionActive` already selects that row.
-
-**Why this is worth doing before the next policy change rather than after.**
-Two scheduled items rewrite the Privacy Policy:
-`specs/0007-server-noticeboard.md` (blocked on it) and
-`specs/0011-groups-without-servers.md` (changes what a group is). Both would
-ship a materially different policy to people who agreed to the old one, with
-no mechanism to notice. That is this roadmap's Rule 1 — a change to how we
-ship comes before the things it would ship — applied to policy rather than
-to code.
+**This is the second instance of the same mistake in two days**, and the first
+was mine an hour earlier (item 41's first draft did exactly this, caught only
+because the compiled stylesheet was checked). The rule worth writing down:
+**a Tailwind class must exist as literal text somewhere the scanner reads.**
+Anything built with a template string, a `.replace()`, or a lookup is not a
+class — it is a string that looks like one. Worth a lint rule if it happens a
+third time.
 
 ## Already built
 
@@ -1425,3 +1383,321 @@ someone added to a real group stays on that roster.
 exercise a background job will, once that job runs, contain state the fixture
 did not create. "Delete everything with my prefix" is only true before the
 first tick.
+
+### 37. Updating the Privacy Policy or Terms should force everyone to re-agree — shipped in v0.4.4
+
+Asked (Aug 2026): every time the Privacy Policy or the Terms change, people
+should be logged out before their next visit, so they have to agree to the
+updated version before using the app again.
+
+**Nothing in the app records agreement to anything today.** There is no
+`accepted_*` column, no policy version server-side, and no consent check
+anywhere — logging in *is* the implicit agreement, and the policy's own
+"last updated" is `LAST_UPDATED`, a hand-maintained string constant in
+`frontend/src/lib/legal.ts`. So this is two mechanisms, not one, and the
+second is the one that makes it mean something:
+
+1. **Revoke.** `revokeAllSessionsForUser` already exists in `lib/sessions.ts`
+   — the logout half is a single call per user, or one `UPDATE sessions SET
+   revoked_at = ?` across the table.
+2. **Record.** A logout on its own does not capture consent; it just puts the
+   login page in front of someone, which is where the agreement is already
+   implicit. Getting the thing actually asked for ("they have to agree")
+   needs a recorded acceptance: `users.accepted_policy_version`, set when
+   they agree, and refused service until it matches.
+
+**The version has to live in the Worker, not the frontend.** Enforcement is
+server-side or it is decorative — a client-side check is bypassed by not
+being the client. That means the current arrangement inverts: the Worker owns
+`CURRENT_POLICY_VERSION`, the frontend reads it (from `/me`, which the app
+already calls on every load) rather than holding its own copy. Two constants
+that must agree, in two deployables, is exactly the drift
+`scripts/check-env-parity.mjs` exists to catch elsewhere.
+
+**Shape that fits what is already there:** bump a Worker-side
+`CURRENT_POLICY_VERSION`; `requireAuth` (or a middleware just after it)
+returns a distinct status — 403 with a machine-readable code, not a bare
+403 — when `users.accepted_policy_version` is behind it; the frontend shows
+the agreement screen and calls `POST /me/accept-policy`; every other route
+stays refused until it does. Revoking sessions at the same time is then the
+belt to that braces, and it is what makes it a *logout* as asked rather than
+a quiet interstitial.
+
+**Decided (Aug 2026), all four, after a walkthrough.** The finding that
+shaped the first two: `DELETE /me` and `GET /me/export` both sit behind
+`requireAuth`, so **a logged-out person cannot leave properly or take their
+data with them.** "Agree or you cannot use the app" needs an answer for
+someone who genuinely will not agree, and the only honest answers are *leave*
+and *export*, both of which need a session. So the shape is a hybrid rather
+than either extreme:
+
+1. A version bump revokes every session — the logout, unambiguously.
+2. Their next visit is the login page (public, and it links both documents).
+   They log in, and the session issued is **unaccepted**: a check just after
+   `requireAuth` refuses every route except `GET /me`, `GET /me/export`,
+   `DELETE /me` and `POST /me/accept-policy`.
+3. Accepting unlocks everything. Declining leaves them able to export, to
+   delete, and to change their mind later.
+
+Logging in therefore stops implying agreement, which is the thing that is
+wrong today.
+
+- **Declining keeps the exit door open**, as above. One caveat on
+  presentation: `deleteUserCompletely` revokes sessions and then deletes
+  **every event that person organised**, not only their own rows — so
+  "delete my account" has blast radius on other people's calendars and must
+  not sit one click from "I don't agree". Link to the existing Settings flow
+  with its confirmation.
+- **DMs keep going.** This is the architectural default rather than a new
+  behaviour: the cron never reads sessions (its only reference is
+  `pruneStaleSessions`, housekeeping), and recipients come from
+  `event_invites` and `users.notifications_enabled`. Suppressing them is the
+  option that costs work, and its cost lands on the wrong person — someone
+  misses a session because they have not opened the website yet, and so does
+  whoever organised it. Revisit only if a policy change is specifically about
+  notifications.
+- **The version is a hand-maintained constant**, not derived from the
+  documents' contents. `legal.ts` already argues this case for `APP_VERSION`:
+  a derived value makes "published" mean "last redeployed". Deriving this one
+  from a content hash would log out every user for a typo fix. A CI guard
+  against the forgotten bump was considered and left out for now — if it is
+  ever added it has to be able to *fail usefully*, with a documented override
+  for non-substantive edits, per what item 31 cost.
+- **One version covering both documents.** They change rarely and almost
+  always together; two counters double the bookkeeping and force the
+  acceptance screen to explain which document moved. Accepted cost: splitting
+  them later needs a migration, which is cheap in a repo that does them
+  routinely and may never be needed.
+
+**One more thing, small and easy to get wrong:** new users must be stamped
+with the current version at signup (`upsertUser`), or someone who has just
+created an account meets an acceptance gate as the first screen after the
+login that created it.
+
+**Specced as `specs/0012-policy-reacceptance.md`.** The design that made it
+cheap: rather than a mass `UPDATE sessions` triggered by a deploy step
+somebody has to remember, the session row records the policy version it was
+issued under and `isSessionActive` requires it to still match. Bumping the
+constant then invalidates every outstanding session lazily, on each holder's
+next request — no mass write, nothing to run twice, and no extra query, since
+`isSessionActive` already selects that row.
+
+**Why this is worth doing before the next policy change rather than after.**
+Two scheduled items rewrite the Privacy Policy:
+`specs/0007-server-noticeboard.md` (blocked on it) and
+`specs/0011-groups-without-servers.md` (changes what a group is). Both would
+ship a materially different policy to people who agreed to the old one, with
+no mechanism to notice. That is this roadmap's Rule 1 — a change to how we
+ship comes before the things it would ship — applied to policy rather than
+to code.
+
+**Done in v0.4.4**, per `specs/0012-policy-reacceptance.md`, and the build
+found a cheaper mechanism than the capture assumed. The obvious version is a
+mass `UPDATE sessions SET revoked_at` fired by a deploy step somebody has to
+remember; instead the session row records the policy version it was issued
+under and `isSessionActive` requires it to still match. Bumping the constant
+invalidates every outstanding session lazily, on each holder's next request —
+no write, no deploy step, nothing to run twice, and no extra query, because
+that function already reads the row.
+
+Ships **dormant** at version 1 with matching migration defaults, so nobody was
+logged out on the day it deployed. The mechanism was exercised on the sandbox
+by bumping the constant there by hand.
+
+The trap the spec named was real and is now pinned: `upsertUser` runs on every
+login, so `accepted_policy_version` is in its INSERT list and not in its
+`ON CONFLICT DO UPDATE` list. Verified by introducing exactly that mutation —
+the named test fails and nothing else in the suite does, which is the whole
+reason it exists. Without it the feature would have looked finished and done
+nothing.
+
+### 40. Merge candidate polls and window polls into one thing: candidates that are windows — shipped in v0.4.6
+
+Asked (Aug 2026), and it is the better model rather than a third mode. Today
+there are two:
+
+- **`poll_mode = 'options'`** — `event_poll_options` rows with fixed
+  start/end, voted yes/no/maybe.
+- **`poll_mode = 'window'`** — one `window_start_at`/`window_end_at` on the
+  event plus `window_block_minutes`, and people submit the sub-range they can
+  commit to. `bestWindowBlock` slides a block across the window and picks the
+  position the most people cover.
+
+The ask: let each *candidate* carry its own window, with one minimum duration
+across the poll. "25th 7:30-10, 26th 7:30-10, 30th 1-11, any 2.5-hour block in
+any of those qualifies — and if everyone is free the whole time on the 30th,
+we get a longer session."
+
+**Why this is a merge and not an addition: both current modes are special
+cases of it.** A candidate whose window is exactly the block length is
+today's options poll. A poll with exactly one candidate is today's window
+poll. That is the argument for one tab with a checkbox rather than three
+modes to choose between — and for the two existing modes becoming presets of
+the general one rather than surviving alongside it.
+
+**The one genuinely new behaviour is the longer session.** `bestWindowBlock`
+returns a block of *exactly* `blockMinutes` — it slides a fixed-width window
+and maximises the count. "2.5 hours is a minimum, and if you're all free
+longer you get longer" needs it to return the maximal span that still clears
+the threshold, which is a different search: for each start, extend while the
+covering set stays above the bar. That is a change to the resolution
+algorithm, not just to the schema, and it needs its own bound — the existing
+`MAX_WINDOW_CANDIDATES` ceiling exists because work already scales with span
+x submissions, and this adds a dimension.
+
+Rough shape of the rest: `window_start_at`/`window_end_at` move from `events`
+onto `event_poll_options` (per candidate), `window_block_minutes` stays on the
+event (one minimum for the whole poll), and `event_window_availability` keys
+on the option rather than the event. It composes with
+`poll_resolution_mode = 'multi_winner'` for free: each candidate resolves
+independently once its best block clears the threshold, which is exactly what
+multi-winner already means for options.
+
+Not small — schema, resolution algorithm, the creation form, the voting UI and
+the DM copy — and it wants a spec. It also subsumes **39**: an availability
+grid that shows every candidate is the same view this needs, so doing 39 first
+is not wasted, and doing 40 without it would leave the new mode unusable for
+the same reason the old one is.
+
+**Shipped in v0.4.6**, as `specs/0013`. What landed, and the two places it
+differs from the sketch above:
+
+- **`window_start_at`/`window_end_at` did not move onto
+  `event_poll_options`** — the candidate's existing `start_at`/`end_at`
+  simply changed meaning. Set a minimum and they are the window a session may
+  fall in; leave it unset and the candidate *is* the session. So the whole
+  shape of a poll is decided by one nullable column that already existed, and
+  the checkbox in the form is literally "is `window_block_minutes` set?".
+  `poll_mode` stops being read but stays in the schema: dropping a column the
+  deployed Worker still reads is a two-release change.
+- **The longer session orders its two objectives, and the order is
+  load-bearing: most people first, then longest.** A poll that traded a
+  person for an extra half hour would be choosing a longer session with fewer
+  players. `bestWindowSpan` fixes coverage to what a minimum-length block can
+  achieve, then stretches; it stays `O(grid x N log N)` because for a given
+  start, the latest end `c` people can reach is just the `c`-th largest
+  `endAt` among those who begin by then — no search over pairs.
+
+`event_window_availability` moved to `(option_id, user_id)` in migration
+0021, which is what lets one person answer about each candidate separately;
+existing window polls were converted to single-candidate polls first so their
+submissions had something to point at. Multi-winner composed as predicted,
+with one wrinkle worth recording: confirming a *windowed* candidate has to
+narrow its row from the window to the span that won, since unlike a fixed
+slot it does not know its own session time until it resolves.
+
+### 39. The availability grid shows one candidate day, and a fixed 8am-2am slice of it — shipped in v0.4.5
+
+Reported while creating a real multi-option poll (Aug 2026): "can't see all
+the availabilities at all the times." Both halves are real, and they are
+different bugs.
+
+**It only ever shows the first candidate.** `SchedulingAssistant` takes a
+single `date` prop, and `EventFormPage` binds it to
+`pollSlots[0]?.date` for an options poll. So a poll offering 25th, 26th and
+30th August shows availability for the 25th and nothing else — and gives no
+sign that the other two exist. The whole point of a multi-candidate poll is
+comparing candidates, which is the one thing this cannot do.
+
+**And it shows a fixed slice of that day.** `dayStartHour = 8`,
+`dayEndHour = 26` are defaults nothing overrides, so the grid is always
+8am-2am. Anyone busy at 7am reads as free, and a candidate slot proposed
+outside that range has no column to appear in. The 2am end was a deliberate
+choice ("sessions routinely run past midnight") and is fine; the 8am start is
+the arbitrary half.
+
+Fix shape, roughly: the assistant takes a *list* of ranges rather than one
+date, renders a row per candidate, and derives its time axis from the
+candidates themselves rather than from a constant — with the fixed axis kept
+only as the fallback for a fixed-time event, which genuinely has one day.
+
+Worth noting what this does *not* need: the `/guilds/:id/free-busy` endpoint
+already takes an arbitrary `from`/`to` and returns opaque ranges, so this is
+a frontend change. The cost to watch is one request per candidate day rather
+than one — `MAX_POLL_OPTIONS` is 20, so it wants batching into a single
+from/to spanning the candidates and slicing client-side, not a loop.
+
+**Done in v0.4.5.** `SchedulingAssistant` takes a list of slots and draws one
+strip per candidate, each scaled to its own span plus 90 minutes either side
+so near misses are visible rather than clipped, with ticks that scale instead
+of a fixed two-hour interval. One batched request across every candidate, not
+one per candidate. Both halves of the complaint came from the same mistake and
+went the same way: the view was built around a *day* and is now built around
+what is being proposed.
+
+### 41. A poll shows up on its deadline date, not on the days it might actually happen — shipped in v0.4.5
+
+Asked (Aug 2026): "I'd also like to see pending events on the calendar."
+
+They are on it — but not where you would look. `lib/calendar.ts` returns an
+unresolved single-winner poll only when its **`poll_deadline_at`** falls in
+the queried range, so it renders as one "Poll open" chip on the day voting
+closes. The candidate days it is actually proposing — the whole content of
+the poll — put nothing on the calendar at all. A poll offering the 25th, 26th
+and 30th is invisible on all three.
+
+(Multi-winner polls are different again: any active one is returned, and its
+*confirmed* options render on their own days. Its unconfirmed options are the
+same gap.)
+
+So the ask is really: **render each candidate slot as a provisional chip on
+its own day**, marked as not-yet-confirmed.
+
+**The visual language is already half-built, and the suggestion fits it
+exactly.** `EventChip` has two "not happening" treatments and keeps them
+deliberately apart: opacity means *past* (item 27), strike-through means
+*cancelled*, and the comment there explains that fading a cancelled event
+would collapse the two into one indistinct grey. Pending is a third,
+orthogonal state, so it needs a third mark rather than a shade — dashed
+border or a diagonal hatch, as asked. It also has to compose: a candidate day
+that has already gone by is both past *and* pending.
+
+The cost to design rather than discover: **fan-out**. `MAX_POLL_OPTIONS` is
+20, so one poll can put twenty provisional chips across a month, and
+`MonthCalendarGrid` already caps a cell at three with a "+N more". A poll
+with many candidates could bury real events under its own maybes. Worth a
+rule — perhaps provisional chips lose to confirmed ones for the three slots,
+or a poll contributes at most one chip per day.
+
+**Done in v0.4.5.** The calendar query now also loads a poll whose candidate
+slots fall in range, and emits one provisional occurrence per candidate,
+capped at six per poll so twenty maybes cannot bury a month of real events.
+The treatment is the one suggested here — a dashed outline in the group's own
+hue over a faint fill — and it composes with past, so a candidate day already
+gone by renders as both.
+
+Two things caught building it, neither visible to the type checker: the
+pending swatch was first assembled at the call site by string surgery on the
+palette, which Tailwind never sees and therefore never emits (the chip would
+have had no background and a grey border); and "Maybe · 7:30 PM" does not fit
+a month cell, so `EventChip` gained `compact` and the month grid shows the
+word while the agenda keeps the time.
+
+### 42. A month-grid chip has room for the time or the title, and spends it all on the time — shipped in v0.4.5
+
+Asked in the same breath, and it is a layout bug rather than missing data.
+`EventChip` renders `{time} {title}` — the title is already there. But the
+chip is a single `truncate` line in a seventh-of-a-grid cell, and "7:30 PM "
+eats the whole width, so what renders is `7:30 PM …` with the title cut to
+nothing. Every chip in a month therefore looks identical except for colour.
+
+Fix shape: two lines rather than one — time small and dim on top, title
+below, each truncating independently. The cell is `min-h-20` and caps at
+three chips, so there is vertical room at the usual density; the trade is
+that a very busy day hits "+N more" sooner. Worth also asking whether the
+time needs the space it takes: `7:30 PM` is seven characters where `7:30p`
+is five, and the leading zero-padded `h:mm a` format is the widest option
+available.
+
+The game is the other half of the ask ("nothing to show the event name or
+game"), and — correcting this entry's first draft — it is **already on the
+occurrence**: `mapOccurrence` sets `game: event.game` and `EventOccurrence`
+types it. So it needs no payload change either; it is the same problem as
+the title, one step further along. A month cell has no room for a third
+line, so it belongs in the tooltip beside the server name, which is where
+the colour-encoded group information already lives.
+
+**Done in v0.4.5.** Two lines: time small and dim above, title below, each
+truncating on its own. The game went to the tooltip — and, correcting this
+entry's first draft, it was already on the occurrence and needed no payload
+change.

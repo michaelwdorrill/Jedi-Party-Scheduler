@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { DateTime } from 'luxon';
 import { api, ApiError } from '../api/client';
@@ -7,11 +7,22 @@ import { useGuild } from '../auth/GuildContext';
 import InviteePicker from '../components/InviteePicker';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
-import SchedulingAssistant from '../components/SchedulingAssistant';
+import SchedulingAssistant, { type AssistantSlot } from '../components/SchedulingAssistant';
 import { isValidRange, startsInPast } from '../lib/datetime';
-import type { EventDetail, Friend, Group, PollMode, PollStrategy, VoiceChannel } from '../types';
+import type { EventDetail, Friend, Group, PollStrategy, VoiceChannel } from '../types';
 import { describeError } from '../lib/async';
 import { ErrorState, InlineError, buttonClass, cardClass, controlClass } from '../components/ui';
+
+// Module scope on purpose: the availability memo below needs this during the
+// first render pass, and the component-scoped `toUtcMillis` is a `const`
+// declared two hundred lines further down -- reading it from a useMemo that
+// runs earlier is a temporal-dead-zone ReferenceError, which TypeScript does
+// not catch across a closure and which kills the whole New Event page.
+// Verified: the version that read `toUtcMillis` here failed with
+// "Cannot access 'nt' before initialization" and rendered nothing.
+function localToMillis(date: string, time: string, zone: string): number {
+  return DateTime.fromISO(`${date}T${time}`, { zone }).toMillis();
+}
 
 interface PollSlotDraft {
   key: string;
@@ -65,7 +76,6 @@ export default function EventFormPage() {
   });
 
   // Poll fields (shared)
-  const [pollMode, setPollMode] = useState<PollMode>('options');
   const [pollStrategy, setPollStrategy] = useState<PollStrategy>('threshold');
   const [pollThreshold, setPollThreshold] = useState(3);
   const [pollDeadline, setPollDeadline] = useState(
@@ -78,12 +88,13 @@ export default function EventFormPage() {
   ]);
   const [multiWinner, setMultiWinner] = useState(false);
 
-  // Poll fields ('window' mode)
-  const [windowStartDate, setWindowStartDate] = useState(prefillDate);
-  const [windowEndDate, setWindowEndDate] = useState(prefillDate);
-  const [windowStartTime, setWindowStartTime] = useState('12:00');
-  const [windowEndTime, setWindowEndTime] = useState('18:00');
-  const [windowBlockHours, setWindowBlockHours] = useState(3);
+  // The one field that decides what the candidates above *mean* (specs/0013).
+  // Off, each candidate is the session and people vote yes/no/maybe on it.
+  // On, each candidate is a window and people say which part of it they can
+  // make. There is no second tab any more because there was never a second
+  // kind of poll -- a "time window" was one candidate with a minimum.
+  const [windowed, setWindowed] = useState(false);
+  const [windowBlockHours, setWindowBlockHours] = useState(2.5);
 
   const [friends, setFriends] = useState<Friend[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -111,6 +122,26 @@ export default function EventFormPage() {
   // since-superseded read, rather than the two of them racing to overwrite
   // each other's changes in whatever order their requests happen to land.
   const [loadedRevision, setLoadedRevision] = useState<number | null>(null);
+
+  // Every slot being proposed, so the availability strip can show all of them
+  // rather than only the first (idea 39). One entry for a fixed-time event,
+  // one per candidate for an options poll, one for a window poll's span --
+  // which is also the shape windowed candidates want, being a candidate list
+  // too.
+  const assistantSlots: AssistantSlot[] = useMemo(() => {
+    const range = (key: string, sd: string, st: string, ed: string, et: string): AssistantSlot | null => {
+      const startAt = localToMillis(sd, st, timezone);
+      const endAt = localToMillis(ed, et, timezone);
+      return Number.isFinite(startAt) && Number.isFinite(endAt) && endAt > startAt
+        ? { key, startAt, endAt }
+        : null;
+    };
+    const keep = (s: AssistantSlot | null): s is AssistantSlot => s !== null;
+    if (eventType === 'single') {
+      return [range('single', date, startTime, endDate, endTime)].filter(keep);
+    }
+    return pollSlots.map((slot) => range(slot.key, slot.date, slot.startTime, slot.endDate, slot.endTime)).filter(keep);
+  }, [timezone, eventType, date, startTime, endDate, endTime, pollSlots]);
 
   useEffect(() => {
     // Keyed on effectiveGuildId, not the raw ?guild= param, so this also runs
@@ -200,24 +231,13 @@ export default function EventFormPage() {
       if (ev.eventType === 'poll') {
         setPollStrategy(ev.pollStrategy ?? 'threshold');
         setPollThreshold(ev.pollThresholdCount ?? 3);
-        setPollMode(ev.pollMode ?? 'options');
         setMultiWinner(ev.pollResolutionMode === 'multi_winner');
         if (ev.pollDeadlineAt) {
           setPollDeadline(DateTime.fromMillis(ev.pollDeadlineAt).setZone(ev.timezone).toISODate()!);
         }
-        if (ev.pollMode === 'window') {
-          if (ev.windowStartAt) {
-            const s = DateTime.fromMillis(ev.windowStartAt).setZone(ev.timezone);
-            setWindowStartDate(s.toISODate()!);
-            setWindowStartTime(s.toFormat('HH:mm'));
-          }
-          if (ev.windowEndAt) {
-            const e = DateTime.fromMillis(ev.windowEndAt).setZone(ev.timezone);
-            setWindowEndDate(e.toISODate()!);
-            setWindowEndTime(e.toFormat('HH:mm'));
-          }
-          if (ev.windowBlockMinutes) setWindowBlockHours(ev.windowBlockMinutes / 60);
-        } else if (ev.pollOptions) {
+        setWindowed(ev.windowBlockMinutes != null);
+        if (ev.windowBlockMinutes) setWindowBlockHours(ev.windowBlockMinutes / 60);
+        if (ev.pollOptions) {
           setPollSlots(
             ev.pollOptions.map((o) => {
               const s = DateTime.fromMillis(o.startAt).setZone(ev.timezone);
@@ -252,11 +272,6 @@ export default function EventFormPage() {
     setPollSlots((prev) =>
       prev.map((s) => (s.key === key ? { ...s, date: next, endDate: s.endDate < next ? next : s.endDate } : s)),
     );
-
-  const handleWindowStartDateChange = (next: string) => {
-    setWindowStartDate(next);
-    if (windowEndDate < next) setWindowEndDate(next);
-  };
 
   const toggleUser = (id: string) =>
     setSelectedUserIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -309,13 +324,17 @@ export default function EventFormPage() {
     eventType !== 'single' || isValidRange(date, startTime, endDate, endTime, timezone);
   const pollSlotsValid =
     eventType !== 'poll' ||
-    pollMode !== 'options' ||
     pollSlots.every((s) => isValidRange(s.date, s.startTime, s.endDate, s.endTime, timezone));
-  const windowRangeValid =
-    eventType !== 'poll' ||
-    pollMode !== 'window' ||
-    isValidRange(windowStartDate, windowStartTime, windowEndDate, windowEndTime, timezone);
-  const rangeValid = singleRangeValid && pollSlotsValid && windowRangeValid;
+  // A window shorter than the minimum session it demands can never resolve --
+  // there is no span inside it long enough to clear the bar. The server
+  // rejects it outright; this is the client-side warning that says so before
+  // the submit, the same relationship idea 12's range check has.
+  const windowsFitTheMinimum = (slot: PollSlotDraft) =>
+    !windowed ||
+    toUtcMillis(slot.endDate, slot.endTime) - toUtcMillis(slot.date, slot.startTime) >=
+      windowBlockHours * 3600_000;
+  const windowMinimumsValid = eventType !== 'poll' || pollSlots.every(windowsFitTheMinimum);
+  const rangeValid = singleRangeValid && pollSlotsValid && windowMinimumsValid;
 
   // Idea 28, and note what it is *not*: this never gates `rangeValid`, so it
   // cannot stop a submit. Dating an event in the past is unusual, not
@@ -390,19 +409,15 @@ export default function EventFormPage() {
         body.pollStrategy = pollStrategy;
         body.pollThresholdCount = pollStrategy === 'threshold' ? pollThreshold : null;
         body.pollDeadlineAt = DateTime.fromISO(`${pollDeadline}T23:59`, { zone: timezone }).toMillis();
-        body.pollMode = pollMode;
-
-        if (pollMode === 'window') {
-          body.windowStartAt = toUtcMillis(windowStartDate, windowStartTime);
-          body.windowEndAt = toUtcMillis(windowEndDate, windowEndTime);
-          body.windowBlockMinutes = windowBlockHours * 60;
-        } else {
-          body.pollResolutionMode = pollStrategy === 'threshold' && multiWinner ? 'multi_winner' : 'single_winner';
-          body.pollOptions = pollSlots.map((s) => ({
-            startAt: toUtcMillis(s.date, s.startTime),
-            endAt: toUtcMillis(s.endDate, s.endTime),
-          }));
-        }
+        body.pollResolutionMode = pollStrategy === 'threshold' && multiWinner ? 'multi_winner' : 'single_winner';
+        body.pollOptions = pollSlots.map((s) => ({
+          startAt: toUtcMillis(s.date, s.startTime),
+          endAt: toUtcMillis(s.endDate, s.endTime),
+        }));
+        // Sent explicitly either way, including the null. Absent means "leave
+        // whatever is stored alone", which on an edit that unticks the box
+        // would silently keep the poll windowed.
+        body.windowBlockMinutes = windowed ? Math.round(windowBlockHours * 60) : null;
       }
 
       if (isEdit) {
@@ -479,9 +494,9 @@ export default function EventFormPage() {
           </button>
           <button
             onClick={() => setEventType('poll')}
-            className={`rounded px-3 py-1 text-sm ${eventType === 'poll' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
+            className={`rounded px-3 py-1 font-display text-sm uppercase tracking-wide ${eventType === 'poll' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
           >
-            Potential invite (poll)
+            Potential Options
           </button>
         </div>
       )}
@@ -579,144 +594,110 @@ export default function EventFormPage() {
         </div>
       ) : (
         <div className={cardClass('md', 'space-y-3')}>
-          {!isEdit && (
-            <div className="flex gap-1 rounded-md bg-raised p-1 w-fit">
-              <button
-                onClick={() => setPollMode('options')}
-                className={`rounded px-3 py-1 text-xs ${pollMode === 'options' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
-              >
-                Candidate days/times
-              </button>
-              <button
-                onClick={() => setPollMode('window')}
-                className={`rounded px-3 py-1 text-xs ${pollMode === 'window' ? 'bg-accent text-on-accent' : 'text-ink-dim'}`}
-              >
-                Time window
-              </button>
-            </div>
-          )}
-
-          {pollMode === 'options' ? (
-            <div className="space-y-2">
-              {pollSlots.map((slot) => {
-                const slotValid = isValidRange(slot.date, slot.startTime, slot.endDate, slot.endTime, timezone);
-                return (
-                  <div key={slot.key}>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <input
-                        type="date"
-                        value={slot.date}
-                        onChange={(e) => handleSlotStartDateChange(slot.key, e.target.value)}
-                        className={controlClass('sm')}
-                      />
-                      <input
-                        type="time"
-                        value={slot.startTime}
-                        onChange={(e) =>
-                          setPollSlots((prev) =>
-                            prev.map((s) => (s.key === slot.key ? { ...s, startTime: e.target.value } : s)),
-                          )
-                        }
-                        className={controlClass('sm')}
-                      />
-                      <span className="text-faint">to</span>
-                      <input
-                        type="date"
-                        value={slot.endDate}
-                        min={slot.date}
-                        onChange={(e) =>
-                          setPollSlots((prev) =>
-                            prev.map((s) => (s.key === slot.key ? { ...s, endDate: e.target.value } : s)),
-                          )
-                        }
-                        className={controlClass('sm')}
-                      />
-                      <input
-                        type="time"
-                        value={slot.endTime}
-                        onChange={(e) =>
-                          setPollSlots((prev) =>
-                            prev.map((s) => (s.key === slot.key ? { ...s, endTime: e.target.value } : s)),
-                          )
-                        }
-                        className={controlClass('sm')}
-                      />
-                      {pollSlots.length > 1 && (
-                        <button
-                          onClick={() => removePollSlot(slot.key)}
-                          className="text-xs text-danger-text hover:underline"
-                        >
-                          Remove
-                        </button>
-                      )}
-                    </div>
-                    {!slotValid && <p className="mt-1 text-xs text-danger-text">End must be after the start.</p>}
+          <div className="space-y-2">
+            {pollSlots.map((slot) => {
+              const slotValid = isValidRange(slot.date, slot.startTime, slot.endDate, slot.endTime, timezone);
+              const longEnough = windowsFitTheMinimum(slot);
+              return (
+                <div key={slot.key}>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="date"
+                      value={slot.date}
+                      onChange={(e) => handleSlotStartDateChange(slot.key, e.target.value)}
+                      className={controlClass('sm')}
+                    />
+                    <input
+                      type="time"
+                      value={slot.startTime}
+                      onChange={(e) =>
+                        setPollSlots((prev) =>
+                          prev.map((s) => (s.key === slot.key ? { ...s, startTime: e.target.value } : s)),
+                        )
+                      }
+                      className={controlClass('sm')}
+                    />
+                    <span className="text-faint">to</span>
+                    <input
+                      type="date"
+                      value={slot.endDate}
+                      min={slot.date}
+                      onChange={(e) =>
+                        setPollSlots((prev) =>
+                          prev.map((s) => (s.key === slot.key ? { ...s, endDate: e.target.value } : s)),
+                        )
+                      }
+                      className={controlClass('sm')}
+                    />
+                    <input
+                      type="time"
+                      value={slot.endTime}
+                      onChange={(e) =>
+                        setPollSlots((prev) =>
+                          prev.map((s) => (s.key === slot.key ? { ...s, endTime: e.target.value } : s)),
+                        )
+                      }
+                      className={controlClass('sm')}
+                    />
+                    {pollSlots.length > 1 && (
+                      <button
+                        onClick={() => removePollSlot(slot.key)}
+                        className="text-xs text-danger-text hover:underline"
+                      >
+                        Remove
+                      </button>
+                    )}
                   </div>
-                );
-              })}
-              <button onClick={addPollSlot} className="text-sm text-accent-text hover:underline">
-                + Add another time slot
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <p className="text-sm text-muted">
-                Propose a window of time; invitees mark the range within it they could commit to, and the
-                best-overlapping block is picked automatically.
-              </p>
-              <div className="flex flex-wrap items-end gap-3">
-                <div>
-                  <label className="mb-1 block text-sm text-muted">Window starts</label>
-                  <input
-                    type="date"
-                    value={windowStartDate}
-                    onChange={(e) => handleWindowStartDateChange(e.target.value)}
-                    className={controlClass('sm')}
-                  />
+                  {!slotValid && <p className="mt-1 text-xs text-danger-text">End must be after the start.</p>}
+                  {slotValid && !longEnough && (
+                    <p className="mt-1 text-xs text-danger-text">
+                      This option is shorter than the {windowBlockHours}-hour minimum, so nothing could ever fit in
+                      it.
+                    </p>
+                  )}
                 </div>
-                <div>
-                  <label className="mb-1 block text-sm text-muted">at</label>
-                  <input
-                    type="time"
-                    value={windowStartTime}
-                    onChange={(e) => setWindowStartTime(e.target.value)}
-                    className={controlClass('sm')}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm text-muted">Window ends</label>
-                  <input
-                    type="date"
-                    value={windowEndDate}
-                    min={windowStartDate}
-                    onChange={(e) => setWindowEndDate(e.target.value)}
-                    className={controlClass('sm')}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm text-muted">at</label>
-                  <input
-                    type="time"
-                    value={windowEndTime}
-                    onChange={(e) => setWindowEndTime(e.target.value)}
-                    className={controlClass('sm')}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm text-muted">Session length (hours)</label>
-                  <input
-                    type="number"
-                    min={0.5}
-                    step={0.5}
-                    value={windowBlockHours}
-                    onChange={(e) => setWindowBlockHours(Math.max(0.5, Number(e.target.value)))}
-                    className={controlClass('sm', 'w-24')}
-                  />
-                </div>
+              );
+            })}
+            <button onClick={addPollSlot} className="text-sm text-accent-text hover:underline">
+              + Add another option
+            </button>
+          </div>
+
+          {/* The merge of what used to be two poll modes (specs/0013). A
+              "time window" poll was always this poll with one option and a
+              minimum, so it is a checkbox on the options rather than a
+              separate tab you have to choose between up front -- and ticking
+              it changes nothing about the options already entered, only what
+              they mean. */}
+          <label className="flex items-start gap-2 text-sm text-ink-dim">
+            <input
+              type="checkbox"
+              checked={windowed}
+              onChange={(e) => setWindowed(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              These are windows, not fixed times — find any long enough session inside them. Invitees say which part
+              of each window they could make, and the longest block the most people can all manage wins.
+            </span>
+          </label>
+
+          {windowed && (
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className="mb-1 block text-sm text-muted">Minimum session length (hours)</label>
+                <input
+                  type="number"
+                  min={0.5}
+                  step={0.5}
+                  value={windowBlockHours}
+                  onChange={(e) => setWindowBlockHours(Math.max(0.5, Number(e.target.value)))}
+                  className={controlClass('sm', 'w-24')}
+                />
               </div>
-              {!windowRangeValid && (
-                <p className="text-xs text-danger-text">Window end must be after the window start.</p>
-              )}
+              <p className="text-xs text-faint pb-2">
+                A floor, not a length. If everyone can stay longer, the session gets longer.
+              </p>
             </div>
           )}
 
@@ -736,7 +717,7 @@ export default function EventFormPage() {
                 onChange={(e) => setPollThreshold(Math.max(1, Number(e.target.value)))}
                 className={controlClass('xs', 'w-14')}
               />
-              people say yes
+              {windowed ? 'people can make the same block' : 'people say yes'}
             </label>
             <label className="flex items-center gap-1 text-sm">
               <input
@@ -747,11 +728,11 @@ export default function EventFormPage() {
                   setMultiWinner(false);
                 }}
               />
-              Pick the most popular slot at the deadline
+              {windowed ? 'Pick the best overlap at the deadline' : 'Pick the most popular slot at the deadline'}
             </label>
           </div>
 
-          {pollMode === 'options' && pollStrategy === 'threshold' && (
+          {pollStrategy === 'threshold' && (
             <label className="flex items-start gap-2 text-sm text-ink-dim">
               <input
                 type="checkbox"
@@ -760,8 +741,9 @@ export default function EventFormPage() {
                 className="mt-0.5"
               />
               <span>
-                Confirm each day independently — if multiple days each get enough "I'm in"s, they all happen
-                (instead of picking just one winner).
+                {windowed
+                  ? 'Confirm each option independently — every window that enough people can make becomes its own session (instead of picking just one winner).'
+                  : 'Confirm each day independently — if multiple days each get enough "I\'m in"s, they all happen (instead of picking just one winner).'}
               </span>
             </label>
           )}
@@ -829,26 +811,8 @@ export default function EventFormPage() {
           <SchedulingAssistant
             guildId={effectiveGuildId}
             userIds={inviteeIds}
-            date={eventType === 'single' ? date : pollMode === 'window' ? windowStartDate : (pollSlots[0]?.date ?? date)}
+            slots={assistantSlots}
             zone={timezone}
-            proposedStart={
-              eventType === 'single'
-                ? toUtcMillis(date, startTime)
-                : pollMode === 'window'
-                  ? toUtcMillis(windowStartDate, windowStartTime)
-                  : pollSlots[0]
-                    ? toUtcMillis(pollSlots[0].date, pollSlots[0].startTime)
-                    : null
-            }
-            proposedEnd={
-              eventType === 'single'
-                ? toUtcMillis(endDate, endTime)
-                : pollMode === 'window'
-                  ? toUtcMillis(windowEndDate, windowEndTime)
-                  : pollSlots[0]
-                    ? toUtcMillis(pollSlots[0].endDate, pollSlots[0].endTime)
-                    : null
-            }
           />
         </div>
       )}

@@ -1,5 +1,6 @@
 import type { Env } from '../env';
 import { newId } from './ids';
+import { CURRENT_POLICY_VERSION } from './policy';
 
 // Absolute session lifetime. Deliberately not indefinitely renewable: once a
 // session passes this age, the user must go through a real Discord login
@@ -19,10 +20,10 @@ export async function createSession(env: Env, userId: string): Promise<{ id: str
   const id = newId();
   const now = Date.now();
   await env.DB.prepare(
-    `INSERT INTO sessions (id, user_id, created_at, last_used_at, expires_at, revoked_at)
-     VALUES (?, ?, ?, ?, ?, NULL)`,
+    `INSERT INTO sessions (id, user_id, created_at, last_used_at, expires_at, revoked_at, policy_version)
+     VALUES (?, ?, ?, ?, ?, NULL, ?)`,
   )
-    .bind(id, userId, now, now, now + SESSION_TTL_MS)
+    .bind(id, userId, now, now, now + SESSION_TTL_MS, CURRENT_POLICY_VERSION)
     .run();
 
   await env.DB.prepare(
@@ -41,7 +42,14 @@ export async function createSession(env: Env, userId: string): Promise<{ id: str
 // cron sweep so storage doesn't grow forever.
 export async function pruneStaleSessions(env: Env): Promise<void> {
   const now = Date.now();
-  await env.DB.prepare(`DELETE FROM sessions WHERE expires_at < ? OR revoked_at IS NOT NULL`).bind(now).run();
+  // Sessions issued under a superseded policy are inert but not revoked and
+  // not expired, so without this clause they would sit here until their TTL
+  // ran out. Same reasoning as the other two: nothing else removes them.
+  await env.DB.prepare(
+    `DELETE FROM sessions WHERE expires_at < ? OR revoked_at IS NOT NULL OR policy_version <> ?`,
+  )
+    .bind(now, CURRENT_POLICY_VERSION)
+    .run();
 }
 
 // The authority check behind every authenticated request: the JWT's
@@ -50,11 +58,17 @@ export async function pruneStaleSessions(env: Env): Promise<void> {
 // immediately instead of waiting out the token's lifetime.
 export async function isSessionActive(env: Env, sessionId: string, userId: string): Promise<boolean> {
   const row = await env.DB.prepare(
-    `SELECT user_id, expires_at, revoked_at FROM sessions WHERE id = ?`,
+    `SELECT user_id, expires_at, revoked_at, policy_version FROM sessions WHERE id = ?`,
   )
     .bind(sessionId)
-    .first<{ user_id: string; expires_at: number; revoked_at: number | null }>();
+    .first<{ user_id: string; expires_at: number; revoked_at: number | null; policy_version: number }>();
   if (!row || row.user_id !== userId || row.revoked_at != null) return false;
+  // A session issued under a superseded policy is dead. This is the whole
+  // logout mechanism (spec 0012): bumping CURRENT_POLICY_VERSION invalidates
+  // every outstanding session at once, lazily, on each holder's next request
+  // -- no mass write, no deploy step, nothing to run twice. It rides on a row
+  // this function already reads, so it costs no extra query.
+  if (row.policy_version !== CURRENT_POLICY_VERSION) return false;
   return row.expires_at > Date.now();
 }
 

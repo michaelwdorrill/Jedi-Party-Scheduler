@@ -1,5 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
+import { requirePolicyAcceptance } from '../lib/authMiddleware';
+import { CURRENT_POLICY_VERSION } from '../lib/policy';
 import { buildCalendarOccurrences } from '../lib/calendar';
 import { chunkIds, placeholders } from '../lib/d1';
 import { deleteUserCompletely, isGuildMember, isOwner, listFriends, mapUser, MEMBERSHIP_GRACE_MS, type UserRow } from '../lib/db';
@@ -7,18 +9,52 @@ import { assertBoolean, assertTimezone, LIMITS, readJsonBody, ValidationError } 
 
 export const meRoutes = new Hono<AppEnv>();
 
-const PROFILE_COLUMNS = `id, username, global_name, avatar_hash, timezone, notifications_enabled, free_busy_visible`;
+const PROFILE_COLUMNS = `id, username, global_name, avatar_hash, timezone, notifications_enabled, free_busy_visible, accepted_policy_version, accepted_policy_at`;
 
+// Four routes in this file are deliberately NOT gated on policy acceptance
+// (docs/specs/0012): this one, GET /export, DELETE /, and POST /accept-policy.
+//
+// They are what makes the gate a gate rather than a wall. The export and the
+// deletion endpoints live behind requireAuth, so a logged-out person cannot
+// take their data with them or leave properly -- "agree or you cannot use the
+// app" has to leave someone who will not agree a way out. This one is how the
+// frontend learns it needs to show the screen at all.
+//
+// Every other route in this file carries requirePolicyAcceptance explicitly,
+// rather than the group being gated and these four opting out, because a
+// route added later should fail closed: forgetting to gate a new route is the
+// mistake worth making impossible-by-omission, and here it costs a visible
+// missing argument rather than a silent hole.
 meRoutes.get('/', async (c) => {
   const userId = c.get('userId');
   const row = await c.env.DB.prepare(`SELECT ${PROFILE_COLUMNS} FROM users WHERE id = ?`)
     .bind(userId)
     .first<UserRow>();
   if (!row) return c.text('User not found', 404);
-  return c.json(mapUser(row, isOwner(c.env, userId)));
+  return c.json({
+    ...mapUser(row, isOwner(c.env, userId)),
+    // The frontend reads the current version from here rather than holding a
+    // copy of it -- two constants in two deployables that must agree is the
+    // drift check:env-parity exists to catch elsewhere.
+    policyVersion: CURRENT_POLICY_VERSION,
+    acceptedPolicyVersion: row.accepted_policy_version,
+  });
 });
 
-meRoutes.patch('/', async (c) => {
+// Recording the agreement. Idempotent: agreeing twice is not an error, and
+// the timestamp moves to the most recent one.
+meRoutes.post('/accept-policy', async (c) => {
+  const userId = c.get('userId');
+  await c.env.DB.prepare(
+    `UPDATE users SET accepted_policy_version = ?, accepted_policy_at = ? WHERE id = ?`,
+  )
+    .bind(CURRENT_POLICY_VERSION, Date.now(), userId)
+    .run();
+  c.set('acceptedPolicyVersion', CURRENT_POLICY_VERSION);
+  return c.json({ ok: true, policyVersion: CURRENT_POLICY_VERSION });
+});
+
+meRoutes.patch('/', requirePolicyAcceptance, async (c) => {
   const userId = c.get('userId');
   const body = await readJsonBody<{
     timezone?: string;
@@ -95,7 +131,7 @@ meRoutes.get('/export', async (c) => {
 // Cheaper than it sounds, and cheaper than the per-guild route it
 // generalizes: both are bounded by what the caller is personally attached to,
 // not by how much exists in a guild. See lib/calendar.ts.
-meRoutes.get('/events', async (c) => {
+meRoutes.get('/events', requirePolicyAcceptance, async (c) => {
   const userId = c.get('userId');
   const from = Number(c.req.query('from'));
   const to = Number(c.req.query('to'));
@@ -112,7 +148,7 @@ meRoutes.get('/events', async (c) => {
 // an active member of. The only group-listing endpoint there is: the
 // per-guild GET /guilds/:id/groups was removed in v0.4.3 (IDEAS item 34),
 // which is why the event form's invitee picker now reads this one too.
-meRoutes.get('/groups', async (c) => {
+meRoutes.get('/groups', requirePolicyAcceptance, async (c) => {
   const userId = c.get('userId');
 
   // Two predicates doing two different jobs, and both are load-bearing.
@@ -185,7 +221,7 @@ meRoutes.get('/groups', async (c) => {
   );
 });
 
-meRoutes.get('/friends', async (c) => {
+meRoutes.get('/friends', requirePolicyAcceptance, async (c) => {
   const userId = c.get('userId');
   const guildId = c.req.query('guild_id');
   if (!guildId) return c.text('guild_id is required', 400);

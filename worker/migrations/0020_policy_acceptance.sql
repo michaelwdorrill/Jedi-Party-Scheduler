@@ -1,0 +1,42 @@
+-- IDEAS item 37 / docs/specs/0012-policy-reacceptance.md.
+--
+-- Nothing in this app has ever recorded agreement to anything. There is no
+-- policy version on the server, no acceptance column, and no consent check on
+-- any route -- logging in *is* the implicit agreement, and the documents' own
+-- "last updated" is a hand-maintained string in the frontend that no code
+-- reads. So a rewritten Privacy Policy silently applies to people who agreed
+-- to the previous one, and nothing notices.
+--
+-- Two columns, doing two different jobs, and both are needed:
+--
+--   sessions.policy_version        was this session issued under the current
+--                                  policy? If not, it is dead -- a real
+--                                  logout, taken lazily on the holder's next
+--                                  request.
+--   users.accepted_policy_version  has this person agreed to the current
+--                                  policy? If not, they are logged in but
+--                                  gated.
+--
+-- The session column is what makes a version bump self-executing. The
+-- alternative was a mass `UPDATE sessions SET revoked_at` fired by a deploy
+-- step somebody has to remember, or a migration per bump -- both the class of
+-- manual step docs/specs/0002 exists to remove. Stamping the session at issue
+-- and comparing in isSessionActive (which already reads that row, so this
+-- costs no extra query) invalidates every outstanding session the moment the
+-- constant changes, with no write and nothing to run twice.
+--
+-- Without the *user* column, logging back in would silently count as
+-- agreement again, which is precisely the defect being fixed.
+--
+-- DEFAULT 1 on both, matching CURRENT_POLICY_VERSION at launch, so this
+-- deploys dormant: nobody is logged out, nobody is gated, and the mechanism
+-- sits idle until the first deliberate bump. Shipping it "hot" would log out
+-- the entire user base to agree to a policy that did not change, which
+-- teaches people to click through the screen before the first time it means
+-- anything.
+ALTER TABLE sessions ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE users ADD COLUMN accepted_policy_version INTEGER NOT NULL DEFAULT 1;
+
+-- When they agreed, not just that they did. This is the difference between a
+-- consent record and a flag, and it goes into GET /me/export with the rest.
+ALTER TABLE users ADD COLUMN accepted_policy_at INTEGER;

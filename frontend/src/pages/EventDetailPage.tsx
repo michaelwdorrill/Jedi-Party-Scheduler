@@ -2,24 +2,38 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
-import { formatTimeRange } from '../lib/datetime';
+import { formatDuration, formatTimeRange } from '../lib/datetime';
 import ChangeRequestSection from '../components/ChangeRequestSection';
 import PollOptionRow from '../components/PollOptionRow';
 import RsvpButtons from '../components/RsvpButtons';
 import WindowAvailabilityPicker from '../components/WindowAvailabilityPicker';
-import type { ChangeRequestView, EventDetail, Friend, PollVote, RsvpStatus, WindowInfo } from '../types';
+import type {
+  ChangeRequestView,
+  EventDetail,
+  Friend,
+  PollVote,
+  RsvpStatus,
+  WindowCandidateInfo,
+  WindowInfo,
+} from '../types';
 import { useAction, useAsync } from '../lib/async';
 import { ErrorState, InlineError, Loading, buttonClass, cardClass } from '../components/ui';
 
 type WindowDraft = { startAt: number; endAt: number };
 
+// One draft per candidate now, not one per poll (specs/0013). A windowed
+// poll can offer several windows and each is answered separately, so a
+// single draft would have meant the last candidate touched overwriting every
+// other -- which is exactly the bug the old (event_id, user_id) key had in
+// the database.
+type WindowDrafts = Record<string, WindowDraft>;
+
 // Hoisted out of the component so the draft-sync effect below can depend on
 // `windowInfo` alone rather than on a closure rebuilt every render.
-function defaultWindowDraft(w: WindowInfo): WindowDraft | null {
-  if (w.windowStartAt == null || w.windowEndAt == null || w.windowBlockMinutes == null) return null;
+function defaultWindowDraft(candidate: WindowCandidateInfo, blockMinutes: number): WindowDraft {
   return {
-    startAt: w.windowStartAt,
-    endAt: Math.min(w.windowEndAt, w.windowStartAt + w.windowBlockMinutes * 60000),
+    startAt: candidate.windowStartAt,
+    endAt: Math.min(candidate.windowEndAt, candidate.windowStartAt + blockMinutes * 60000),
   };
 }
 
@@ -38,14 +52,16 @@ export default function EventDetailPage() {
   const occurrenceDate = searchParams.get('occurrence');
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [windowDraft, setWindowDraft] = useState<WindowDraft | null>(null);
+  const [windowDrafts, setWindowDrafts] = useState<WindowDrafts>({});
   const [linkCopied, setLinkCopied] = useState(false);
 
   const { data, error, loading, reload } = useAsync<EventBundle | null>(async () => {
     if (!eventId) return null;
     const ev = await api.get<EventDetail>(`/events/${eventId}`);
+    // `windowBlockMinutes` is what decides a poll's shape now -- pollMode is
+    // still returned but nothing reads it (specs/0013).
     const windowInfo =
-      ev.eventType === 'poll' && ev.pollMode === 'window'
+      ev.eventType === 'poll' && ev.windowBlockMinutes != null
         ? await api.get<WindowInfo>(`/events/${eventId}/window`)
         : null;
     const changeRequests =
@@ -69,7 +85,15 @@ export default function EventDetailPage() {
   // reload after voting must not throw away a selection in progress.
   useEffect(() => {
     if (!windowInfo) return;
-    setWindowDraft((prev) => prev ?? windowInfo.mySubmission ?? defaultWindowDraft(windowInfo));
+    setWindowDrafts((prev) => {
+      const next: WindowDrafts = { ...prev };
+      for (const candidate of windowInfo.candidates) {
+        if (next[candidate.optionId]) continue;
+        next[candidate.optionId] =
+          candidate.mySubmission ?? defaultWindowDraft(candidate, windowInfo.blockMinutes);
+      }
+      return next;
+    });
   }, [windowInfo]);
 
   if (loading) return <Loading />;
@@ -80,6 +104,9 @@ export default function EventDetailPage() {
   const zone = user?.timezone ?? event.timezone;
   const deadlinePassed = !!event.pollDeadlineAt && Date.now() > event.pollDeadlineAt;
   const isMultiWinner = event.pollResolutionMode === 'multi_winner';
+  // The single field that decides whether this poll's candidates are fixed
+  // slots to vote on or windows to find a session inside (specs/0013).
+  const isWindowed = event.windowBlockMinutes != null;
 
   const handleRsvp = (status: RsvpStatus) =>
     action.run(async () => {
@@ -93,10 +120,11 @@ export default function EventDetailPage() {
       reload();
     });
 
-  const handleSubmitWindow = async () => {
-    if (!windowDraft) return;
+  const handleSubmitWindow = async (optionId: string) => {
+    const draft = windowDrafts[optionId];
+    if (!draft) return;
     await action.run(async () => {
-      await api.post(`/events/${event.eventId}/window`, windowDraft);
+      await api.post(`/events/${event.eventId}/window`, { optionId, ...draft });
       reload();
     });
   };
@@ -266,7 +294,7 @@ export default function EventDetailPage() {
         </div>
       )}
 
-      {event.eventType === 'poll' && event.pollMode === 'options' && !isMultiWinner && event.status === 'active' && event.pollOptions && (
+      {event.eventType === 'poll' && !isWindowed && !isMultiWinner && event.status === 'active' && event.pollOptions && (
         <div className="space-y-2">
           <p className="text-sm text-muted">
             {event.pollStrategy === 'threshold'
@@ -287,7 +315,7 @@ export default function EventDetailPage() {
         </div>
       )}
 
-      {event.eventType === 'poll' && isMultiWinner && event.pollOptions && (
+      {event.eventType === 'poll' && !isWindowed && isMultiWinner && event.pollOptions && (
         <div className="space-y-2">
           <p className="text-sm text-muted">
             Each day is confirmed independently once {event.pollThresholdCount} people say they're in — any that
@@ -305,42 +333,52 @@ export default function EventDetailPage() {
         </div>
       )}
 
-      {event.eventType === 'poll' &&
-        event.pollMode === 'window' &&
-        event.status === 'active' &&
-        windowInfo &&
-        windowInfo.windowStartAt != null &&
-        windowInfo.windowEndAt != null &&
-        windowInfo.windowBlockMinutes != null && (
-          <div className={cardClass('md', 'space-y-3')}>
-            <p className="text-sm text-muted">
-              {event.pollStrategy === 'threshold'
-                ? `Confirms once ${event.pollThresholdCount} people can commit to the same block, otherwise by the deadline.`
-                : 'The best-overlapping block wins at the deadline.'}
-              {event.pollDeadlineAt && (
-                <> Voting closes {formatTimeRange(event.pollDeadlineAt, event.pollDeadlineAt, zone).split(' –')[0]}.</>
-              )}
-            </p>
-            {windowDraft && (
-              <WindowAvailabilityPicker
-                windowStartAt={windowInfo.windowStartAt}
-                windowEndAt={windowInfo.windowEndAt}
-                blockMinutes={windowInfo.windowBlockMinutes}
-                value={windowDraft}
-                onChange={setWindowDraft}
-                zone={zone}
-                otherSubmissions={windowInfo.submissions.filter((s) => s.userId !== user?.id)}
-                bestCandidate={windowInfo.bestCandidate}
-              />
+      {event.eventType === 'poll' && isWindowed && event.status === 'active' && windowInfo && (
+        <div className="space-y-3">
+          <p className="text-sm text-muted">
+            {event.pollStrategy === 'threshold'
+              ? `Each option confirms once ${event.pollThresholdCount} people can commit to the same block within it, otherwise the best one wins at the deadline.`
+              : 'The option with the best overlap wins at the deadline.'}{' '}
+            Sessions are at least {formatDuration(windowInfo.blockMinutes)} long — if everyone can stay longer, they
+            will be.
+            {event.pollDeadlineAt && (
+              <> Voting closes {formatTimeRange(event.pollDeadlineAt, event.pollDeadlineAt, zone).split(' –')[0]}.</>
             )}
-            <button
-              onClick={handleSubmitWindow}
-              className={buttonClass()}
-            >
-              {windowInfo.mySubmission ? 'Update my availability' : 'Submit my availability'}
-            </button>
-          </div>
-        )}
+          </p>
+          {windowInfo.candidates.map((candidate) => {
+            const draft = windowDrafts[candidate.optionId];
+            return (
+              <div key={candidate.optionId} className={cardClass('md', 'space-y-3')}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <p className="font-medium">
+                    {formatTimeRange(candidate.windowStartAt, candidate.windowEndAt, zone)}
+                  </p>
+                  {candidate.confirmedAt && (
+                    <span className="shrink-0 rounded bg-success-surface px-2 py-0.5 text-xs text-success-text">
+                      Confirmed
+                    </span>
+                  )}
+                </div>
+                {draft && (
+                  <WindowAvailabilityPicker
+                    windowStartAt={candidate.windowStartAt}
+                    windowEndAt={candidate.windowEndAt}
+                    blockMinutes={windowInfo.blockMinutes}
+                    value={draft}
+                    onChange={(next) => setWindowDrafts((prev) => ({ ...prev, [candidate.optionId]: next }))}
+                    zone={zone}
+                    otherSubmissions={candidate.submissions.filter((s) => s.userId !== user?.id)}
+                    bestCandidate={candidate.bestCandidate}
+                  />
+                )}
+                <button onClick={() => handleSubmitWindow(candidate.optionId)} className={buttonClass()}>
+                  {candidate.mySubmission ? 'Update my availability' : "Say when I'm free"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {event.eventType === 'poll' && event.status === 'resolved' && event.startAt && event.endAt && (
         <div className="rounded-lg border border-success/50 bg-success-surface/60 p-4">

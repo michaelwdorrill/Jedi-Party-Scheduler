@@ -38,7 +38,8 @@ enough yet.
 | [0009-binary-sunset](0009-binary-sunset.md) | Ideas 8, 20 | 3.5 | 0.4 | Built |
 | [0010-interactive-bot](0010-interactive-bot.md) | Idea 19 (and 32) | 3.75 | 0.5 | Draft |
 | [0011-groups-without-servers](0011-groups-without-servers.md) | Ideas 36, 34 | TBD | TBD | Draft |
-| [0012-policy-reacceptance](0012-policy-reacceptance.md) | Idea 37 | TBD | before 0.5 | Draft |
+| [0012-policy-reacceptance](0012-policy-reacceptance.md) | Idea 37 | 3.9 | 0.4.4 | Built |
+| [0013-windowed-candidates](0013-windowed-candidates.md) | Idea 40 (and 39, 41) | 3.11 | 0.4.6 | Draft |
 
 This index had drifted: it stopped at 0003 while 0004–0007 existed, and
 listed 0003 as Draft after it shipped. Keeping it current is cheap and it is

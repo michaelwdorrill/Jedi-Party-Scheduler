@@ -290,6 +290,83 @@ live and wrong since v0.4 without anyone noticing. That is an argument for
 item 23 (there is still no way to put a frontend change in front of anyone but
 Michael) and, more cheaply, for watching someone else use it more often.
 
+### Phase 3.9 — Consent that means something (idea 37) → **v0.4.4** ✅ shipped
+
+**Spec:** `specs/0012-policy-reacceptance.md` (Built).
+
+Rule 1 again, applied to policy rather than to code: nothing in the app
+recorded agreement to anything, so any of the three scheduled items that
+rewrite the Privacy Policy — 0007, 0011, and **v0.5**, whose interactions
+endpoint falsifies the current promise that the bot "only sends direct
+messages" — would have shipped a materially different policy to people who had
+only ever agreed to the previous one, with no mechanism to notice.
+
+Two things worth carrying forward:
+
+- **The bump self-executes.** `sessions.policy_version` records the version in
+  force when a session was issued; `isSessionActive` requires it to match. So
+  a bump invalidates every outstanding session lazily, on each holder's next
+  request, with no mass write and no deploy step. The alternative — an
+  `UPDATE sessions` fired by something a person has to remember — is the class
+  of manual step `specs/0002` exists to remove.
+- **It shipped dormant**, at version 1 with matching defaults. Logging out the
+  whole user base to agree to a policy that had not changed would have taught
+  people to click through the screen before the first time it meant anything —
+  the same lesson item 31 cost, in a different costume.
+
+### Phase 3.10 — What running a real poll turned up (39, 41, 42) → **v0.4.5** ✅ shipped
+
+No spec. Three items found the third way things get found here — using the app
+to run an actual poll, after the security-review cycle and building-the-last-
+release — and all three are the same complaint from different angles: **the
+screens hid what a poll was asking.** The availability view showed the first
+candidate of three; the calendar showed the poll on the day voting *closed*
+and not on any of the nights it proposed; and every chip in a month rendered
+as its time with the title truncated to nothing.
+
+**Idea 40 was specified and deliberately not built here.** `specs/0013`
+records the design — candidates become windows with a minimum length, and both
+current poll modes fall out as special cases needing no new columns — but the
+build recreates `event_window_availability`, rewrites live rows, changes the
+resolution algorithm and touches five files of a thousand lines each. Landing
+that on top of three untested changes at the end of a long session is how a
+data migration goes wrong. It is v0.4.6, and it is a better candidate for an
+unhurried run than v0.5 is, precisely because of the migration.
+
+Also worth recording: `scripts/seed-poll-demo.sql` was added for verifying
+this release, and is the first fixture that attaches to a *real* account
+rather than synthetic ones — a poll nobody is invited to appears on nobody's
+calendar. It looks up the operator's id and whichever server they are actually
+in, and every insert is guarded so that finding neither is a clean no-op
+rather than the foreign-key error item 38 was.
+
+### Phase 3.15 — Windowed candidates (idea 40) → **v0.4.6** ✅ shipped
+
+**Spec:** `specs/0013-windowed-candidates.md` (Built). Held back from v0.4.5
+on purpose — see the phase above — and it earned the wait: the build turned
+out to need less schema than the spec predicted and one more special case
+than it predicted, which is not a combination that survives being rushed.
+
+What actually shipped is smaller than the design suggested, because the
+merge is real. `event_poll_options.start_at`/`end_at` change *meaning*
+rather than shape: with a minimum set they are the window a session may fall
+in, without one the candidate is the session. So there is one nullable
+column deciding what a poll is, one tab in the form, and a checkbox on it.
+`poll_mode` is no longer read by anything and stays in the schema only
+because dropping a column the deployed Worker reads is a two-release change.
+
+The one genuinely new behaviour is the longer session, and its two
+objectives had to be ordered: **most people first, then longest.** A poll
+that traded a player for an extra half hour would be choosing a longer
+session with fewer people in it, which is the wrong way round for this app.
+
+Migration 0021 is the piece that wanted the unhurried run. It converts every
+existing window poll into a single-candidate poll *before* recreating
+`event_window_availability` on `(option_id, user_id)`, because a window poll
+with no candidate row would lose its submissions; and it recreates both
+indexes explicitly, since rebuilding a table in SQLite drops them — the
+mistake migration 0016 exists to repair.
+
 ### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ← next
 
 **Spec:** `specs/0010-interactive-bot.md` (Draft). It scopes v0.5 down to the
@@ -372,7 +449,9 @@ shifts.
 | **0.4.1** | Phase 3.6 — error states (24), organizer RSVP (26), CI action majors (25), the sandbox-frontend rule written down (23, partial), past events faded (27), past-date warning (28) | **Shipped 24 Aug 2026** |
 | **0.4.2** | Phase 3.7 — the sandbox advisory made meaningful (31), sandbox drift reported (30), `IDEAS.md` split into open and built (29). Repo only: the deployed app stays 0.4.1 | **Shipped 25 Aug 2026** |
 | **0.4.3** | Phase 3.8 — group visibility restricted to members (34), the horizon re-pinned (33), Discord avatars (35) | **Shipped 25 Aug 2026** |
-| 0.4.4 | Policy/Terms re-acceptance (37), per `specs/0012` | Planned |
+| **0.4.4** | Phase 3.9 — Policy/Terms re-acceptance (37) | **Shipped 25 Aug 2026** |
+| **0.4.5** | Phase 3.10 — every candidate's availability (39), poll candidates on the calendar (41), readable chips (42) | **Shipped 25 Aug 2026** |
+| **0.4.6** | Phase 3.15 — windowed candidates (40), per `specs/0013` | **Shipped 25 Aug 2026** |
 | 0.5 | Interactive bot (19), and the message-id cost it turned out to carry (32) | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
@@ -418,8 +497,14 @@ shifts.
 | 35 | Discord avatars where people are listed | S | 3.8 | 0.4.3 | — | none needed |
 | 34 | Groups are visible to server members who aren't in them | S | 3.8 | 0.4.3 | — | none needed |
 | 38 | Sandbox seed could not be re-run (its own cron broke it) | S | 3.8 | 0.4.3 | — | none needed |
+| 39 | Availability grid shows one candidate, fixed 8am-2am | M | 3.10 | 0.4.5 | — | none needed |
+| 40 | Candidate polls and window polls merged into windowed candidates | L | 3.15 | 0.4.6 | 39 | 0013 |
+| 41 | Polls render on their deadline, not their candidate days | M | 3.10 | 0.4.5 | — | none needed |
+| 42 | Month chips show the time and truncate the title away | S | 3.10 | 0.4.5 | — | none needed |
+| 44 | Agenda's group-colour gutter never rendered (runtime-built class) | XS | 3.10 | 0.4.5 | — | none needed |
+| 43 | Nothing guards CURRENT_POLICY_VERSION against an accidental bump | S | — | — | 37 | TBD |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
-| 37 | Re-agree to the Policy/Terms when they change | M | — | — | — | 0012 |
+| 37 | Re-agree to the Policy/Terms when they change | M | 3.9 | 0.4.4 | — | 0012 |
 
 Ideas 15–19 were captured after this roadmap was first written and had never
 been scheduled; they're placed above. Ideas 21 and 22 were found while writing
@@ -507,6 +592,26 @@ notes on that placement:
   the bot "only sends direct messages", since it starts receiving button
   presses and editing its own messages. So 37 goes in front of the
   interactive bot, whichever order the rest take.
+
+- **39 and 40 were found using the app to run a real poll**, which is the
+  third distinct source of backlog items after the security-review cycle and
+  building the previous release. 39 is a bug with two halves (the grid shows
+  only the first candidate, and a fixed 8am-2am slice of it); 40 is a model
+  change that makes today's two poll modes special cases of one general one —
+  a candidate that is a window, with a minimum duration. **40 subsumes 39**,
+  so 39 is not wasted work done first, and 40 without it would ship a mode
+  nobody can read. Both want scheduling against v0.5 rather than ahead of it,
+  since neither changes how we ship.
+
+- **41 and 42 came from the same session as 39 and 40** — using the app to
+  run a real poll and then looking at the month it produced. 42 is the
+  cheapest item on this list (a one-line chip that spends its whole width on
+  the time, so every event in a month looks the same) and is worth taking
+  whenever the frontend is next open. 41 is a genuine gap rather than a
+  styling one: an unresolved poll is rendered on the day *voting closes*, and
+  the candidate days it proposes appear nowhere, so the content of the poll is
+  invisible on the calendar. Its design cost is fan-out, not appearance —
+  twenty candidates could bury a month's real events under one poll's maybes.
 
 - **The tail did not shift.** v0.4.1 is inserted, not substituted: 0.5 through
   0.7 keep their contents. That is the roadmap behaving as designed — a new

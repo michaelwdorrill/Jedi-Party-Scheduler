@@ -1,5 +1,6 @@
 import { vi } from 'vitest';
 import type { Env } from '../src/env';
+import { CURRENT_POLICY_VERSION } from '../src/lib/policy';
 import { createTestDb, type ShimDatabase } from './d1shim';
 import type { EventRow } from '../src/lib/events';
 
@@ -99,14 +100,25 @@ export async function seedGuild(db: ShimDatabase, id = 'guild-1', isActive = 1):
   return id;
 }
 
+// Stamps `accepted_policy_version` with the current version, matching what a
+// real signup does through upsertUser (docs/specs/0012). Leaving it to the
+// column default is not the same thing: the default is 1 forever, so the
+// first time anyone bumps CURRENT_POLICY_VERSION for real, every seeded user
+// in the suite is suddenly behind on the policy and gated -- 55 tests failed
+// on exactly that when the version was bumped on the sandbox to exercise the
+// mechanism. Those failures said nothing about the change being made, which
+// is the definition of a landmine.
+//
+// A test that wants someone *behind* on the policy sets it explicitly; see
+// test/policyAcceptance.test.ts.
 export async function seedUser(db: ShimDatabase, id: string): Promise<string> {
   const now = Date.now();
   await db.prepare(
     `INSERT INTO users (id, username, global_name, avatar_hash, timezone, notifications_enabled,
-       created_at, updated_at, last_login_at, last_login_attempt_at)
-     VALUES (?, ?, NULL, NULL, 'America/New_York', 1, ?, ?, ?, ?)`,
+       created_at, updated_at, last_login_at, last_login_attempt_at, accepted_policy_version, accepted_policy_at)
+     VALUES (?, ?, NULL, NULL, 'America/New_York', 1, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(id, `user-${id}`, now, now, now, now)
+    .bind(id, `user-${id}`, now, now, now, now, CURRENT_POLICY_VERSION, now)
     .run();
   return id;
 }

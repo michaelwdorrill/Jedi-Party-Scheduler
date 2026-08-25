@@ -1,4 +1,5 @@
 import { DateTime } from 'luxon';
+import { moveWindowEnd, moveWindowStart } from '../lib/windowSelection';
 import type { WindowSubmission } from '../types';
 
 const STEP_MINUTES = 15;
@@ -40,14 +41,18 @@ export default function WindowAvailabilityPicker({
   const endMin = Math.round((value.endAt - windowStartAt) / 60000);
   const pct = (min: number) => (min / totalMinutes) * 100;
 
-  const setStartMin = (min: number) => {
-    const clamped = Math.min(min, endMin - blockMinutes);
-    onChange({ startAt: windowStartAt + clamped * 60000, endAt: value.endAt });
-  };
-  const setEndMin = (min: number) => {
-    const clamped = Math.max(min, startMin + blockMinutes);
-    onChange({ startAt: value.startAt, endAt: windowStartAt + clamped * 60000 });
-  };
+  // Dragging either handle pushes the other rather than stopping dead -- see
+  // lib/windowSelection.ts for why that is the behaviour and not a clamp.
+  // Both sliders keep the full 0..totalMinutes scale so they stay aligned
+  // with the bar above them; the constraint lives in the handler, not in the
+  // input's own bounds.
+  const apply = (next: { startMin: number; endMin: number }) =>
+    onChange({
+      startAt: windowStartAt + next.startMin * 60000,
+      endAt: windowStartAt + next.endMin * 60000,
+    });
+  const setStartMin = (min: number) => apply(moveWindowStart(min, { startMin, endMin }, totalMinutes, blockMinutes));
+  const setEndMin = (min: number) => apply(moveWindowEnd(min, { startMin, endMin }, totalMinutes, blockMinutes));
 
   return (
     <div className="space-y-2">

@@ -102,11 +102,18 @@ export async function getConfirmedAttendeeIds(
 ): Promise<AttendeeRow[]> {
   if (pending.limit <= 0) return [];
 
-  if (event.event_type === 'poll' && event.poll_mode === 'window') {
-    // Window-mode resolution doesn't produce a real event_poll_options row
-    // (resolved_option_id is the literal string 'window'), so "confirmed"
-    // here means: submitted a window availability range covering the
-    // resolved start/end.
+  if (event.event_type === 'poll' && event.window_block_minutes != null) {
+    // A windowed poll is answered with a range rather than a yes, so
+    // "confirmed" here means: submitted availability covering the span that
+    // actually won.
+    //
+    // Matched on the *event* rather than on the winning candidate, which is
+    // deliberate. Before specs/0013 a window poll had no real
+    // event_poll_options row at all -- resolved_option_id was the literal
+    // string 'window' -- so a poll resolved before that release has no
+    // candidate to match on and would silently produce nobody. Candidates
+    // within one poll do not overlap in any shape the form can produce, so
+    // covering the resolved span is unambiguous either way.
     if (event.start_at == null || event.end_at == null) return [];
     const { results } = await env.DB.prepare(
       membershipJoin(

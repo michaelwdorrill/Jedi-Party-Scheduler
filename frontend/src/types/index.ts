@@ -7,6 +7,12 @@ export interface User {
   notificationsEnabled: boolean;
   freeBusyVisible: boolean;
   isOwner: boolean;
+  // The policy version in force, and the one this person last agreed to
+  // (docs/specs/0012). The server owns the first: a client-side copy of it
+  // would be a second constant that has to agree with the Worker's, which is
+  // exactly the drift this avoids having at all.
+  policyVersion: number;
+  acceptedPolicyVersion: number;
 }
 
 export interface Guild {
@@ -76,14 +82,25 @@ export interface WindowSubmission {
   endAt: number;
 }
 
-// As returned by GET /events/:eventId/window
-export interface WindowInfo {
-  windowStartAt: number | null;
-  windowEndAt: number | null;
-  windowBlockMinutes: number | null;
+// One candidate of a windowed poll (specs/0013). A poll used to have exactly
+// one window; it now has one per candidate, each answered separately.
+export interface WindowCandidateInfo {
+  optionId: string;
+  windowStartAt: number;
+  windowEndAt: number;
+  displayOrder: number;
+  confirmedAt: number | null;
   mySubmission: { startAt: number; endAt: number } | null;
   submissions: WindowSubmission[];
   bestCandidate: { startAt: number; endAt: number; count: number } | null;
+}
+
+// As returned by GET /events/:eventId/window
+export interface WindowInfo {
+  // The minimum session length for the whole poll -- the floor every
+  // candidate's best span has to clear.
+  blockMinutes: number;
+  candidates: WindowCandidateInfo[];
 }
 
 export interface EventInvite {
@@ -109,6 +126,9 @@ export interface EventOccurrence {
   endAt: number | null;
   isRecurring: boolean;
   isPersonal: boolean;
+  // A candidate day on a poll that has not resolved -- something that might
+  // happen, not something that will (idea 41).
+  isProvisional?: boolean;
   organizerId: string;
   // Which server this event belongs to, for labelling and filtering on the
   // cross-guild calendar (spec 0006). Null for personal time, which isn't
