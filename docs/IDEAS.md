@@ -380,6 +380,31 @@ is what makes option 3 implementable at all.
 The Privacy Policy needs reading before any of the three is chosen; it is
 already the blocker on 0007, and this touches the same promise.
 
+**Decided (Aug 2026): option 3 — you see only the groups you are in**, even
+when the group is on a server you are in. That is the strictest of the three
+and it was chosen over the noticeboard-consistency argument deliberately: a
+group roster is a list of *people*, and spec 0007's reasoning about a server
+being a public noticeboard was about *events*, which are things that happen at
+a time. "Who is in this D&D party" is not a listing on a noticeboard.
+
+**The consequence to go in with eyes open: it restricts inviting, not just
+viewing.** `GET /guilds/:id/groups` is what feeds the New Event form's
+invitee picker, so an organizer who can only see groups they are in can only
+*invite* groups they are in. Today they can invite any group on the server.
+That is a real behaviour change, and it is the right one — inviting twelve
+people you cannot name, by picking a group you are not part of, is the same
+leak from the other side — but it will be noticed, and it should be in the
+changelog in those words rather than as "improved privacy".
+
+It also removes the "browse the server's groups and ask to be added" path,
+which was option 3's stated cost. Accepted: asking happens in Discord, where
+these people already are, and the app is not where that conversation belongs.
+
+This makes 34 a small, decided change rather than an open question, so it
+moves onto the roadmap. Note it lands naturally as part of item 36 too — if
+groups stop being server-scoped at all, "the groups you can see" and "the
+groups you are in" become the same set by construction.
+
 ### 35. Show Discord avatars where people are listed
 
 Requested: people's Discord profile pictures when looking at who to add to a
@@ -413,6 +438,179 @@ Three things to get right rather than discover:
   loading these tells Discord the IP of everyone viewing the page, which is
   worth a Privacy Policy line even though every user here is already a Discord
   user.
+
+### 36. Should a group be server-agnostic, requiring only that people share a server?
+
+Asked (Aug 2026) alongside the decision on 34, and it is the more interesting
+half: rather than a group belonging to one server, let a group be just a list
+of people, with the rule that membership requires sharing a server.
+
+**Why this is directionally right.** It finishes what idea 5 started. v0.3
+made *viewing* server-agnostic (the calendar spans every server; the switcher
+went away; server became a label). Idea 5's spec drew the boundary explicitly
+and said which half was not moving: "server stays load-bearing for
+*invitation*... Servers stop mattering for *viewing*; they keep mattering for
+*who you can add*." This asks whether that half can move too, and the answer
+is yes, provided the property being protected is stated correctly. The guild
+is not a filing category — it is *proof that these people already know each
+other*. `filterActiveGuildMembers` exists so that knowing a user's ID is not
+enough to graft them onto a roster or DM them a private event's title.
+
+**Decided (Aug 2026): the intersection rule.** A group is valid when there
+exists at least one server containing *every* member. Michael chose "pairwise"
+over the cheaper adder-anchored star, with the reason that settles the whole
+design: *"otherwise where is everyone playing?"* — and that reason is worth
+more than the rule it was given for, because **pairwise does not actually
+deliver it**. Pairwise says every *pair* shares a server: A–B share X, B–C
+share Y, A–C share Z satisfies it, and there is no server all three are in, so
+there is no voice channel they can all join. The intersection rule is what
+"where is everyone playing" means. It is strictly stronger than pairwise, and
+it happens to be cheaper: one `GROUP BY guild_id HAVING COUNT(*) = <members>`
+over `user_guild_membership` (already indexed `(user_id, is_member)`) instead
+of n² pairs.
+
+It also repairs the repair problem. Under pairwise, one person leaving one
+server can invalidate a group with no sensible answer to which of twelve
+people the app should eject. Under the intersection rule the group simply has
+**no venue** — a state you can show, and block event creation on, without
+ejecting anybody.
+
+So: a group is a list of people, plus the invariant that their common-server
+set is non-empty. An event picks its venue from that set.
+
+**`events.guild_id` stays, and stays `NOT NULL`.** An earlier draft of this
+entry framed it as "either it becomes nullable or a cross-server group's event
+has to nominate a server, which puts the filter back", and concluded this had
+to be decided before `specs/0007-server-noticeboard.md` was built. That was a
+false choice. The event's guild is the *venue* — `voiceChannelLink(guildId,
+channelId)` is `discord.com/channels/{guild}/{channel}`, the actual link
+people click to go and play — and under the intersection rule the venue is
+always a server every member is in. Only *groups* lose their `guild_id`.
+That makes this item substantially smaller than first priced, and it means
+0007 is not blocked by it.
+
+**The five things `events.guild_id` holds up**, all of which survive:
+1. **The venue** (`cron/reminders.ts`'s `voiceChannelLink`, and
+   `fetchGuildVoiceChannels` for the picker).
+2. **The invitation boundary** (`lib/eventWrites.ts` — direct invitees
+   rejected, group-derived silently dropped).
+3. **Control of the event** — `routes/events.ts` requires active guild
+   membership to view one event, edit, cancel, add invitees or RSVP, *on top
+   of* holding an invite row.
+4. **Continuing visibility** — `lib/calendar.ts`'s `/me/events` predicate
+   joins membership on `e.guild_id`, so leaving a server removes its events
+   from your calendar even though the invite row survives. This is a
+   deliberate revocation mechanism, not an accident of the query.
+5. **Label, filter, and 0007's entire scope.**
+
+**Still to decide, and each is small:**
+- **More than one common server.** Who picks the venue? Leaning: the
+  organizer, at creation, defaulting to the venue of the group's last event.
+- **Someone leaves the venue server after the event exists.** Today they
+  silently vanish from the event (role 4) and get no voice link. Leave it,
+  auto-re-anchor to another common server, or warn the organizer? Leaning
+  leave-it-and-warn: silently moving where people are meeting is worse than
+  saying one person can't reach it.
+- **A group member who left the venue server but still shares another.**
+  Leaning: drop them from *that event* (matching today's silent drop for
+  group-derived invitees), never from the group.
+- **Does leaving a server still revoke your view of events you were invited
+  to?** Today yes, deliberately. Leaning keep — and it stays coherent here,
+  since every member is in the venue server at creation by construction.
+
+**What changes in the code**, roughly: `groups.guild_id` goes away, along with
+`assertValidGroupMemberTargets`'s "not current members of this server" check,
+replaced by an intersection check over the proposed roster. `resolveInvitees`
+keeps filtering group-derived invitees against the event's guild, which is now
+redundant-but-stricter rather than the primary boundary. Both frontend group
+surfaces lose their server picker. The Privacy Policy needs a pass: the
+guarantee it can still make is that you are never in a group with someone you
+share no server with — which the intersection rule preserves exactly, and
+which the adder-anchored alternative would have lost.
+
+**One genuinely nice property, worth noting because it is counterintuitive:
+the membership *freshness* check gets cheaper, not dearer.** Today the event's
+guild is fixed, so a stale cached row for that one guild must be revalidated
+against Discord or the request is refused (`MembershipUnavailableError`, 20
+live revalidations per request). Asking "which servers do all of these people
+share" can be answered from whichever cached rows are fresh, and only needs a
+live call when a candidate venue's rows are all stale.
+
+Wants a spec — not for the rule, which is now decided, but for the four open
+calls above and the migration. Not v0.5.
+
+### 37. Updating the Privacy Policy or Terms should force everyone to re-agree
+
+Asked (Aug 2026): every time the Privacy Policy or the Terms change, people
+should be logged out before their next visit, so they have to agree to the
+updated version before using the app again.
+
+**Nothing in the app records agreement to anything today.** There is no
+`accepted_*` column, no policy version server-side, and no consent check
+anywhere — logging in *is* the implicit agreement, and the policy's own
+"last updated" is `LAST_UPDATED`, a hand-maintained string constant in
+`frontend/src/lib/legal.ts`. So this is two mechanisms, not one, and the
+second is the one that makes it mean something:
+
+1. **Revoke.** `revokeAllSessionsForUser` already exists in `lib/sessions.ts`
+   — the logout half is a single call per user, or one `UPDATE sessions SET
+   revoked_at = ?` across the table.
+2. **Record.** A logout on its own does not capture consent; it just puts the
+   login page in front of someone, which is where the agreement is already
+   implicit. Getting the thing actually asked for ("they have to agree")
+   needs a recorded acceptance: `users.accepted_policy_version`, set when
+   they agree, and refused service until it matches.
+
+**The version has to live in the Worker, not the frontend.** Enforcement is
+server-side or it is decorative — a client-side check is bypassed by not
+being the client. That means the current arrangement inverts: the Worker owns
+`CURRENT_POLICY_VERSION`, the frontend reads it (from `/me`, which the app
+already calls on every load) rather than holding its own copy. Two constants
+that must agree, in two deployables, is exactly the drift
+`scripts/check-env-parity.mjs` exists to catch elsewhere.
+
+**Shape that fits what is already there:** bump a Worker-side
+`CURRENT_POLICY_VERSION`; `requireAuth` (or a middleware just after it)
+returns a distinct status — 403 with a machine-readable code, not a bare
+403 — when `users.accepted_policy_version` is behind it; the frontend shows
+the agreement screen and calls `POST /me/accept-policy`; every other route
+stays refused until it does. Revoking sessions at the same time is then the
+belt to that braces, and it is what makes it a *logout* as asked rather than
+a quiet interstitial.
+
+**Four calls this needs before it is built:**
+- **What happens if someone declines.** They cannot use the app; the honest
+  paths are "stay logged out" and "delete my account" (`DELETE /me` already
+  exists and already does a full erase). The screen should offer both rather
+  than trapping them on a wall.
+- **Do the bot's DMs keep going to someone who has not re-agreed?** The cron
+  does not read sessions at all, so by default: yes. Arguably right — they
+  are still an invitee and the reminder is the service working — and
+  arguably not, if the policy change is about what we do with their data.
+  Needs an answer, not a default.
+- **Does every edit bump the version?** Fixing a typo should not log out the
+  world. So the version is bumped deliberately, like `APP_VERSION` is, and is
+  not derived from the file's contents or its `LAST_UPDATED` string.
+- **Terms and Policy: one version or two?** One is simpler and over-fires;
+  two is honest and doubles the bookkeeping. Leaning one, on the grounds that
+  this app changes both rarely and usually together.
+
+**Considered and not chosen: a soft in-app gate with no logout.** Blocking
+the API until acceptance would achieve consent without discarding sessions or
+forcing an OAuth round trip, which is gentler and equally enforceable. The
+ask was specifically for a logout, and there is a real argument for it — a
+logout is unambiguous, and it puts the login page (which links both
+documents) in front of the person rather than a dialog they can learn to
+dismiss. Recording both here so the choice is visible rather than assumed.
+
+**Why this is worth doing before the next policy change rather than after.**
+Two scheduled items rewrite the Privacy Policy:
+`specs/0007-server-noticeboard.md` (blocked on it) and
+`specs/0011-groups-without-servers.md` (changes what a group is). Both would
+ship a materially different policy to people who agreed to the old one, with
+no mechanism to notice. That is this roadmap's Rule 1 — a change to how we
+ship comes before the things it would ship — applied to policy rather than
+to code.
 
 ## Already built
 

@@ -378,7 +378,9 @@ shifts.
 | 32 | `sendBotDm` discards the sent message id | S | 3.75 | 0.5 | 19 | in 19's spec |
 | 33 | Ground and vaporators unpinned since v0.4 | S | 3.8 | TBD | — | none needed |
 | 35 | Discord avatars where people are listed | S | 3.8 | TBD | — | none needed |
-| 34 | Groups are visible to server members who aren't in them | M | — | — | the 0007 privacy call | TBD |
+| 34 | Groups are visible to server members who aren't in them | S | 3.8 | TBD | — | decided, none needed |
+| 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
+| 37 | Re-agree to the Policy/Terms when they change | M | — | — | — | TBD |
 
 Ideas 15–19 were captured after this roadmap was first written and had never
 been scheduled; they're placed above. Ideas 21 and 22 were found while writing
@@ -422,18 +424,52 @@ notes on that placement:
   per the rule item 23 wrote down — which is item 23 continuing to cost
   something on every frontend change, and an argument for finally closing it.
 
-- **34 is unscheduled on purpose, and it is a decision rather than a task.**
-  A server member currently sees every group in that server, and every one of
-  those groups' full member lists — not through a leak but because both group
-  routes join on guild membership alone. That is arguably the same call
-  `specs/0007-server-noticeboard.md` already made for events (a server is "more
-  public noticeboard type thing than anything"), in which case the fix is a
-  Privacy Policy line and a note on the Groups page rather than a query change.
-  But it was never decided for groups; it fell out of the query. It shares
-  0007's blocker — the Privacy Policy currently promises something else — so
-  the two want deciding together, and that decision is Michael's rather than
-  the roadmap's. If it lands as "restrict", the cheap middle option (show
-  groups, hide rosters) is the one that keeps the invitee picker working.
+- **34 was a decision rather than a task, and the decision has been made:
+  you see only the groups you are in.** The strictest of the three options,
+  chosen over consistency with `specs/0007-server-noticeboard.md` on the
+  grounds that 0007's noticeboard argument is about *events* — things that
+  happen at a time — and a group roster is a list of people. That makes it a
+  small, understood change, so Rule 2 puts it in **Phase 3.8** with the other
+  frontend-adjacent errands, with one caveat that belongs in the changelog in
+  plain words: it restricts *inviting*, not just viewing. The New Event form's
+  invitee picker is fed by `GET /guilds/:id/groups`, so an organizer will no
+  longer be able to invite a group they are not part of.
+
+- **36 is the same question asked properly, and its rule is now decided.** A
+  group becomes a list of people, valid when there exists at least one server
+  containing *every* member — the **intersection rule**. That is stronger than
+  the "pairwise" it was asked for, and for the reason pairwise was asked for:
+  pairwise lets A–B, B–C and A–C each share a different server, leaving no
+  server all three are in and therefore no voice channel they can all join.
+  Since the event's guild is the venue people actually click through to,
+  "where is everyone playing" is the requirement, and the intersection rule is
+  its literal statement. It is also cheaper to check than pairwise, and it has
+  a repair story pairwise lacks: a group with no common server has no venue,
+  which can be shown and blocked on, rather than requiring the app to eject
+  somebody.
+
+  **`events.guild_id` stays `NOT NULL`; only groups lose theirs.** An earlier
+  reading of this had the event's guild becoming nullable and therefore
+  colliding with `specs/0007-server-noticeboard.md`'s premise, making 36
+  urgent to decide before 0007 was built. That was wrong, and correcting it
+  removes the sequencing pressure: the venue is always a server every member
+  is in, so all five things the event's guild holds up survive untouched.
+  36 is a group-side change plus one intersection check, and 0007 is not
+  blocked by it. Four small calls remain open (which server when several
+  qualify, what happens when someone leaves the venue afterwards, whether a
+  departed member is dropped from the event or the group, and whether leaving
+  a server still revokes your view of its events) — they want a spec, after
+  v0.5.
+
+- **37 is a Rule 1 item and should go in front of the two specs that need
+  it.** Nothing in the app records agreement to anything: there is no policy
+  version server-side, no acceptance column, and login is the implicit
+  consent. Both `specs/0007` and `specs/0011` rewrite the Privacy Policy, so
+  either would ship a materially different policy to people who agreed to the
+  old one with no mechanism to notice. That is the same argument Phase 3.7
+  made for the sandbox guardrails, applied to policy instead of code — which
+  means it wants a slot before the noticeboard or the group model, not after
+  them.
 
 - **The tail did not shift.** v0.4.1 is inserted, not substituted: 0.5 through
   0.7 keep their contents. That is the roadmap behaving as designed — a new
