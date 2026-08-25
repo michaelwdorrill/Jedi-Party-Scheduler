@@ -208,6 +208,52 @@ Pages project, or a downloadable preview bundle from CI) are still
 undecided, and the underlying gap is unchanged: there is still no branch you
 can push a frontend change to and have anything happen.
 
+### Phase 3.7 — The project's own machinery (ideas 29, 30, 31) → **v0.4.2** ✅ shipped
+
+No spec; docs and CI only, no worker code and no schema. Placed ahead of v0.5
+by **Rule 1** — anything that changes how we ship comes before the things it
+would ship — and v0.5 is the release that most needs the shipping route to be
+trustworthy, since it adds a public inbound endpoint whose verification loop
+runs entirely through the sandbox.
+
+- **31, the advisory that could never pass.** It asked the Deployments API for
+  `sha=github.sha`, the merge commit — a commit that by construction never
+  existed when the sandbox was deployed from a feature branch's head. It now
+  compares the `worker/` **subtree hash** instead, which is immune to merge
+  commits, rebases and squashes, and ignores frontend and docs commits that
+  landed on `main` in between. Checked against the case that produced the
+  entry: v0.4.1's `692eb89` and its merge `ec8b33d` share a `worker/` tree, so
+  the new predicate matches where the old one warned.
+- **30, drift nobody reported.** Both workflows now say it out loud. The
+  production deploy reports how far `sandbox` is behind the release; the
+  sandbox deploy reports how far the branch it is building is behind `main`
+  and how many of those commits touch `worker/`. The second is the one worth
+  having, because it fires *before* a verification session rather than after.
+  Fast-forwarding `sandbox` from the production workflow was considered and
+  rejected: it would redeploy the sandbox out from under whatever feature is
+  parked on it.
+- **29, a backlog that never emptied.** `IDEAS.md` is now two sections, and
+  the 1.0 test reads against **Still open** alone.
+
+**The deployed app stays at 0.4.1, deliberately.** `APP_VERSION`,
+`PUBLISHED_AT` and the changelog page are not bumped for this release,
+because nothing in the app changed — no worker code, no frontend, no schema.
+`lib/changelog.ts` says in its own header that it records *releases as users
+experience them*, not commits, so a 0.4.2 entry there would be a version
+stamp with an empty list under it. v0.4.2 is a release of the project's
+machinery, and it is versioned here and in `IDEAS.md` rather than in the
+app's footer.
+
+The reason these three were worth a release rather than a spare afternoon is
+the shape 31 turned out to have: it was not a check that was wrong, it was a
+check that was *uninformative in a way nobody could point at*, and had been
+since it was written. It fired identically on every release whether or not
+the sandbox was used, which trains the reader to ignore it — and CLAUDE.md
+had already written that training down as a discipline problem ("read it more
+carefully") rather than a predicate problem. A guardrail that cannot fail
+usefully is worse than no guardrail, because it costs attention and returns
+nothing.
+
 ### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ← next
 
 One new inbound surface (a Discord interactions endpoint) turns the bot from
@@ -259,8 +305,10 @@ ceiling accepted rather than designed around.
 The app entered **Beta at v0.2**, the moment there was a written backlog
 being worked through rather than a pile of unsorted intentions.
 
-**v1.0 is defined by the backlog, not by a feature set: when `IDEAS.md` is
-empty, we leave Beta.** That deliberately makes 1.0 a moving target — new
+**v1.0 is defined by the backlog, not by a feature set: when `IDEAS.md`'s
+"Still open" section is empty, we leave Beta.** (Until v0.4.2 that read
+"when `IDEAS.md` is empty", and since nothing ever cleared the file, the one
+test 1.0 is defined by could not pass — item 29.) That deliberately makes 1.0 a moving target — new
 ideas get captured all the time, and each one pushes 1.0 out. That's the
 intended behaviour, not a flaw in the definition: shipping 1.0 should mean
 "there is nothing captured that we still intend to build", and the honest way
@@ -277,10 +325,11 @@ shifts.
 | **0.3** | Phase 3 — calendar-first (5), group creator membership (16), admin list gaps (15), changelog page | **Shipped 22 Aug 2026** |
 | **0.4** | Phase 3.5 — visual design pass (8), Dashboard/Calendar merged into one landing page (20) | **Shipped 23 Aug 2026** |
 | **0.4.1** | Phase 3.6 — error states (24), organizer RSVP (26), CI action majors (25), the sandbox-frontend rule written down (23, partial), past events faded (27), past-date warning (28) | **Shipped 24 Aug 2026** |
-| 0.5 | Interactive bot (19) | Planned |
+| **0.4.2** | Phase 3.7 — the sandbox advisory made meaningful (31), sandbox drift reported (30), `IDEAS.md` split into open and built (29). Repo only: the deployed app stays 0.4.1 | **Shipped 25 Aug 2026** |
+| 0.5 | Interactive bot (19), and the message-id cost it turned out to carry (32) | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
-| 1.0 | `IDEAS.md` empty — leave Beta | When the list clears |
+| 1.0 | `IDEAS.md`'s **Still open** section empty — leave Beta | When the list clears |
 
 ## Summary
 
@@ -314,6 +363,13 @@ shifts.
 | 23 | No sandbox frontend (rule written down only) | S | 3.6 | 0.4.1 | — | still open |
 | 27 | Fade events that have already happened | XS | 3.6 | 0.4.1 | — | none needed |
 | 28 | Warn on an event created in the past | XS | 3.6 | 0.4.1 | — | none needed |
+| 29 | `IDEAS.md` never marked shipped items | S | 3.7 | 0.4.2 | — | none needed |
+| 30 | Sandbox/`main` drift goes unreported | S | 3.7 | 0.4.2 | — | none needed |
+| 31 | Sandbox advisory can never pass | S | 3.7 | 0.4.2 | 30 | none needed |
+| 32 | `sendBotDm` discards the sent message id | S | 3.75 | 0.5 | 19 | in 19's spec |
+| 33 | Ground and vaporators unpinned since v0.4 | S | 3.8 | TBD | — | none needed |
+| 35 | Discord avatars where people are listed | S | 3.8 | TBD | — | none needed |
+| 34 | Groups are visible to server members who aren't in them | M | — | — | the 0007 privacy call | TBD |
 
 Ideas 15–19 were captured after this roadmap was first written and had never
 been scheduled; they're placed above. Ideas 21 and 22 were found while writing
@@ -332,12 +388,44 @@ notes on that placement:
   ahead — but it is a behaviour change with a cost (`GET /me/events` is bounded
   by `MAX_QUERY_RANGE_MS`, and the two-month window is what makes the landing
   page one query), so it wants a spec rather than a slot.
-- **Ideas 29-31 are captured but unscheduled.** All three are about the
-  project's own machinery rather than the app: the backlog never marks
-  shipped items (29), sandbox/main drift goes unreported (30), and the
-  production deploy's sandbox advisory fires on every merge whether or not
-  the sandbox was used (31). 30 and 31 are the same surface and are probably
-  cheaper together. None of them blocks v0.5.
+- **Ideas 29-31 shipped as v0.4.2**, in Phase 3.7 above. They were captured
+  here as unscheduled and "not blocking v0.5"; Rule 1 moved them in front of
+  it anyway, and 30 and 31 were indeed cheaper together, being the same
+  surface.
+- **Ideas 32-35 were captured after v0.4.2 and are placed as follows.** 32
+  (the sent DM's message id is discarded, so idea 19's "edit the original
+  message" sub-item is not the cheap one it is written up as) is not its own
+  item at all — it is a cost inside v0.5, and belongs in idea 19's spec rather
+  than in a phase. 33 and 35 are both small, frontend-only and
+  already-understood, which is Rule 2, so they get a phase of their own rather
+  than a queue position: **Phase 3.8**, to ride whichever release is next
+  through the frontend. 34 is the one that does not place itself — see below.
+
+- **Phase 3.8 — frontend errands found in use (33, 35).** 33 is a regression
+  with a root cause (the `.uo-ground` and `.uo-vaporators` rules were deleted
+  by `4a0ee7e`, which reused their declaration blocks for other classes while
+  the markup kept the old class names), so restoring them is small — but the
+  entry records that restoring alone does not fix the complaint, because the
+  two SVGs stretch independently and can only line up at one aspect ratio.
+  35 turned out to be frontend-only: `avatarHash` is already stored, already
+  returned by every member-listing route, and already typed in the frontend;
+  nothing renders it. Both are verified locally rather than on the sandbox,
+  per the rule item 23 wrote down — which is item 23 continuing to cost
+  something on every frontend change, and an argument for finally closing it.
+
+- **34 is unscheduled on purpose, and it is a decision rather than a task.**
+  A server member currently sees every group in that server, and every one of
+  those groups' full member lists — not through a leak but because both group
+  routes join on guild membership alone. That is arguably the same call
+  `specs/0007-server-noticeboard.md` already made for events (a server is "more
+  public noticeboard type thing than anything"), in which case the fix is a
+  Privacy Policy line and a note on the Groups page rather than a query change.
+  But it was never decided for groups; it fell out of the query. It shares
+  0007's blocker — the Privacy Policy currently promises something else — so
+  the two want deciding together, and that decision is Michael's rather than
+  the roadmap's. If it lands as "restrict", the cheap middle option (show
+  groups, hide rosters) is the one that keeps the invitee picker working.
+
 - **The tail did not shift.** v0.4.1 is inserted, not substituted: 0.5 through
   0.7 keep their contents. That is the roadmap behaving as designed — a new
   idea gets a phase like everything else — but it is worth saying plainly,
