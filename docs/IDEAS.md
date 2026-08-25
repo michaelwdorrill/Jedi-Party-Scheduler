@@ -1245,6 +1245,17 @@ numbers that must agree are what came apart here in the first place, and a
 mast that ends underground cannot drift above the surface however the dune is
 later reshaped.
 
+**And a third round, from the same verification: in-app the vaporators were
+planted but stubby.** Merging the two SVGs had left the whole scene inside the
+old ground band — 15vh — and a mast can only ever be a fraction of the box it
+is drawn in, so they came out as knee-high posts while the login hero's (drawn
+against a full-viewport SVG) stayed tall. The viewBox is now 400 units with
+the sand as the bottom 150 and the 250 above it deliberately empty headroom,
+and the band is 40vh so the *sand* still occupies the 15vh the original ground
+did. Everything above the sand is transparent, so the taller element covers
+nothing. Masts measure 118-205px across 1280x620 through 1920x1080, with the
+foot at a constant 85% of the band in every case.
+
 ### 34. A server member can see every group in that server, including ones they are not in — and every group's full member list — shipped in v0.4.3
 
 Reported from watching someone else use it: "he can see groups he's not a
