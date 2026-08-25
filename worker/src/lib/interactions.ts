@@ -2,6 +2,7 @@ import type { Env } from '../env';
 import { boundContent } from './discord';
 import { recordRsvp, type RsvpStatus } from './attendance';
 import { recordPollSelection } from './polls';
+import { CURRENT_POLICY_VERSION } from './policy';
 
 // Discord interactions (specs/0010). This is the first thing in the app whose
 // caller is not a browser holding one of our JWTs: there is no cookie, no
@@ -229,9 +230,29 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
   // Anyone who received a DM from us was a user when we sent it, but accounts
   // can be deleted while the DM stays in someone's client forever. That is an
   // ordinary outcome with an answer, not a 500.
-  const known = await env.DB.prepare(`SELECT 1 FROM users WHERE id = ?`).bind(userId).first();
+  const known = await env.DB.prepare(`SELECT accepted_policy_version AS v FROM users WHERE id = ?`)
+    .bind(userId)
+    .first<{ v: number }>();
   if (!known) {
     return ephemeral(`I don't have an account for you any more, so I can't record that. ${siteLink(env)}`);
+  }
+
+  // IDEAS.md item 45. requirePolicyAcceptance is middleware on the
+  // authenticated route groups, and this endpoint is outside every one of
+  // them by construction -- there is no session to gate. Without this, a
+  // button would record an answer from someone the website is currently
+  // refusing to serve, which is a hole in a consent gate rather than a
+  // convenience.
+  //
+  // Refusing rather than recording, because a gate works by showing someone
+  // the documents and letting them agree, and a DM has nowhere to show them.
+  // The refusal costs the person nothing: the message and its buttons are
+  // still sitting there once they have agreed on the site.
+  if (known.v < CURRENT_POLICY_VERSION) {
+    return ephemeral(
+      `The Terms and Privacy Policy have changed since you last agreed, so I can't record that yet. ` +
+        `Agree on the site and this button will work again: ${env.FRONTEND_URL}`,
+    );
   }
 
   const original = interaction.message?.content ?? '';

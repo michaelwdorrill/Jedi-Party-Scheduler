@@ -196,6 +196,11 @@ export async function sendBotDm(
   recipientUserId: string,
   content: string,
   existingChannelId?: string | null,
+  // Discord message components (specs/0010) -- the buttons and selects that
+  // let a DM be answered in place. Passed straight through as the caller
+  // assembled them; this module does not build them (lib/dmComponents.ts
+  // does) and does not interpret them.
+  components?: unknown[] | null,
 ): Promise<{ result: DmSendResult; channelId: string | null; messageId: string | null }> {
   let channelId = existingChannelId ?? null;
 
@@ -232,7 +237,15 @@ export async function sendBotDm(
       // allowed_mentions suppresses @everyone/@here/user/role pings that
       // could otherwise be smuggled in through a user-controlled
       // event/group/channel name and fired off by the trusted bot account.
-      body: JSON.stringify({ content: boundContent(content), allowed_mentions: { parse: [] } }),
+      body: JSON.stringify({
+        content: boundContent(content),
+        allowed_mentions: { parse: [] },
+        // Omitted entirely rather than sent as [] when there are none: an
+        // empty array is a meaningful value to Discord (it *clears*
+        // components) and this is a message-create, where there is nothing
+        // to clear.
+        ...(components && components.length > 0 ? { components } : {}),
+      }),
       signal: AbortSignal.timeout(DISCORD_FETCH_TIMEOUT_MS),
     });
   } catch {

@@ -50,6 +50,10 @@ export interface FetchRule {
 
 export interface FetchStub {
   calls: string[];
+  // The request bodies, in the same order as `calls`, so a test can assert on
+  // what was actually sent rather than only on where. Non-string bodies (none
+  // today) record as null.
+  bodies: (string | null)[];
   restore: () => void;
 }
 
@@ -57,11 +61,13 @@ export interface FetchStub {
 // test can never silently pass because it accidentally hit the real network.
 export function stubFetch(rules: FetchRule[]): FetchStub {
   const calls: string[] = [];
+  const bodies: (string | null)[] = [];
   const original = globalThis.fetch;
 
-  globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+  globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     calls.push(url);
+    bodies.push(typeof init?.body === 'string' ? init.body : null);
     const rule = rules.find((r) => url.includes(r.match));
     if (!rule) throw new Error(`Unstubbed fetch to ${url}`);
     if (rule.networkError) throw new TypeError('network failure');
@@ -73,6 +79,7 @@ export function stubFetch(rules: FetchRule[]): FetchStub {
 
   return {
     calls,
+    bodies,
     restore: () => {
       globalThis.fetch = original;
     },

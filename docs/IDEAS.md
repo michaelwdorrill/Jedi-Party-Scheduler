@@ -320,6 +320,15 @@ would edit an arbitrary message.
 poll resolves -- is actually built, along with the budget decision spec 0010
 records for it (the edit is lower priority than the notification itself).
 
+**And it turned out to have a sibling nobody had priced** (v0.5, migration
+0023). The same argument that makes a message id worth storing makes a
+message's *components* worth storing: migration 0014 exists because a retry
+cannot re-derive what the source sweep rendered, and an options poll's select
+lists the candidates as they were when the DM was written. Without that
+column a retried invite would have arrived with its text and no buttons --
+worse than the delivery it replaced, and only for the people whose first
+attempt failed, which is the kind of difference nobody would ever notice.
+
 ### 36. Should a group be server-agnostic, requiring only that people share a server?
 
 Asked (Aug 2026) alongside the decision on 34, and it is the more interesting
@@ -464,40 +473,6 @@ Options, roughly in order of cost:
 Related to item 31's lesson from the other direction. There the guardrail
 existed and could not fail usefully; here the guardrail does not exist at all
 for the change most in need of one.
-
-### 45. A Discord button press is not subject to the policy re-acceptance gate
-
-Found while building the interactions endpoint (v0.5, `specs/0010`), and it
-is a consequence of the endpoint's own design rather than an oversight in it.
-
-`requirePolicyAcceptance` (spec 0012) is middleware mounted on the
-authenticated route groups, and it works by refusing with a machine-readable
-403 that the frontend recognises and turns into the acceptance screen. The
-interactions endpoint sits outside every one of those groups, because an
-interaction carries no JWT and no session — so someone who has not agreed to
-a new Terms can still record an RSVP or a poll vote by pressing a button in
-a DM, while the same person is gated out of the website.
-
-**Deliberate for now, and the reasoning should be checked rather than
-assumed.** A consent gate works by *showing someone the documents and
-letting them agree*, and a button press in a DM has nowhere to show them:
-the honest options are to record the answer, or to refuse it with an
-ephemeral "go and agree first". Refusing is defensible; silently recording
-is what happens today.
-
-What makes this worth deciding properly rather than leaving implicit:
-- The gate exists because agreement should precede *use*, and recording an
-  RSVP is use.
-- But the DM was sent before the policy moved, so the button is an artifact
-  of a world where they had agreed — closer to "finishing something already
-  started" than to a fresh action.
-- And the buttons only exist at all on messages the bot sent, so the blast
-  radius is bounded to people who were already invited.
-
-Worth answering alongside the components-on-DMs half of v0.5, since that is
-what will make these buttons exist in the first place. An ephemeral "the
-Terms changed, agree on the site and this button will work again" is cheap
-and is probably the right answer.
 
 ## Already built
 
@@ -1756,3 +1731,53 @@ because the compiled stylesheet was checked). The rule worth writing down:
 Anything built with a template string, a `.replace()`, or a lookup is not a
 class — it is a string that looks like one. Worth a lint rule if it happens a
 third time.
+
+### 45. A Discord button press is not subject to the policy re-acceptance gate — shipped in v0.5
+
+Found while building the interactions endpoint (v0.5, `specs/0010`), and it
+is a consequence of the endpoint's own design rather than an oversight in it.
+
+`requirePolicyAcceptance` (spec 0012) is middleware mounted on the
+authenticated route groups, and it works by refusing with a machine-readable
+403 that the frontend recognises and turns into the acceptance screen. The
+interactions endpoint sits outside every one of those groups, because an
+interaction carries no JWT and no session — so someone who has not agreed to
+a new Terms can still record an RSVP or a poll vote by pressing a button in
+a DM, while the same person is gated out of the website.
+
+**Deliberate for now, and the reasoning should be checked rather than
+assumed.** A consent gate works by *showing someone the documents and
+letting them agree*, and a button press in a DM has nowhere to show them:
+the honest options are to record the answer, or to refuse it with an
+ephemeral "go and agree first". Refusing is defensible; silently recording
+is what happens today.
+
+What makes this worth deciding properly rather than leaving implicit:
+- The gate exists because agreement should precede *use*, and recording an
+  RSVP is use.
+- But the DM was sent before the policy moved, so the button is an artifact
+  of a world where they had agreed — closer to "finishing something already
+  started" than to a fresh action.
+- And the buttons only exist at all on messages the bot sent, so the blast
+  radius is bounded to people who were already invited.
+
+Worth answering alongside the components-on-DMs half of v0.5, since that is
+what will make these buttons exist in the first place. An ephemeral "the
+Terms changed, agree on the site and this button will work again" is cheap
+and is probably the right answer.
+
+**Decided and built the same day it was captured (v0.5).** A press from
+someone behind on the current policy version is refused with an ephemeral
+"the Terms have changed -- agree on the site and this button will work
+again", carrying the link. Nothing is recorded.
+
+The argument that settled it is the one in the third bullet above, read the
+other way round: a consent gate works by *showing someone the documents and
+letting them agree*, and a DM has nowhere to show them. Recording the answer
+anyway would leave spec 0012's gate with a hole nothing in that spec
+acknowledges, while refusing costs the person almost nothing -- the message
+and its buttons are still sitting in their DMs once they have agreed.
+
+The check is a version comparison on the row the handler already reads to
+confirm the account still exists, so it costs no extra statement.
+

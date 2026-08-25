@@ -370,14 +370,60 @@ and the code is legible rather than remembered.
 - `custom_id` exactly as designed above, with `parseCustomId` distinguishing
   "not ours" from "ours but stale".
 
-**Not built yet, and each blocks the release rather than the endpoint:**
+- **The components themselves**, in `lib/dmComponents.ts` and attached in
+  `cron/reminders.ts`: three RSVP buttons on an invite to a fixed-time event,
+  a candidate select on an invite to an options poll, a link button on a
+  window poll, RSVP buttons on both reminder types and on a poll that has
+  resolved into a time, and the candidate select on the deadline nudge. A
+  cancelled poll carries nothing, because there is nothing left to answer.
+- **Migration 0023**, which was not in this design and should have been. See
+  below.
+- **Item 45's answer** (`IDEAS.md`): a press from someone behind on the Terms
+  is refused ephemerally with a link, not recorded.
 
-- **Components and embeds on the DMs.** Nothing attaches a button to anything
-  yet, so no interaction can arrive in the wild. This is the next chunk and it
-  lands in `cron/reminders.ts`.
+**Not built yet:**
+
+- **Embeds.** The DMs that gained components did not gain embeds with them,
+  which this spec lists as in-scope for the release. Deliberately deferred:
+  an embed is a presentation change to text that cannot be previewed from a
+  cloud session, and the components are what make the DMs *answerable*.
+  Worth doing with a real Discord client open.
 - **The edit when a poll resolves**, and the budget decision this spec
   records for it.
-- The manual portal steps (`docs/SETUP.md` 1.8 and 1.9).
+- The manual portal steps (`docs/SETUP.md` 1.8 and 1.9) -- **done for the
+  sandbox application**, 25 Aug 2026: key pasted, endpoint URL accepted by
+  Discord, which means the deployed Worker passed Discord's own PING and
+  bad-signature probes. Production's key is committed and takes effect when
+  this reaches `main`; its endpoint URL is still unset.
+
+## What the build added to this design
+
+**Migration 0023, `notification_log.components`.** This spec priced item 32's
+message-id column and missed its sibling. Migration 0014's argument -- a retry
+cannot re-derive what the source sweep rendered, because by the time a retry
+is due the source may no longer produce it -- applies to a message's controls
+at least as strongly as to its text: an options poll's select lists that
+poll's candidates *as they were when the DM was written*. Without the column,
+a retried invite would have arrived with its text and no buttons, silently
+worse than the delivery it replaced, and only for the people whose first
+attempt happened to fail.
+
+**One query per poll per tick, and what happens when the tick cannot afford
+it.** A select needs the candidate list, which the invite sweep's query does
+not carry. It is fetched once per poll, cached for that poll's other invitees,
+and charged to the budget like everything else. When the budget cannot afford
+the lookup, the DM goes out *without* its select rather than not going out:
+a notification with no buttons is what this app sent before this release, and
+a notification withheld to save a statement is a person not told their poll is
+closing.
+
+**Two of the three open questions below are now answered.** Reminder DMs do
+get components (question 3) -- a reminder is where someone realises they can't
+make it after all, which was the strongest argument in the question itself.
+Question 1's link button was not added beside the RSVP buttons: every one of
+these DMs already carries the event link in its text, and a fourth control
+for the same destination is noise. Question 2 (what happens to the buttons
+after the event starts) stands: they are left alone.
 
 **One design point this spec did not settle, decided during the build.** A
 select hands back a whole set at once, so `recordPollSelection` *deletes* the

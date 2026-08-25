@@ -5,6 +5,7 @@ import { parseCustomId, rsvpCustomId, voteCustomId, withAnswer } from '../src/li
 import { countRows, seedEvent, seedGuild, seedInvite, seedMembership, seedUser, setup } from './helpers';
 import type { Env } from '../src/env';
 import type { ShimDatabase } from './d1shim';
+import { CURRENT_POLICY_VERSION } from '../src/lib/policy';
 
 const app = buildApp();
 
@@ -445,5 +446,54 @@ describe('what the endpoint sends back to Discord', () => {
     const json = (await (await post(envWithKey(env), body, headers)).json()) as { type: number };
     expect(json.type).toBe(7);
     expect(await countRows(db, 'event_poll_votes', `user_id = 'u1' AND option_id = 'x1'`)).toBe(1);
+  });
+});
+
+describe('a press from someone behind on the Terms (item 45)', () => {
+  it('is refused with somewhere to go, and records nothing', async () => {
+    const { db, env } = setup();
+    await seedInvitedUser(db);
+    // Behind on the policy: the website would be showing them the acceptance
+    // screen right now instead of answering.
+    await db
+      .prepare(`UPDATE users SET accepted_policy_version = ? WHERE id = 'u1'`)
+      .bind(CURRENT_POLICY_VERSION - 1)
+      .run();
+
+    const { body, headers } = signed({
+      type: 3,
+      data: { custom_id: rsvpCustomId('accepted', 'e1') },
+      user: { id: 'u1' },
+      message: { content: 'Game night' },
+    });
+    const json = (await (await post(envWithKey(env), body, headers)).json()) as {
+      type: number;
+      data: { content: string; flags: number };
+    };
+
+    expect(json.type).toBe(4);
+    expect(json.data.flags).toBe(64);
+    expect(json.data.content).toContain('have changed');
+    expect(json.data.content).toContain(env.FRONTEND_URL);
+    expect(await countRows(db, 'event_invites', `rsvp_status <> 'pending'`)).toBe(0);
+  });
+
+  it('works again once they have agreed', async () => {
+    const { db, env } = setup();
+    await seedInvitedUser(db);
+    await db
+      .prepare(`UPDATE users SET accepted_policy_version = ? WHERE id = 'u1'`)
+      .bind(CURRENT_POLICY_VERSION)
+      .run();
+
+    const { body, headers } = signed({
+      type: 3,
+      data: { custom_id: rsvpCustomId('accepted', 'e1') },
+      user: { id: 'u1' },
+      message: { content: 'Game night' },
+    });
+    const json = (await (await post(envWithKey(env), body, headers)).json()) as { type: number };
+    expect(json.type).toBe(7);
+    expect(await countRows(db, 'event_invites', `user_id = 'u1' AND rsvp_status = 'accepted'`)).toBe(1);
   });
 });

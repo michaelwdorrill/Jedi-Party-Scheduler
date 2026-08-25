@@ -97,6 +97,13 @@ export type OutboxKey = Record<string, string | number>;
 
 export type OutboxTable = 'notification_log' | 'group_nudge_log' | 'change_request_log';
 
+// The outbox tables that carry a message's components and the id of the
+// message they were sent on (migrations 0022 and 0023). Deliberately one
+// table: nothing attaches a component to a group nudge or a change-request
+// DM, and nothing edits either afterwards, so giving them the columns would
+// mean writing values no code ever reads.
+const TABLES_WITH_MESSAGE_COLUMNS = new Set<OutboxTable>(['notification_log']);
+
 // Takes the lease in one statement.
 //
 // This used to be three or four: SELECT the row, INSERT or UPDATE it, then
@@ -123,10 +130,19 @@ async function claim(
   key: OutboxKey,
   token: string,
   content: string,
+  components: unknown[] | null,
 ): Promise<{ id: string; attempt: number } | null> {
   const columns = Object.keys(key);
   const values = Object.values(key);
   const now = Date.now();
+
+  // Migration 0023, and only on notification_log -- see
+  // TABLES_WITH_MESSAGE_COLUMNS.
+  // Spliced into the statement that was already being issued rather than
+  // written by a second one, for the same reason the message id is: this runs
+  // inside the cron's per-invocation budget.
+  const storesComponents = TABLES_WITH_MESSAGE_COLUMNS.has(table);
+  const componentsJson = components && components.length > 0 ? JSON.stringify(components) : null;
 
   // `content` is written on every claim, including a retry, so the row
   // always carries whatever the most recent attempt actually sent (or was
@@ -136,15 +152,15 @@ async function claim(
   // may no longer offer the same answer, or any answer, by the time a retry
   // is due.
   const { results } = await env.DB.prepare(
-    `INSERT INTO ${table} (id, ${columns.join(', ')}, sent_at, attempt_count, claim_token, claimed_until, content)
-     VALUES (?, ${columns.map(() => '?').join(', ')}, ?, 1, ?, ?, ?)
+    `INSERT INTO ${table} (id, ${columns.join(', ')}, sent_at, attempt_count, claim_token, claimed_until, content${storesComponents ? ', components' : ''})
+     VALUES (?, ${columns.map(() => '?').join(', ')}, ?, 1, ?, ?, ?${storesComponents ? ', ?' : ''})
      ON CONFLICT(${columns.join(', ')}) DO UPDATE SET
        claim_token = excluded.claim_token,
        claimed_until = excluded.claimed_until,
        sent_at = excluded.sent_at,
        attempt_count = ${table}.attempt_count + 1,
        next_attempt_at = NULL,
-       content = excluded.content
+       content = excluded.content${storesComponents ? ',\n       components = excluded.components' : ''}
      WHERE ${table}.delivered_at IS NULL
        AND ${table}.failed_at IS NULL
        AND ${table}.attempt_count < ?
@@ -152,7 +168,18 @@ async function claim(
        AND (${table}.next_attempt_at IS NULL OR ${table}.next_attempt_at <= ?)
      RETURNING id, attempt_count`,
   )
-    .bind(newId(), ...values, now, token, now + LEASE_MS, content, MAX_DELIVERY_ATTEMPTS, now, now)
+    .bind(
+      newId(),
+      ...values,
+      now,
+      token,
+      now + LEASE_MS,
+      content,
+      ...(storesComponents ? [componentsJson] : []),
+      MAX_DELIVERY_ATTEMPTS,
+      now,
+      now,
+    )
     .all<{ id: string; attempt_count: number }>();
 
   const row = results[0];
@@ -202,6 +229,11 @@ export async function deliverThroughOutbox(
   recipient: DmRecipient,
   content: string,
   budget?: DeliveryBudget,
+  // The message's components, if it carries any (specs/0010). Recorded
+  // alongside `content` for the same reason `content` is recorded at all: a
+  // retry cannot re-derive them, and an options poll's select lists the
+  // candidates *as they were* when the DM was written.
+  components?: unknown[] | null,
 ): Promise<boolean> {
   if (!recipient.notifications_enabled) return false;
 
@@ -224,7 +256,7 @@ export async function deliverThroughOutbox(
   if (budget && !budget.reserveDelivery(cached)) return false;
 
   const token = newId();
-  const held = await claim(env, table, key, token, content);
+  const held = await claim(env, table, key, token, content, components ?? null);
   if (!held) {
     // Nothing to send: already delivered, still backing off, or another
     // invocation won the claim. Give back what was reserved, less the one
@@ -243,6 +275,7 @@ export async function deliverThroughOutbox(
     recipient.id,
     content,
     recipient.dm_channel_id,
+    components,
   );
   if (channelId && channelId !== recipient.dm_channel_id) {
     await env.DB.prepare(`UPDATE users SET dm_channel_id = ? WHERE id = ?`).bind(channelId, recipient.id).run();
@@ -269,7 +302,7 @@ export async function deliverThroughOutbox(
     // Only notification_log has the column. The other two outbox tables send
     // DMs nothing edits, and migration 0022 deliberately did not give them a
     // column that would go stale unread.
-    const recordsMessageId = table === 'notification_log';
+    const recordsMessageId = TABLES_WITH_MESSAGE_COLUMNS.has(table);
     const write = await env.DB.prepare(
       `UPDATE ${table} SET delivered_at = ?, claim_token = NULL, claimed_until = NULL, next_attempt_at = NULL
        ${recordsMessageId ? ', message_id = ?' : ''}
