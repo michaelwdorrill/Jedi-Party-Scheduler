@@ -770,12 +770,18 @@ roadmap gets revisited between phases.
     since every release makes the gap wider.
 
 30. **The `sandbox` branch is behind `main` and nobody would notice.**
-    `origin/sandbox` currently sits at v0.4 *branch 1*; branches 2 and 3 went
-    to `main` without passing through it. Nothing reports this — there is no
-    check that says "sandbox is N commits behind production", and the
-    advisory note on the production deploy answers a different question (was
-    *this commit* deployed to sandbox first), which is easy to read past and
-    was read past for all of v0.4.
+    Nothing reports this — there is no check that says "sandbox is N commits
+    behind production", and the advisory note on the production deploy
+    answers a different question (was *this commit* deployed to sandbox
+    first), which is easy to read past and was read past for all of v0.4.
+
+    **The specific figure first written here has already gone stale, which
+    is the point rather than a correction.** It said `origin/sandbox` sat at
+    v0.4 *branch 1*, two branches behind. It now sits at `692eb89`, v0.4.1's
+    sandbox-verified head — one docs-only commit behind `main` — because
+    v0.4.1 went through the sandbox properly. Nothing announced either state.
+    A number you have to re-derive by hand every time you want it is the gap;
+    how big it happens to be today is not.
 
     The consequence is quiet rather than dramatic: the next person to verify
     something on the sandbox is verifying it against a Worker several
@@ -838,3 +844,29 @@ roadmap gets revisited between phases.
     Related to idea 30 — both are cases of the sandbox's relationship to
     production being unreported rather than wrong. Doing them together is
     probably cheaper than doing either alone.
+
+32. **`sendBotDm` throws the sent message's id away, so idea 19's "edit the
+    original message" is not the cheap sub-item it is written up as.** Idea
+    19 says editing a poll DM in place when the poll resolves is "cheap,
+    since the message id is already in hand". It isn't in hand anywhere:
+    `worker/src/lib/discord.ts`'s `sendBotDm` reads Discord's message-create
+    response only for `ok`/`status`/`retry_after`, never parses the body, and
+    returns `{ result, channelId }` — the id in that body is discarded at the
+    moment it arrives. Nothing in `migrations/*.sql` stores a message id
+    either (no column anywhere matches `message_id`), and `notification_log`
+    dedupes on its own key rather than on anything Discord returned.
+
+    So the sub-item costs: parsing the create response, widening
+    `DmSendResult`, a migration to persist `(notification, message id,
+    channel id)`, and a decision about what happens when the row is missing
+    because the DM predates the change or was sent by a different bot
+    application (production and sandbox are separate Discord apps, and a
+    message id is only editable by the application that sent it).
+
+    None of that is large, but it is a schema change inside a release that
+    was otherwise scoped as "one new inbound endpoint", and it is exactly the
+    kind of one-line-with-a-day-of-consequences item that idea 26's audit
+    turned out to be. It should be priced into spec 0010 rather than
+    discovered during it.
+
+    Found while surveying the worker for v0.5 readiness, Aug 2026.
