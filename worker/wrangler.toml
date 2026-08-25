@@ -21,7 +21,7 @@ OWNER_DISCORD_ID = "346042183486537730"
 # Key) for THIS application, and note that the sandbox has a different one
 # because it is a different application. Until it is set, the interactions
 # endpoint rejects everything with a 401, which is the safe direction to fail.
-DISCORD_PUBLIC_KEY = ""
+DISCORD_PUBLIC_KEY = "ce60fa5ba939ad3e1b22e6386752725ce94da9adacebf9b223c220165b5545e6"
 # Which Cloudflare plan this Worker runs on: "free" or "paid". Free and Paid
 # differ by more than an order of magnitude in D1 queries and outbound
 # subrequests allowed per invocation, and the 15-minute cron sizes its own
