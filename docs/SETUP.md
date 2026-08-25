@@ -43,10 +43,36 @@ those require your own credentials. Do these steps yourself, in order.
    `REPLACE_WITH_YOUR_CONTACT_EMAIL` with an address you actually monitor.
    Both documents cite it as the fallback route for data requests from anyone
    who can no longer sign in.
-8. Decide which Discord server(s) (guilds) you want the app to support —
-   you'll add their server IDs to the allow-list in step 2.15 below. To get a
-   server's ID, enable Developer Mode in Discord (User Settings → Advanced),
-   then right-click the server icon → **Copy Server ID**.
+8. Under **General Information**, copy the **Public Key** and paste it into
+   `worker/wrangler.toml` as `DISCORD_PUBLIC_KEY` — into `[vars]` for the
+   production application, and into `[env.sandbox.vars]` for the sandbox one.
+   They are *different applications and therefore different keys*; pasting
+   production's into both would let the sandbox Worker accept interactions
+   signed for the production bot.
+
+   It is not a secret and does not belong in `wrangler secret put`: it
+   verifies Discord's signatures, it cannot make them. `check:env-parity`
+   fails CI if the key is present in one block and missing from the other,
+   but it cannot tell you that you pasted the same value twice.
+
+9. Under **General Information**, set the **Interactions Endpoint URL** to
+   `https://<your-worker>.workers.dev/discord/interactions` and save.
+
+   This is the one step in the release that no workflow performs, and it has
+   an order dependency: Discord will not accept the URL until the deployed
+   Worker both answers its PING with `{"type": 1}` *and* rejects its
+   deliberately-invalid probe signatures with a 401. So deploy the Worker
+   with `DISCORD_PUBLIC_KEY` already set, then save the URL — doing it the
+   other way round fails with a message that says only "endpoint could not be
+   verified".
+
+   Do the sandbox application first. It is a separate bot with its own
+   endpoint URL, so a mistake there DMs nobody real.
+
+10. Decide which Discord server(s) (guilds) you want the app to support —
+    you'll add their server IDs to the allow-list in step 2.15 below. To get a
+    server's ID, enable Developer Mode in Discord (User Settings → Advanced),
+    then right-click the server icon → **Copy Server ID**.
 
 ## 2. Cloudflare (Workers + D1)
 
@@ -517,9 +543,14 @@ environments). What's actually separate is the *data* and the *bot*.
    Leaving the placeholder in place is caught by CI
    (`npm run check:env-parity` — Guardrail 1), but only once it happens to
    equal *production's* id by accident; get the real id in regardless.
-3. **Fill in the sandbox client id.** In `worker/wrangler.toml`, replace
-   `REPLACE_WITH_SANDBOX_DISCORD_CLIENT_ID` under `[env.sandbox.vars]` with
-   the second application's Client ID from step 1.
+3. **Fill in the sandbox client id and public key.** In
+   `worker/wrangler.toml`, replace `REPLACE_WITH_SANDBOX_DISCORD_CLIENT_ID`
+   under `[env.sandbox.vars]` with the second application's Client ID from
+   step 1, and set that same block's `DISCORD_PUBLIC_KEY` to the *second*
+   application's Public Key (step 1.8). Two different applications, two
+   different keys — and the sandbox's endpoint URL (step 1.9) points at the
+   sandbox Worker, so this is the pair that lets you press buttons in Discord
+   without a real bot being involved.
 4. **Migrate, verify, and set secrets**, same shape as production but with
    `:sandbox` script variants and `--env sandbox`:
    ```

@@ -238,7 +238,7 @@ export async function deliverThroughOutbox(
     return false;
   }
 
-  const { result, channelId } = await sendBotDm(
+  const { result, channelId, messageId } = await sendBotDm(
     env.DISCORD_BOT_TOKEN,
     recipient.id,
     content,
@@ -260,11 +260,22 @@ export async function deliverThroughOutbox(
     // the return value never claims ownership it didn't actually have --
     // a losing invocation logs the anomaly instead of silently reporting
     // success as if its bookkeeping were authoritative.
+    // The message id rides along in the statement that was already being
+    // issued (migration 0022, IDEAS.md item 32), so recording it costs the
+    // tick nothing -- which matters, because this runs inside the cron's
+    // per-invocation statement budget and an extra write per delivery is
+    // exactly the kind of unbudgeted spend the Pass 9 review found.
+    //
+    // Only notification_log has the column. The other two outbox tables send
+    // DMs nothing edits, and migration 0022 deliberately did not give them a
+    // column that would go stale unread.
+    const recordsMessageId = table === 'notification_log';
     const write = await env.DB.prepare(
       `UPDATE ${table} SET delivered_at = ?, claim_token = NULL, claimed_until = NULL, next_attempt_at = NULL
+       ${recordsMessageId ? ', message_id = ?' : ''}
        WHERE id = ? AND claim_token = ?`,
     )
-      .bind(Date.now(), held.id, token)
+      .bind(...(recordsMessageId ? [Date.now(), messageId, held.id, token] : [Date.now(), held.id, token]))
       .run();
     if (write.meta.changes === 0) {
       console.warn(`outbox lease lost after a successful send for ${table} ${JSON.stringify(key)} -- delivered, but this invocation's claim had already expired`);

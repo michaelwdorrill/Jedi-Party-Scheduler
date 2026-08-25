@@ -22,6 +22,10 @@ export function makeEnv(db: ShimDatabase, plan: 'free' | 'paid' = 'free'): Env {
     JWT_SIGNING_KEY: 'test-signing-key-at-least-32-characters-long',
     FRONTEND_URL: 'https://example.test/app',
     OWNER_DISCORD_ID: 'owner',
+    // Overwritten by test/interactions.test.ts with the public half of a key
+    // pair it generates, so it can sign fixtures the endpoint really verifies
+    // rather than stubbing the check out.
+    DISCORD_PUBLIC_KEY: '',
   } as Env;
 }
 

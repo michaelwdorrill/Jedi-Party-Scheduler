@@ -374,3 +374,66 @@ describe('group nudges through the outbox', () => {
     expect(countSends(fetchStub)).toBe(2);
   });
 });
+
+// IDEAS.md item 32 / migration 0022: the id of the message we just sent is
+// the one thing specs/0010's edit-on-resolve needs and the one thing the send
+// path used to throw away.
+describe('the sent message id', () => {
+  async function messageIdFor(db: Awaited<ReturnType<typeof seedOutboxFixture>>['db']) {
+    const row = await db
+      .prepare(`SELECT message_id FROM notification_log WHERE user_id = ? AND event_id = ?`)
+      .bind('u1', 'e1')
+      .first<{ message_id: string | null }>();
+    return row?.message_id ?? null;
+  }
+
+  it('is recorded on the row that was just delivered', async () => {
+    const { db, env } = await seedOutboxFixture();
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200)]);
+
+    expect(await deliverThroughOutbox(env, 'notification_log', KEY, recipient, 'hi')).toBe(true);
+    expect(await messageIdFor(db)).toBe('message-1');
+  });
+
+  it('stays null when Discord accepts the message but says nothing we can read', async () => {
+    const { db, env } = await seedOutboxFixture();
+    // A 2xx whose body is not the shape we expect. The DM did arrive, so this
+    // must not become a retry -- only the ability to edit it later is lost,
+    // and "no id" already means "leave that message alone".
+    fetchStub = stubFetch([DM_CHANNEL_RULE, { match: '/messages', status: 200, body: { unexpected: true } }]);
+
+    expect(await deliverThroughOutbox(env, 'notification_log', KEY, recipient, 'hi')).toBe(true);
+    expect(await messageIdFor(db)).toBeNull();
+  });
+
+  it('is not recorded for a delivery that failed', async () => {
+    const { db, env } = await seedOutboxFixture();
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(500)]);
+
+    expect(await deliverThroughOutbox(env, 'notification_log', KEY, recipient, 'hi')).toBe(false);
+    expect(await messageIdFor(db)).toBeNull();
+  });
+
+  it('still delivers through the outbox tables that have no such column', async () => {
+    const { db, env } = await seedOutboxFixture();
+    await db
+      .prepare(
+        `INSERT INTO groups (id, guild_id, name, idle_reminder_days, created_by, created_at)
+         VALUES ('g1', 'guild-1', 'Squad', 2, 'u1', ?)`,
+      )
+      .bind(Date.now())
+      .run();
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200)]);
+
+    // group_nudge_log deliberately never got the column (migration 0022), so
+    // this is the case that would break if the write were unconditional.
+    const delivered = await deliverThroughOutbox(
+      env,
+      'group_nudge_log',
+      { group_id: 'g1', user_id: 'u1', last_event_at: 0 },
+      recipient,
+      'hi',
+    );
+    expect(delivered).toBe(true);
+  });
+});

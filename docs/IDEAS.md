@@ -299,6 +299,27 @@ discovered during it.
 
 Found while surveying the worker for v0.5 readiness, Aug 2026.
 
+**Half paid, Aug 2026 (v0.5 in progress).** `sendBotDm` now parses the
+create response and returns the message id, `deliverThroughOutbox` records
+it, and migration 0022 gives `notification_log` the column. The recording
+costs the cron nothing: the id rides along in the `UPDATE ... SET
+delivered_at` statement that was already being issued, which mattered more
+than it sounds -- an extra write per delivery is precisely the unbudgeted
+spend the Pass 9 review found.
+
+Two things were decided while building it. The column went on
+`notification_log` alone, not on the other two outbox tables, because
+nothing edits a group nudge or a change-request DM and an unread column
+goes stale unnoticed; `deliverThroughOutbox` therefore writes it
+conditionally, which has its own test. And a 2xx whose body we cannot read
+records *no* id rather than a guessed one, because the edit path reads "no
+id" as "leave that message alone" -- the safe outcome -- while a wrong id
+would edit an arbitrary message.
+
+**Stays open** until the thing the id exists for -- editing the DM when the
+poll resolves -- is actually built, along with the budget decision spec 0010
+records for it (the edit is lower priority than the notification itself).
+
 ### 36. Should a group be server-agnostic, requiring only that people share a server?
 
 Asked (Aug 2026) alongside the decision on 34, and it is the more interesting
@@ -444,34 +465,39 @@ Related to item 31's lesson from the other direction. There the guardrail
 existed and could not fail usefully; here the guardrail does not exist at all
 for the change most in need of one.
 
-### 44. The agenda's per-group colour gutter has never rendered — shipped in v0.4.5
+### 45. A Discord button press is not subject to the policy re-acceptance gate
 
-Found while checking v0.4.5's own work: `AgendaList` colours each row's
-left-hand time gutter with its group's hue, via
-`palette.ring.replace('ring-', 'border-')`. Tailwind generates CSS by scanning
-source text for class names, so a class assembled at runtime is never seen and
-never emitted. Before v0.4.5 `colors.ts` contained exactly **one** literal
-`border-[#…]` — so seven of the eight group colours produced no rule at all,
-and every agenda gutter has quietly been the default border colour since the
-agenda shipped.
+Found while building the interactions endpoint (v0.5, `specs/0010`), and it
+is a consequence of the endpoint's own design rather than an oversight in it.
 
-**It started working in v0.4.5 by accident**, which is the part worth
-recording. Item 41's `pending` swatch happens to contain the same literals
-(`border-[<ring hex>]` for all eight), so adding it made the agenda's
-long-broken gutter render for the first time. A bug fixed by coincidence is
-one commit away from breaking again.
+`requirePolicyAcceptance` (spec 0012) is middleware mounted on the
+authenticated route groups, and it works by refusing with a machine-readable
+403 that the frontend recognises and turns into the acceptance screen. The
+interactions endpoint sits outside every one of those groups, because an
+interaction carries no JWT and no session — so someone who has not agreed to
+a new Terms can still record an RSVP or a poll vote by pressing a button in
+a DM, while the same person is gated out of the website.
 
-Fixed properly in the same release: `Swatch` gains a literal `border` field
-and `AgendaList` uses it. Also marked the agenda's provisional rows while
-there — see below.
+**Deliberate for now, and the reasoning should be checked rather than
+assumed.** A consent gate works by *showing someone the documents and
+letting them agree*, and a button press in a DM has nowhere to show them:
+the honest options are to record the answer, or to refuse it with an
+ephemeral "go and agree first". Refusing is defensible; silently recording
+is what happens today.
 
-**This is the second instance of the same mistake in two days**, and the first
-was mine an hour earlier (item 41's first draft did exactly this, caught only
-because the compiled stylesheet was checked). The rule worth writing down:
-**a Tailwind class must exist as literal text somewhere the scanner reads.**
-Anything built with a template string, a `.replace()`, or a lookup is not a
-class — it is a string that looks like one. Worth a lint rule if it happens a
-third time.
+What makes this worth deciding properly rather than leaving implicit:
+- The gate exists because agreement should precede *use*, and recording an
+  RSVP is use.
+- But the DM was sent before the policy moved, so the button is an artifact
+  of a world where they had agreed — closer to "finishing something already
+  started" than to a fresh action.
+- And the buttons only exist at all on messages the bot sent, so the blast
+  radius is bounded to people who were already invited.
+
+Worth answering alongside the components-on-DMs half of v0.5, since that is
+what will make these buttons exist in the first place. An ephemeral "the
+Terms changed, agree on the site and this button will work again" is cheap
+and is probably the right answer.
 
 ## Already built
 
@@ -1701,3 +1727,32 @@ the colour-encoded group information already lives.
 truncating on its own. The game went to the tooltip — and, correcting this
 entry's first draft, it was already on the occurrence and needed no payload
 change.
+
+### 44. The agenda's per-group colour gutter has never rendered — shipped in v0.4.5
+
+Found while checking v0.4.5's own work: `AgendaList` colours each row's
+left-hand time gutter with its group's hue, via
+`palette.ring.replace('ring-', 'border-')`. Tailwind generates CSS by scanning
+source text for class names, so a class assembled at runtime is never seen and
+never emitted. Before v0.4.5 `colors.ts` contained exactly **one** literal
+`border-[#…]` — so seven of the eight group colours produced no rule at all,
+and every agenda gutter has quietly been the default border colour since the
+agenda shipped.
+
+**It started working in v0.4.5 by accident**, which is the part worth
+recording. Item 41's `pending` swatch happens to contain the same literals
+(`border-[<ring hex>]` for all eight), so adding it made the agenda's
+long-broken gutter render for the first time. A bug fixed by coincidence is
+one commit away from breaking again.
+
+Fixed properly in the same release: `Swatch` gains a literal `border` field
+and `AgendaList` uses it. Also marked the agenda's provisional rows while
+there — see below.
+
+**This is the second instance of the same mistake in two days**, and the first
+was mine an hour earlier (item 41's first draft did exactly this, caught only
+because the compiled stylesheet was checked). The rule worth writing down:
+**a Tailwind class must exist as literal text somewhere the scanner reads.**
+Anything built with a template string, a `.replace()`, or a lookup is not a
+class — it is a string that looks like one. Worth a lint rule if it happens a
+third time.

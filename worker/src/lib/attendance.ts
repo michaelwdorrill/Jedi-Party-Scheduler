@@ -1,5 +1,5 @@
 import type { Env } from '../env';
-import { MEMBERSHIP_GRACE_MS } from './db';
+import { MEMBERSHIP_GRACE_MS, requireActiveGuildMember } from './db';
 import type { EventRow } from './events';
 import {
   PENDING_NOTIFICATION_JOIN,
@@ -161,4 +161,48 @@ export async function getConfirmedAttendeeIds(
     )
     .all<AttendeeRow>();
   return results;
+}
+
+// One person's answer to one event's invitation, extracted out of
+// POST /events/:eventId/rsvp so the Discord interactions endpoint can record
+// the same thing (specs/0010). The website reaches this with a session; a
+// button press reaches it with a signed Discord payload and no session at
+// all, so nothing here may read `c.get('userId')` or any other request state.
+//
+// The permission checks live *inside* this function rather than in the route
+// that used to hold them, and that is the whole point of the extraction. If
+// they had stayed in the route handler, the interactions path would silently
+// have had none -- the same shape as IDEAS.md item 26, where the organizer's
+// 403 was invisible because two halves of the app disagreed about who was
+// allowed. A DM is a permanent artifact and the state behind it moves: the
+// press may arrive after the sender left the server, after the invite was
+// withdrawn, or after the event was deleted, so every one of those is
+// re-checked from the database on every press rather than inferred from the
+// fact that we once sent them a message.
+export type RsvpStatus = 'accepted' | 'declined' | 'tentative';
+
+export type RsvpOutcome = 'recorded' | 'not_invited' | 'no_such_event';
+
+export async function recordRsvp(
+  env: Env,
+  userId: string,
+  eventId: string,
+  status: RsvpStatus,
+): Promise<RsvpOutcome> {
+  const event = await env.DB.prepare(`SELECT guild_id FROM events WHERE id = ?`)
+    .bind(eventId)
+    .first<{ guild_id: string }>();
+  if (!event) return 'no_such_event';
+  if (!(await requireActiveGuildMember(env, userId, event.guild_id))) return 'not_invited';
+
+  // The UPDATE is the authorisation check as well as the write: it only
+  // matches a row that actually invites this user to this event, so an
+  // uninvited presser changes nothing and is told so.
+  const result = await env.DB.prepare(
+    `UPDATE event_invites SET rsvp_status = ?, responded_at = ? WHERE event_id = ? AND user_id = ?`,
+  )
+    .bind(status, Date.now(), eventId, userId)
+    .run();
+
+  return result.meta.changes === 0 ? 'not_invited' : 'recorded';
 }

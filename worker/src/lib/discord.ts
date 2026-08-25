@@ -160,7 +160,7 @@ const DISCORD_MAX_CONTENT_LENGTH = 2000;
 // one place that guarantees Discord never rejects a message for being too
 // long, which would otherwise leave a notification permanently "sent" in our
 // dedupe log (see notifyOnce) despite never actually reaching the recipient.
-function boundContent(content: string): string {
+export function boundContent(content: string): string {
   return content.length > DISCORD_MAX_CONTENT_LENGTH
     ? `${content.slice(0, DISCORD_MAX_CONTENT_LENGTH - 1)}…`
     : content;
@@ -182,12 +182,21 @@ export const DISCORD_FETCH_TIMEOUT_MS = 20_000;
 // come back as the same shape a 5xx would, since to a caller deciding
 // whether to retry, "Discord didn't answer" and "Discord errored" mean the
 // same thing.
+//
+// `messageId` is the sent message's own id, read out of the create response
+// (IDEAS.md item 32: it used to be discarded at the moment it arrived, which
+// is what made specs/0010's edit-the-message-in-place feature a schema change
+// rather than the freebie idea 19 assumed). It is null whenever the send did
+// not succeed, and also whenever Discord answered 2xx with a body this can't
+// read -- an id we are not sure of is worse than none, because the edit path
+// treats "no id" as "leave the message alone" and would otherwise PATCH
+// something arbitrary.
 export async function sendBotDm(
   botToken: string,
   recipientUserId: string,
   content: string,
   existingChannelId?: string | null,
-): Promise<{ result: DmSendResult; channelId: string | null }> {
+): Promise<{ result: DmSendResult; channelId: string | null; messageId: string | null }> {
   let channelId = existingChannelId ?? null;
 
   if (!channelId) {
@@ -203,10 +212,10 @@ export async function sendBotDm(
         signal: AbortSignal.timeout(DISCORD_FETCH_TIMEOUT_MS),
       });
     } catch {
-      return { result: { ok: false, status: 0 }, channelId: null };
+      return { result: { ok: false, status: 0 }, channelId: null, messageId: null };
     }
     if (!channelRes.ok) {
-      return { result: { ok: false, status: channelRes.status }, channelId: null };
+      return { result: { ok: false, status: channelRes.status }, channelId: null, messageId: null };
     }
     const channel = (await channelRes.json()) as { id: string };
     channelId = channel.id;
@@ -227,7 +236,7 @@ export async function sendBotDm(
       signal: AbortSignal.timeout(DISCORD_FETCH_TIMEOUT_MS),
     });
   } catch {
-    return { result: { ok: false, status: 0 }, channelId };
+    return { result: { ok: false, status: 0 }, channelId, messageId: null };
   }
 
   if (messageRes.status === 429) {
@@ -243,8 +252,20 @@ export async function sendBotDm(
     return {
       result: { ok: false, status: 429, retryAfterMs: seconds * 1000 },
       channelId,
+      messageId: null,
     };
   }
 
-  return { result: { ok: messageRes.ok, status: messageRes.status }, channelId };
+  if (!messageRes.ok) {
+    return { result: { ok: false, status: messageRes.status }, channelId, messageId: null };
+  }
+
+  // A body that doesn't parse, or parses without an id, is not a failed send
+  // -- Discord accepted the message and the recipient has it. Only the
+  // ability to edit it later is lost, so this degrades to null rather than
+  // turning a delivered notification into a retry.
+  const message = (await messageRes.json().catch(() => null)) as { id?: unknown } | null;
+  const messageId = typeof message?.id === 'string' ? message.id : null;
+
+  return { result: { ok: true, status: messageRes.status }, channelId, messageId };
 }

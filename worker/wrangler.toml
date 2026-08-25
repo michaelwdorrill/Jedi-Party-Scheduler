@@ -14,6 +14,14 @@ account_id = "f22e4f3ece3f69c4bd0da97be4f7a3b6"
 DISCORD_CLIENT_ID = "1531128508728737812"
 FRONTEND_URL = "https://uncleowen.space"
 OWNER_DISCORD_ID = "346042183486537730"
+# The production Discord application's public key, which verifies that an
+# inbound interaction really came from Discord (docs/specs/0010). Not a
+# secret: it verifies signatures, it cannot make them. One-time manual step --
+# copy it from the Discord developer portal (General Information -> Public
+# Key) for THIS application, and note that the sandbox has a different one
+# because it is a different application. Until it is set, the interactions
+# endpoint rejects everything with a 401, which is the safe direction to fail.
+DISCORD_PUBLIC_KEY = ""
 # Which Cloudflare plan this Worker runs on: "free" or "paid". Free and Paid
 # differ by more than an order of magnitude in D1 queries and outbound
 # subrequests allowed per invocation, and the 15-minute cron sizes its own
@@ -64,6 +72,12 @@ DISCORD_CLIENT_ID = "1534208528930046044"
 FRONTEND_URL = "http://localhost:5173"
 # Same owner account as production -- see spec 0002's open question 2.
 OWNER_DISCORD_ID = "346042183486537730"
+# The *sandbox* Discord application's public key -- deliberately not
+# production's. Pasting production's here would let the sandbox Worker accept
+# interactions signed for the production bot. check:env-parity only proves the
+# key exists in both blocks; that they hold different values is on whoever
+# fills them in.
+DISCORD_PUBLIC_KEY = ""
 # Kept identical to production's [vars] on purpose: the whole point of the
 # sandbox is to exercise the cron's budget logic (src/cron/budget.ts) under
 # the same ceiling prod runs under, not a more generous one.

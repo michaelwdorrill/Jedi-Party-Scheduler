@@ -1,32 +1,17 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
-import type { Env } from '../env';
 import type { EventRow } from '../lib/events';
-import { requireActiveGuildMember } from '../lib/db';
 import {
-  checkThresholdAndResolve,
   checkWindowThresholdAndResolve,
   getOptionTallies,
   getWindowedCandidates,
+  recordPollVote,
+  requireInvitedOrOrganizer,
   resolveWindowedCandidates,
 } from '../lib/polls';
 import { assertOneOf, assertSafeInt, assertString, assertTimeRange, LIMITS, readJsonBody } from '../lib/validate';
 
 export const pollRoutes = new Hono<AppEnv>();
-
-// A former member holding a stale invite/organizer row must not keep poll
-// access -- current active membership in the event's guild is required too.
-async function requireInvitedOrOrganizer(env: Env, eventId: string, userId: string): Promise<boolean> {
-  const row = await env.DB.prepare(
-    `SELECT e.guild_id FROM events e
-     LEFT JOIN event_invites i ON i.event_id = e.id AND i.user_id = ?
-     WHERE e.id = ? AND (e.organizer_id = ? OR i.user_id IS NOT NULL)`,
-  )
-    .bind(userId, eventId, userId)
-    .first<{ guild_id: string }>();
-  if (!row) return false;
-  return requireActiveGuildMember(env, userId, row.guild_id);
-}
 
 pollRoutes.get('/:eventId/poll', async (c) => {
   const userId = c.get('userId');
@@ -55,6 +40,9 @@ pollRoutes.get('/:eventId/poll', async (c) => {
   );
 });
 
+// Like the RSVP route above it, this is now shape-only: lib/polls.ts holds
+// the vote and every check that can refuse it, so the interactions endpoint
+// records a vote through the same path (specs/0010).
 pollRoutes.post('/:eventId/poll/vote', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
@@ -62,40 +50,17 @@ pollRoutes.post('/:eventId/poll/vote', async (c) => {
   const optionId = assertString(body.optionId, 'optionId', 64);
   const vote = assertOneOf(body.vote, 'vote', ['yes', 'no', 'maybe'] as const);
 
-  const event = await c.env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
-  // A windowed poll is answered with a range, not a yes/no -- see the
-  // /window routes below. Decided by window_block_minutes rather than
-  // poll_mode, which nothing reads any more (specs/0013).
-  if (!event || event.event_type !== 'poll' || event.window_block_minutes != null) return c.text('Not found', 404);
-
-  const option = await c.env.DB.prepare(
-    `SELECT id, confirmed_at FROM event_poll_options WHERE id = ? AND event_id = ?`,
-  )
-    .bind(optionId, eventId)
-    .first<{ id: string; confirmed_at: number | null }>();
-  if (!option) return c.text('Invalid option', 400);
-
-  if (event.poll_resolution_mode === 'multi_winner') {
-    // Confirmed days stay open forever for late joiners; unconfirmed days
-    // close once the deadline passes.
-    const deadlinePassed = !!event.poll_deadline_at && Date.now() > event.poll_deadline_at;
-    if (!option.confirmed_at && deadlinePassed) {
-      return c.text('Voting for this day has closed', 400);
-    }
-  } else if (event.status !== 'active') {
-    return c.text('Voting is closed for this event', 400);
+  const outcome = await recordPollVote(c.env, userId, eventId, optionId, vote);
+  switch (outcome.status) {
+    case 'no_such_poll':
+      return c.text('Not found', 404);
+    case 'invalid_option':
+      return c.text('Invalid option', 400);
+    case 'closed':
+      return c.text(outcome.reason, 400);
+    case 'forbidden':
+      return c.text('Forbidden', 403);
   }
-
-  if (!(await requireInvitedOrOrganizer(c.env, eventId, userId))) return c.text('Forbidden', 403);
-
-  await c.env.DB.prepare(
-    `INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT(option_id, user_id) DO UPDATE SET vote = excluded.vote, voted_at = excluded.voted_at`,
-  )
-    .bind(optionId, userId, vote, Date.now())
-    .run();
-
-  await checkThresholdAndResolve(c.env, event);
 
   return c.json({ ok: true });
 });

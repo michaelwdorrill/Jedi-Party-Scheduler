@@ -1,0 +1,34 @@
+-- specs/0010, and IDEAS.md item 32 -- the cost idea 19 assumed away.
+--
+-- Idea 19 describes "edit the original message when the poll resolves" as
+-- cheap, "since the message id is already in hand". It is in hand for exactly
+-- as long as it takes to discard it: lib/discord.ts's sendBotDm reads
+-- Discord's message-create response for ok/status/retry_after and never
+-- parses the body the id arrives in. Nothing in this schema stored one
+-- either.
+--
+-- notification_log is the right home for the same reason it already carries
+-- `content` (migration 0014): a message id is a durable fact about a
+-- *delivery*, not about the event/poll state that prompted it, and the state
+-- that prompted it may have moved on -- or stopped existing -- by the time
+-- anything wants to edit the message. The dedupe key stays what it was; this
+-- is one more column recorded on the attempt that succeeded.
+--
+-- Deliberately only this table. group_nudge_log and change_request_log send
+-- DMs through the same outbox, but nothing in this release or the next edits
+-- either of those messages, and a column nothing reads is a column that goes
+-- stale without anyone noticing.
+--
+-- Two things that make a stored id less authoritative than it looks, both of
+-- which the edit path has to treat as ordinary rather than as errors:
+--
+--   * A message is editable only by the application that sent it. Production
+--     and the sandbox are separate Discord applications, so an id written by
+--     one is not editable by the other.
+--   * Every row written before this migration has none at all, and every row
+--     whose delivery predates the code that records it will keep having none.
+--
+-- So "no message id" and "the edit 404s or 403s" both mean the same thing:
+-- leave the DM alone. That is precisely what happens today, which is what
+-- makes it a safe outcome rather than a failure.
+ALTER TABLE notification_log ADD COLUMN message_id TEXT;

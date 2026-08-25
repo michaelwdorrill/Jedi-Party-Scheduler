@@ -1,6 +1,6 @@
 # 0010 — An interactive bot
 
-**Status:** Draft
+**Status:** Part built (v0.5 in progress)
 **Covers:** `IDEAS.md` item 19, and item 32 (which is a cost inside it)
 **Phase:** 3.75 → **v0.5**
 
@@ -342,6 +342,56 @@ safe to develop in the open: a wrong endpoint in the sandbox DMs nobody real.
    where someone realises they can't make it after all, which is the strongest
    argument for buttons anywhere in this release — but it multiplies the
    message ids to track. Undecided, and cheap to add later.
+
+## What is built, and what is left
+
+Written down at the point the endpoint landed, so the gap between this design
+and the code is legible rather than remembered.
+
+**Built:**
+
+- `POST /discord/interactions`, mounted outside every `requireAuth` group,
+  with Ed25519 verification over `timestamp + rawBody`, a 401 before any D1
+  statement, the five-minute replay window, and PING → `{type: 1}`. An unset
+  `DISCORD_PUBLIC_KEY` rejects with 401 and logs why, rather than erroring:
+  failing closed is the only safe direction for the one route with no session
+  behind it.
+- Both handlers, answering synchronously with `type: 7` (UPDATE_MESSAGE) as
+  this spec preferred. Nothing measured needed a defer.
+- The extraction: `recordRsvp` in `lib/attendance.ts`, `recordPollVote` and
+  `recordPollSelection` in `lib/polls.ts`, with `requireInvitedOrOrganizer`
+  moved out of `routes/polls.ts` so the check travels with the logic rather
+  than with the HTTP surface. The routes are now shape-only, and the whole
+  366-test suite passed unchanged across the move, which is the evidence that
+  the website's behaviour did not shift underneath it.
+- Item 32's half: `sendBotDm` returns the message id, `deliverThroughOutbox`
+  records it in the statement it was already issuing, migration 0022 adds the
+  column.
+- `custom_id` exactly as designed above, with `parseCustomId` distinguishing
+  "not ours" from "ours but stale".
+
+**Not built yet, and each blocks the release rather than the endpoint:**
+
+- **Components and embeds on the DMs.** Nothing attaches a button to anything
+  yet, so no interaction can arrive in the wild. This is the next chunk and it
+  lands in `cron/reminders.ts`.
+- **The edit when a poll resolves**, and the budget decision this spec
+  records for it.
+- The manual portal steps (`docs/SETUP.md` 1.8 and 1.9).
+
+**One design point this spec did not settle, decided during the build.** A
+select hands back a whole set at once, so `recordPollSelection` *deletes* the
+presser's votes on candidates they did not pick, rather than only inserting
+the ones they did. Without the delete, deselecting a night you had previously
+said yes to would leave the old yes standing, and the DM would show one answer
+while the tally counted another. The yes/maybe/no nuance stays website-only as
+designed; this much has to agree with what was just pressed.
+
+**And one gap it opened**, captured as `IDEAS.md` item 45: the endpoint is
+outside `requirePolicyAcceptance` by construction, so a button press records
+an answer from someone the website would gate. A DM has nowhere to show a
+consent document, so the options are to record it or to refuse it ephemerally
+-- worth deciding with the components work rather than by default.
 
 ## Rejected alternatives
 
