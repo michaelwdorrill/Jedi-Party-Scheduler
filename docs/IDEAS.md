@@ -1372,3 +1372,45 @@ plain `name[0]` does.
 The Privacy Policy needed no amendment: it already said avatars are shown to
 other members of servers you share, "so people can identify who they're
 inviting", which is exactly this.
+
+### 38. The sandbox seed could not be re-run, and the cron was what broke it — shipped in v0.4.3
+
+`npm run seed:sandbox` failed with a bare `FOREIGN KEY constraint failed:
+SQLITE_CONSTRAINT_FOREIGNKEY` — no table named, nothing to act on. The file
+had claimed "safe to re-run: everything is deleted and reinserted... in FK-safe
+order" since it was written.
+
+**The first run is what breaks the second, and it does it on purpose.**
+`group_nudge_log` references both `groups` and `users` with no
+`ON DELETE CASCADE`, and the seed group sets `idle_reminder_days = 0`
+*specifically* so `sweepIdleGroups` fires on the first cron tick — which is
+the whole point of the fixture. So roughly fifteen minutes after the first
+successful seed, the sandbox's own cron has written rows that make the seed's
+`DELETE FROM groups` and `DELETE FROM users` impossible. The file's most
+useful feature disabled its second-most useful one.
+
+The second half is ordinary accumulation: deleting the seed *guild* fails once
+anyone's own group or event lives on it, and deleting seed *users* fails once
+they are on a real group's roster or a real event's invite list. None of those
+FKs cascade either.
+
+**Fixed in v0.4.3** by narrowing what the file deletes to what it actually
+owns — the seed events (which cascade to invites, poll options, votes, window
+availability, change requests and notification rows), the seed group and its
+roster, and the cron bookkeeping the seed itself caused — and *upserting* the
+guild, the users and their memberships rather than deleting them. An invite on
+a real event that was sourced from the seed group has its `source_group_id`
+detached rather than the invite removed, which is the same move
+`routes/groups.ts` already makes when deleting a group for real.
+
+`test/seed.test.ts` runs the file against a schema built from the migrations,
+twice, with both kinds of state in between. Checked against the pre-fix file:
+the two failure-mode tests fail there and the two structural ones pass, so it
+reproduces the reported error rather than merely asserting the new behaviour.
+It also asserts the collateral damage that must *not* happen — a seed user
+someone added to a real group stays on that roster.
+
+**The lesson worth keeping is about seeds generally:** a fixture designed to
+exercise a background job will, once that job runs, contain state the fixture
+did not create. "Delete everything with my prefix" is only true before the
+first tick.

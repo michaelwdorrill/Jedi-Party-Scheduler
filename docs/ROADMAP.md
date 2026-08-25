@@ -277,6 +277,12 @@ already understood, which is Rule 2.
   fixed the complaint.
 - **35, avatars.** Frontend-only: the hash was already stored, already
   returned, already typed. Nothing rendered it.
+- **38, the seed that could only run once.** Found while trying to verify 34
+  with a group the tester was not in. `npm run seed:sandbox` failed on a bare
+  foreign-key error, because the seed group is configured to make the idle
+  sweep fire and `group_nudge_log` does not cascade from `groups` — so the
+  first run's *success* is what made the second impossible. Not planned into
+  this release; it was in the way of testing it.
 
 **What this phase is really evidence for.** Every one of these was found by a
 person using the app rather than by a review pass or a test, and 33 had been
@@ -411,6 +417,7 @@ shifts.
 | 33 | Ground and vaporators unpinned since v0.4 | S | 3.8 | 0.4.3 | — | none needed |
 | 35 | Discord avatars where people are listed | S | 3.8 | 0.4.3 | — | none needed |
 | 34 | Groups are visible to server members who aren't in them | S | 3.8 | 0.4.3 | — | none needed |
+| 38 | Sandbox seed could not be re-run (its own cron broke it) | S | 3.8 | 0.4.3 | — | none needed |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
 | 37 | Re-agree to the Policy/Terms when they change | M | — | — | — | 0012 |
 
