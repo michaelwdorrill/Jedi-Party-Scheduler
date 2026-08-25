@@ -138,21 +138,33 @@ CI rather than by hand later — don't route around them:
   `worker/migrations/*.sql` -- this is what caught three genuine schema-
   drift incidents in production before this existed (see `docs/SETUP.md`).
 - An advisory (non-blocking) note on the production deploy about whether
-  the commit was deployed to sandbox first. It is deliberately advisory —
-  see `deploy-worker.yml` for why — and that call is still right.
+  the Worker being deployed was run on the sandbox first. It is deliberately
+  advisory — see `deploy-worker.yml` for why — and that call is still right.
 
-  **But do not read this note as meaning anything yet.** It queries the
-  Deployments API for `sha=${{ github.sha }}`, which on a push to `main` is
-  the *merge commit* — a commit that by construction never existed when the
-  sandbox was deployed from the feature branch's head. So it reports "no
-  matching sandbox deployment" on a release that went through the sandbox
-  correctly and on one that skipped it, identically. It fired on every
-  production deploy of v0.3 and v0.4.1; v0.4.1 was sandbox-verified at
-  `692eb89` and merged as `ec8b33d`, and the note fired anyway.
+  **As of v0.4.2 this note means something; before that it did not.** It
+  used to ask the Deployments API for `sha=${{ github.sha }}`, which on a
+  push to `main` is the *merge commit* — a commit that by construction never
+  existed when the sandbox was deployed from the feature branch's head — so
+  it reported "no matching sandbox deployment" identically whether or not
+  the sandbox had been used, and it did that on every release from v0.3 to
+  v0.4.1. It now resolves each recorded sandbox deployment to its `worker/`
+  subtree and compares that against the tree being deployed, which is
+  immune to merge commits, rebases and squashes alike, and ignores frontend
+  and docs commits that landed on main in between. Verified against the case
+  that used to fail: v0.4.1's sandbox commit `692eb89` and its merge
+  `ec8b33d` have the same `worker/` tree, so the new predicate matches where
+  the old one warned.
 
-  That is IDEAS.md item 31, still open. Until it is fixed, a warning from
-  this step is not evidence of anything — and a *clean* result from it would
-  be genuinely surprising and worth investigating.
+  So a warning from this step is now evidence, and worth stopping for. What
+  it still cannot speak to is a sandbox deploy of a branch that was never
+  merged and has since been deleted — those commits are unreachable from the
+  production checkout, and the step says how many it had to skip.
+
+- A freshness note on the *sandbox* deploy saying how far behind `main` the
+  branch being deployed is, and how many of those commits touch `worker/`.
+  This is the one that would have saved the long detour behind IDEAS item
+  24, where a sandbox Worker predating v0.3 had no `/me/events` route and
+  the frontend reported the 404 as an empty calendar.
 
 There is also a local guardrail that fires at the moment of the mistake
 rather than after it: `.claude/hooks/block-push-to-main.mjs`, wired up as a
