@@ -82,8 +82,10 @@ eventRoutes.get('/:eventId', async (c) => {
     .bind(event.organizer_id)
     .first<{ username: string; global_name: string | null }>();
 
+  // Every poll has candidates now, windowed or not (specs/0013), so this no
+  // longer branches on poll_mode -- a migrated window poll has exactly one.
   let pollOptions = null;
-  if (event.event_type === 'poll' && event.poll_mode === 'options') {
+  if (event.event_type === 'poll') {
     const { results: options } = await c.env.DB.prepare(
       `SELECT id, start_at, end_at, display_order, confirmed_at FROM event_poll_options
        WHERE event_id = ? ORDER BY display_order`,

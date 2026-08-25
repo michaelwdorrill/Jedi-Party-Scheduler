@@ -30,8 +30,8 @@ describe('deleteUserCompletely', () => {
       .bind(now)
       .run();
     await db.prepare(
-      `INSERT INTO event_window_availability (event_id, user_id, avail_start_at, avail_end_at, submitted_at)
-       VALUES ('mine', 'bystander', ?, ?, ?)`,
+      `INSERT INTO event_window_availability (option_id, event_id, user_id, avail_start_at, avail_end_at, submitted_at)
+       VALUES ('opt', 'mine', 'bystander', ?, ?, ?)`,
     )
       .bind(now, now + 3600_000, now)
       .run();

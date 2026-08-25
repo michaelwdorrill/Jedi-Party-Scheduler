@@ -120,7 +120,12 @@ async function confirmOption(env: Env, optionId: string): Promise<boolean> {
 // keep collecting votes on other candidate days). Returns the ids of any
 // options newly confirmed in this call, so the caller/cron can notify them.
 export async function checkThresholdAndResolve(env: Env, event: EventRow): Promise<string[]> {
-  if (event.event_type !== 'poll' || event.poll_mode !== 'options') return [];
+  // Windowed polls are counted from submitted ranges, not from yes/no votes,
+  // so they go the other way -- see checkWindowThresholdAndResolve. This is
+  // the fixed-slot half of the merged model (specs/0013), and it is decided
+  // by `window_block_minutes` rather than by `poll_mode`, which nothing reads
+  // any more.
+  if (event.event_type !== 'poll' || event.window_block_minutes != null) return [];
   if (event.poll_strategy !== 'threshold' || !event.poll_threshold_count) return [];
 
   const tallies = await getOptionTallies(env, event.id);
@@ -185,29 +190,202 @@ export function bestWindowBlock(
   return best;
 }
 
-async function getWindowSubmissions(env: Env, eventId: string) {
-  const { results } = await env.DB.prepare(
-    `SELECT avail_start_at as "startAt", avail_end_at as "endAt" FROM event_window_availability WHERE event_id = ?`,
-  )
-    .bind(eventId)
-    .all<{ startAt: number; endAt: number }>();
-  return results;
+// The same search, but returning the *longest* span that still reaches the
+// best achievable coverage rather than a block of exactly `minBlockMinutes`
+// (IDEAS 40, specs/0013). The minimum stops being the session length and
+// becomes a floor: "two and a half hours at least, and if everyone is free
+// all afternoon on the 30th then we play all afternoon."
+//
+// Two objectives need an order and the order is not arbitrary: **most people
+// first, then longest.** Trading a player for an extra half hour would be
+// choosing a longer session with fewer people in it, which is the wrong way
+// round for this app. So coverage is fixed to the maximum a minimum-length
+// block can achieve, and only then is the span stretched.
+//
+// It stays cheap by not searching over pairs. For a given start `s`, the
+// latest end that `target` people can all reach is simply the `target`-th
+// largest `endAt` among submissions that begin at or before `s` -- so the
+// answer for every start comes from one pass, not from trying every end.
+//
+// Ties go to the earliest start (`>` rather than `>=` below), matching what
+// the existing window resolution already does for equal counts: soonest wins.
+export function bestWindowSpan(
+  windowStart: number,
+  windowEnd: number,
+  minBlockMinutes: number,
+  submissions: { startAt: number; endAt: number }[],
+): WindowCandidate | null {
+  const blockMs = minBlockMinutes * 60 * 1000;
+  if (blockMs <= 0 || windowEnd <= windowStart) return null;
+
+  // `bestWindowBlock` already refuses an over-sized window, and this is the
+  // same refusal -- but it now matters *per candidate* rather than per poll.
+  // Work used to be bounded once for a poll's single window; a poll can now
+  // carry MAX_POLL_OPTIONS of them, so the ceiling is checked on each one and
+  // twenty candidates cannot buy twenty times the work.
+  const base = bestWindowBlock(windowStart, windowEnd, minBlockMinutes, submissions);
+  if (!base || base.count === 0) return base;
+  const target = base.count;
+
+  // `top` holds the `target` largest `endAt` values among the submissions
+  // eligible at the current start, ascending -- so `top[0]` is the
+  // `target`-th largest, which is exactly the latest end all of them reach.
+  // The eligible set only grows as `s` advances, so this is filled once
+  // across the whole sweep rather than rebuilt at every step.
+  const byStart = [...submissions].sort((a, b) => a.startAt - b.startAt);
+  const top: number[] = [];
+  let next = 0;
+  let best: WindowCandidate | null = null;
+
+  for (let s = windowStart; s + blockMs <= windowEnd; s += WINDOW_STEP_MS) {
+    while (next < byStart.length && byStart[next].startAt <= s) {
+      let i = top.length;
+      top.push(byStart[next++].endAt);
+      while (i > 0 && top[i - 1] > top[i]) {
+        const swap = top[i - 1];
+        top[i - 1] = top[i];
+        top[i] = swap;
+        i--;
+      }
+      // Ascending, so dropping the front drops the smallest -- what is kept
+      // is the `target` largest.
+      if (top.length > target) top.shift();
+    }
+    if (top.length < target) continue;
+
+    const e = Math.min(top[0], windowEnd);
+    if (e - s < blockMs) continue;
+    if (!best || e - s > best.endAt - best.startAt) best = { startAt: s, endAt: e, count: target };
+  }
+
+  // `base`'s own start always satisfies the loop above, so this is a
+  // belt-and-braces fallback rather than a reachable branch.
+  return best ?? base;
 }
 
-// Called synchronously after an attendee submits/updates their window
-// availability. Window-mode events are always single_winner (enforced at
-// creation), so this resolves the whole event, same as the options path.
-export async function checkWindowThresholdAndResolve(env: Env, event: EventRow): Promise<boolean> {
-  if (event.event_type !== 'poll' || event.poll_mode !== 'window' || event.status !== 'active') return false;
-  if (event.poll_strategy !== 'threshold' || !event.poll_threshold_count) return false;
-  if (event.window_start_at == null || event.window_end_at == null || event.window_block_minutes == null) return false;
+// Every submission on a poll, grouped by the candidate it was made on.
+//
+// One query for the whole poll rather than one per candidate: a poll can
+// carry MAX_POLL_OPTIONS windows, and twenty statements to resolve one poll
+// would not survive the Free plan's fifty-per-invocation allowance -- the
+// same reasoning that made getOptionTallies a single query.
+export interface WindowedCandidate {
+  id: string;
+  displayOrder: number;
+  startAt: number;
+  endAt: number;
+  confirmedAt: number | null;
+  submissions: { startAt: number; endAt: number }[];
+}
 
-  const submissions = await getWindowSubmissions(env, event.id);
-  const best = bestWindowBlock(event.window_start_at, event.window_end_at, event.window_block_minutes, submissions);
-  if (best && best.count >= event.poll_threshold_count) {
-    return markResolved(env, event.id, { id: 'window', startAt: best.startAt, endAt: best.endAt });
+export async function getWindowedCandidates(env: Env, eventId: string): Promise<WindowedCandidate[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT o.id, o.display_order, o.start_at, o.end_at, o.confirmed_at,
+            a.avail_start_at, a.avail_end_at
+     FROM event_poll_options o
+     LEFT JOIN event_window_availability a ON a.option_id = o.id
+     WHERE o.event_id = ?
+     ORDER BY o.display_order, o.id`,
+  )
+    .bind(eventId)
+    .all<{
+      id: string;
+      display_order: number;
+      start_at: number;
+      end_at: number;
+      confirmed_at: number | null;
+      avail_start_at: number | null;
+      avail_end_at: number | null;
+    }>();
+
+  const byId = new Map<string, WindowedCandidate>();
+  for (const row of results) {
+    let c = byId.get(row.id);
+    if (!c) {
+      c = {
+        id: row.id,
+        displayOrder: row.display_order,
+        startAt: row.start_at,
+        endAt: row.end_at,
+        confirmedAt: row.confirmed_at,
+        submissions: [],
+      };
+      byId.set(row.id, c);
+    }
+    // NULL for the LEFT JOIN's nobody-has-submitted-yet row.
+    if (row.avail_start_at != null && row.avail_end_at != null) {
+      c.submissions.push({ startAt: row.avail_start_at, endAt: row.avail_end_at });
+    }
   }
-  return false;
+  return [...byId.values()];
+}
+
+// The best span each candidate can offer, in candidate order. Everything
+// that has to choose between candidates -- resolution, the poll route, the
+// DM copy -- reads this rather than re-deriving it.
+export function resolveWindowedCandidates(
+  event: EventRow,
+  candidates: WindowedCandidate[],
+): { candidate: WindowedCandidate; best: WindowCandidate | null }[] {
+  const blockMinutes = event.window_block_minutes;
+  if (blockMinutes == null) return [];
+  return candidates.map((candidate) => ({
+    candidate,
+    // The MAX_WINDOW_CANDIDATES ceiling inside this call is now checked per
+    // candidate, which is the tightening specs/0013 asked for: work used to
+    // be bounded once per poll, and a poll can now hold twenty windows.
+    best: bestWindowSpan(candidate.startAt, candidate.endAt, blockMinutes, candidate.submissions),
+  }));
+}
+
+// Confirming one windowed candidate in multi-winner mode.
+//
+// Unlike a fixed candidate, a window does not know its own session time
+// until it resolves -- so confirmation narrows the row from the window to
+// the span that actually won. Both writes are in the one compare-and-set, so
+// a candidate cannot be confirmed twice or be left confirmed with its window
+// still in place.
+async function confirmWindowedOption(env: Env, optionId: string, span: WindowCandidate): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE event_poll_options SET confirmed_at = ?, start_at = ?, end_at = ? WHERE id = ? AND confirmed_at IS NULL`,
+  )
+    .bind(Date.now(), span.startAt, span.endAt, optionId)
+    .run();
+  return result.meta.changes > 0;
+}
+
+// Called synchronously after an attendee submits or updates their
+// availability on one candidate.
+//
+// Single-winner: the first candidate (in display order) whose best span
+// clears the threshold resolves the whole poll, and the event takes that
+// span as its time. Multi-winner: every candidate that clears it is
+// confirmed independently, which is what multi-winner already means for
+// fixed slots -- windows compose with it rather than being excluded from it.
+//
+// Returns the option ids newly settled by *this* call, so the caller can
+// notify exactly those.
+export async function checkWindowThresholdAndResolve(env: Env, event: EventRow): Promise<string[]> {
+  if (event.event_type !== 'poll' || event.window_block_minutes == null || event.status !== 'active') return [];
+  if (event.poll_strategy !== 'threshold' || !event.poll_threshold_count) return [];
+
+  const resolved = resolveWindowedCandidates(event, await getWindowedCandidates(env, event.id));
+  const threshold = event.poll_threshold_count;
+
+  if (event.poll_resolution_mode === 'multi_winner') {
+    const newlyConfirmed: string[] = [];
+    for (const { candidate, best } of resolved) {
+      if (candidate.confirmedAt || !best || best.count < threshold) continue;
+      if (await confirmWindowedOption(env, candidate.id, best)) newlyConfirmed.push(candidate.id);
+    }
+    return newlyConfirmed;
+  }
+
+  const winner = resolved.find(({ best }) => best && best.count >= threshold);
+  if (winner && (await markResolved(env, event.id, { id: winner.candidate.id, ...winner.best! }))) {
+    return [winner.candidate.id];
+  }
+  return [];
 }
 
 // Called from the cron sweep for polls whose deadline has passed.
@@ -281,15 +459,23 @@ export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): P
         continue;
       }
 
-      if (event.poll_mode === 'window') {
-        if (event.window_start_at != null && event.window_end_at != null && event.window_block_minutes != null) {
-          const submissions = await getWindowSubmissions(env, event.id);
-          const best = bestWindowBlock(event.window_start_at, event.window_end_at, event.window_block_minutes, submissions);
-          if (best && best.count > 0) {
-            await markResolved(env, event.id, { id: 'window', startAt: best.startAt, endAt: best.endAt });
-          } else {
-            await markCancelled(env, event.id);
-          }
+      if (event.window_block_minutes != null) {
+        // No threshold to clear at the deadline -- whatever people managed
+        // to agree on wins, the same way pickMostVotes settles a fixed-slot
+        // poll below. The candidate with the most coverage takes it; ties go
+        // to the longer session, then to the earlier candidate.
+        const resolved = resolveWindowedCandidates(event, await getWindowedCandidates(env, event.id));
+        const winner = resolved
+          .filter((r) => r.best && r.best.count > 0)
+          .sort((a, b) => {
+            if (b.best!.count !== a.best!.count) return b.best!.count - a.best!.count;
+            const lenA = a.best!.endAt - a.best!.startAt;
+            const lenB = b.best!.endAt - b.best!.startAt;
+            if (lenB !== lenA) return lenB - lenA;
+            return a.candidate.displayOrder - b.candidate.displayOrder || a.candidate.id.localeCompare(b.candidate.id);
+          })[0];
+        if (winner) {
+          await markResolved(env, event.id, { id: winner.candidate.id, ...winner.best! });
         } else {
           await markCancelled(env, event.id);
         }

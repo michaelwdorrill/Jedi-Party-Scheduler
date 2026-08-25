@@ -312,6 +312,17 @@ function formatWhen(startAt: number, zone: string): string {
   return DateTime.fromMillis(startAt).setZone(zone).toFormat("ccc d LLL, h:mm a ZZZZ");
 }
 
+// A windowed poll resolves to a span, not just a start (specs/0013), and the
+// span is the answer: "we found two and a half hours" and "everyone can stay
+// until eleven" are different outcomes and the DM has to distinguish them.
+// Fixed-slot polls keep the shorter copy -- their length was never in doubt.
+function formatSpan(startAt: number, endAt: number, zone: string): string {
+  const start = DateTime.fromMillis(startAt).setZone(zone);
+  const end = DateTime.fromMillis(endAt).setZone(zone);
+  const endFormat = end.hasSame(start, 'day') ? 'h:mm a ZZZZ' : 'ccc d LLL, h:mm a ZZZZ';
+  return `${start.toFormat('ccc d LLL, h:mm a')} - ${end.toFormat(endFormat)}`;
+}
+
 // Deep link straight to the event so the DM is actionable rather than just
 // informational -- HashRouter, so the fragment is part of the URL.
 function eventLink(env: Env, eventId: string): string {
@@ -813,7 +824,11 @@ async function sweepSingleWinnerPollNotifications(
       const pending = await pendingRecipients(env, event, 'poll_resolved', '', limit);
       await notifyPending(env, budget, pending, event.id, 'poll_resolved', '', (user) =>
         event.status === 'resolved'
-          ? `"${event.title}" is on! Time locked in: ${formatWhen(event.start_at!, user.timezone)}.\n${eventLink(env, event.id)}`
+          ? `"${event.title}" is on! Time locked in: ${
+              event.window_block_minutes != null
+                ? formatSpan(event.start_at!, event.end_at!, user.timezone)
+                : formatWhen(event.start_at!, user.timezone)
+            }.\n${eventLink(env, event.id)}`
           : `"${event.title}" didn't get enough votes and was cancelled.`,
       );
       // A full page of recipients means there may be more behind it, and an
@@ -883,12 +898,13 @@ async function sweepConfirmedMultiWinnerOptions(
     end_at: number;
     title: string;
     guild_id: string;
+    window_block_minutes: number | null;
   }>(
     env,
     budget,
     cursors,
     'confirmed_options',
-    `SELECT epo.id AS id, epo.event_id, epo.start_at, epo.end_at, e.title, e.guild_id
+    `SELECT epo.id AS id, epo.event_id, epo.start_at, epo.end_at, e.title, e.guild_id, e.window_block_minutes
      FROM event_poll_options epo
      JOIN events e ON e.id = epo.event_id
      WHERE e.poll_resolution_mode = 'multi_winner' AND epo.confirmed_at IS NOT NULL`,
@@ -896,14 +912,30 @@ async function sweepConfirmedMultiWinnerOptions(
     async (opt) => {
       const limit = budget.deliveriesAffordable;
       if (limit <= 0) return 'incomplete';
+
+      // Who counts as confirmed depends on how the candidate was answered.
+      // A fixed slot has yes-voters. A window has people who submitted a
+      // range -- and since confirming a windowed candidate narrows its row
+      // from the window to the span that won (see confirmWindowedOption),
+      // "covers start_at..end_at" is exactly "can make the session".
+      const windowed = opt.window_block_minutes != null;
+      const recipientSource = windowed
+        ? `FROM event_window_availability ewa
+           JOIN users u ON u.id = ewa.user_id`
+        : `FROM event_poll_votes epv
+           JOIN users u ON u.id = epv.user_id`;
+      const recipientWhere = windowed
+        ? `ewa.option_id = ? AND ewa.avail_start_at <= ? AND ewa.avail_end_at >= ?`
+        : `epv.option_id = ? AND epv.vote = 'yes'`;
+      const recipientBinds = windowed ? [opt.id, opt.start_at, opt.end_at] : [opt.id];
+
       const { results: voters } = await env.DB.prepare(
         `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
-         FROM event_poll_votes epv
-         JOIN users u ON u.id = epv.user_id
+         ${recipientSource}
          JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
          JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
          ${PENDING_NOTIFICATION_JOIN}
-         WHERE epv.option_id = ? AND epv.vote = 'yes'
+         WHERE ${recipientWhere}
            AND ${PENDING_NOTIFICATION_WHERE}
          ORDER BY u.id
          LIMIT ?`,
@@ -912,7 +944,7 @@ async function sweepConfirmedMultiWinnerOptions(
           opt.guild_id,
           membershipCutoff(),
           ...pendingNotificationJoinBinds(opt.event_id, 'poll_resolved', opt.id),
-          opt.id,
+          ...recipientBinds,
           ...pendingNotificationWhereBinds(),
           limit,
         )
@@ -926,7 +958,9 @@ async function sweepConfirmedMultiWinnerOptions(
         'poll_resolved',
         opt.id,
         (user) =>
-          `"${opt.title}" is on for ${formatWhen(opt.start_at, user.timezone)}! You're confirmed.\n${eventLink(env, opt.event_id)}`,
+          `"${opt.title}" is on for ${
+            windowed ? formatSpan(opt.start_at, opt.end_at, user.timezone) : formatWhen(opt.start_at, user.timezone)
+          }! You're confirmed.\n${eventLink(env, opt.event_id)}`,
       );
       if (voters.length >= limit || budget.exhausted) return 'incomplete';
     },
@@ -954,7 +988,7 @@ async function sweepPollDeadlineReminders(env: Env, budget: TickBudget, cursors:
       const limit = budget.deliveriesAffordable;
       if (limit <= 0) return 'incomplete';
       const hasVotedSubquery =
-        poll.poll_mode === 'window'
+        poll.window_block_minutes != null
           ? `SELECT 1 FROM event_window_availability WHERE event_id = ei.event_id AND user_id = ei.user_id`
           : `SELECT 1 FROM event_poll_votes WHERE user_id = ei.user_id
              AND option_id IN (SELECT id FROM event_poll_options WHERE event_id = ei.event_id)`;
@@ -1046,7 +1080,12 @@ async function sweepVoiceChannelInvites(env: Env, budget: TickBudget, cursors: C
     async (event) => {
       const limit = budget.deliveriesAffordable;
       if (limit <= 0) return 'incomplete';
-      const optionId = event.event_type === 'poll' && event.poll_mode === 'options' ? event.resolved_option_id : null;
+      // 'window' is not an option id -- it is what a window poll resolved to
+      // before specs/0013 gave every poll real candidates. Passing it on
+      // would look up votes for a row that does not exist; the windowed
+      // branch of getConfirmedAttendeeIds handles those polls anyway.
+      const optionId =
+        event.event_type === 'poll' && event.resolved_option_id !== 'window' ? event.resolved_option_id : null;
       const attendees = await getConfirmedAttendeeIds(env, event, optionId, {
         notificationType: 'voice_channel_invite',
         occurrenceDate: '',

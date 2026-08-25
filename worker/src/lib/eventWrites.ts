@@ -54,9 +54,15 @@ export interface EventWriteInput {
   pollMode?: 'options' | 'window';
   pollResolutionMode?: 'single_winner' | 'multi_winner';
   pollOptions?: { startAt: number; endAt: number }[];
+  // Legacy request shape only -- normalizeWindowInput turns these into a
+  // single candidate before anything else sees them.
   windowStartAt?: number;
   windowEndAt?: number;
-  windowBlockMinutes?: number;
+  // The minimum session length, and the only thing that decides whether this
+  // poll's candidates are fixed slots or windows. `null` is meaningful and
+  // distinct from absent: it turns a windowed poll back into a fixed-slot
+  // one, where absent leaves whatever is stored alone.
+  windowBlockMinutes?: number | null;
 
   // The revision the client actually read before building this edit
   // (F-08-B). Optional for backward compatibility with callers that don't
@@ -67,16 +73,47 @@ export interface EventWriteInput {
   revision?: number;
 }
 
-// multi_winner only makes sense for discrete day/slot options (each day
-// independently reaches its own quorum) and window mode always resolves to
-// exactly one block, so the two combinations below are the only valid pairs.
-function normalizePollModes(input: {
-  pollMode?: 'options' | 'window';
-  pollResolutionMode?: 'single_winner' | 'multi_winner';
-}) {
-  const pollMode = input.pollMode ?? 'options';
-  const pollResolutionMode = pollMode === 'window' ? 'single_winner' : (input.pollResolutionMode ?? 'single_winner');
-  return { pollMode, pollResolutionMode };
+// Every poll is now an options poll (IDEAS 40, specs/0013). What used to be
+// a second mode is a poll with exactly one candidate and a minimum session
+// length, so `poll_mode` has one value from here on and multi_winner is no
+// longer excluded by it: a windowed candidate resolves independently to its
+// own best span, which is precisely what multi-winner means.
+//
+// The column is still written -- dropping a column the deployed Worker reads
+// is the two-release change deploy-worker.yml's ordering comment warns about
+// -- but nothing reads it any more. `window_block_minutes IS NULL` is what
+// decides a poll's shape.
+function normalizePollModes(input: { pollResolutionMode?: 'single_winner' | 'multi_winner' }) {
+  return { pollMode: 'options' as const, pollResolutionMode: input.pollResolutionMode ?? 'single_winner' };
+}
+
+// The legacy `pollMode: 'window'` request shape, expressed in the new one.
+//
+// A window poll was "one span plus a block length". That is a one-candidate
+// windowed poll, exactly, so it is translated at the boundary and no code
+// past this point has to know the old shape existed. Callers that already
+// send candidates plus a minimum pass through untouched.
+//
+// This is what keeps the change additive across the deploy gap: the Worker
+// ships before Pages does, so for a few minutes the previous frontend is
+// still creating polls the old way.
+export function normalizeWindowInput<T extends Partial<EventWriteInput>>(input: T): T {
+  if (input.pollMode !== 'window') return input;
+  if (input.pollOptions && input.pollOptions.length > 0) {
+    return { ...input, pollMode: 'options' };
+  }
+  if (input.windowStartAt == null || input.windowEndAt == null) {
+    // Incomplete: leave it alone so validation can produce its own message
+    // rather than turning it into a mysteriously empty poll here.
+    return input;
+  }
+  return {
+    ...input,
+    pollMode: 'options',
+    pollOptions: [{ startAt: input.windowStartAt, endAt: input.windowEndAt }],
+    windowStartAt: undefined,
+    windowEndAt: undefined,
+  };
 }
 
 async function resolveInviteeUserIds(
@@ -271,28 +308,51 @@ function validateEventWriteInput(input: Partial<EventWriteInput>, requireComplet
     if (revision < 0) throw new ValidationError('revision must not be negative');
   }
 
+  // `windowBlockMinutes` is no longer part of a separate mode -- it is the
+  // one field that decides whether a poll's candidates are fixed slots or
+  // windows -- so it is validated on its own rather than behind
+  // `windowStartAt`. `null` is the deliberate "these are fixed slots after
+  // all" and has to stay expressible.
+  if (input.windowBlockMinutes != null) {
+    assertSafeInt(input.windowBlockMinutes, 'windowBlockMinutes');
+    if (
+      input.windowBlockMinutes < LIMITS.MIN_WINDOW_BLOCK_MINUTES ||
+      input.windowBlockMinutes > LIMITS.MAX_WINDOW_BLOCK_MINUTES
+    ) {
+      throw new ValidationError('windowBlockMinutes out of range');
+    }
+  }
+
   if (input.pollOptions) {
     if (input.pollOptions.length > LIMITS.MAX_POLL_OPTIONS) {
       throw new ValidationError(`pollOptions must have ${LIMITS.MAX_POLL_OPTIONS} items or fewer`);
     }
+    // A fixed candidate *is* the session, so it is bounded like one. A window
+    // is a range to find a session inside, so it gets the far more generous
+    // window ceiling -- "any evening over the next fortnight" is a reasonable
+    // thing to ask and is not a two-week game.
+    const windowed = input.windowBlockMinutes != null;
+    const maxSpan = windowed ? LIMITS.MAX_WINDOW_SPAN_MS : LIMITS.MAX_EVENT_DURATION_MS;
+    const minSpan = windowed ? input.windowBlockMinutes! * 60 * 1000 : 0;
     for (const opt of input.pollOptions) {
       assertSafeInt(opt.startAt, 'pollOptions[].startAt');
       assertSafeInt(opt.endAt, 'pollOptions[].endAt');
-      assertTimeRange(opt.startAt, opt.endAt, 'pollOptions[]', LIMITS.MAX_EVENT_DURATION_MS);
+      assertTimeRange(opt.startAt, opt.endAt, 'pollOptions[]', maxSpan);
+      // A window shorter than the minimum can never resolve -- there is no
+      // span inside it long enough to clear the bar -- so it is rejected at
+      // write time rather than becoming a candidate nobody can ever win.
+      if (opt.endAt - opt.startAt < minSpan) {
+        throw new ValidationError('every window must be at least as long as the minimum session length');
+      }
     }
   }
 
+  // Only reachable from the legacy request shape (see normalizeWindowInput),
+  // which converts a complete one into candidates before this runs.
   if (input.windowStartAt !== undefined) {
     assertSafeInt(input.windowStartAt, 'windowStartAt');
     assertSafeInt(input.windowEndAt, 'windowEndAt');
-    assertSafeInt(input.windowBlockMinutes, 'windowBlockMinutes');
     assertTimeRange(input.windowStartAt, input.windowEndAt!, 'window', LIMITS.MAX_WINDOW_SPAN_MS);
-    if (
-      input.windowBlockMinutes! < LIMITS.MIN_WINDOW_BLOCK_MINUTES ||
-      input.windowBlockMinutes! > LIMITS.MAX_WINDOW_BLOCK_MINUTES
-    ) {
-      throw new ValidationError('windowBlockMinutes out of range');
-    }
   }
 
   if (requireComplete) assertCompleteEventShape(input);
@@ -391,12 +451,9 @@ function assertCompleteEventShape(input: Partial<EventWriteInput>): void {
   }
 
   if (input.pollDeadlineAt == null) throw new ValidationError('pollDeadlineAt is required for a poll');
-  const { pollMode } = normalizePollModes(input);
-  if (pollMode === 'window') {
-    if (input.windowStartAt == null || input.windowEndAt == null || input.windowBlockMinutes == null) {
-      throw new ValidationError('windowStartAt, windowEndAt and windowBlockMinutes are required for a window poll');
-    }
-  } else if (!input.pollOptions || input.pollOptions.length === 0) {
+  // One rule for both shapes, because there is only one shape: a poll is its
+  // candidates. A windowed poll is candidates that happen to be windows.
+  if (!input.pollOptions || input.pollOptions.length === 0) {
     throw new ValidationError('a poll needs at least one option');
   }
   if (input.pollStrategy === 'threshold' && input.pollThresholdCount == null) {
@@ -643,6 +700,7 @@ export async function createEventWithInvites(
   organizerId: string,
   input: EventWriteInput,
 ): Promise<string> {
+  input = normalizeWindowInput(input);
   validateEventWriteInput(input, true);
   const eventId = newId();
   const now = Date.now();
@@ -706,9 +764,15 @@ export async function createEventWithInvites(
       input.eventType === 'poll' ? (input.pollDeadlineAt ?? null) : null,
       pollMode,
       pollResolutionMode,
-      input.eventType === 'poll' && pollMode === 'window' ? (input.windowStartAt ?? null) : null,
-      input.eventType === 'poll' && pollMode === 'window' ? (input.windowEndAt ?? null) : null,
-      input.eventType === 'poll' && pollMode === 'window' ? (input.windowBlockMinutes ?? null) : null,
+      // window_start_at/_end_at are dead weight now: a candidate carries its
+      // own span. Written NULL rather than dropped, for the same
+      // two-release reason poll_mode is still written at all.
+      null,
+      null,
+      // The one field that decides the poll's shape. Set means every
+      // candidate is a window and this is the minimum session length inside
+      // it; NULL means each candidate *is* the session.
+      input.eventType === 'poll' ? (input.windowBlockMinutes ?? null) : null,
       isRecurring ? 1 : 0,
       input.voiceChannelId ?? null,
       input.voiceChannelName ?? null,
@@ -744,7 +808,7 @@ export async function createEventWithInvites(
     );
   }
 
-  if (input.eventType === 'poll' && pollMode === 'options' && input.pollOptions) {
+  if (input.eventType === 'poll' && input.pollOptions) {
     statements.push(...pollOptionStatements(env, eventId, input.pollOptions, true));
   }
 
@@ -777,6 +841,7 @@ export async function updateEvent(
   input: Partial<EventWriteInput>,
   stored: EventRow,
 ): Promise<void> {
+  input = normalizeWindowInput(input);
   validateEventWriteInput(input);
   assertCoherentMergedEvent(stored, input);
   const now = Date.now();
@@ -986,6 +1051,10 @@ export async function updateEvent(
         `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id = ?)`,
         eventId,
       ),
+      // Window submissions go with the candidates they were made on: they
+      // cascade from event_poll_options, so this DELETE clears them without
+      // a statement of its own. That is why the availability table keeps a
+      // foreign key on the option and not only on the event.
       guardedStatement(`DELETE FROM event_poll_options WHERE event_id = ?`, eventId),
     );
     statements.push(...pollOptionStatements(env, eventId, input.pollOptions, true, mutationToken));
@@ -993,7 +1062,7 @@ export async function updateEvent(
       guardedStatement(
         `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
            poll_mode = ?, poll_resolution_mode = ?, window_start_at = NULL, window_end_at = NULL,
-           window_block_minutes = NULL
+           window_block_minutes = ?
          WHERE id = ?`,
         // F-08-A: a PATCH carrying only `pollOptions` (e.g. re-ordering the
         // candidate slots) still reaches this UPDATE, since replacing the
@@ -1009,30 +1078,29 @@ export async function updateEvent(
         input.pollDeadlineAt !== undefined ? input.pollDeadlineAt : stored.poll_deadline_at,
         pollMode,
         pollResolutionMode,
+        // Same F-08-A preservation as the three fields above, and for a
+        // sharper reason: this one decides what the candidates *mean*. An
+        // edit that only re-orders the candidate slots must not quietly turn
+        // a windowed poll back into a fixed-slot one.
+        input.windowBlockMinutes !== undefined ? input.windowBlockMinutes : stored.window_block_minutes,
         eventId,
       ),
     );
   }
 
-  if (input.windowStartAt !== undefined) {
+  // Toggling the minimum on its own, with the candidates left as they are --
+  // "actually, treat these as windows" (or the reverse).
+  if (input.windowBlockMinutes !== undefined && !input.pollOptions) {
+    // Turning windows *off* makes every submitted sub-range meaningless --
+    // the candidate is the session now, and there is nothing to submit a
+    // range within. Turning them on, or changing the minimum, leaves
+    // submissions alone: they are still honest statements of when someone is
+    // free, and bestWindowSpan re-reads them against the new bar.
+    if (input.windowBlockMinutes === null) {
+      statements.push(guardedStatement(`DELETE FROM event_window_availability WHERE event_id = ?`, eventId));
+    }
     statements.push(
-      guardedStatement(`DELETE FROM event_window_availability WHERE event_id = ?`, eventId),
-      guardedStatement(
-        `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,
-           poll_mode = 'window', poll_resolution_mode = 'single_winner',
-           window_start_at = ?, window_end_at = ?, window_block_minutes = ?
-         WHERE id = ?`,
-        // Same preservation as the pollOptions branch above (F-08-A): a
-        // window-only edit must not clear the strategy/threshold/deadline
-        // fields it didn't mention.
-        input.pollStrategy !== undefined ? input.pollStrategy : stored.poll_strategy,
-        input.pollThresholdCount !== undefined ? input.pollThresholdCount : stored.poll_threshold_count,
-        input.pollDeadlineAt !== undefined ? input.pollDeadlineAt : stored.poll_deadline_at,
-        input.windowStartAt,
-        input.windowEndAt ?? null,
-        input.windowBlockMinutes ?? null,
-        eventId,
-      ),
+      guardedStatement(`UPDATE events SET window_block_minutes = ? WHERE id = ?`, input.windowBlockMinutes, eventId),
     );
   }
 
