@@ -286,3 +286,70 @@ describe('seed-button-demo.sql', () => {
     expect(events.n).toBe(0);
   });
 });
+
+// scripts/seed-resolve-demo.sql, tested like the others -- and with one extra
+// assertion the others do not need: the threshold has to be reachable by a
+// single vote, or the fixture cannot demonstrate the thing it exists for.
+describe('seed-resolve-demo.sql', () => {
+  const RESOLVE_SQL = readFileSync(join(__dirname, '..', 'scripts', 'seed-resolve-demo.sql'), 'utf8');
+  const POLL_DEMO_SQL = readFileSync(join(__dirname, '..', 'scripts', 'seed-poll-demo.sql'), 'utf8');
+  const OPERATOR = '346042183486537730';
+
+  function seedOperator(db: ReturnType<typeof createTestDb>) {
+    const now = Date.now();
+    db.raw.exec(`INSERT INTO guilds (id, name, is_active, added_at) VALUES ('real-guild', 'Real', 1, ${now})`);
+    db.raw.exec(
+      `INSERT INTO users (id, username, global_name, avatar_hash, timezone, notifications_enabled,
+         created_at, updated_at, last_login_at, last_login_attempt_at)
+       VALUES ('${OPERATOR}', 'michael', NULL, NULL, 'America/New_York', 1, ${now}, ${now}, ${now}, ${now})`,
+    );
+    db.raw.exec(
+      `INSERT INTO user_guild_membership (user_id, guild_id, is_member, verified_at)
+       VALUES ('${OPERATOR}', 'real-guild', 1, ${now})`,
+    );
+  }
+
+  it('applies to a migration-built schema and is re-runnable', () => {
+    const db = createTestDb();
+    seedOperator(db);
+    db.raw.exec(SEED_SQL);
+    db.raw.exec(POLL_DEMO_SQL);
+
+    expect(() => db.raw.exec(RESOLVE_SQL)).not.toThrow();
+    expect(() => db.raw.exec(RESOLVE_SQL)).not.toThrow();
+
+    const opts = db.raw
+      .prepare(`SELECT COUNT(*) AS n FROM event_poll_options WHERE event_id = 'demo-resolve'`)
+      .get() as { n: number };
+    expect(opts.n).toBe(2);
+  });
+
+  it('can be resolved by one vote, which is the whole point of it', () => {
+    const db = createTestDb();
+    seedOperator(db);
+    db.raw.exec(SEED_SQL);
+    db.raw.exec(POLL_DEMO_SQL);
+    db.raw.exec(RESOLVE_SQL);
+
+    const poll = db.raw
+      .prepare(`SELECT poll_strategy, poll_threshold_count, organizer_id FROM events WHERE id = 'demo-resolve'`)
+      .get() as { poll_strategy: string; poll_threshold_count: number; organizer_id: string };
+    expect(poll.poll_strategy).toBe('threshold');
+    expect(poll.poll_threshold_count).toBe(1);
+    // Organised by someone else, or sweepNewInvites would skip the operator's
+    // row and no DM with a dropdown would ever arrive to press.
+    expect(poll.organizer_id).toBe('seed-user-alice');
+
+    const invited = db.raw
+      .prepare(`SELECT COUNT(*) AS n FROM event_invites WHERE event_id = 'demo-resolve' AND user_id = '${OPERATOR}'`)
+      .get() as { n: number };
+    expect(invited.n).toBe(1);
+  });
+
+  it('is a clean no-op with no operator in an active guild', () => {
+    const db = createTestDb();
+    expect(() => db.raw.exec(RESOLVE_SQL)).not.toThrow();
+    const events = db.raw.prepare(`SELECT COUNT(*) AS n FROM events WHERE id = 'demo-resolve'`).get() as { n: number };
+    expect(events.n).toBe(0);
+  });
+});
