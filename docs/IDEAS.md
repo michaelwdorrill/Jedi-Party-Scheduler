@@ -504,6 +504,61 @@ Related to the edit-on-resolve work in `specs/0010`, which is the same shape
 from the other end — a message whose controls should reflect state that has
 moved since it was sent.
 
+### 47. A confirmed multi-winner poll day gets no reminders at all
+
+Found while designing the reminder ladder (item 48, `specs/0014`), and it is
+a live bug rather than a design gap.
+
+`markResolved` is the only thing that sets `events.start_at`, and it runs for
+`single_winner` polls only. A `multi_winner` poll confirms individual days by
+setting `confirmed_at` on each `event_poll_options` row and never touches the
+parent event's start time — deliberately, because the event stays active and
+keeps collecting votes on other days.
+
+But `sweepReminders` selects `WHERE start_at IS NOT NULL`. So a confirmed
+multi-winner day gets exactly one DM — `sweepConfirmedMultiWinnerOptions`'s
+"this day is confirmed" — and then nothing. No 24-hour reminder, no 1-hour
+reminder, ever. Every other event shape in the app gets both.
+
+Nobody has reported it, which is its own lesson: a notification that never
+arrives leaves no trace anywhere, and the sweep that should have sent it
+reports success because it correctly found nothing to do.
+
+Two ways to fix it, and they are not the same size:
+- **Now, small:** teach the reminder sweep to select confirmed
+  `event_poll_options` rows alongside events with a `start_at`. Contained,
+  and it does not wait for anything.
+- **Later, structural:** `specs/0014`'s fan-out, where a confirmed day
+  becomes a real event and every reminder path works on it with no special
+  case at all.
+
+The first does not block the second and should probably just be done.
+
+### 48. Reminders should depend on whether you have answered
+
+Asked for by Michael, Aug 2026, after pressing the v0.5 buttons: the app
+sends everyone the same two reminders — 24 hours and 1 hour — whether they
+accepted, said maybe, declined, or never answered at all. `pendingRecipients`
+does not read `rsvp_status` in any form.
+
+The proposal is a ladder: no answer gets nudged at 96 and 48 hours, a maybe
+at 72 and 24, an accepted at 24 and 1, a decline gets nothing further. Each
+rung carries only the controls that make sense from where the person is —
+which is the part that makes item 46 fall out as a special case rather than
+a separate fix.
+
+Designing it turned up the thing underneath, and Michael decided it:
+**attendance is per occurrence, not per event.** `notification_log` and
+`event_occurrence_overrides` are both keyed per occurrence; `event_invites`
+holds one `rsvp_status` per event. Nothing had forced those to agree because
+nothing read attendance in the notification path. The ladder is the first
+thing that does.
+
+Fully specced in `specs/0014-attendance-per-occurrence.md`, including the two
+calls that make it tractable: a multi-winner poll fans out into separate
+events on confirmation, and a recurring event is accepted one occurrence at a
+time with the next ladder starting 24 hours after the last session ends.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
