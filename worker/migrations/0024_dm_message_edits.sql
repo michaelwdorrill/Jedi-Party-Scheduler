@@ -1,0 +1,19 @@
+-- specs/0010's edit-on-resolve: when a poll settles, the DM that asked people
+-- to vote should stop offering a vote and start showing the answer.
+--
+-- Migration 0022 stored the message id that makes such an edit possible. This
+-- records that the edit has been *done*, and it is not bookkeeping for its own
+-- sake -- without it the sweep that performs the edit would redo it on every
+-- tick for as long as the resolved poll stays inside the sweep's recency
+-- window. That is one wasted Discord call per recipient per fifteen minutes,
+-- charged to the same per-tick allowance the notifications draw on.
+--
+-- Deliberately a timestamp rather than a flag, matching delivered_at and
+-- failed_at beside it: "when" answers questions a boolean cannot, and every
+-- other terminal state on this table is recorded the same way.
+--
+-- A row where this stays NULL forever is an ordinary outcome, not a failure to
+-- chase. It means the delivery never got a message id (0022's own note covers
+-- why: a message is editable only by the application that sent it, and rows
+-- predating that migration have none at all), or the poll never resolved.
+ALTER TABLE notification_log ADD COLUMN message_edited_at INTEGER;

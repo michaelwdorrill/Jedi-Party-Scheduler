@@ -264,3 +264,81 @@ describe('scripts/seed-button-demo.sql', () => {
     expect(select.options).toHaveLength(3);
   });
 });
+
+// IDEAS item 47. A confirmed multi-winner day has a time on the *option*, not
+// on the event, and sweepReminders only ever looked at events with a
+// start_at -- so these reminders had never been sent, by anyone, ever.
+describe('a confirmed multi-winner day', () => {
+  async function seedConfirmedDay(db: ShimDatabase, startsInMs: number): Promise<void> {
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'player');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'player', 'guild-1');
+    await seedEvent(db, {
+      id: 'mw',
+      organizerId: 'organizer',
+      title: 'Wednesday game',
+      eventType: 'poll',
+      // The parent event never gets a start time -- that is the whole bug.
+      startAt: null,
+      endAt: null,
+    });
+    await db.prepare(`UPDATE events SET poll_resolution_mode = 'multi_winner' WHERE id = 'mw'`).run();
+    await seedInvite(db, 'mw', 'player');
+    const start = Date.now() + startsInMs;
+    await db
+      .prepare(
+        `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order, confirmed_at)
+         VALUES ('mw-opt', 'mw', ?, ?, 0, ?)`,
+      )
+      .bind(start, start + 3 * HOUR_MS, Date.now())
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES ('mw-opt', 'player', 'yes', ?)`,
+      )
+      .bind(Date.now())
+      .run();
+  }
+
+  it('is reminded about 24 hours out, with the buttons', async () => {
+    const { db, env } = setup();
+    await seedConfirmedDay(db, 20 * HOUR_MS);
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    await runReminderSweep(env);
+
+    const reminder = sentMessages(fetchStub).find((m) => m.content.includes('is coming up'));
+    expect(reminder).toBeDefined();
+    expect(reminder!.content).toContain('Wednesday game');
+    expect(firstRow<Button>(reminder!).map((b) => b.label)).toEqual(["I'm in", 'Maybe', "Can't make it"]);
+  });
+
+  it('is reminded again an hour out, and only once each', async () => {
+    const { db, env } = setup();
+    await seedConfirmedDay(db, 40 * 60 * 1000);
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    await runReminderSweep(env);
+    await runReminderSweep(env);
+
+    const hourly = sentMessages(fetchStub).filter((m) => m.content.includes('starts in about an hour'));
+    // Two ticks, one DM: the outbox dedupe keys on (user, event, type,
+    // occurrence), and the option id is the occurrence here.
+    expect(hourly).toHaveLength(1);
+  });
+
+  it('says nothing about a day that is still weeks away', async () => {
+    const { db, env } = setup();
+    await seedConfirmedDay(db, 30 * DAY_MS);
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    await runReminderSweep(env);
+
+    const reminders = sentMessages(fetchStub).filter(
+      (m) => m.content.includes('is coming up') || m.content.includes('starts in about an hour'),
+    );
+    expect(reminders).toHaveLength(0);
+  });
+});

@@ -330,6 +330,10 @@ describe('a full terminal purge and a spent notification budget still fit one ti
     // reserve, leaving slightly less usable allowance and so slightly more
     // ticks before the 120-invitee reminder backlog fully drains and a tick
     // is quiet enough to fit the purge too.
+    //
+    // This test is also what proved IDEAS item 47 could not have a sweep of
+    // its own: with one more fixed query per tick, the purge here never ran
+    // at all -- not at 40 ticks, not at 200.
     for (let tick = 0; tick < 35; tick++) {
       db.resetQueryCount();
       await runReminderSweep(env);

@@ -152,47 +152,6 @@ should also count as "used" for someone who stays signed in and never opens
 the site, and whether organizing/being invited to a future event should
 suppress the purge even if login is stale.
 
-### 19. Make the bot interactive, not just a megaphone
-
-Today the bot is outbound-DM-only: it sends invites, reminders, poll results
-and voice nudges, and has no way to receive anything back. Everything it
-sends is a dead end that says "go to the website." Adding a Discord
-**interactions endpoint** (Discord POSTs to the Worker, Ed25519-signed;
-3-second response deadline with deferred replies for anything slower)
-is one new inbound surface that unlocks all of the following:
-
-- **Respond without leaving Discord**, tiered to the event type,
-  because one widget does not fit all three:
-  - *Fixed-time event* → three buttons (I'm in / Maybe / Can't), mapping
-    straight onto `event_invites.rsvp_status`. Full fidelity.
-  - *Options poll* → one multi-select menu of the candidate slots.
-    Discord caps a select at 25 options and `MAX_POLL_OPTIONS` is 20, so
-    it already fits. Chosen → `yes` per option; unchosen → no vote at
-    all, which is exactly how `getOptionTallies`'s LEFT JOIN already
-    treats absence, so it degrades gracefully. The yes/maybe/no nuance
-    stays available on the site.
-  - *Window poll* → a link button to the site, deliberately. Picking a
-    continuous sub-range at 15-minute granularity (now potentially
-    across several days, post-idea-6) has no honest Discord primitive:
-    two dropdowns break past 25 steps, and a text modal means parsing
-    free text.
-- **Edit the original message when a poll resolves** — swap the vote
-  control for the confirmed time and RSVP buttons. Cheap, since the
-  message id is already in hand.
-- **Slash commands** (`/schedule`, `/whos-free`, `/my-events`).
-- **Discord Scheduled Events sync** — create the guild's native
-  scheduled event when an Uncle Owen event confirms, which gets
-  Discord's own calendar UI, notifications and interested-list for free.
-- **Rich embeds instead of plain-text DMs** — pure formatting, but a
-  large part of why the current DMs "read like spam/scam" (see idea 3).
-
-**Explicitly ruled out (Aug 2026): posting event announcements to a
-server channel.** It was considered as a way to make invites feel less
-like unsolicited DMs, and rejected: a channel post is visible to
-everyone with read access to that channel, including people who have
-never used Uncle Owen, which breaks the model where an event is visible
-to its organizer and invitees only. Everything above stays DM-and-site
-scoped, and should remain so.
 
 ### 23. The sandbox has no frontend, so the sandbox-first rule has a blind spot for frontend-only changes — partly shipped in v0.4.1
 
@@ -252,61 +211,6 @@ is still no branch you can push a frontend change to and have anything
 happen, and the choice between a sandbox Pages project and a CI preview
 bundle is still unmade.
 
-### 32. `sendBotDm` throws the sent message's id away, so idea 19's "edit the original message" is not the cheap sub-item it is written up as
-
-Idea 19 says editing a poll DM in place when the poll resolves is "cheap,
-since the message id is already in hand". It isn't in hand anywhere:
-`worker/src/lib/discord.ts`'s `sendBotDm` reads Discord's message-create
-response only for `ok`/`status`/`retry_after`, never parses the body, and
-returns `{ result, channelId }` — the id in that body is discarded at the
-moment it arrives. Nothing in `migrations/*.sql` stores a message id either
-(no column anywhere matches `message_id`), and `notification_log` dedupes on
-its own key rather than on anything Discord returned.
-
-So the sub-item costs: parsing the create response, widening
-`DmSendResult`, a migration to persist `(notification, message id,
-channel id)`, and a decision about what happens when the row is missing
-because the DM predates the change or was sent by a different bot
-application (production and sandbox are separate Discord apps, and a
-message id is only editable by the application that sent it).
-
-None of that is large, but it is a schema change inside a release that
-was otherwise scoped as "one new inbound endpoint", and it is exactly the
-kind of one-line-with-a-day-of-consequences item that idea 26's audit
-turned out to be. It should be priced into spec 0010 rather than
-discovered during it.
-
-Found while surveying the worker for v0.5 readiness, Aug 2026.
-
-**Half paid, Aug 2026 (v0.5 in progress).** `sendBotDm` now parses the
-create response and returns the message id, `deliverThroughOutbox` records
-it, and migration 0022 gives `notification_log` the column. The recording
-costs the cron nothing: the id rides along in the `UPDATE ... SET
-delivered_at` statement that was already being issued, which mattered more
-than it sounds -- an extra write per delivery is precisely the unbudgeted
-spend the Pass 9 review found.
-
-Two things were decided while building it. The column went on
-`notification_log` alone, not on the other two outbox tables, because
-nothing edits a group nudge or a change-request DM and an unread column
-goes stale unnoticed; `deliverThroughOutbox` therefore writes it
-conditionally, which has its own test. And a 2xx whose body we cannot read
-records *no* id rather than a guessed one, because the edit path reads "no
-id" as "leave that message alone" -- the safe outcome -- while a wrong id
-would edit an arbitrary message.
-
-**Stays open** until the thing the id exists for -- editing the DM when the
-poll resolves -- is actually built, along with the budget decision spec 0010
-records for it (the edit is lower priority than the notification itself).
-
-**And it turned out to have a sibling nobody had priced** (v0.5, migration
-0023). The same argument that makes a message id worth storing makes a
-message's *components* worth storing: migration 0014 exists because a retry
-cannot re-derive what the source sweep rendered, and an options poll's select
-lists the candidates as they were when the DM was written. Without that
-column a retried invite would have arrived with its text and no buttons --
-worse than the delivery it replaced, and only for the people whose first
-attempt failed, which is the kind of difference nobody would ever notice.
 
 ### 36. Should a group be server-agnostic, requiring only that people share a server?
 
@@ -483,35 +387,6 @@ Related to the edit-on-resolve work in `specs/0010`, which is the same shape
 from the other end — a message whose controls should reflect state that has
 moved since it was sent.
 
-### 47. A confirmed multi-winner poll day gets no reminders at all
-
-Found while designing the reminder ladder (item 48, `specs/0014`), and it is
-a live bug rather than a design gap.
-
-`markResolved` is the only thing that sets `events.start_at`, and it runs for
-`single_winner` polls only. A `multi_winner` poll confirms individual days by
-setting `confirmed_at` on each `event_poll_options` row and never touches the
-parent event's start time — deliberately, because the event stays active and
-keeps collecting votes on other days.
-
-But `sweepReminders` selects `WHERE start_at IS NOT NULL`. So a confirmed
-multi-winner day gets exactly one DM — `sweepConfirmedMultiWinnerOptions`'s
-"this day is confirmed" — and then nothing. No 24-hour reminder, no 1-hour
-reminder, ever. Every other event shape in the app gets both.
-
-Nobody has reported it, which is its own lesson: a notification that never
-arrives leaves no trace anywhere, and the sweep that should have sent it
-reports success because it correctly found nothing to do.
-
-Two ways to fix it, and they are not the same size:
-- **Now, small:** teach the reminder sweep to select confirmed
-  `event_poll_options` rows alongside events with a `start_at`. Contained,
-  and it does not wait for anything.
-- **Later, structural:** `specs/0014`'s fan-out, where a confirmed day
-  becomes a real event and every reminder path works on it with no special
-  case at all.
-
-The first does not block the second and should probably just be done.
 
 ### 48. Reminders should depend on whether you have answered
 
@@ -1913,3 +1788,186 @@ event, forwards past the old ceiling and backwards past zero, and the rail
 holds the two sessions inside its 60-day horizon while the grid sits in
 November.
 
+### 19. Make the bot interactive, not just a megaphone — shipped in v0.5
+
+Today the bot is outbound-DM-only: it sends invites, reminders, poll results
+and voice nudges, and has no way to receive anything back. Everything it
+sends is a dead end that says "go to the website." Adding a Discord
+**interactions endpoint** (Discord POSTs to the Worker, Ed25519-signed;
+3-second response deadline with deferred replies for anything slower)
+is one new inbound surface that unlocks all of the following:
+
+- **Respond without leaving Discord**, tiered to the event type,
+  because one widget does not fit all three:
+  - *Fixed-time event* → three buttons (I'm in / Maybe / Can't), mapping
+    straight onto `event_invites.rsvp_status`. Full fidelity.
+  - *Options poll* → one multi-select menu of the candidate slots.
+    Discord caps a select at 25 options and `MAX_POLL_OPTIONS` is 20, so
+    it already fits. Chosen → `yes` per option; unchosen → no vote at
+    all, which is exactly how `getOptionTallies`'s LEFT JOIN already
+    treats absence, so it degrades gracefully. The yes/maybe/no nuance
+    stays available on the site.
+  - *Window poll* → a link button to the site, deliberately. Picking a
+    continuous sub-range at 15-minute granularity (now potentially
+    across several days, post-idea-6) has no honest Discord primitive:
+    two dropdowns break past 25 steps, and a text modal means parsing
+    free text.
+- **Edit the original message when a poll resolves** — swap the vote
+  control for the confirmed time and RSVP buttons. Cheap, since the
+  message id is already in hand.
+- **Slash commands** (`/schedule`, `/whos-free`, `/my-events`).
+- **Discord Scheduled Events sync** — create the guild's native
+  scheduled event when an Uncle Owen event confirms, which gets
+  Discord's own calendar UI, notifications and interested-list for free.
+- **Rich embeds instead of plain-text DMs** — pure formatting, but a
+  large part of why the current DMs "read like spam/scam" (see idea 3).
+
+**Explicitly ruled out (Aug 2026): posting event announcements to a
+server channel.** It was considered as a way to make invites feel less
+like unsolicited DMs, and rejected: a channel post is visible to
+everyone with read access to that channel, including people who have
+never used Uncle Owen, which breaks the model where an event is visible
+to its organizer and invitees only. Everything above stays DM-and-site
+scoped, and should remain so.
+
+**Shipped (v0.5), as `specs/0010`.** One inbound endpoint turned the bot from
+a megaphone into something you can answer: `POST /discord/interactions`,
+authenticated by Ed25519 signature alone because an interaction carries no
+cookie, no session and no header of ours.
+
+What the capture got right: the tiering. Three event shapes really do want
+three different controls, and the reason a window poll gets a link rather
+than a widget is the one this entry guessed — there is no honest Discord
+primitive for "any two and a half hours in this range".
+
+What it got wrong is recorded as item 32, which turned out to be a schema
+change rather than a freebie, and it got two more: the app's `custom_id`
+needs a version in it (messages live in DMs indefinitely, and a button
+pressed a year from now must be recognisably old rather than
+misinterpreted), and a select's answer has to *clear* the candidates it
+leaves out, or deselecting a night you previously said yes to leaves the old
+yes standing.
+
+Embeds, which spec 0010 scoped into this release, are the one part that did
+not ship. The reason is in the spec: making them survive a retry costs a
+third durable column, and not doing so makes a retried DM look different
+from everyone else's. That is a decision to take with a Discord client open.
+
+### 32. `sendBotDm` throws the sent message's id away, so idea 19's "edit the original message" is not the cheap sub-item it is written up as — shipped in v0.5
+
+Idea 19 says editing a poll DM in place when the poll resolves is "cheap,
+since the message id is already in hand". It isn't in hand anywhere:
+`worker/src/lib/discord.ts`'s `sendBotDm` reads Discord's message-create
+response only for `ok`/`status`/`retry_after`, never parses the body, and
+returns `{ result, channelId }` — the id in that body is discarded at the
+moment it arrives. Nothing in `migrations/*.sql` stores a message id either
+(no column anywhere matches `message_id`), and `notification_log` dedupes on
+its own key rather than on anything Discord returned.
+
+So the sub-item costs: parsing the create response, widening
+`DmSendResult`, a migration to persist `(notification, message id,
+channel id)`, and a decision about what happens when the row is missing
+because the DM predates the change or was sent by a different bot
+application (production and sandbox are separate Discord apps, and a
+message id is only editable by the application that sent it).
+
+None of that is large, but it is a schema change inside a release that
+was otherwise scoped as "one new inbound endpoint", and it is exactly the
+kind of one-line-with-a-day-of-consequences item that idea 26's audit
+turned out to be. It should be priced into spec 0010 rather than
+discovered during it.
+
+Found while surveying the worker for v0.5 readiness, Aug 2026.
+
+**Half paid, Aug 2026 (v0.5 in progress).** `sendBotDm` now parses the
+create response and returns the message id, `deliverThroughOutbox` records
+it, and migration 0022 gives `notification_log` the column. The recording
+costs the cron nothing: the id rides along in the `UPDATE ... SET
+delivered_at` statement that was already being issued, which mattered more
+than it sounds -- an extra write per delivery is precisely the unbudgeted
+spend the Pass 9 review found.
+
+Two things were decided while building it. The column went on
+`notification_log` alone, not on the other two outbox tables, because
+nothing edits a group nudge or a change-request DM and an unread column
+goes stale unnoticed; `deliverThroughOutbox` therefore writes it
+conditionally, which has its own test. And a 2xx whose body we cannot read
+records *no* id rather than a guessed one, because the edit path reads "no
+id" as "leave that message alone" -- the safe outcome -- while a wrong id
+would edit an arbitrary message.
+
+**Stays open** until the thing the id exists for -- editing the DM when the
+poll resolves -- is actually built, along with the budget decision spec 0010
+records for it (the edit is lower priority than the notification itself).
+
+**And it turned out to have a sibling nobody had priced** (v0.5, migration
+0023). The same argument that makes a message id worth storing makes a
+message's *components* worth storing: migration 0014 exists because a retry
+cannot re-derive what the source sweep rendered, and an options poll's select
+lists the candidates as they were when the DM was written. Without that
+column a retried invite would have arrived with its text and no buttons --
+worse than the delivery it replaced, and only for the people whose first
+attempt failed, which is the kind of difference nobody would ever notice.
+
+**Fully paid (v0.5).** Migration 0022 gave `notification_log` the column,
+`sendBotDm` parses the create response for the id, and `deliverThroughOutbox`
+records it in the `UPDATE` it was already issuing — so the recording itself
+costs the cron nothing.
+
+And the thing the id existed for now uses it: `editSettledPollDms` rewrites
+the vote DM when a poll settles. Migration 0024 records that the edit
+happened, which is not bookkeeping for its own sake — without it the sweep
+redoes the edit every fifteen minutes for as long as the poll stays in its
+recency window, one Discord call per recipient per tick.
+
+The entry's warning was right in substance and understated in scope: it
+predicted a migration, and there were three (0022 for the id, 0023 for the
+components a retry cannot re-derive, 0024 for the edit marker). "One line
+with a day of consequences" is exactly what it was.
+
+### 47. A confirmed multi-winner poll day gets no reminders at all — shipped in v0.5
+
+Found while designing the reminder ladder (item 48, `specs/0014`), and it is
+a live bug rather than a design gap.
+
+`markResolved` is the only thing that sets `events.start_at`, and it runs for
+`single_winner` polls only. A `multi_winner` poll confirms individual days by
+setting `confirmed_at` on each `event_poll_options` row and never touches the
+parent event's start time — deliberately, because the event stays active and
+keeps collecting votes on other days.
+
+But `sweepReminders` selects `WHERE start_at IS NOT NULL`. So a confirmed
+multi-winner day gets exactly one DM — `sweepConfirmedMultiWinnerOptions`'s
+"this day is confirmed" — and then nothing. No 24-hour reminder, no 1-hour
+reminder, ever. Every other event shape in the app gets both.
+
+Nobody has reported it, which is its own lesson: a notification that never
+arrives leaves no trace anywhere, and the sweep that should have sent it
+reports success because it correctly found nothing to do.
+
+Two ways to fix it, and they are not the same size:
+- **Now, small:** teach the reminder sweep to select confirmed
+  `event_poll_options` rows alongside events with a `start_at`. Contained,
+  and it does not wait for anything.
+- **Later, structural:** `specs/0014`'s fan-out, where a confirmed day
+  becomes a real event and every reminder path works on it with no special
+  case at all.
+
+The first does not block the second and should probably just be done.
+
+**Fixed (v0.5), and where it went is the interesting part.** The reminder
+now rides along in `sweepConfirmedMultiWinnerOptions`, which already scans
+every confirmed multi-winner day, rather than in a sweep of its own.
+
+The first attempt *was* a sweep of its own, and measuring it turned up
+something worth keeping: one extra fixed query per tick did not merely slow
+the tick down, it stopped `sweepPurgeTerminalHistory` running **at all** —
+not at 40 ticks, not at 200. A cursored sweep costs one query on every tick
+forever whether or not it finds anything, and the tick's usable allowance
+after `RESERVED_QUERIES` was exactly enough that one more left the purge
+permanently short of the budget it needs to start.
+
+So the rule this leaves behind: **a new cursored sweep is not free, and its
+cost is paid by whatever runs last.** Folding work into a scan that already
+visits the right rows costs nothing fixed at all. `test/pass6.test.ts` is
+what caught it, and it now says so.

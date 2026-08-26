@@ -18,6 +18,7 @@ import {
   reapExhaustedDeliveries,
   type DmRecipient,
 } from '../lib/outbox';
+import { editBotDm } from '../lib/discord';
 import { linkButton, pollSelect, rsvpButtons } from '../lib/dmComponents';
 import { LIMITS } from '../lib/validate';
 import { chunkIds, placeholders } from '../lib/d1';
@@ -343,6 +344,33 @@ function formatSpan(startAt: number, endAt: number, zone: string): string {
 // informational -- HashRouter, so the fragment is part of the URL.
 function eventLink(env: Env, eventId: string): string {
   return `${env.FRONTEND_URL}/#/events/${eventId}`;
+}
+
+// Which reminder an upcoming session is due, if any.
+//
+// Mutually exclusive, deliberately. These used to both fire for an event
+// inside the hour, which doubled the fan-out of the single most expensive
+// moment in the sweep to say two versions of the same thing -- and a "coming
+// up tomorrow" note is useless once the event is 40 minutes away regardless.
+//
+// `startAt` is passed to `render` as well as read here, because the
+// multi-winner sweep reminds about a confirmed *option's* time rather than
+// the event's, and an event row's own start_at is null there.
+function reminderFor(
+  startAt: number,
+  now: number,
+): { type: NotificationType; render: (u: ParticipantRow, at: number) => string } | null {
+  const remaining = startAt - now;
+  if (remaining <= HOUR_MS) {
+    return {
+      type: 'reminder_1h',
+      render: (u, at) => `starts in about an hour (${formatWhen(at, u.timezone)})`,
+    };
+  }
+  if (remaining <= 24 * HOUR_MS) {
+    return { type: 'reminder_24h', render: (u, at) => `is coming up on ${formatWhen(at, u.timezone)}` };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -706,22 +734,6 @@ async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore
     )
     .all<EventRow>();
 
-  // Mutually exclusive, deliberately. These used to both fire for an event
-  // inside the hour, which doubled the fan-out of the single most expensive
-  // moment in the sweep to say two versions of the same thing -- and a
-  // "coming up tomorrow" note is useless once the event is 40 minutes away
-  // regardless.
-  const reminderFor = (startAt: number): { type: NotificationType; render: (u: ParticipantRow) => string } | null => {
-    const remaining = startAt - now;
-    if (remaining <= HOUR_MS) {
-      return { type: 'reminder_1h', render: (u) => `starts in about an hour (${formatWhen(startAt, u.timezone)})` };
-    }
-    if (remaining <= 24 * HOUR_MS) {
-      return { type: 'reminder_24h', render: (u) => `is coming up on ${formatWhen(startAt, u.timezone)}` };
-    }
-    return null;
-  };
-
   let lastKey: string | null = null;
   let stoppedEarly = false;
   for (const event of singleEvents) {
@@ -739,7 +751,7 @@ async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore
     // possibly after the reminder's own window has expired.
     let recipientsSettled = true;
     try {
-      const reminder = reminderFor(event.start_at!);
+      const reminder = reminderFor(event.start_at!, now);
       if (reminder) {
         const limit = budget.deliveriesAffordable;
         const pending = limit > 0 ? await pendingRecipients(env, event, reminder.type, '', limit) : [];
@@ -750,7 +762,7 @@ async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore
           event.id,
           reminder.type,
           '',
-          (user) => `"${event.title}" ${reminder.render(user)}.\n${eventLink(env, event.id)}`,
+          (user) => `"${event.title}" ${reminder.render(user, event.start_at!)}.\n${eventLink(env, event.id)}`,
           // A reminder is where someone realises they cannot make it after
           // all, which is the strongest case for a button anywhere in this
           // release -- and the answer it changes is the same RSVP the invite
@@ -789,7 +801,7 @@ async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore
     if (occurrences.length === 0) return;
 
     for (const occ of occurrences) {
-      const reminder = reminderFor(occ.startAt);
+      const reminder = reminderFor(occ.startAt, now);
       if (!reminder) continue;
       if (!budget.trySpend(SCAN_COST_PER_EVENT)) return;
       const pending = await pendingRecipients(env, event, reminder.type, occ.date, budget.deliveriesAffordable);
@@ -800,7 +812,7 @@ async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore
         event.id,
         reminder.type,
         occ.date,
-        (user) => `"${event.title}" ${reminder.render(user)}.\n${eventLink(env, event.id)}`,
+        (user) => `"${event.title}" ${reminder.render(user, occ.startAt)}.\n${eventLink(env, event.id)}`,
         // No occurrence date in the custom_id, deliberately: rsvp_status is
         // per event, not per occurrence, so a recurring event's RSVP is one
         // answer -- which is exactly how the website already behaves.
@@ -928,6 +940,84 @@ async function sweepPollDeadlines(env: Env, budget: TickBudget): Promise<void> {
   await resolvePastDeadlinePolls(env, budget);
 }
 
+// specs/0010's edit-on-resolve, and what migration 0022's message id was for.
+//
+// When a poll settles, the DM that asked people to vote is still sitting in
+// their client offering a vote. This rewrites it in place: the confirmed time
+// (or the fact that it was cancelled) and, for a resolved poll, the RSVP
+// buttons -- because the question has changed from "which night" to "are you
+// coming".
+//
+// Three properties this path has to have, all of them about *not* mattering
+// too much:
+//
+//   * It is charged to the budget explicitly, like every other outbound call.
+//     An unbudgeted subrequest per recipient is precisely what the Pass 9
+//     review found.
+//   * It ranks below the notification. A tick that can afford one of the two
+//     sends the new DM and leaves the old message alone: a stale vote control
+//     next to a fresh "it's confirmed for Thursday" is survivable, a missing
+//     DM is not. That ordering is why this runs after notifyPending in each
+//     caller, and why it stops the moment the budget says so.
+//   * A failed edit is not retried into the ground. 404 and 403 are ordinary
+//     here (see editBotDm), so the row is marked as attempted and left alone;
+//     only a 5xx or a network failure is left for the next tick.
+async function editSettledPollDms(env: Env, budget: TickBudget, event: EventRow): Promise<void> {
+  if (budget.exhausted) return;
+  if (!budget.trySpend(1)) return;
+
+  // The invite DM is the one that carried the vote control. Rows with no
+  // message id are skipped in the query rather than fetched and discarded:
+  // every delivery predating migration 0022 has none, and there is nothing to
+  // do about those.
+  const { results: rows } = await env.DB.prepare(
+    `SELECT nl.id, nl.message_id, u.id AS user_id, u.dm_channel_id, u.timezone
+     FROM notification_log nl
+     JOIN users u ON u.id = nl.user_id
+     WHERE nl.event_id = ? AND nl.notification_type = 'invite'
+       AND nl.message_id IS NOT NULL AND nl.message_edited_at IS NULL
+       AND u.dm_channel_id IS NOT NULL
+     ORDER BY nl.id
+     LIMIT ?`,
+  )
+    .bind(event.id, Math.max(0, budget.deliveriesAffordable))
+    .all<{ id: string; message_id: string; user_id: string; dm_channel_id: string; timezone: string }>();
+
+  for (const row of rows) {
+    // One subrequest for the PATCH plus one statement to record it, which is
+    // what a cached-channel delivery costs -- so it is reserved the same way
+    // rather than through a second accounting path.
+    if (!budget.reserveDelivery(true)) return;
+
+    const settled =
+      event.status === 'resolved' && event.start_at != null && event.end_at != null
+        ? `"${event.title}" is settled: ${
+            event.window_block_minutes != null
+              ? formatSpan(event.start_at, event.end_at, row.timezone)
+              : formatWhen(event.start_at, row.timezone)
+          }.\n${eventLink(env, event.id)}`
+        : `"${event.title}" was cancelled -- voting is closed.\n${eventLink(env, event.id)}`;
+
+    const result = await editBotDm(
+      env.DISCORD_BOT_TOKEN,
+      row.dm_channel_id,
+      row.message_id,
+      settled,
+      // A cancelled poll asks nothing, so it keeps no controls at all.
+      event.status === 'resolved' ? rsvpControls(event) : [],
+    );
+
+    if (!result.ok && result.retryable) continue;
+
+    // Marked on success *and* on a permanent failure: a 403 from the wrong
+    // application will be a 403 forever, and re-attempting it every fifteen
+    // minutes would spend the allowance on a call that cannot succeed.
+    await env.DB.prepare(`UPDATE notification_log SET message_edited_at = ? WHERE id = ?`)
+      .bind(Date.now(), row.id)
+      .run();
+  }
+}
+
 // Covers every resolved/cancelled single_winner (incl. window-mode) poll,
 // regardless of whether it resolved synchronously via threshold or via the
 // deadline sweep above -- notifyOnce's dedupe makes it safe to re-scan all
@@ -973,6 +1063,11 @@ async function sweepSingleWinnerPollNotifications(
       // exhausted budget means we stopped part-way through the ones we had.
       // Either way this row is not finished.
       if (pending.length >= limit || budget.exhausted) return 'incomplete';
+
+      // Only once the notifications for this poll are done, so the edit can
+      // never take the allowance a DM needed (specs/0010).
+      await editSettledPollDms(env, budget, event);
+      if (budget.exhausted) return 'incomplete';
     },
   );
 }
@@ -1017,6 +1112,12 @@ async function sweepMultiWinnerPollClosedNotifications(
       // exhausted budget means we stopped part-way through the ones we had.
       // Either way this row is not finished.
       if (pending.length >= limit || budget.exhausted) return 'incomplete';
+
+      // The vote control goes away here too, but not before: a multi-winner
+      // poll confirms individual days while it is still collecting votes on
+      // the others, so its DM stays answerable until the poll itself closes.
+      await editSettledPollDms(env, budget, event);
+      if (budget.exhausted) return 'incomplete';
     },
   );
 }
@@ -1036,16 +1137,19 @@ async function sweepConfirmedMultiWinnerOptions(
     end_at: number;
     title: string;
     guild_id: string;
+    timezone: string;
     window_block_minutes: number | null;
   }>(
     env,
     budget,
     cursors,
     'confirmed_options',
-    `SELECT epo.id AS id, epo.event_id, epo.start_at, epo.end_at, e.title, e.guild_id, e.window_block_minutes
+    `SELECT epo.id AS id, epo.event_id, epo.start_at, epo.end_at, e.title, e.guild_id, e.timezone,
+            e.window_block_minutes
      FROM event_poll_options epo
      JOIN events e ON e.id = epo.event_id
-     WHERE e.poll_resolution_mode = 'multi_winner' AND epo.confirmed_at IS NOT NULL`,
+     WHERE e.poll_resolution_mode = 'multi_winner' AND epo.confirmed_at IS NOT NULL
+       AND e.status != 'cancelled'`,
     [],
     async (opt) => {
       const limit = budget.deliveriesAffordable;
@@ -1067,26 +1171,34 @@ async function sweepConfirmedMultiWinnerOptions(
         : `epv.option_id = ? AND epv.vote = 'yes'`;
       const recipientBinds = windowed ? [opt.id, opt.start_at, opt.end_at] : [opt.id];
 
-      const { results: voters } = await env.DB.prepare(
-        `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
-         ${recipientSource}
-         JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
-         JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
-         ${PENDING_NOTIFICATION_JOIN}
-         WHERE ${recipientWhere}
-           AND ${PENDING_NOTIFICATION_WHERE}
-         ORDER BY u.id
-         LIMIT ?`,
-      )
-        .bind(
-          opt.guild_id,
-          membershipCutoff(),
-          ...pendingNotificationJoinBinds(opt.event_id, 'poll_resolved', opt.id),
-          ...recipientBinds,
-          ...pendingNotificationWhereBinds(),
-          limit,
+      // Whoever is confirmed for this day and has not yet had the given
+      // notification. Shared by the two things this sweep now sends, so the
+      // "who is coming on this day" rule cannot drift between them.
+      const confirmedFor = async (notificationType: NotificationType, rows: number) => {
+        const { results } = await env.DB.prepare(
+          `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
+           ${recipientSource}
+           JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
+           JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
+           ${PENDING_NOTIFICATION_JOIN}
+           WHERE ${recipientWhere}
+             AND ${PENDING_NOTIFICATION_WHERE}
+           ORDER BY u.id
+           LIMIT ?`,
         )
-        .all<ParticipantRow>();
+          .bind(
+            opt.guild_id,
+            membershipCutoff(),
+            ...pendingNotificationJoinBinds(opt.event_id, notificationType, opt.id),
+            ...recipientBinds,
+            ...pendingNotificationWhereBinds(),
+            rows,
+          )
+          .all<ParticipantRow>();
+        return results;
+      };
+
+      const voters = await confirmedFor('poll_resolved', limit);
 
       await notifyPending(
         env,
@@ -1101,6 +1213,44 @@ async function sweepConfirmedMultiWinnerOptions(
           }! You're confirmed.\n${eventLink(env, opt.event_id)}`,
       );
       if (voters.length >= limit || budget.exhausted) return 'incomplete';
+
+      // IDEAS item 47, and the reason it lives here rather than in a sweep of
+      // its own: this scan already visits every confirmed multi-winner day,
+      // so the reminder costs a query only when there is a day due to be
+      // reminded about. A separate cursored sweep would have cost one fixed
+      // query on every tick forever -- and measuring that showed it does not
+      // merely slow the tick down, it permanently starves
+      // sweepPurgeTerminalHistory of the allowance it needs to ever run.
+      //
+      // The bug itself: markResolved is the only thing that sets
+      // events.start_at and it is single_winner only, while sweepReminders
+      // selects WHERE start_at IS NOT NULL -- so a confirmed multi-winner day
+      // got its "this day is confirmed" DM and then silence, no 24-hour and
+      // no 1-hour reminder, ever. Nobody reported it, because a notification
+      // that never arrives leaves no trace at either end: the sweep that
+      // should have sent it reports success for correctly finding nothing.
+      //
+      // specs/0014's fan-out makes this unnecessary eventually -- once a
+      // confirmed day is a real event, every reminder path finds it with no
+      // special case at all.
+      const reminder = reminderFor(opt.start_at, Date.now());
+      if (!reminder) return;
+
+      const remindLimit = budget.deliveriesAffordable;
+      if (remindLimit <= 0) return 'incomplete';
+
+      const due = await confirmedFor(reminder.type, remindLimit);
+      await notifyPending(
+        env,
+        budget,
+        due,
+        opt.event_id,
+        reminder.type,
+        opt.id,
+        (user) => `"${opt.title}" ${reminder.render(user, opt.start_at)}.\n${eventLink(env, opt.event_id)}`,
+        () => rsvpControls({ id: opt.event_id, event_type: 'poll', window_block_minutes: opt.window_block_minutes }),
+      );
+      if (due.length >= remindLimit || budget.exhausted) return 'incomplete';
     },
     'epo.id',
   );

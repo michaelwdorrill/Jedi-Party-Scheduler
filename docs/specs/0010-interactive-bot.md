@@ -1,6 +1,6 @@
 # 0010 — An interactive bot
 
-**Status:** Part built (v0.5 in progress)
+**Status:** Built (v0.5) — embeds deferred, see below
 **Covers:** `IDEAS.md` item 19, and item 32 (which is a cost inside it)
 **Phase:** 3.75 → **v0.5**
 
@@ -381,15 +381,34 @@ and the code is legible rather than remembered.
 - **Item 45's answer** (`IDEAS.md`): a press from someone behind on the Terms
   is refused ephemerally with a link, not recorded.
 
-**Not built yet:**
+- **The edit when a poll resolves** (`editSettledPollDms`), with the budget
+  ordering this spec asked for: it runs only after that poll's notifications,
+  reserves like a cached-channel delivery, and stops the moment the tick is
+  out. Migration 0024 records that the edit happened, because without it the
+  sweep would redo it every fifteen minutes for as long as the poll stays in
+  the recency window. A 403 or 404 is marked done rather than retried -- the
+  wrong application can never edit that message, so trying again forever
+  spends the allowance on a call that cannot succeed.
 
-- **Embeds.** The DMs that gained components did not gain embeds with them,
-  which this spec lists as in-scope for the release. Deliberately deferred:
-  an embed is a presentation change to text that cannot be previewed from a
-  cloud session, and the components are what make the DMs *answerable*.
-  Worth doing with a real Discord client open.
-- **The edit when a poll resolves**, and the budget decision this spec
-  records for it.
+**Not built, and deferred deliberately:**
+
+- **Embeds.** This spec lists them as in-scope and they are the one thing
+  that did not ship. The reason is worth recording, because "we ran out of
+  time" would be the wrong lesson.
+
+  Making an embed durable costs a *third* column on `notification_log`,
+  beside `content` (0014) and `components` (0023), for the same reason those
+  exist: the retry consumer cannot re-derive what the source sweep rendered.
+  Not making it durable is worse in a subtler way -- a DM whose first
+  delivery failed would arrive looking different from everyone else's, and
+  only for the people who hit a transient error, which is exactly the kind of
+  difference nobody ever notices or reports.
+
+  Neither is a bad option, but choosing between a schema change and a visible
+  inconsistency, for a purely presentational feature that has to be *looked
+  at* to be judged, is not a call to make from a session that cannot see
+  Discord. It wants an hour with a client open. **v0.5.1.**
+
 - The manual portal steps (`docs/SETUP.md` 1.8 and 1.9) -- **done for the
   sandbox application**, 25 Aug 2026: key pasted, endpoint URL accepted by
   Discord, which means the deployed Worker passed Discord's own PING and

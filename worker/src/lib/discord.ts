@@ -176,6 +176,53 @@ export function boundContent(content: string): string {
 // both hang.
 export const DISCORD_FETCH_TIMEOUT_MS = 20_000;
 
+// Rewrites a message the bot already sent (specs/0010, edit-on-resolve).
+//
+// Every failure here is an ordinary outcome rather than something to retry,
+// and that is the whole design of this path. A message is editable only by
+// the application that sent it, so a production id is not editable by the
+// sandbox bot and vice versa; a recipient can delete a DM; a channel can go
+// away. In all of those Discord answers 4xx and the right response is to
+// leave the message alone -- which is exactly what the app did before this
+// feature existed, so the fallback is the old behaviour rather than a broken
+// one.
+//
+// Returns whether the edit landed, so the caller can record it and stop
+// trying. `retryable` separates "Discord was briefly unavailable" from "this
+// will never work", because only the first is worth another tick.
+export async function editBotDm(
+  botToken: string,
+  channelId: string,
+  messageId: string,
+  content: string,
+  components?: unknown[] | null,
+): Promise<{ ok: boolean; status: number; retryable: boolean }> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/channels/${channelId}/messages/${messageId}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bot ${botToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        content: boundContent(content),
+        allowed_mentions: { parse: [] },
+        // Always sent, unlike on create: [] is how Discord is told to *remove*
+        // the controls, which is most of the point of editing at all.
+        components: components ?? [],
+      }),
+      signal: AbortSignal.timeout(DISCORD_FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, status: 0, retryable: true };
+  }
+
+  if (res.ok) return { ok: true, status: res.status, retryable: false };
+  const retryable = res.status === 429 || res.status >= 500;
+  return { ok: false, status: res.status, retryable };
+}
+
 // Opens (or reuses) a DM channel with the given user and sends `content` via
 // the bot. Returns enough info for the caller to decide whether to retry.
 // Never throws for a network-level failure (including a timeout) -- those

@@ -21,6 +21,25 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.5',
+    date: '26 August 2026',
+    summary: 'The bot can be answered. Press a button in Discord instead of coming here.',
+    added: [
+      'Invitations and reminders now carry buttons. \u201cI\u2019m in\u201d, \u201cMaybe\u201d or \u201cCan\u2019t make it\u201d, answered in the DM \u2014 the message rewrites itself to show what was recorded, and that is the whole interaction. No link to follow, no page to load.',
+      'A poll\u2019s invitation carries the nights themselves. Pick every one that works from a dropdown in Discord; picking none is a valid answer too. What a dropdown cannot say is \u201cmaybe\u201d, so the DM says plainly that a night you did not pick is left blank rather than refused \u2014 marking a maybe is still a job for the site.',
+      'When a poll settles, the DM that asked you to vote stops asking. It becomes the confirmed time, with the RSVP buttons for the question that replaced it: not \u201cwhich night\u201d any more, but \u201care you coming\u201d.',
+      'The calendar goes to any month, forwards and back, by arrows or by picking a month and year. It could only ever show this month and next before.',
+    ],
+    changed: [
+      'The agenda is the next two weeks rather than a calendar month, so it stops at a fortnight instead of at whatever the grid happened to be showing.',
+      'A window poll gets a link rather than a control. Choosing \u201cany two and a half hours in this range\u201d has no honest Discord widget \u2014 a dropdown would mangle it \u2014 so that one still opens the site.',
+    ],
+    fixed: [
+      'A confirmed day on a multi-day poll now gets its reminders. Those days have never had a 24-hour or 1-hour reminder in the app\u2019s history: only the single-date polls set a time on the event itself, and the reminders looked at nothing else. Nobody reported it, because a notification that never arrives leaves no trace.',
+      'An event on the first days of a month now appears in the previous month\u2019s calendar, in the trailing days the grid draws. It was always blank there, whatever was scheduled.',
+    ],
+  },
+  {
     version: '0.4.6',
     date: '25 August 2026',
     summary: 'A poll can ask "any two and a half hours in these" instead of only "this or this".',

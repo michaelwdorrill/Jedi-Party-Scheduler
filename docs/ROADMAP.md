@@ -367,7 +367,7 @@ with no candidate row would lose its submissions; and it recreates both
 indexes explicitly, since rebuilding a table in SQLite drops them — the
 mistake migration 0016 exists to repair.
 
-### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ← next
+### Phase 3.75 — An interactive bot (idea 19) → **v0.5** ✅ shipped
 
 **Spec:** `specs/0010-interactive-bot.md` (Draft). It scopes v0.5 down to the
 endpoint, the three response widgets, the edit-on-resolve and embeds on the
@@ -384,6 +384,44 @@ because the in-Discord flows should mirror a settled in-app model, not a
 moving one — and because the "DMs read like spam" problem it partly addresses
 is also being addressed from the other side by rich embeds and idea 3's
 invite link.
+
+**Shipped 26 Aug 2026**, and it carried three things the phase entry did not
+plan for.
+
+**Idea 22 rode along.** The calendar's two-month ceiling was a `0 | 1`
+literal type in one function; asked to remove it, it came out in an
+afternoon, and it had to — `specs/0014` had just decided how far ahead
+someone may answer for a recurring session, and the honest answer was "as far
+as the calendar goes". A navigation limit had quietly become a data model
+question.
+
+**Idea 47 was found by writing a spec, not by running the app.** Designing
+the reminder ladder meant reading how reminders choose events, and that is
+when it became clear that a confirmed multi-day poll never matched any of
+them. It had been true since multi-winner polls shipped.
+
+**Embeds did not ship**, and `specs/0010` records why in full: durable embeds
+cost a third column on `notification_log`, non-durable ones make a retried DM
+look different from everyone else's, and choosing between those for a
+presentational feature wants someone looking at Discord. v0.5.1.
+
+### Phase 3.8x — What v0.5 turned up (ideas 46, 48) → **v0.6 or later**
+
+Both came out of using the thing. Idea 46 is small and specific: a reminder
+shows the buttons but not the answer you already gave, so the only way to see
+what you said is to press something. Idea 48 is not small at all — it is the
+reminder ladder, and designing it produced `specs/0014`, whose central
+decision (attendance is per occurrence, not per event) is the largest single
+change to this app's data model since it was built.
+
+They are listed together because 46 is a special case of 48: once a reminder
+knows what you answered, showing it is the easy half. Doing 46 alone is
+defensible if 48 keeps slipping; doing 46 *inside* 48 is cheaper.
+
+`specs/0014` is staged across two or three releases on purpose, and its
+migration ships alone. That sequencing is the reason this phase is "0.6 or
+later" rather than a number — it depends on whether the migration goes first
+or the growth work does.
 
 ### Phase 4 — Growth and lifecycle (ideas 9, 10) → **v0.6**
 
@@ -452,7 +490,8 @@ shifts.
 | **0.4.4** | Phase 3.9 — Policy/Terms re-acceptance (37) | **Shipped 25 Aug 2026** |
 | **0.4.5** | Phase 3.10 — every candidate's availability (39), poll candidates on the calendar (41), readable chips (42) | **Shipped 25 Aug 2026** |
 | **0.4.6** | Phase 3.15 — windowed candidates (40), per `specs/0013` | **Shipped 25 Aug 2026** |
-| 0.5 | Interactive bot (19), and the message-id cost it turned out to carry (32) | Planned |
+| **0.5** | Phase 3.75 — the interactive bot (19), the message-id cost it carried (32), the calendar's month ceiling removed (22), and reminders for confirmed multi-day polls (47). Embeds deferred to 0.5.1 | **Shipped 26 Aug 2026** |
+| 0.5.1 | Embeds on the DMs that carry controls — see `specs/0010` for why it is its own release | Planned |
 | 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
 | 0.7 | Google Calendar sync (2) | Planned |
 | 1.0 | `IDEAS.md`'s **Still open** section empty — leave Beta | When the list clears |

@@ -36,10 +36,10 @@ enough yet.
 | [0007-server-noticeboard](0007-server-noticeboard.md) | Idea 5 (second half) | TBD | TBD | Decisions locked |
 | [0008-visual-design-pass](0008-visual-design-pass.md) | Ideas 8, 20 | 3.5 | 0.4 | Superseded by 0009 |
 | [0009-binary-sunset](0009-binary-sunset.md) | Ideas 8, 20 | 3.5 | 0.4 | Built |
-| [0010-interactive-bot](0010-interactive-bot.md) | Idea 19 (and 32) | 3.75 | 0.5 | Draft |
+| [0010-interactive-bot](0010-interactive-bot.md) | Idea 19 (and 32) | 3.75 | 0.5 | Built |
 | [0011-groups-without-servers](0011-groups-without-servers.md) | Ideas 36, 34 | TBD | TBD | Draft |
 | [0012-policy-reacceptance](0012-policy-reacceptance.md) | Idea 37 | 3.9 | 0.4.4 | Built |
-| [0013-windowed-candidates](0013-windowed-candidates.md) | Idea 40 (and 39, 41) | 3.11 | 0.4.6 | Draft |
+| [0013-windowed-candidates](0013-windowed-candidates.md) | Idea 40 (and 39, 41) | 3.11 | 0.4.6 | Built |
 | [0014-attendance-per-occurrence](0014-attendance-per-occurrence.md) | Ideas 47, 48 (absorbs 46) | TBD | TBD | Decisions locked |
 
 This index had drifted: it stopped at 0003 while 0004–0007 existed, and
