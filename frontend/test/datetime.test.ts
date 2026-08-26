@@ -9,7 +9,11 @@ import {
   horizonWindow,
   isValidRange,
   monthWindow,
+  offsetForMonth,
   startsInPast,
+  YEAR_RANGE_BACK,
+  YEAR_RANGE_FORWARD,
+  yearOptions,
 } from '../src/lib/datetime';
 
 describe('buildMonthGrid', () => {
@@ -209,5 +213,48 @@ describe('horizonWindow', () => {
     // that asked for more would 400 rather than render.
     const { from, to } = horizonWindow('America/New_York');
     expect(to.diff(from, 'days').days).toBeLessThan(366);
+  });
+});
+
+describe('the month/year picker (IDEAS item 22)', () => {
+  const zone = 'America/New_York';
+
+  it('round-trips: an offset lands on a month, and that month gives the offset back', () => {
+    for (const offset of [-14, -1, 0, 1, 25]) {
+      const start = monthWindow(offset, zone).start;
+      expect(offsetForMonth(start.year, start.month, zone)).toBe(offset);
+    }
+  });
+
+  it('crosses a year boundary in both directions', () => {
+    const now = DateTime.now().setZone(zone);
+    const nextJan = offsetForMonth(now.year + 1, 1, zone);
+    expect(monthWindow(nextJan, zone).start.toFormat('LLLL yyyy')).toBe(`January ${now.year + 1}`);
+
+    const lastDec = offsetForMonth(now.year - 1, 12, zone);
+    expect(monthWindow(lastDec, zone).start.toFormat('LLLL yyyy')).toBe(`December ${now.year - 1}`);
+  });
+
+  it('offers a bounded range of years around today', () => {
+    const thisYear = DateTime.now().setZone(zone).year;
+    const years = yearOptions(thisYear, zone);
+    expect(years[0]).toBe(thisYear - YEAR_RANGE_BACK);
+    expect(years[years.length - 1]).toBe(thisYear + YEAR_RANGE_FORWARD);
+  });
+
+  it('includes a year the arrows reached outside that range, so the select is never blank', () => {
+    const thisYear = DateTime.now().setZone(zone).year;
+    const far = thisYear + 40;
+    const years = yearOptions(far, zone);
+    expect(years).toContain(far);
+    // Still sorted, and still contains the ordinary range around today.
+    expect(years).toEqual([...years].sort((a, b) => a - b));
+    expect(years).toContain(thisYear);
+  });
+
+  it('does not duplicate the viewed year when it is already in range', () => {
+    const thisYear = DateTime.now().setZone(zone).year;
+    const years = yearOptions(thisYear + 1, zone);
+    expect(years.filter((y) => y === thisYear + 1)).toHaveLength(1);
   });
 });

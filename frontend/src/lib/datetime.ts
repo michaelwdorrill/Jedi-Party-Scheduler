@@ -12,6 +12,30 @@ export function monthWindow(monthsFromNow: number, zone: string) {
   return { start, end };
 }
 
+// The month offset that lands on a given month and year — the inverse of
+// `monthWindow`, so a dropdown can set the same state the arrows do rather
+// than introducing a second source of truth for "which month am I looking
+// at".
+export function offsetForMonth(year: number, month: number, zone: string): number {
+  const now = DateTime.now().setZone(zone);
+  return (year - now.year) * 12 + (month - now.month);
+}
+
+// The years a picker offers. Bounded because a dropdown has to be, while the
+// arrows stay unbounded — so the viewed year is always included even when it
+// is outside the range, or a select would sit blank on a month its own arrows
+// reached.
+export const YEAR_RANGE_BACK = 3;
+export const YEAR_RANGE_FORWARD = 5;
+
+export function yearOptions(viewedYear: number, zone: string): number[] {
+  const thisYear = DateTime.now().setZone(zone).year;
+  const years = new Set<number>();
+  for (let y = thisYear - YEAR_RANGE_BACK; y <= thisYear + YEAR_RANGE_FORWARD; y++) years.add(y);
+  years.add(viewedYear);
+  return [...years].sort((a, b) => a - b);
+}
+
 // The range the *grid* covers, which is not the same as the month.
 // buildMonthGrid pads with leading and trailing days from the adjacent months
 // so every week row is complete, and those days have to show their events like

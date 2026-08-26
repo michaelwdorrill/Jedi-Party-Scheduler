@@ -4,7 +4,14 @@ import { DateTime } from 'luxon';
 import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
-import { formatTimeRange, gridWindow, horizonWindow, monthWindow } from '../lib/datetime';
+import {
+  formatTimeRange,
+  gridWindow,
+  horizonWindow,
+  monthWindow,
+  offsetForMonth,
+  yearOptions,
+} from '../lib/datetime';
 import { getView, setView, type CalendarView } from '../lib/view';
 import { useAsync } from '../lib/async';
 import MonthCalendarGrid from '../components/MonthCalendarGrid';
@@ -43,6 +50,25 @@ import type { EventOccurrence } from '../types';
 
 type Filter = 'all' | 'personal' | 'games' | { guildId: string };
 
+// Written out rather than generated from the locale, for the same reason the
+// rest of this app spells its month names: the grid, the agenda and this
+// picker have to agree, and a locale-derived list would drift from the
+// `LLLL` format strings everywhere else.
+const MONTH_NAMES = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
 function matchesFilter(occ: EventOccurrence, filter: Filter): boolean {
   if (filter === 'all') return true;
   if (filter === 'personal') return occ.isPersonal;
@@ -62,6 +88,7 @@ export default function HomePage() {
   const zone = user?.timezone ?? 'America/New_York';
 
   const monthStart = useMemo(() => monthWindow(monthOffset, zone).start, [monthOffset, zone]);
+  const years = useMemo(() => yearOptions(monthStart.year, zone), [monthStart.year, zone]);
 
   // This call is the one idea 24 was found on: with no `.catch`, a 404 from a
   // Worker without `/me/events` rendered as "nothing scheduled".
@@ -160,6 +187,12 @@ export default function HomePage() {
               a control that only appeared on the grid would leave the agenda
               stuck on this month with no way to say so. */}
           <div className="flex items-center gap-1">
+            {/* The selects announce their own value on change, but the month
+                *changing* underneath a Previous/Next press is otherwise
+                silent -- the button keeps focus and nothing is read out. */}
+            <span className="sr-only" aria-live="polite">
+              {monthStart.toFormat('LLLL yyyy')}
+            </span>
             <div className="flex overflow-hidden rounded-md border border-edge-strong">
               <button
                 type="button"
@@ -169,15 +202,35 @@ export default function HomePage() {
               >
                 ‹
               </button>
-              {/* aria-live so a screen reader hears the month change: the
-                  buttons keep focus, and without this the only thing that
-                  moved is silent. */}
-              <span
-                aria-live="polite"
-                className="min-w-[9.5rem] px-3 py-1.5 text-center font-display text-sm uppercase tracking-wide text-ink"
+              {/* Two selects rather than one label, so a month a year out is
+                  one gesture instead of twelve clicks. The arrows stay for
+                  stepping; these are for jumping. Both write the same
+                  `monthOffset` the arrows do -- there is no second source of
+                  truth for which month is on screen. */}
+              <select
+                aria-label="Month"
+                value={monthStart.month}
+                onChange={(e) => setMonthOffset(offsetForMonth(monthStart.year, Number(e.target.value), zone))}
+                className="border-x border-edge-strong bg-transparent px-2 py-1.5 font-display text-sm uppercase tracking-wide text-ink"
               >
-                {monthStart.toFormat('LLLL yyyy')}
-              </span>
+                {MONTH_NAMES.map((name, i) => (
+                  <option key={name} value={i + 1}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Year"
+                value={monthStart.year}
+                onChange={(e) => setMonthOffset(offsetForMonth(Number(e.target.value), monthStart.month, zone))}
+                className="bg-transparent px-2 py-1.5 font-display text-sm uppercase tracking-wide text-ink"
+              >
+                {years.map((y) => (
+                  <option key={y} value={y}>
+                    {y}
+                  </option>
+                ))}
+              </select>
               <button
                 type="button"
                 aria-label="Next month"
