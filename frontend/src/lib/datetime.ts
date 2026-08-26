@@ -1,16 +1,43 @@
 import { DateTime } from 'luxon';
 
-export function monthWindow(monthsFromNow: 0 | 1, zone: string) {
+// Any month, forwards or back (IDEAS item 22). This took a `0 | 1` until
+// v0.5: the calendar could show this month and next and nothing else, which
+// was a data limit as much as a UI one, and it quietly became load-bearing --
+// specs/0014 had to decide how far ahead someone may answer for a recurring
+// session, and the honest answer was "as far as the calendar goes".
+export function monthWindow(monthsFromNow: number, zone: string) {
   const base = DateTime.now().setZone(zone).plus({ months: monthsFromNow });
   const start = base.startOf('month');
   const end = base.endOf('month');
   return { start, end };
 }
 
-export function fullWindow(zone: string) {
-  const thisMonth = monthWindow(0, zone);
-  const nextMonth = monthWindow(1, zone);
-  return { from: thisMonth.start, to: nextMonth.end };
+// The range the *grid* covers, which is not the same as the month.
+// buildMonthGrid pads with leading and trailing days from the adjacent months
+// so every week row is complete, and those days have to show their events like
+// any other.
+//
+// The old two-month fetch got this wrong at one edge and nobody noticed: it
+// asked for the start of this month to the end of next, so the "next month"
+// grid's trailing days -- up to six days into the month after -- were always
+// drawn empty, whatever was actually scheduled on them. Asking for the grid
+// rather than the month removes the class of bug rather than that instance.
+export function gridWindow(monthStart: DateTime) {
+  const days = buildMonthGrid(monthStart);
+  return { from: days[0].startOf('day'), to: days[days.length - 1].endOf('day') };
+}
+
+// How far "on the horizon" looks. The rail is anchored to now rather than to
+// whatever month is on screen, so it needs its own range: paging to December
+// must not empty the list of what is coming up this week.
+//
+// Sixty days is the Dashboard's old query, from before spec 0009 merged it
+// into this page.
+export const HORIZON_DAYS = 60;
+
+export function horizonWindow(zone: string) {
+  const now = DateTime.now().setZone(zone);
+  return { from: now, to: now.plus({ days: HORIZON_DAYS }) };
 }
 
 // Builds a 7-column calendar grid (Sun-Sat) covering the whole month, including

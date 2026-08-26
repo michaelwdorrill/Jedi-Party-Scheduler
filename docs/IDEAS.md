@@ -194,36 +194,6 @@ never used Uncle Owen, which breaks the model where an event is visible
 to its organizer and invitees only. Everything above stays DM-and-site
 scoped, and should remain so.
 
-### 22. The calendar can only ever show this month and next month
-
-`CalendarPage` holds `tab: 0 | 1` and `monthWindow(monthsFromNow: 0 | 1,
-zone)` takes that literal type, so there is no arbitrary month paging
-anywhere in the app — you cannot look at December from August, and you
-cannot look backwards at all. `fullWindow()` fetches exactly those two
-months, so it's a data limit as well as a UI one.
-
-Noticed while writing `specs/0008`, where it matters twice: it makes
-idea 20's "does the sidebar follow the calendar or stay anchored to now"
-much cheaper than it looked (the grid moves by one month, once, not to
-"arbitrary months" as that entry assumed), and pitch C's value partly
-rests on the ceiling being *invisible* rather than raised.
-
-**It has a consequence now that it did not have before** (`specs/0014`,
-Aug 2026). Attendance became per occurrence, and the decision there was that
-someone may answer for any occurrence *the calendar shows* — so the window
-this item is about is no longer only a navigation limit, it is the horizon
-over which attendance rows can exist. Resolving 22 with real unbounded paging
-would therefore mean unbounded attendance rows, which is a different
-conversation from "let me look at December". The two want deciding together
-if this one is picked up first.
-
-Deliberately left out of v0.4: it's a behaviour change, not a design one.
-Worth deciding whether the fix is a real month pager (prev/next without
-bound, which means `/me/events` gets asked for arbitrary windows and the
-query bound that made spec 0006 cheap needs re-checking) or simply a
-wider fixed window. Also worth asking whether looking *backwards* at past
-sessions is wanted — nothing in the app offers that today.
-
 ### 23. The sandbox has no frontend, so the sandbox-first rule has a blind spot for frontend-only changes — partly shipped in v0.4.1
 
 `deploy-sandbox.yml` is worker-only — every step runs with
@@ -1874,4 +1844,72 @@ and its buttons are still sitting in their DMs once they have agreed.
 
 The check is a version comparison on the row the handler already reads to
 confirm the account still exists, so it costs no extra statement.
+
+### 22. The calendar can only ever show this month and next month — shipped in v0.5
+
+`CalendarPage` holds `tab: 0 | 1` and `monthWindow(monthsFromNow: 0 | 1,
+zone)` takes that literal type, so there is no arbitrary month paging
+anywhere in the app — you cannot look at December from August, and you
+cannot look backwards at all. `fullWindow()` fetches exactly those two
+months, so it's a data limit as well as a UI one.
+
+Noticed while writing `specs/0008`, where it matters twice: it makes
+idea 20's "does the sidebar follow the calendar or stay anchored to now"
+much cheaper than it looked (the grid moves by one month, once, not to
+"arbitrary months" as that entry assumed), and pitch C's value partly
+rests on the ceiling being *invisible* rather than raised.
+
+**It has a consequence now that it did not have before** (`specs/0014`,
+Aug 2026). Attendance became per occurrence, and the decision there was that
+someone may answer for any occurrence *the calendar shows* — so the window
+this item is about is no longer only a navigation limit, it is the horizon
+over which attendance rows can exist. Resolving 22 with real unbounded paging
+would therefore mean unbounded attendance rows, which is a different
+conversation from "let me look at December". The two want deciding together
+if this one is picked up first.
+
+Deliberately left out of v0.4: it's a behaviour change, not a design one.
+Worth deciding whether the fix is a real month pager (prev/next without
+bound, which means `/me/events` gets asked for arbitrary windows and the
+query bound that made spec 0006 cheap needs re-checking) or simply a
+wider fixed window. Also worth asking whether looking *backwards* at past
+sessions is wanted — nothing in the app offers that today.
+
+**Shipped (v0.5): a real pager, unbounded in both directions.** The entry
+asked whether the fix was arbitrary paging or a wider fixed window, and
+whether looking backwards was even wanted. Michael answered all of it at
+once — all months, and yes, backwards too.
+
+`monthWindow` took a `0 | 1` literal type, which is what made this a
+compile-time ceiling rather than a preference; it now takes any integer. The
+two tabs are a `‹ month ›` pager with a *Today* button that appears only when
+it would do something.
+
+**The query bound this entry worried about turned out not to exist.**
+`GET /me/events` has always taken arbitrary `from`/`to`, capped at
+`MAX_QUERY_RANGE_MS` (~366 days) — so the ceiling was entirely in the
+frontend and the worker needed no change at all. What spec 0006 made cheap
+was the *shape* of the query, not its range.
+
+Two things came out of doing it that the entry did not predict:
+
+- **The rail needed its own query, exactly as spec 0009 said it would.** That
+  spec assumed the "anchored to now" horizon list would cost a second,
+  smaller request, and it did not — because the two-month fetch always
+  covered now. Removing the ceiling makes the prediction come true: a grid
+  showing next March has nothing to say about what is on this week. The two
+  fetches are independent, so paging does not re-fetch the horizon and a
+  failed horizon does not take the calendar down.
+- **The old fetch had an off-by-one-month bug at its far edge.** It asked for
+  the start of this month to the end of next, but the grid pads with days
+  from adjacent months — so the *next-month* grid's trailing days, up to six
+  days into the month after, were always drawn empty whatever was scheduled
+  on them. Asking for the grid's range rather than the month's removes the
+  class rather than the instance.
+
+Verified in a real browser against a local Worker and D1 seeded with one
+event a month from two months back to three ahead: each month renders its own
+event, forwards past the old ceiling and backwards past zero, and the rail
+holds the two sessions inside its 60-day horizon while the grid sits in
+November.
 

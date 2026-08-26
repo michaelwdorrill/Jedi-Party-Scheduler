@@ -325,12 +325,22 @@ jobs: a DM is about one session and asking it to be about six would be
 unreadable, while the website can reasonably let you decline the week you are
 away.
 
-*This couples attendance to `IDEAS.md` item 22*, which is still open: the
-calendar can only show this month and next, so "the visible calendar" today
-means a two-month horizon. If item 22 is ever resolved with real month
-paging, the attendance horizon moves with it — and item 22 stops being purely
-a navigation question, because arbitrary paging would then mean arbitrary
-attendance rows. Worth deciding them together if item 22 is picked up first.
+*This coupled attendance to `IDEAS.md` item 22, and item 22 was then resolved
+in the permissive direction* (v0.5, the same day): the calendar pages to any
+month, forwards and back. So "any occurrence the calendar shows" now means
+**any occurrence at all**, which is worth stating plainly rather than
+inheriting quietly.
+
+That is a larger promise than it was when the decision was taken, and it is
+still the right one, because the thing it could have gone wrong on does not
+apply: attendance rows are created by a person answering, never by the app
+expanding a recurrence. Somebody who navigates to March 2028 and declines a
+session there has created exactly one row, deliberately. The growth bound is
+human effort, which is the only bound this app has ever needed.
+
+What it does mean is that the **ladder's** restraint is doing all the work:
+the DM only ever asks about the next occurrence. Without that, an unbounded
+calendar would imply unbounded nagging.
 
 **3. A change to an event clears attendance only if the date moves.** Moving
 to another day re-asks everyone and restarts the ladder; shifting the time
