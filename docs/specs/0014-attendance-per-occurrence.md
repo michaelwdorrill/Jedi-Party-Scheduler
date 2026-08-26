@@ -1,6 +1,6 @@
 # 0014 — Attendance per occurrence, and a reminder ladder that reads it
 
-**Status:** Draft
+**Status:** Draft — decisions locked (see below), two build questions open
 **Covers:** `IDEAS.md` items 47 and 48. Absorbs item 46, which is one symptom
 of the same thing.
 **Phase:** TBD → after v0.5
@@ -31,6 +31,8 @@ Two properties are worth stating as rules rather than leaving implicit:
   tap; no buttons at all makes the person whose plans just changed go to the
   website, which is the exact failure the interactive bot exists to remove.
   One button — the transition they actually need — is the answer to both.
+- **The organizer is on the accepted rungs without answering** — see the
+  decisions below.
 - **Rungs are mutually exclusive and never fire in arrears.** Only the
   nearest due rung sends. An event that becomes visible late (a poll that
   resolves 30 hours out) must not fire 96h, 72h and 48h in one tick, which
@@ -120,6 +122,9 @@ accept one occurrence at a time.**
 - Answering never applies to the series. There is no "yes to all Thursdays",
   which is deliberate — the app's whole reason to exist is that people cannot
   reliably make every session.
+- **The ladder only ever asks about the next occurrence; the website lets you
+  answer any occurrence the calendar shows** (decision 2). A DM is about one
+  session, and one that asked about six would be unreadable.
 - **The ladder for the next occurrence starts 24 hours after the previous one
   ends**, not 96 hours before the next one. For a weekly game night those are
   the same moment give or take; for anything sparser, the 24-hours-after rule
@@ -194,13 +199,13 @@ exists but means nothing.
 it. What it becomes is the invite list — who may see and answer — which is
 what its name says.
 
-**The migration is the risky part**, and it has an unanswerable case. A
+**The migration is the risky part**, and it had an unanswerable case: a
 recurring event's single existing `rsvp_status` applies, in the old model, to
-the whole series; there is no fact of the matter about which occurrence it
-meant. Proposal: copy it to the **next** occurrence only, and let the ladder
-ask again for the ones after. Copying it to every future occurrence would
-manufacture commitments nobody made; dropping it entirely would silently
-un-answer people who did answer.
+the whole series, and there is no fact of the matter about which occurrence it
+meant. Decision 5 settles it — nothing is carried over, everyone starts
+unanswered, and the changelog says so. The costs of that are recorded with
+the decision rather than here, because they are costs to *people* rather than
+to the schema.
 
 Blast radius, measured rather than estimated: **16 references to
 `rsvp_status` across 9 worker files**, and **3 across 2 frontend files**. The
@@ -240,13 +245,9 @@ Three things this needs that do not exist:
    concept of "enough people". This wants an optional `minimum_attendees` on
    the event, set by the organizer. **Optional and unset by default** — see
    below.
-2. **A decision about who cancels.** Auto-cancelling is a large power to hand
-   a button: one person pressing *Can't make it* ends everybody else's
-   evening, and the presser may not even realise it happened. Proposal: when
-   an event drops below its minimum, **the organizer is told and offered the
-   cancel**, and auto-cancel is available only if they opted into it when
-   setting the minimum. An organizer who wants "four players or it's off"
-   can have exactly that; nobody gets it by accident.
+2. **A decision about who cancels — decided, see decision 4.** The organizer
+   is told and offered the cancel; auto-cancel happens only if they opted
+   into it when setting the minimum.
 3. **Honesty about "immediately".** The interaction handler has three seconds
    and cannot fan out DMs to an event's invitees inside it. What it *can* do
    synchronously is record the decline and mark the event, so the state is
@@ -306,23 +307,88 @@ never had.
   interpreted under v2 rules.
 - The fan-out is idempotent across repeated sweeps.
 
-## Open questions
+## Decisions (Michael, Aug 2026)
 
-1. **Does the organizer get a ladder?** They have an invite row (idea 26) and
-   an implicit "yes". Probably they get the accepted rungs and no controls,
-   but "the organizer declines their own session" is a real case the app
-   already handles elsewhere (`ORGANIZER_UNLESS_DECLINED`).
-2. **What does the event page show for a recurring event now?** One answer per
+Taken before any code, because every one of them changes what gets built
+rather than how it looks.
+
+**1. The organizer is implicitly attending, and gets the accepted rungs.**
+No answer required from them per occurrence: 24 hours and 1 hour, with the
+single *Can't make it* button. This is `ORGANIZER_UNLESS_DECLINED` (idea 26)
+carried over intact and made per-occurrence — they are running it, so they
+are there unless they say otherwise, and now they can say otherwise for one
+session without abandoning the series.
+
+**2. Someone can answer for any occurrence the calendar shows; the DM only
+ever asks about the next one.** Two different surfaces with two different
+jobs: a DM is about one session and asking it to be about six would be
+unreadable, while the website can reasonably let you decline the week you are
+away.
+
+*This couples attendance to `IDEAS.md` item 22*, which is still open: the
+calendar can only show this month and next, so "the visible calendar" today
+means a two-month horizon. If item 22 is ever resolved with real month
+paging, the attendance horizon moves with it — and item 22 stops being purely
+a navigation question, because arbitrary paging would then mean arbitrary
+attendance rows. Worth deciding them together if item 22 is picked up first.
+
+**3. A change to an event clears attendance only if the date moves.** Moving
+to another day re-asks everyone and restarts the ladder; shifting the time
+within the same local day keeps every answer and only notifies. The test this
+passes and the alternatives fail is whether it can be explained to a player
+in one sentence: *"if we move it to a different day, you'll be asked again."*
+
+The rule is deliberately about the **local** date in the event's own timezone,
+not a UTC one, because "same evening, half an hour later" must not count as a
+date change for a session that starts at 23:30.
+
+**4. Below the minimum, the organizer decides — unless they asked not to be
+asked.** Dropping below `minimum_attendees` DMs the organizer with a *Cancel
+this session* button. If they ticked "cancel automatically" when setting the
+minimum, it cancels itself and everyone still attending is told.
+
+The reasoning is about what a button should be able to do to other people.
+Auto-cancel by default means one person pressing *Can't make it* ends
+everybody else's evening, possibly without ever realising they did it. An
+organizer who genuinely wants "four players or it's off" can still have
+exactly that; nobody gets it by accident.
+
+**5. The migration drops existing answers rather than guessing.** No
+`rsvp_status` is carried into `event_attendance`. Everyone starts unanswered
+and the ladder asks.
+
+This is the honest option and it is not the comfortable one, so the costs go
+here rather than being discovered later:
+
+- **Anyone who had declined will be asked again.** They said no once, under a
+  model where that meant the whole series, and the release takes that away.
+  That is the sharpest single consequence of this spec and the changelog has
+  to say so plainly — this project has form for that (v0.4.4's entry said
+  outright that nothing changed for anyone yet).
+- **The first tick after release has a backlog**, because every upcoming
+  event's invitees are simultaneously unanswered. It is a throughput spike,
+  not a spam spike: the nearest-due-rung rule still means one DM per person
+  per occurrence, and the outbox drains the rest over successive ticks. Worth
+  watching the first few ticks on the sandbox with a realistic number of
+  events before doing it in production.
+- **The alternative was worse.** Copying an answer forward across occurrences
+  nobody was ever shown manufactures commitments, which is the exact failure
+  per-occurrence attendance exists to prevent.
+
+## Still open
+
+1. **What does the event page show for a recurring event?** One answer per
    occurrence means the detail page needs an occurrence picker, or the next
-   occurrence's answer with a way to see the rest. This is a real frontend
-   design question and it is not costed here.
-3. **Does a change request (specs/0003) reset attendance?** If the organizer
-   moves a session by two hours, everyone's "I'm in" was for the old time.
-   Arguably every answer should revert to unanswered and the ladder restart.
-   Arguably that is infuriating for a ten-minute shift.
-4. **How far ahead do recurring occurrences get attendance rows?** They are
-   computed, not stored, so "the next one" is a moving target the ladder has
-   to resolve on every tick.
+   occurrence's answer with a way to reach the others. Decision 2 makes this
+   load-bearing rather than cosmetic — the site is now the *only* place a
+   further-out occurrence can be answered. Not costed here, and it is the
+   largest remaining unknown.
+2. **How are a recurring event's occurrences resolved on each tick?** They are
+   computed from the rule, not stored, so "the next one" is a moving target
+   and "every one the calendar shows" is a range that has to be expanded per
+   event per tick. `expandOccurrencesForEvent` already does this for
+   reminders; whether it can carry the attendance join cheaply is a build
+   question worth measuring before stage 2.
 
 ## Rejected alternatives
 

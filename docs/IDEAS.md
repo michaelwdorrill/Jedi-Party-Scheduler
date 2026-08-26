@@ -208,6 +208,15 @@ much cheaper than it looked (the grid moves by one month, once, not to
 "arbitrary months" as that entry assumed), and pitch C's value partly
 rests on the ceiling being *invisible* rather than raised.
 
+**It has a consequence now that it did not have before** (`specs/0014`,
+Aug 2026). Attendance became per occurrence, and the decision there was that
+someone may answer for any occurrence *the calendar shows* — so the window
+this item is about is no longer only a navigation limit, it is the horizon
+over which attendance rows can exist. Resolving 22 with real unbounded paging
+would therefore mean unbounded attendance rows, which is a different
+conversation from "let me look at December". The two want deciding together
+if this one is picked up first.
+
 Deliberately left out of v0.4: it's a behaviour change, not a design one.
 Worth deciding whether the fix is a real month pager (prev/next without
 bound, which means `/me/events` gets asked for arbitrary windows and the
