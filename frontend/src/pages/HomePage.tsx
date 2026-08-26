@@ -5,6 +5,7 @@ import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
 import {
+  AGENDA_DAYS,
   formatTimeRange,
   gridWindow,
   horizonWindow,
@@ -123,6 +124,22 @@ export default function HomePage() {
   // The rail is anchored to now rather than to the month on screen, so paging
   // to December does not empty it. Cancelled sessions are dropped: the rail
   // answers "what is coming up", and a cancelled one is not.
+  // The agenda answers a different question from the grid, so it reads the
+  // horizon's data rather than the month's. Scoping it to the visible month
+  // was wrong in a way that showed: an event on 3 September appeared under
+  // August, because 3 September is a cell in August's grid.
+  //
+  // No third request -- the horizon fetch already covers 60 days from now, so
+  // a fortnight is a filter on data the rail has loaded anyway.
+  const agenda = useMemo(() => {
+    const now = Date.now();
+    const until = now + AGENDA_DAYS * 24 * 60 * 60 * 1000;
+    return (horizon.data ?? [])
+      .filter((occ) => matchesFilter(occ, filter))
+      .filter((o) => o.startAt != null && o.startAt >= now && o.startAt <= until)
+      .sort((a, b) => a.startAt! - b.startAt!);
+  }, [horizon.data, filter]);
+
   const upNext = useMemo(() => {
     const now = Date.now();
     return (horizon.data ?? [])
@@ -182,10 +199,10 @@ export default function HomePage() {
             ))}
           </div>
 
-          {/* Any month, in either direction (IDEAS item 22). The pager applies
-              to both views: the agenda lists whatever month is on screen, so
-              a control that only appeared on the grid would leave the agenda
-              stuck on this month with no way to say so. */}
+          {/* Any month, in either direction (IDEAS item 22). Month view only:
+              the agenda is a rolling fortnight from today, so a pager beside
+              it would be a control that does nothing. */}
+          {view === 'month' && (
           <div className="flex items-center gap-1">
             {/* The selects announce their own value on change, but the month
                 *changing* underneath a Previous/Next press is otherwise
@@ -211,7 +228,7 @@ export default function HomePage() {
                 aria-label="Month"
                 value={monthStart.month}
                 onChange={(e) => setMonthOffset(offsetForMonth(monthStart.year, Number(e.target.value), zone))}
-                className="border-x border-edge-strong bg-transparent px-2 py-1.5 font-display text-sm uppercase tracking-wide text-ink"
+                className="border-x border-edge-strong bg-raised px-2 py-1.5 font-display text-sm uppercase tracking-wide text-ink"
               >
                 {MONTH_NAMES.map((name, i) => (
                   <option key={name} value={i + 1}>
@@ -223,7 +240,7 @@ export default function HomePage() {
                 aria-label="Year"
                 value={monthStart.year}
                 onChange={(e) => setMonthOffset(offsetForMonth(Number(e.target.value), monthStart.month, zone))}
-                className="bg-transparent px-2 py-1.5 font-display text-sm uppercase tracking-wide text-ink"
+                className="bg-raised px-2 py-1.5 font-display text-sm uppercase tracking-wide text-ink"
               >
                 {years.map((y) => (
                   <option key={y} value={y}>
@@ -252,6 +269,7 @@ export default function HomePage() {
               </button>
             )}
           </div>
+          )}
 
           <select
             value={filterValue}
@@ -295,25 +313,28 @@ export default function HomePage() {
         />
       )}
 
-      {loading ? (
+      {(view === 'agenda' ? horizon.loading : loading) ? (
         <Loading />
-      ) : error ? (
+      ) : (view === 'agenda' ? horizon.error : error) ? (
         // Before the empty state, never instead of it: an empty calendar and a
         // calendar that failed to load are different facts about the day.
         <Card padding="md">
-          <ErrorState message={error} onRetry={reload} />
+          <ErrorState
+            message={(view === 'agenda' ? horizon.error : error) as string}
+            onRetry={view === 'agenda' ? horizon.reload : reload}
+          />
         </Card>
       ) : view === 'agenda' ? (
         <Card padding="md">
-          {visible.length === 0 ? (
+          {agenda.length === 0 ? (
             <EmptyState
-              title={`Nothing in ${monthStart.toFormat('LLLL')}`}
+              title="Nothing in the next two weeks"
               action={!noServers ? <Button to="/events/new">+ New Event</Button> : undefined}
             >
               {emptyBody}
             </EmptyState>
           ) : (
-            <AgendaList occurrences={visible} zone={zone} />
+            <AgendaList occurrences={agenda} zone={zone} />
           )}
         </Card>
       ) : (

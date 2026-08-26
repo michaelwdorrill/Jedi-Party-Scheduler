@@ -25,7 +25,11 @@ export function offsetForMonth(year: number, month: number, zone: string): numbe
 // arrows stay unbounded — so the viewed year is always included even when it
 // is outside the range, or a select would sit blank on a month its own arrows
 // reached.
-export const YEAR_RANGE_BACK = 3;
+//
+// Nothing before this year: the calendar can still *reach* last March with
+// the arrows, but offering a list of past years in a scheduling app is
+// offering to plan something that already happened.
+export const YEAR_RANGE_BACK = 0;
 export const YEAR_RANGE_FORWARD = 5;
 
 export function yearOptions(viewedYear: number, zone: string): number[] {
@@ -58,6 +62,12 @@ export function gridWindow(monthStart: DateTime) {
 // Sixty days is the Dashboard's old query, from before spec 0009 merged it
 // into this page.
 export const HORIZON_DAYS = 60;
+
+// The agenda answers "what am I doing soon", which is a different question
+// from the grid's "what does this month look like". Scoping it to the month
+// on screen made it inherit the grid's padding days -- an event on 3
+// September showed up under August, because that is a cell in August's grid.
+export const AGENDA_DAYS = 14;
 
 export function horizonWindow(zone: string) {
   const now = DateTime.now().setZone(zone);
