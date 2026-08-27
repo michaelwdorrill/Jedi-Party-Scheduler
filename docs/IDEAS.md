@@ -464,6 +464,46 @@ events — at which point "who is coming to this night" stops being a poll
 question at all and becomes an ordinary event's invitee list, which already
 works.
 
+### 50. An invite DM is still sent for a poll that has already resolved
+
+Found by accident, Aug 2026, while testing v0.5: the resolve fixture's poll
+was voted on *in the app* before its invitation DM had gone out, which left
+an invite queued for a poll that was already settled.
+
+`sweepNewInvites` filters on `e.status != 'cancelled'` and nothing else, so a
+resolved event is still an event people get invited to. For a fixed-time
+event that is correct — "you're invited to this thing on Thursday" is true
+whatever the event's status. For a *poll* it is not: the DM says "you've been
+invited to vote on X" about a question that has an answer.
+
+**Pre-existing, and v0.5 is what made it visible.** Before, that DM was text
+ending in a link, and following the link showed a resolved poll — mildly
+odd, easy to miss. Now it carries a select of candidates, and pressing it
+answers "Voting is closed for this event", which is a control that exists
+only to refuse.
+
+It half-heals itself, which is its own trap. Within a tick the sweeps run in
+this order: `sweepSingleWinnerPollNotifications` (which now performs
+edit-on-resolve) comes *before* `sweepNewInvites`. So tick N sends the stale
+invite and records its message id; tick N+1's edit finds that id and rewrites
+the message into "is settled: …" with RSVP buttons. The wrong DM therefore
+exists for about fifteen minutes and then quietly becomes the right one —
+which means anyone who looks later sees nothing wrong.
+
+Options, roughly in order of honesty:
+- **Don't invite anyone to vote on a settled poll.** Add `AND NOT (e.event_type
+  = 'poll' AND e.status <> 'active')` to the sweep. One predicate, and it
+  stops the wrong message being sent rather than fixing it afterwards.
+- **Send it, but as the settled message.** More code, and it duplicates what
+  edit-on-resolve already renders.
+- **Leave it**, on the grounds that the edit tidies up within a tick. Rejected
+  in advance: a DM that says the wrong thing for fifteen minutes is a DM that
+  says the wrong thing, and "it fixes itself before most people look" is the
+  reasoning that let item 47 hide for a whole release.
+
+Worth doing with idea 46, since both are about a DM whose contents no longer
+match the state behind it.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
