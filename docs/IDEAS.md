@@ -387,6 +387,14 @@ Related to the edit-on-resolve work in `specs/0010`, which is the same shape
 from the other end — a message whose controls should reflect state that has
 moved since it was sent.
 
+One half of this landed for polls without being aimed at it. Keeping the
+controls after an answer (v0.5) meant the select had to be rebuilt, and a
+rebuilt select can carry `default: true` on the picks — so a poll DM you
+have answered *does* reopen showing what is on record. That only covers the
+message you answered, though. A **new** reminder about the same poll is a
+fresh send with a fresh select, and it still arrives blank. So the gap here
+is unchanged for reminders, and buttons never had the mechanism at all.
+
 
 ### 48. Reminders should depend on whether you have answered
 
