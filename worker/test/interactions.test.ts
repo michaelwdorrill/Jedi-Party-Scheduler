@@ -1,7 +1,8 @@
 import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/router';
-import { parseCustomId, rsvpCustomId, voteCustomId, withAnswer } from '../src/lib/interactions';
+import { keepSelection, parseCustomId, rsvpCustomId, voteCustomId, withAnswer } from '../src/lib/interactions';
+import { pollSelect, rsvpButtons } from '../src/lib/dmComponents';
 import { countRows, seedEvent, seedGuild, seedInvite, seedMembership, seedUser, setup } from './helpers';
 import type { Env } from '../src/env';
 import type { ShimDatabase } from './d1shim';
@@ -115,7 +116,7 @@ describe('POST /discord/interactions -- verification', () => {
 });
 
 describe('POST /discord/interactions -- RSVP buttons', () => {
-  it('records the RSVP and rewrites the DM without its buttons', async () => {
+  it('records the RSVP and rewrites the DM, keeping its buttons', async () => {
     const { db, env } = setup();
     await seedInvitedUser(db);
 
@@ -123,7 +124,7 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
       type: 3,
       data: { custom_id: rsvpCustomId('accepted', 'e1') },
       user: { id: 'u1' },
-      message: { content: "You're invited to Test event" },
+      message: { content: "You're invited to Test event", components: rsvpButtons('e1') },
     });
     const res = await post(envWithKey(env), body, headers);
 
@@ -134,9 +135,56 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
     expect(json.type).toBe(7);
     expect(json.data.content).toContain("You're invited to Test event");
     expect(json.data.content).toContain("you're in.");
-    expect(json.data.components).toEqual([]);
+    // The buttons survive the edit. Taking them away would make the DM a
+    // one-shot and send anyone changing their mind to the website, which is
+    // the journey this endpoint exists to remove.
+    expect(json.data.components).toEqual(rsvpButtons('e1'));
 
     expect(await countRows(db, 'event_invites', `event_id = 'e1' AND user_id = 'u1' AND rsvp_status = 'accepted'`)).toBe(1);
+  });
+
+  it('keeps a partial button set rather than putting the missing ones back', async () => {
+    const { db, env } = setup();
+    await seedInvitedUser(db);
+
+    // What specs/0014's ladder sends someone who already said maybe: yes and
+    // no only. Answering it must not resurrect a Maybe button.
+    const all = rsvpButtons('e1') as { components: unknown[] }[];
+    const [row] = all;
+    const twoButtons = [{ ...row, components: [row.components[0], row.components[2]] }];
+
+    const { body, headers } = signed({
+      type: 3,
+      data: { custom_id: rsvpCustomId('declined', 'e1') },
+      user: { id: 'u1' },
+      message: { content: 'Game night', components: twoButtons },
+    });
+    const json = (await (await post(envWithKey(env), body, headers)).json()) as {
+      data: { components: { components: unknown[] }[] };
+    };
+
+    expect(json.data.components).toEqual(twoButtons);
+    expect(json.data.components[0].components).toHaveLength(2);
+  });
+
+  it('answers with a full button set when the payload carried none', async () => {
+    const { db, env } = setup();
+    await seedInvitedUser(db);
+
+    const { body, headers } = signed({
+      type: 3,
+      data: { custom_id: rsvpCustomId('accepted', 'e1') },
+      user: { id: 'u1' },
+      message: { content: 'Game night' },
+    });
+    const json = (await (await post(envWithKey(env), body, headers)).json()) as {
+      data: { components: unknown[] };
+    };
+
+    // Not reachable from a real DM -- you cannot press a button that is not
+    // there -- so this pins the fallback rather than a journey: a signed but
+    // odd payload still leaves a usable message behind.
+    expect(json.data.components).toEqual(rsvpButtons('e1'));
   });
 
   it('replaces its own previous answer rather than stacking a second one', async () => {
@@ -308,6 +356,55 @@ describe('POST /discord/interactions -- poll select', () => {
     });
     await post(envWithKey(env), second.body, second.headers);
 
+    expect(await countRows(db, 'event_poll_votes', `user_id = 'u1'`)).toBe(1);
+    expect(await countRows(db, 'event_poll_votes', `user_id = 'u1' AND option_id = 'o2'`)).toBe(1);
+  });
+
+  it('keeps the select after an answer, with the picks ticked, so it can be changed again', async () => {
+    const { db, env } = setup();
+    await seedPoll(db);
+
+    const sent = pollSelect('p1', [
+      { id: 'o1', label: 'Mon' },
+      { id: 'o2', label: 'Tue' },
+      { id: 'o3', label: 'Wed' },
+    ]);
+
+    const first = signed({
+      type: 3,
+      data: { custom_id: voteCustomId('p1'), values: ['o1', 'o3'] },
+      user: { id: 'u1' },
+      message: { content: 'Which nights work?', components: sent },
+    });
+    const firstJson = (await (await post(envWithKey(env), first.body, first.headers)).json()) as {
+      data: { content: string; components: { components: { options: { value: string; default: boolean }[] }[] }[] };
+    };
+
+    // Reopening the DM has to show what is on record, not an untouched picker.
+    const options = firstJson.data.components[0].components[0].options;
+    expect(options.map((o) => [o.value, o.default])).toEqual([
+      ['o1', true],
+      ['o2', false],
+      ['o3', true],
+    ]);
+
+    // And the whole point of keeping it: a second answer arrives, through the
+    // components the first answer left behind, and replaces the first.
+    const second = signed({
+      type: 3,
+      data: { custom_id: voteCustomId('p1'), values: ['o2'] },
+      user: { id: 'u1' },
+      message: { content: firstJson.data.content, components: firstJson.data.components },
+    });
+    const secondJson = (await (await post(envWithKey(env), second.body, second.headers)).json()) as {
+      data: { components: { components: { options: { value: string; default: boolean }[] }[] }[] };
+    };
+
+    expect(secondJson.data.components[0].components[0].options.map((o) => [o.value, o.default])).toEqual([
+      ['o1', false],
+      ['o2', true],
+      ['o3', false],
+    ]);
     expect(await countRows(db, 'event_poll_votes', `user_id = 'u1'`)).toBe(1);
     expect(await countRows(db, 'event_poll_votes', `user_id = 'u1' AND option_id = 'o2'`)).toBe(1);
   });
@@ -498,5 +595,39 @@ describe('a press from someone behind on the Terms (item 45)', () => {
     const json = (await (await post(envWithKey(env), body, headers)).json()) as { type: number };
     expect(json.type).toBe(7);
     expect(await countRows(db, 'event_invites', `user_id = 'u1' AND rsvp_status = 'accepted'`)).toBe(1);
+  });
+});
+
+describe('keepSelection', () => {
+  const select = () =>
+    pollSelect('p1', [
+      { id: 'o1', label: 'Mon' },
+      { id: 'o2', label: 'Tue' },
+    ]) as { components: { options: { value: string; default?: boolean }[] }[] }[];
+
+  it('marks every picked value and unmarks the rest', () => {
+    const kept = keepSelection(select(), ['o2']) as { components: { options: { value: string; default: boolean }[] }[] }[];
+    expect(kept[0].components[0].options.map((o) => o.default)).toEqual([false, true]);
+  });
+
+  it('unmarks everything for an empty pick, so "none of these" reopens empty', () => {
+    const kept = keepSelection(select(), []) as { components: { options: { value: string; default: boolean }[] }[] }[];
+    expect(kept[0].components[0].options.every((o) => o.default === false)).toBe(true);
+  });
+
+  it('leaves anything that is not a string select alone', () => {
+    const buttons = rsvpButtons('e1');
+    expect(keepSelection(buttons, ['whatever'])).toEqual(buttons);
+  });
+
+  it('returns an empty set rather than throwing when there are no components', () => {
+    expect(keepSelection(undefined, ['o1'])).toEqual([]);
+  });
+
+  // A select that reopens without its ticks is cosmetic; a malformed one
+  // Discord rejects would take the whole edit down with it.
+  it('passes a shape it does not recognise straight through', () => {
+    const odd = [{ type: 1, components: 'not an array' }] as unknown as unknown[];
+    expect(keepSelection(odd, ['o1'])).toEqual(odd);
   });
 });

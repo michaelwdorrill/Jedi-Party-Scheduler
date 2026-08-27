@@ -172,6 +172,17 @@ spec picks the first wherever it fits:
   poll, since `checkThresholdAndResolve` can fan out. Measure it on the
   sandbox; defer only if the measurement says to.
 
+The edit **keeps the controls**. The first build cleared them, on the theory
+that a message showing "Recorded: you're in." has nothing left to press --
+which turned out to make every DM a one-shot, so anyone whose plans changed
+was sent to the website, the exact journey this endpoint exists to remove. It
+also made `recordPollSelection`'s clearing of dropped candidates unreachable
+from Discord, since a second answer could never arrive. A select comes back
+with its picks marked `default: true`, rebuilt from the components Discord
+returns with the interaction rather than re-queried, so it reopens showing
+what is on record. Buttons are echoed rather than rebuilt, so the ladder in
+specs/0014 can send two of the three without this putting the third back.
+
 Do not use `ctx.waitUntil` to do the work and answer early: the interaction
 token is valid for 15 minutes, but a `waitUntil` that fails leaves the user
 looking at a DM that never changes and no record that anything went wrong.

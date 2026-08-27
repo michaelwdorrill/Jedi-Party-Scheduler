@@ -2,6 +2,7 @@ import type { Env } from '../env';
 import { boundContent } from './discord';
 import { recordRsvp, type RsvpStatus } from './attendance';
 import { recordPollSelection } from './polls';
+import { rsvpButtons } from './dmComponents';
 import { CURRENT_POLICY_VERSION } from './policy';
 
 // Discord interactions (specs/0010). This is the first thing in the app whose
@@ -61,7 +62,10 @@ export interface Interaction {
   data?: { custom_id?: string; values?: string[] };
   member?: { user?: { id?: string } };
   user?: { id?: string };
-  message?: { content?: string };
+  // The message the control is attached to, which Discord sends back in full.
+  // Its components are how a select's own candidates are recovered without
+  // re-querying them -- see keepSelection.
+  message?: { content?: string; components?: unknown[] };
 }
 
 function hexToBytes(hex: string): Uint8Array | null {
@@ -188,15 +192,80 @@ function ephemeral(content: string): InteractionResponse {
   };
 }
 
-// Rewrites the DM in place and takes its controls away, which both
-// acknowledges the interaction and shows what was recorded in one response.
-// There is deliberately no second "thanks!" message and no ephemeral
-// confirmation to dismiss.
-function updateMessage(originalContent: string, answer: string): InteractionResponse {
+// Rewrites the DM in place, which both acknowledges the interaction and shows
+// what was recorded in one response. There is deliberately no second
+// "thanks!" message and no ephemeral confirmation to dismiss.
+//
+// **The controls stay.** They did not at first, and that was wrong in a way
+// only pressing them showed: clearing them made every DM a one-shot, so
+// somebody who said "I'm in" and then couldn't make it had to go to the
+// website — which is the exact journey this endpoint exists to remove. The
+// app has always let you change a vote until the deadline and an RSVP
+// whenever; the DM has to mean the same thing.
+//
+// It also made a whole code path unreachable. recordPollSelection clears the
+// candidates you leave out precisely so a *second* answer replaces the first,
+// and no second answer could ever arrive.
+function updateMessage(
+  originalContent: string,
+  answer: string,
+  components: unknown[],
+): InteractionResponse {
   return {
     type: RESPONSE_TYPE.UPDATE_MESSAGE,
-    data: { content: withAnswer(originalContent, answer), components: [], allowed_mentions: NO_MENTIONS },
+    data: { content: withAnswer(originalContent, answer), components, allowed_mentions: NO_MENTIONS },
   };
+}
+
+// The select as it came in, with the chosen candidates marked so it reopens
+// showing what is on record rather than looking untouched.
+//
+// Rebuilt from the incoming message rather than from the database: Discord
+// sends the components back with the interaction, and they already carry the
+// candidate labels rendered in this recipient's timezone. Re-deriving them
+// would mean another query and another chance to render them differently.
+//
+// Anything unexpected in that structure falls through to returning it
+// unchanged. A select that reopens without its ticks is a small cosmetic
+// loss; a malformed one that Discord rejects would take the whole edit down.
+export function keepSelection(components: unknown[] | undefined, picked: string[]): unknown[] {
+  if (!Array.isArray(components)) return [];
+  const chosen = new Set(picked);
+  try {
+    return components.map((row) => {
+      const r = row as { type?: number; components?: unknown[] };
+      if (!Array.isArray(r.components)) return row;
+      return {
+        ...r,
+        components: r.components.map((component) => {
+          const c = component as { type?: number; options?: { value?: string }[] };
+          if (c.type !== COMPONENT_TYPE_STRING_SELECT || !Array.isArray(c.options)) return component;
+          return { ...c, options: c.options.map((o) => ({ ...o, default: chosen.has(String(o.value)) })) };
+        }),
+      };
+    });
+  } catch {
+    return components;
+  }
+}
+
+// Discord's string select. Named here rather than imported from
+// lib/dmComponents so the receiving half does not depend on the sending half
+// for a protocol constant.
+const COMPONENT_TYPE_STRING_SELECT = 3;
+
+// The buttons as they came in, or a fresh full set if the payload did not
+// carry any.
+//
+// Echoed rather than rebuilt because the sender does not always attach all
+// three: specs/0014's reminder ladder drops "Maybe" from a reminder to
+// somebody who already said maybe, and rebuilding here would quietly put it
+// back. What arrives has already been through signature verification and the
+// custom_id parse that got us into this branch, so echoing it is not trust in
+// Discord's payload so much as reuse of a structure we authored one message
+// ago.
+export function keepButtons(components: unknown[] | undefined, eventId: string): unknown[] {
+  return Array.isArray(components) && components.length > 0 ? components : rsvpButtons(eventId);
 }
 
 const RSVP_ANSWER: Record<RsvpStatus, string> = {
@@ -263,7 +332,7 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
     if (outcome === 'not_invited') {
       return ephemeral(`You're not on the invite list for that one any more. ${siteLink(env)}`);
     }
-    return updateMessage(original, RSVP_ANSWER[parsed.status]);
+    return updateMessage(original, RSVP_ANSWER[parsed.status], keepButtons(interaction.message?.components, parsed.eventId));
   }
 
   const picked = interaction.data?.values ?? [];
@@ -284,7 +353,7 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
   // which stays visible above this one after the edit -- saying it twice in
   // a message this small reads like the bot is arguing with itself.
   const answer = picked.length === 0 ? 'none of these work for you.' : `${picked.length} of these work for you.`;
-  return updateMessage(original, answer);
+  return updateMessage(original, answer, keepSelection(interaction.message?.components, picked));
 }
 
 export async function handleInteraction(env: Env, interaction: Interaction): Promise<InteractionResponse> {
