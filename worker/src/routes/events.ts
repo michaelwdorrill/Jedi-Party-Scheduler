@@ -3,6 +3,7 @@ import type { AppEnv } from '../lib/authMiddleware';
 import type { Env } from '../env';
 import type { EventRow } from '../lib/events';
 import { requireActiveGuildMember } from '../lib/db';
+import { recordRsvp, type RsvpStatus } from '../lib/attendance';
 import { newId } from '../lib/ids';
 import { addInvitesToEvent, updateEvent, type EventWriteInput } from '../lib/eventWrites';
 import { assertIsoDate, assertOneOf, assertStringArray, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
@@ -324,23 +325,20 @@ eventRoutes.delete('/:eventId/invites/:userId', async (c) => {
   return c.json({ ok: true });
 });
 
+// The body of this route now lives in lib/attendance.ts, permission checks
+// included, so that a Discord button press records an RSVP through exactly
+// the same code (specs/0010). What stays here is the HTTP shape: parse,
+// call, translate the outcome into a status code.
 eventRoutes.post('/:eventId/rsvp', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
-  const body = await readJsonBody<{ status: 'accepted' | 'declined' | 'tentative' }>(c);
+  const body = await readJsonBody<{ status: RsvpStatus }>(c);
   const status = assertOneOf(body.status, 'status', ['accepted', 'declined', 'tentative'] as const);
 
-  const event = await c.env.DB.prepare(`SELECT guild_id FROM events WHERE id = ?`).bind(eventId).first<{ guild_id: string }>();
-  if (!event || !(await requireActiveGuildMember(c.env, userId, event.guild_id))) {
-    return c.text('Not invited to this event', 403);
-  }
-
-  const result = await c.env.DB.prepare(
-    `UPDATE event_invites SET rsvp_status = ?, responded_at = ? WHERE event_id = ? AND user_id = ?`,
-  )
-    .bind(status, Date.now(), eventId, userId)
-    .run();
-
-  if (result.meta.changes === 0) return c.text('Not invited to this event', 403);
+  const outcome = await recordRsvp(c.env, userId, eventId, status);
+  // A missing event and an uninvited caller stay one answer, as they were
+  // before the extraction: telling someone which of the two it is would let
+  // an event id be probed for existence.
+  if (outcome !== 'recorded') return c.text('Not invited to this event', 403);
   return c.json({ ok: true });
 });

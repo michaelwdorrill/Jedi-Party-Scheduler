@@ -1,0 +1,26 @@
+-- specs/0010's components, and the same argument migration 0014 makes for
+-- `content` one column over.
+--
+-- 0014 exists because a retry cannot re-derive what the source sweep
+-- rendered: by the time a retry is due, the poll may have resolved, the
+-- occurrence may be in the past, and the sweep that built the text no longer
+-- selects the row at all. So the rendered text is captured on the attempt
+-- that has it and carried forward by a source-independent consumer.
+--
+-- A message's components are the same kind of fact and go stale the same
+-- way -- more so, in fact: an options poll's select lists that poll's
+-- candidates, and "the candidates as they were when we wrote this DM" is
+-- exactly what a retry has no way to reconstruct. Without this column a
+-- retried invite would arrive with its text and no buttons, silently worse
+-- than the one that failed, and only for the people whose first delivery
+-- happened to fail.
+--
+-- Stored as the JSON array Discord's message-create body takes, so the
+-- delivery path hands it straight through without re-interpreting it. NULL
+-- means "no components", which is every row written before this and every
+-- notification type that carries none.
+--
+-- notification_log only, for the reason 0022 gives: nothing attaches a
+-- component to a group nudge or a change-request DM, and a column nothing
+-- writes is a column that rots.
+ALTER TABLE notification_log ADD COLUMN components TEXT;

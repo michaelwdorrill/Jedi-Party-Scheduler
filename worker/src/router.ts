@@ -11,6 +11,7 @@ import { pollRoutes } from './routes/polls';
 import { changeRequestRoutes } from './routes/changeRequests';
 import { personalRoutes } from './routes/personal';
 import { adminRoutes } from './routes/admin';
+import { discordInteractionRoutes } from './routes/discordInteractions';
 import { MembershipUnavailableError } from './lib/db';
 import { BodyTooLargeError, ConflictError, FreeBusyTooLargeError, MAX_BODY_BYTES, ValidationError } from './lib/validate';
 
@@ -93,6 +94,13 @@ export function buildApp() {
 
   app.use('/admin/*', requireAuth, requirePolicyAcceptance);
   app.route('/admin', adminRoutes);
+
+  // Unauthenticated on purpose: a Discord interaction arrives with no cookie
+  // and no Authorization header, so this endpoint authenticates by Ed25519
+  // signature alone and cannot sit behind requireAuth. It is also outside the
+  // policy gate -- a button press is not a place to put a Terms dialog, and
+  // the acceptance state is checked where it can actually be shown.
+  app.route('/discord', discordInteractionRoutes);
 
   return app;
 }

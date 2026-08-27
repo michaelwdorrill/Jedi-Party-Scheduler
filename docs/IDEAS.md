@@ -152,68 +152,6 @@ should also count as "used" for someone who stays signed in and never opens
 the site, and whether organizing/being invited to a future event should
 suppress the purge even if login is stale.
 
-### 19. Make the bot interactive, not just a megaphone
-
-Today the bot is outbound-DM-only: it sends invites, reminders, poll results
-and voice nudges, and has no way to receive anything back. Everything it
-sends is a dead end that says "go to the website." Adding a Discord
-**interactions endpoint** (Discord POSTs to the Worker, Ed25519-signed;
-3-second response deadline with deferred replies for anything slower)
-is one new inbound surface that unlocks all of the following:
-
-- **Respond without leaving Discord**, tiered to the event type,
-  because one widget does not fit all three:
-  - *Fixed-time event* → three buttons (I'm in / Maybe / Can't), mapping
-    straight onto `event_invites.rsvp_status`. Full fidelity.
-  - *Options poll* → one multi-select menu of the candidate slots.
-    Discord caps a select at 25 options and `MAX_POLL_OPTIONS` is 20, so
-    it already fits. Chosen → `yes` per option; unchosen → no vote at
-    all, which is exactly how `getOptionTallies`'s LEFT JOIN already
-    treats absence, so it degrades gracefully. The yes/maybe/no nuance
-    stays available on the site.
-  - *Window poll* → a link button to the site, deliberately. Picking a
-    continuous sub-range at 15-minute granularity (now potentially
-    across several days, post-idea-6) has no honest Discord primitive:
-    two dropdowns break past 25 steps, and a text modal means parsing
-    free text.
-- **Edit the original message when a poll resolves** — swap the vote
-  control for the confirmed time and RSVP buttons. Cheap, since the
-  message id is already in hand.
-- **Slash commands** (`/schedule`, `/whos-free`, `/my-events`).
-- **Discord Scheduled Events sync** — create the guild's native
-  scheduled event when an Uncle Owen event confirms, which gets
-  Discord's own calendar UI, notifications and interested-list for free.
-- **Rich embeds instead of plain-text DMs** — pure formatting, but a
-  large part of why the current DMs "read like spam/scam" (see idea 3).
-
-**Explicitly ruled out (Aug 2026): posting event announcements to a
-server channel.** It was considered as a way to make invites feel less
-like unsolicited DMs, and rejected: a channel post is visible to
-everyone with read access to that channel, including people who have
-never used Uncle Owen, which breaks the model where an event is visible
-to its organizer and invitees only. Everything above stays DM-and-site
-scoped, and should remain so.
-
-### 22. The calendar can only ever show this month and next month
-
-`CalendarPage` holds `tab: 0 | 1` and `monthWindow(monthsFromNow: 0 | 1,
-zone)` takes that literal type, so there is no arbitrary month paging
-anywhere in the app — you cannot look at December from August, and you
-cannot look backwards at all. `fullWindow()` fetches exactly those two
-months, so it's a data limit as well as a UI one.
-
-Noticed while writing `specs/0008`, where it matters twice: it makes
-idea 20's "does the sidebar follow the calendar or stay anchored to now"
-much cheaper than it looked (the grid moves by one month, once, not to
-"arbitrary months" as that entry assumed), and pitch C's value partly
-rests on the ceiling being *invisible* rather than raised.
-
-Deliberately left out of v0.4: it's a behaviour change, not a design one.
-Worth deciding whether the fix is a real month pager (prev/next without
-bound, which means `/me/events` gets asked for arbitrary windows and the
-query bound that made spec 0006 cheap needs re-checking) or simply a
-wider fixed window. Also worth asking whether looking *backwards* at past
-sessions is wanted — nothing in the app offers that today.
 
 ### 23. The sandbox has no frontend, so the sandbox-first rule has a blind spot for frontend-only changes — partly shipped in v0.4.1
 
@@ -273,31 +211,6 @@ is still no branch you can push a frontend change to and have anything
 happen, and the choice between a sandbox Pages project and a CI preview
 bundle is still unmade.
 
-### 32. `sendBotDm` throws the sent message's id away, so idea 19's "edit the original message" is not the cheap sub-item it is written up as
-
-Idea 19 says editing a poll DM in place when the poll resolves is "cheap,
-since the message id is already in hand". It isn't in hand anywhere:
-`worker/src/lib/discord.ts`'s `sendBotDm` reads Discord's message-create
-response only for `ok`/`status`/`retry_after`, never parses the body, and
-returns `{ result, channelId }` — the id in that body is discarded at the
-moment it arrives. Nothing in `migrations/*.sql` stores a message id either
-(no column anywhere matches `message_id`), and `notification_log` dedupes on
-its own key rather than on anything Discord returned.
-
-So the sub-item costs: parsing the create response, widening
-`DmSendResult`, a migration to persist `(notification, message id,
-channel id)`, and a decision about what happens when the row is missing
-because the DM predates the change or was sent by a different bot
-application (production and sandbox are separate Discord apps, and a
-message id is only editable by the application that sent it).
-
-None of that is large, but it is a schema change inside a release that
-was otherwise scoped as "one new inbound endpoint", and it is exactly the
-kind of one-line-with-a-day-of-consequences item that idea 26's audit
-turned out to be. It should be priced into spec 0010 rather than
-discovered during it.
-
-Found while surveying the worker for v0.5 readiness, Aug 2026.
 
 ### 36. Should a group be server-agnostic, requiring only that people share a server?
 
@@ -444,34 +357,204 @@ Related to item 31's lesson from the other direction. There the guardrail
 existed and could not fail usefully; here the guardrail does not exist at all
 for the change most in need of one.
 
-### 44. The agenda's per-group colour gutter has never rendered — shipped in v0.4.5
+### 46. A reminder DM shows the buttons but not the answer already on record
 
-Found while checking v0.4.5's own work: `AgendaList` colours each row's
-left-hand time gutter with its group's hue, via
-`palette.ring.replace('ring-', 'border-')`. Tailwind generates CSS by scanning
-source text for class names, so a class assembled at runtime is never seen and
-never emitted. Before v0.4.5 `colors.ts` contained exactly **one** literal
-`border-[#…]` — so seven of the eight group colours produced no rule at all,
-and every agenda gutter has quietly been the default border colour since the
-agenda shipped.
+Found by pressing them (v0.5, sandbox, Aug 2026). The invite DM was answered
+"I'm in" at 5:45 and edited itself to say so. The 24-hour reminder for the
+same event arrived at 6:30 carrying all three buttons and no indication that
+an answer exists at all — so the only way to find out what you had said is to
+press something and see what it changes to.
 
-**It started working in v0.4.5 by accident**, which is the part worth
-recording. Item 41's `pending` swatch happens to contain the same literals
-(`border-[<ring hex>]` for all eight), so adding it made the agenda's
-long-broken gutter render for the first time. A bug fixed by coincidence is
-one commit away from breaking again.
+Offering the buttons again is *right*: a reminder is exactly when someone
+changes their mind, and that was the argument for putting controls on
+reminders in the first place. The gap is narrower than "don't show buttons"
+— it is that the message states the event and the time and omits the one
+fact the recipient already gave it.
 
-Fixed properly in the same release: `Swatch` gains a literal `border` field
-and `AgendaList` uses it. Also marked the agenda's provisional rows while
-there — see below.
+Cheap version: the reminder's text carries the current answer ("You said:
+I'm in") and the buttons stay as they are. The sweep already loads the
+invite row it filters recipients on, so the status is in hand and needs no
+extra query — worth confirming that claim against `pendingRecipients` before
+building, since it selects users rather than invites.
 
-**This is the second instance of the same mistake in two days**, and the first
-was mine an hour earlier (item 41's first draft did exactly this, caught only
-because the compiled stylesheet was checked). The rule worth writing down:
-**a Tailwind class must exist as literal text somewhere the scanner reads.**
-Anything built with a template string, a `.replace()`, or a lookup is not a
-class — it is a string that looks like one. Worth a lint rule if it happens a
-third time.
+Sharper version, and probably better: the *pressed* button is styled as the
+current answer, so the DM shows state rather than describing it. Discord has
+no "selected" style for buttons, so this means rebuilding the row with the
+current answer's button disabled or relabelled ("✓ You're in"), which is
+more code and a second thing to keep in step with `rsvp_status`.
+
+Related to the edit-on-resolve work in `specs/0010`, which is the same shape
+from the other end — a message whose controls should reflect state that has
+moved since it was sent.
+
+One half of this landed for polls without being aimed at it. Keeping the
+controls after an answer (v0.5) meant the select had to be rebuilt, and a
+rebuilt select can carry `default: true` on the picks — so a poll DM you
+have answered *does* reopen showing what is on record. That only covers the
+message you answered, though. A **new** reminder about the same poll is a
+fresh send with a fresh select, and it still arrives blank. So the gap here
+is unchanged for reminders, and buttons never had the mechanism at all.
+
+
+### 48. Reminders should depend on whether you have answered
+
+Asked for by Michael, Aug 2026, after pressing the v0.5 buttons: the app
+sends everyone the same two reminders — 24 hours and 1 hour — whether they
+accepted, said maybe, declined, or never answered at all. `pendingRecipients`
+does not read `rsvp_status` in any form.
+
+The proposal is a ladder: no answer gets nudged at 96 and 48 hours, a maybe
+at 72 and 24, an accepted at 24 and 1, a decline gets nothing further. Each
+rung carries only the controls that make sense from where the person is —
+which is the part that makes item 46 fall out as a special case rather than
+a separate fix.
+
+Designing it turned up the thing underneath, and Michael decided it:
+**attendance is per occurrence, not per event.** `notification_log` and
+`event_occurrence_overrides` are both keyed per occurrence; `event_invites`
+holds one `rsvp_status` per event. Nothing had forced those to agree because
+nothing read attendance in the notification path. The ladder is the first
+thing that does.
+
+Fully specced in `specs/0014-attendance-per-occurrence.md`, including the two
+calls that make it tractable: a multi-winner poll fans out into separate
+events on confirmation, and a recurring event is accepted one occurrence at a
+time with the next ladder starting 24 hours after the last session ends.
+
+### 49. Everyone in an event should see everyone's answer, whatever kind of event it is
+
+Asked for by Michael, Aug 2026, looking at a multi-winner poll showing "1 in"
+and "2 in" per night with no way to find out who.
+
+**Most of this is already true, which makes it much cheaper than it sounds.**
+`GET /events/:eventId` returns `rsvpStatus` for every invitee to anyone
+`loadEventIfVisible` lets through — the organizer and every invitee, gated on
+active membership of the event's server. There is no permission change here
+and no new privacy surface: the data is already shared with exactly the
+people this asks for.
+
+What blocks it is one expression in `EventDetailPage`:
+
+```tsx
+{event.eventType === 'single' ? inv.rsvpStatus : ''}
+```
+
+And that expression is *defensible*, which is the part worth thinking about
+before deleting it. `rsvp_status` on a poll invitee is almost always
+`pending`, because nobody RSVPs to a poll — they vote. A column reading
+"pending" beside everybody's name is worse than a blank one.
+
+So the gap is narrower than the request, and it is one event type:
+
+- **Fixed-time events** already do this.
+- **Window polls** already do it too, and better: since v0.4.5 (idea 39) the
+  availability view names everyone and draws the hours they gave.
+- **Options polls** show tallies and nothing else. `getOptionTallies` returns
+  counts plus the caller's own vote; no names, so the frontend could not
+  render them even if it wanted to.
+
+**The work**, then: attach voters to the poll response, and render them per
+candidate. Bounded by `MAX_POLL_OPTIONS` x invitees, which is the product
+spec 0006 was careful about — one extra query joined on the options rather
+than one per option.
+
+**And a question v0.5 created an hour before this was asked.** Edit-on-resolve
+gives people RSVP buttons once a poll settles, so a resolved poll now carries
+*both* a historical vote and a current RSVP. "Voted yes on Thursday, has
+since said they can't make it" is precisely what an organizer needs to see
+and precisely what one column cannot say. Probably: votes while the poll is
+open, RSVPs once it has resolved, and both on a resolved poll's detail page
+with the vote shown as history rather than as an answer.
+
+Worth doing with `specs/0014` in view rather than before it: that spec makes
+attendance per occurrence, and a multi-winner poll fans out into separate
+events — at which point "who is coming to this night" stops being a poll
+question at all and becomes an ordinary event's invitee list, which already
+works.
+
+### 50. An invite DM is still sent for a poll that has already resolved
+
+Found by accident, Aug 2026, while testing v0.5: the resolve fixture's poll
+was voted on *in the app* before its invitation DM had gone out, which left
+an invite queued for a poll that was already settled.
+
+`sweepNewInvites` filters on `e.status != 'cancelled'` and nothing else, so a
+resolved event is still an event people get invited to. For a fixed-time
+event that is correct — "you're invited to this thing on Thursday" is true
+whatever the event's status. For a *poll* it is not: the DM says "you've been
+invited to vote on X" about a question that has an answer.
+
+**Pre-existing, and v0.5 is what made it visible.** Before, that DM was text
+ending in a link, and following the link showed a resolved poll — mildly
+odd, easy to miss. Now it carries a select of candidates, and pressing it
+answers "Voting is closed for this event", which is a control that exists
+only to refuse.
+
+It half-heals itself, which is its own trap. Within a tick the sweeps run in
+this order: `sweepSingleWinnerPollNotifications` (which now performs
+edit-on-resolve) comes *before* `sweepNewInvites`. So tick N sends the stale
+invite and records its message id; tick N+1's edit finds that id and rewrites
+the message into "is settled: …" with RSVP buttons. The wrong DM therefore
+exists for about fifteen minutes and then quietly becomes the right one —
+which means anyone who looks later sees nothing wrong.
+
+Options, roughly in order of honesty:
+- **Don't invite anyone to vote on a settled poll.** Add `AND NOT (e.event_type
+  = 'poll' AND e.status <> 'active')` to the sweep. One predicate, and it
+  stops the wrong message being sent rather than fixing it afterwards.
+- **Send it, but as the settled message.** More code, and it duplicates what
+  edit-on-resolve already renders.
+- **Leave it**, on the grounds that the edit tidies up within a tick. Rejected
+  in advance: a DM that says the wrong thing for fifteen minutes is a DM that
+  says the wrong thing, and "it fixes itself before most people look" is the
+  reasoning that let item 47 hide for a whole release.
+
+Worth doing with idea 46, since both are about a DM whose contents no longer
+match the state behind it.
+
+### 51. A resolved poll's RSVP is recorded but never read
+
+Found while testing v0.5 (Aug 2026), one layer under item 50 and sharper.
+
+v0.5 puts RSVP buttons on a poll's DM once it settles — edit-on-resolve
+rewrites the vote message into "is settled: Thursday" with *I'm in / Maybe /
+Can't make it*, and the poll_resolved notification carries them too. Pressing
+one writes `event_invites.rsvp_status`, and the event page shows it back.
+
+But **nothing about a poll's attendance reads that column.**
+`getConfirmedAttendeeIds` answers "who is coming" from the yes-votes (or, for
+a windowed poll, from availability covering the resolved span). `rsvp_status`
+enters only through `ORGANIZER_UNLESS_DECLINED`, which applies to the
+organizer alone.
+
+So on a resolved poll: an invitee who presses *Can't make it* is still in the
+confirmed set, still gets the voice-channel DM, still counts as attending. A
+vote cast a week ago outranks an answer given a minute ago, and the app shows
+no sign of the disagreement.
+
+**This is a data-model question, not a bug to patch.** A poll's vote and an
+event's RSVP are two different statements — "that night works for me" and "I
+am coming" — and the app has quietly used the first as a proxy for the second
+since polls existed. That was fine while the second did not exist for polls.
+v0.5 created it.
+
+Three ways it could go:
+- **Once resolved, a poll is an event**: attendance comes from `rsvp_status`,
+  and the winning votes seed it (everyone who voted yes starts as accepted).
+  Clean, and it is a migration plus a rule about which votes convert.
+- **RSVP overrides the vote where one exists**, votes fill in the rest. No
+  migration, one `LEFT JOIN`, and a confirmed-set query that is harder to
+  read.
+- **Take the buttons off a resolved poll.** Honest, and it gives up the thing
+  v0.5 was for.
+
+Wants deciding with `specs/0014`, whose fan-out makes a confirmed poll day
+into a real event — at which point the first option is what happens anyway
+and this stops being a question.
+
+Related: item 50 (a settled poll still invites people to vote) and the
+comment in `sweepConfirmedMultiWinnerOptions` explaining why a multi-winner
+day's reminder carries no buttons at all.
 
 ## Already built
 
@@ -1701,3 +1784,333 @@ the colour-encoded group information already lives.
 truncating on its own. The game went to the tooltip — and, correcting this
 entry's first draft, it was already on the occurrence and needed no payload
 change.
+
+### 44. The agenda's per-group colour gutter has never rendered — shipped in v0.4.5
+
+Found while checking v0.4.5's own work: `AgendaList` colours each row's
+left-hand time gutter with its group's hue, via
+`palette.ring.replace('ring-', 'border-')`. Tailwind generates CSS by scanning
+source text for class names, so a class assembled at runtime is never seen and
+never emitted. Before v0.4.5 `colors.ts` contained exactly **one** literal
+`border-[#…]` — so seven of the eight group colours produced no rule at all,
+and every agenda gutter has quietly been the default border colour since the
+agenda shipped.
+
+**It started working in v0.4.5 by accident**, which is the part worth
+recording. Item 41's `pending` swatch happens to contain the same literals
+(`border-[<ring hex>]` for all eight), so adding it made the agenda's
+long-broken gutter render for the first time. A bug fixed by coincidence is
+one commit away from breaking again.
+
+Fixed properly in the same release: `Swatch` gains a literal `border` field
+and `AgendaList` uses it. Also marked the agenda's provisional rows while
+there — see below.
+
+**This is the second instance of the same mistake in two days**, and the first
+was mine an hour earlier (item 41's first draft did exactly this, caught only
+because the compiled stylesheet was checked). The rule worth writing down:
+**a Tailwind class must exist as literal text somewhere the scanner reads.**
+Anything built with a template string, a `.replace()`, or a lookup is not a
+class — it is a string that looks like one. Worth a lint rule if it happens a
+third time.
+
+### 45. A Discord button press is not subject to the policy re-acceptance gate — shipped in v0.5
+
+Found while building the interactions endpoint (v0.5, `specs/0010`), and it
+is a consequence of the endpoint's own design rather than an oversight in it.
+
+`requirePolicyAcceptance` (spec 0012) is middleware mounted on the
+authenticated route groups, and it works by refusing with a machine-readable
+403 that the frontend recognises and turns into the acceptance screen. The
+interactions endpoint sits outside every one of those groups, because an
+interaction carries no JWT and no session — so someone who has not agreed to
+a new Terms can still record an RSVP or a poll vote by pressing a button in
+a DM, while the same person is gated out of the website.
+
+**Deliberate for now, and the reasoning should be checked rather than
+assumed.** A consent gate works by *showing someone the documents and
+letting them agree*, and a button press in a DM has nowhere to show them:
+the honest options are to record the answer, or to refuse it with an
+ephemeral "go and agree first". Refusing is defensible; silently recording
+is what happens today.
+
+What makes this worth deciding properly rather than leaving implicit:
+- The gate exists because agreement should precede *use*, and recording an
+  RSVP is use.
+- But the DM was sent before the policy moved, so the button is an artifact
+  of a world where they had agreed — closer to "finishing something already
+  started" than to a fresh action.
+- And the buttons only exist at all on messages the bot sent, so the blast
+  radius is bounded to people who were already invited.
+
+Worth answering alongside the components-on-DMs half of v0.5, since that is
+what will make these buttons exist in the first place. An ephemeral "the
+Terms changed, agree on the site and this button will work again" is cheap
+and is probably the right answer.
+
+**Decided and built the same day it was captured (v0.5).** A press from
+someone behind on the current policy version is refused with an ephemeral
+"the Terms have changed -- agree on the site and this button will work
+again", carrying the link. Nothing is recorded.
+
+The argument that settled it is the one in the third bullet above, read the
+other way round: a consent gate works by *showing someone the documents and
+letting them agree*, and a DM has nowhere to show them. Recording the answer
+anyway would leave spec 0012's gate with a hole nothing in that spec
+acknowledges, while refusing costs the person almost nothing -- the message
+and its buttons are still sitting in their DMs once they have agreed.
+
+The check is a version comparison on the row the handler already reads to
+confirm the account still exists, so it costs no extra statement.
+
+### 22. The calendar can only ever show this month and next month — shipped in v0.5
+
+`CalendarPage` holds `tab: 0 | 1` and `monthWindow(monthsFromNow: 0 | 1,
+zone)` takes that literal type, so there is no arbitrary month paging
+anywhere in the app — you cannot look at December from August, and you
+cannot look backwards at all. `fullWindow()` fetches exactly those two
+months, so it's a data limit as well as a UI one.
+
+Noticed while writing `specs/0008`, where it matters twice: it makes
+idea 20's "does the sidebar follow the calendar or stay anchored to now"
+much cheaper than it looked (the grid moves by one month, once, not to
+"arbitrary months" as that entry assumed), and pitch C's value partly
+rests on the ceiling being *invisible* rather than raised.
+
+**It has a consequence now that it did not have before** (`specs/0014`,
+Aug 2026). Attendance became per occurrence, and the decision there was that
+someone may answer for any occurrence *the calendar shows* — so the window
+this item is about is no longer only a navigation limit, it is the horizon
+over which attendance rows can exist. Resolving 22 with real unbounded paging
+would therefore mean unbounded attendance rows, which is a different
+conversation from "let me look at December". The two want deciding together
+if this one is picked up first.
+
+Deliberately left out of v0.4: it's a behaviour change, not a design one.
+Worth deciding whether the fix is a real month pager (prev/next without
+bound, which means `/me/events` gets asked for arbitrary windows and the
+query bound that made spec 0006 cheap needs re-checking) or simply a
+wider fixed window. Also worth asking whether looking *backwards* at past
+sessions is wanted — nothing in the app offers that today.
+
+**Shipped (v0.5): a real pager, unbounded in both directions.** The entry
+asked whether the fix was arbitrary paging or a wider fixed window, and
+whether looking backwards was even wanted. Michael answered all of it at
+once — all months, and yes, backwards too.
+
+`monthWindow` took a `0 | 1` literal type, which is what made this a
+compile-time ceiling rather than a preference; it now takes any integer. The
+two tabs are a `‹ month ›` pager with a *Today* button that appears only when
+it would do something.
+
+**The query bound this entry worried about turned out not to exist.**
+`GET /me/events` has always taken arbitrary `from`/`to`, capped at
+`MAX_QUERY_RANGE_MS` (~366 days) — so the ceiling was entirely in the
+frontend and the worker needed no change at all. What spec 0006 made cheap
+was the *shape* of the query, not its range.
+
+Two things came out of doing it that the entry did not predict:
+
+- **The rail needed its own query, exactly as spec 0009 said it would.** That
+  spec assumed the "anchored to now" horizon list would cost a second,
+  smaller request, and it did not — because the two-month fetch always
+  covered now. Removing the ceiling makes the prediction come true: a grid
+  showing next March has nothing to say about what is on this week. The two
+  fetches are independent, so paging does not re-fetch the horizon and a
+  failed horizon does not take the calendar down.
+- **The old fetch had an off-by-one-month bug at its far edge.** It asked for
+  the start of this month to the end of next, but the grid pads with days
+  from adjacent months — so the *next-month* grid's trailing days, up to six
+  days into the month after, were always drawn empty whatever was scheduled
+  on them. Asking for the grid's range rather than the month's removes the
+  class rather than the instance.
+
+Verified in a real browser against a local Worker and D1 seeded with one
+event a month from two months back to three ahead: each month renders its own
+event, forwards past the old ceiling and backwards past zero, and the rail
+holds the two sessions inside its 60-day horizon while the grid sits in
+November.
+
+### 19. Make the bot interactive, not just a megaphone — shipped in v0.5
+
+Today the bot is outbound-DM-only: it sends invites, reminders, poll results
+and voice nudges, and has no way to receive anything back. Everything it
+sends is a dead end that says "go to the website." Adding a Discord
+**interactions endpoint** (Discord POSTs to the Worker, Ed25519-signed;
+3-second response deadline with deferred replies for anything slower)
+is one new inbound surface that unlocks all of the following:
+
+- **Respond without leaving Discord**, tiered to the event type,
+  because one widget does not fit all three:
+  - *Fixed-time event* → three buttons (I'm in / Maybe / Can't), mapping
+    straight onto `event_invites.rsvp_status`. Full fidelity.
+  - *Options poll* → one multi-select menu of the candidate slots.
+    Discord caps a select at 25 options and `MAX_POLL_OPTIONS` is 20, so
+    it already fits. Chosen → `yes` per option; unchosen → no vote at
+    all, which is exactly how `getOptionTallies`'s LEFT JOIN already
+    treats absence, so it degrades gracefully. The yes/maybe/no nuance
+    stays available on the site.
+  - *Window poll* → a link button to the site, deliberately. Picking a
+    continuous sub-range at 15-minute granularity (now potentially
+    across several days, post-idea-6) has no honest Discord primitive:
+    two dropdowns break past 25 steps, and a text modal means parsing
+    free text.
+- **Edit the original message when a poll resolves** — swap the vote
+  control for the confirmed time and RSVP buttons. Cheap, since the
+  message id is already in hand.
+- **Slash commands** (`/schedule`, `/whos-free`, `/my-events`).
+- **Discord Scheduled Events sync** — create the guild's native
+  scheduled event when an Uncle Owen event confirms, which gets
+  Discord's own calendar UI, notifications and interested-list for free.
+- **Rich embeds instead of plain-text DMs** — pure formatting, but a
+  large part of why the current DMs "read like spam/scam" (see idea 3).
+
+**Explicitly ruled out (Aug 2026): posting event announcements to a
+server channel.** It was considered as a way to make invites feel less
+like unsolicited DMs, and rejected: a channel post is visible to
+everyone with read access to that channel, including people who have
+never used Uncle Owen, which breaks the model where an event is visible
+to its organizer and invitees only. Everything above stays DM-and-site
+scoped, and should remain so.
+
+**Shipped (v0.5), as `specs/0010`.** One inbound endpoint turned the bot from
+a megaphone into something you can answer: `POST /discord/interactions`,
+authenticated by Ed25519 signature alone because an interaction carries no
+cookie, no session and no header of ours.
+
+What the capture got right: the tiering. Three event shapes really do want
+three different controls, and the reason a window poll gets a link rather
+than a widget is the one this entry guessed — there is no honest Discord
+primitive for "any two and a half hours in this range".
+
+What it got wrong is recorded as item 32, which turned out to be a schema
+change rather than a freebie, and it got two more: the app's `custom_id`
+needs a version in it (messages live in DMs indefinitely, and a button
+pressed a year from now must be recognisably old rather than
+misinterpreted), and a select's answer has to *clear* the candidates it
+leaves out, or deselecting a night you previously said yes to leaves the old
+yes standing.
+
+Embeds, which spec 0010 scoped into this release, are the one part that did
+not ship. The reason is in the spec: making them survive a retry costs a
+third durable column, and not doing so makes a retried DM look different
+from everyone else's. That is a decision to take with a Discord client open.
+
+### 32. `sendBotDm` throws the sent message's id away, so idea 19's "edit the original message" is not the cheap sub-item it is written up as — shipped in v0.5
+
+Idea 19 says editing a poll DM in place when the poll resolves is "cheap,
+since the message id is already in hand". It isn't in hand anywhere:
+`worker/src/lib/discord.ts`'s `sendBotDm` reads Discord's message-create
+response only for `ok`/`status`/`retry_after`, never parses the body, and
+returns `{ result, channelId }` — the id in that body is discarded at the
+moment it arrives. Nothing in `migrations/*.sql` stores a message id either
+(no column anywhere matches `message_id`), and `notification_log` dedupes on
+its own key rather than on anything Discord returned.
+
+So the sub-item costs: parsing the create response, widening
+`DmSendResult`, a migration to persist `(notification, message id,
+channel id)`, and a decision about what happens when the row is missing
+because the DM predates the change or was sent by a different bot
+application (production and sandbox are separate Discord apps, and a
+message id is only editable by the application that sent it).
+
+None of that is large, but it is a schema change inside a release that
+was otherwise scoped as "one new inbound endpoint", and it is exactly the
+kind of one-line-with-a-day-of-consequences item that idea 26's audit
+turned out to be. It should be priced into spec 0010 rather than
+discovered during it.
+
+Found while surveying the worker for v0.5 readiness, Aug 2026.
+
+**Half paid, Aug 2026 (v0.5 in progress).** `sendBotDm` now parses the
+create response and returns the message id, `deliverThroughOutbox` records
+it, and migration 0022 gives `notification_log` the column. The recording
+costs the cron nothing: the id rides along in the `UPDATE ... SET
+delivered_at` statement that was already being issued, which mattered more
+than it sounds -- an extra write per delivery is precisely the unbudgeted
+spend the Pass 9 review found.
+
+Two things were decided while building it. The column went on
+`notification_log` alone, not on the other two outbox tables, because
+nothing edits a group nudge or a change-request DM and an unread column
+goes stale unnoticed; `deliverThroughOutbox` therefore writes it
+conditionally, which has its own test. And a 2xx whose body we cannot read
+records *no* id rather than a guessed one, because the edit path reads "no
+id" as "leave that message alone" -- the safe outcome -- while a wrong id
+would edit an arbitrary message.
+
+**Stays open** until the thing the id exists for -- editing the DM when the
+poll resolves -- is actually built, along with the budget decision spec 0010
+records for it (the edit is lower priority than the notification itself).
+
+**And it turned out to have a sibling nobody had priced** (v0.5, migration
+0023). The same argument that makes a message id worth storing makes a
+message's *components* worth storing: migration 0014 exists because a retry
+cannot re-derive what the source sweep rendered, and an options poll's select
+lists the candidates as they were when the DM was written. Without that
+column a retried invite would have arrived with its text and no buttons --
+worse than the delivery it replaced, and only for the people whose first
+attempt failed, which is the kind of difference nobody would ever notice.
+
+**Fully paid (v0.5).** Migration 0022 gave `notification_log` the column,
+`sendBotDm` parses the create response for the id, and `deliverThroughOutbox`
+records it in the `UPDATE` it was already issuing — so the recording itself
+costs the cron nothing.
+
+And the thing the id existed for now uses it: `editSettledPollDms` rewrites
+the vote DM when a poll settles. Migration 0024 records that the edit
+happened, which is not bookkeeping for its own sake — without it the sweep
+redoes the edit every fifteen minutes for as long as the poll stays in its
+recency window, one Discord call per recipient per tick.
+
+The entry's warning was right in substance and understated in scope: it
+predicted a migration, and there were three (0022 for the id, 0023 for the
+components a retry cannot re-derive, 0024 for the edit marker). "One line
+with a day of consequences" is exactly what it was.
+
+### 47. A confirmed multi-winner poll day gets no reminders at all — shipped in v0.5
+
+Found while designing the reminder ladder (item 48, `specs/0014`), and it is
+a live bug rather than a design gap.
+
+`markResolved` is the only thing that sets `events.start_at`, and it runs for
+`single_winner` polls only. A `multi_winner` poll confirms individual days by
+setting `confirmed_at` on each `event_poll_options` row and never touches the
+parent event's start time — deliberately, because the event stays active and
+keeps collecting votes on other days.
+
+But `sweepReminders` selects `WHERE start_at IS NOT NULL`. So a confirmed
+multi-winner day gets exactly one DM — `sweepConfirmedMultiWinnerOptions`'s
+"this day is confirmed" — and then nothing. No 24-hour reminder, no 1-hour
+reminder, ever. Every other event shape in the app gets both.
+
+Nobody has reported it, which is its own lesson: a notification that never
+arrives leaves no trace anywhere, and the sweep that should have sent it
+reports success because it correctly found nothing to do.
+
+Two ways to fix it, and they are not the same size:
+- **Now, small:** teach the reminder sweep to select confirmed
+  `event_poll_options` rows alongside events with a `start_at`. Contained,
+  and it does not wait for anything.
+- **Later, structural:** `specs/0014`'s fan-out, where a confirmed day
+  becomes a real event and every reminder path works on it with no special
+  case at all.
+
+The first does not block the second and should probably just be done.
+
+**Fixed (v0.5), and where it went is the interesting part.** The reminder
+now rides along in `sweepConfirmedMultiWinnerOptions`, which already scans
+every confirmed multi-winner day, rather than in a sweep of its own.
+
+The first attempt *was* a sweep of its own, and measuring it turned up
+something worth keeping: one extra fixed query per tick did not merely slow
+the tick down, it stopped `sweepPurgeTerminalHistory` running **at all** —
+not at 40 ticks, not at 200. A cursored sweep costs one query on every tick
+forever whether or not it finds anything, and the tick's usable allowance
+after `RESERVED_QUERIES` was exactly enough that one more left the purge
+permanently short of the budget it needs to start.
+
+So the rule this leaves behind: **a new cursored sweep is not free, and its
+cost is paid by whatever runs last.** Folding work into a scan that already
+visits the right rows costs nothing fixed at all. `test/pass6.test.ts` is
+what caught it, and it now says so.

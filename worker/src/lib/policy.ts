@@ -20,8 +20,16 @@
 // together; two counters double the bookkeeping and force the acceptance
 // screen to explain which one moved. Splitting them later costs a migration,
 // which is cheap here and may never be needed.
-// TEMPORARY, SANDBOX ONLY -- do not merge this commit to main.
 //
-// Bumped by hand to exercise the mechanism somewhere with no real users,
-// which is step 3 of spec 0012's rollout. Production ships at 1 and dormant.
+// This has never moved from 1, and the day it does, everyone is signed out
+// and asked to agree again -- so it is the one constant in this codebase most
+// worth changing on purpose and nothing else (IDEAS.md item 43, which is
+// still open: nothing automatic guards it).
+//
+// The "TEMPORARY, SANDBOX ONLY -- do not merge this commit to main" note that
+// used to sit here was itself the accident item 43 records. It was written
+// for a scratch commit that bumped this to 2, travelled to a release branch
+// on an uncommitted edit, and was reverted -- but the comment came along and
+// then sat on `main` for four releases telling every reader not to merge a
+// commit that had already been merged.
 export const CURRENT_POLICY_VERSION = 1;

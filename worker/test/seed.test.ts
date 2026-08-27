@@ -200,3 +200,250 @@ describe('seed-poll-demo.sql', () => {
     expect(earliest.n).toBeGreaterThan(now);
   });
 });
+
+// scripts/seed-button-demo.sql, tested the same way and for the same reason:
+// a seed that fails does so against the real sandbox, minutes after you have
+// switched context to look at Discord.
+describe('seed-button-demo.sql', () => {
+  const BUTTON_SQL = readFileSync(join(__dirname, '..', 'scripts', 'seed-button-demo.sql'), 'utf8');
+  const POLL_DEMO_SQL = readFileSync(join(__dirname, '..', 'scripts', 'seed-poll-demo.sql'), 'utf8');
+  // seed-sandbox.sql is what creates the seed users; seed-poll-demo.sql only
+  // gives them membership of the operator's real guild. Running the chain in
+  // the test is what proves the order documented in the file is the real one.
+  const OPERATOR = '346042183486537730';
+
+  // What seed-poll-demo.sql needs to find before it does anything: the
+  // operator, and an active guild they are actually in.
+  function seedOperator(db: ReturnType<typeof createTestDb>) {
+    const now = Date.now();
+    db.raw.exec(`INSERT INTO guilds (id, name, is_active, added_at) VALUES ('real-guild', 'Real', 1, ${now})`);
+    db.raw.exec(
+      `INSERT INTO users (id, username, global_name, avatar_hash, timezone, notifications_enabled,
+         created_at, updated_at, last_login_at, last_login_attempt_at)
+       VALUES ('${OPERATOR}', 'michael', NULL, NULL, 'America/New_York', 1, ${now}, ${now}, ${now}, ${now})`,
+    );
+    db.raw.exec(
+      `INSERT INTO user_guild_membership (user_id, guild_id, is_member, verified_at)
+       VALUES ('${OPERATOR}', 'real-guild', 1, ${now})`,
+    );
+  }
+
+  it('applies to a schema built from the migrations, and is re-runnable', () => {
+    const db = createTestDb();
+    seedOperator(db);
+    db.raw.exec(SEED_SQL);
+    db.raw.exec(POLL_DEMO_SQL);
+
+    expect(() => db.raw.exec(BUTTON_SQL)).not.toThrow();
+    expect(() => db.raw.exec(BUTTON_SQL)).not.toThrow();
+
+    const events = db.raw.prepare(`SELECT COUNT(*) AS n FROM events WHERE id LIKE 'demo-btn-%'`).get() as { n: number };
+    expect(events.n).toBe(2);
+  });
+
+  it('invites the operator to events someone else organises, which is the whole point', () => {
+    const db = createTestDb();
+    seedOperator(db);
+    db.raw.exec(SEED_SQL);
+    db.raw.exec(POLL_DEMO_SQL);
+    db.raw.exec(BUTTON_SQL);
+
+    // If the operator were the organizer, sweepNewInvites would skip them and
+    // no DM would ever arrive -- which is exactly why seed-poll-demo.sql does
+    // not serve this purpose.
+    const organizers = db.raw
+      .prepare(`SELECT DISTINCT organizer_id AS o FROM events WHERE id LIKE 'demo-btn-%'`)
+      .all() as { o: string }[];
+    expect(organizers.map((r) => r.o)).toEqual(['seed-user-alice']);
+
+    const invited = db.raw
+      .prepare(`SELECT COUNT(*) AS n FROM event_invites WHERE event_id LIKE 'demo-btn-%' AND user_id = '${OPERATOR}'`)
+      .get() as { n: number };
+    expect(invited.n).toBe(2);
+  });
+
+  it('puts the poll deadline inside the window the deadline sweep scans', () => {
+    const db = createTestDb();
+    seedOperator(db);
+    db.raw.exec(SEED_SQL);
+    db.raw.exec(POLL_DEMO_SQL);
+    db.raw.exec(BUTTON_SQL);
+
+    const poll = db.raw
+      .prepare(`SELECT poll_deadline_at AS d FROM events WHERE id = 'demo-btn-poll'`)
+      .get() as { d: number };
+    // sweepPollDeadlineReminders looks 24 hours ahead; a deadline outside it
+    // is why seed-poll-demo.sql's week-out poll never nudges anyone.
+    expect(poll.d).toBeGreaterThan(Date.now());
+    expect(poll.d).toBeLessThan(Date.now() + 24 * 60 * 60 * 1000);
+  });
+
+  it('is a clean no-op when the operator is not in any active guild', () => {
+    const db = createTestDb();
+    // No operator, no guild: nothing to hang the fixtures off.
+    expect(() => db.raw.exec(BUTTON_SQL)).not.toThrow();
+    const events = db.raw.prepare(`SELECT COUNT(*) AS n FROM events WHERE id LIKE 'demo-btn-%'`).get() as { n: number };
+    expect(events.n).toBe(0);
+  });
+});
+
+// scripts/seed-resolve-demo.sql, tested like the others -- and with one extra
+// assertion the others do not need: the threshold has to be reachable by a
+// single vote, or the fixture cannot demonstrate the thing it exists for.
+describe('seed-resolve-demo.sql', () => {
+  const RESOLVE_SQL = readFileSync(join(__dirname, '..', 'scripts', 'seed-resolve-demo.sql'), 'utf8');
+  const POLL_DEMO_SQL = readFileSync(join(__dirname, '..', 'scripts', 'seed-poll-demo.sql'), 'utf8');
+  const OPERATOR = '346042183486537730';
+
+  function seedOperator(db: ReturnType<typeof createTestDb>) {
+    const now = Date.now();
+    db.raw.exec(`INSERT INTO guilds (id, name, is_active, added_at) VALUES ('real-guild', 'Real', 1, ${now})`);
+    db.raw.exec(
+      `INSERT INTO users (id, username, global_name, avatar_hash, timezone, notifications_enabled,
+         created_at, updated_at, last_login_at, last_login_attempt_at)
+       VALUES ('${OPERATOR}', 'michael', NULL, NULL, 'America/New_York', 1, ${now}, ${now}, ${now}, ${now})`,
+    );
+    db.raw.exec(
+      `INSERT INTO user_guild_membership (user_id, guild_id, is_member, verified_at)
+       VALUES ('${OPERATOR}', 'real-guild', 1, ${now})`,
+    );
+  }
+
+  it('applies to a migration-built schema and is re-runnable', () => {
+    const db = createTestDb();
+    seedOperator(db);
+    db.raw.exec(SEED_SQL);
+    db.raw.exec(POLL_DEMO_SQL);
+
+    expect(() => db.raw.exec(RESOLVE_SQL)).not.toThrow();
+    expect(() => db.raw.exec(RESOLVE_SQL)).not.toThrow();
+
+    const opts = db.raw
+      .prepare(`SELECT COUNT(*) AS n FROM event_poll_options WHERE event_id = 'demo-resolve'`)
+      .get() as { n: number };
+    expect(opts.n).toBe(2);
+  });
+
+  it('can be resolved by one vote, which is the whole point of it', () => {
+    const db = createTestDb();
+    seedOperator(db);
+    db.raw.exec(SEED_SQL);
+    db.raw.exec(POLL_DEMO_SQL);
+    db.raw.exec(RESOLVE_SQL);
+
+    const poll = db.raw
+      .prepare(`SELECT poll_strategy, poll_threshold_count, organizer_id FROM events WHERE id = 'demo-resolve'`)
+      .get() as { poll_strategy: string; poll_threshold_count: number; organizer_id: string };
+    expect(poll.poll_strategy).toBe('threshold');
+    expect(poll.poll_threshold_count).toBe(1);
+    // Organised by someone else, or sweepNewInvites would skip the operator's
+    // row and no DM with a dropdown would ever arrive to press.
+    expect(poll.organizer_id).toBe('seed-user-alice');
+
+    const invited = db.raw
+      .prepare(`SELECT COUNT(*) AS n FROM event_invites WHERE event_id = 'demo-resolve' AND user_id = '${OPERATOR}'`)
+      .get() as { n: number };
+    expect(invited.n).toBe(1);
+  });
+
+  it('is a clean no-op with no operator in an active guild', () => {
+    const db = createTestDb();
+    expect(() => db.raw.exec(RESOLVE_SQL)).not.toThrow();
+    const events = db.raw.prepare(`SELECT COUNT(*) AS n FROM events WHERE id = 'demo-resolve'`).get() as { n: number };
+    expect(events.n).toBe(0);
+  });
+});
+
+// scripts/clean-sandbox.sql. Tested against a database holding every fixture
+// at once, because the failure mode is a foreign key nobody thought about --
+// which is precisely how item 38 presented: a bare "FOREIGN KEY constraint
+// failed" naming no table, fifteen minutes after the cron had written the
+// rows that caused it.
+describe('clean-sandbox.sql', () => {
+  const CLEAN_SQL = readFileSync(join(__dirname, '..', 'scripts', 'clean-sandbox.sql'), 'utf8');
+  const OPERATOR = '346042183486537730';
+
+  function fullSandbox() {
+    const db = createTestDb();
+    const now = Date.now();
+    db.raw.exec(`INSERT INTO guilds (id, name, is_active, added_at) VALUES ('real-guild', 'Real', 1, ${now})`);
+    db.raw.exec(
+      `INSERT INTO users (id, username, global_name, avatar_hash, timezone, notifications_enabled,
+         created_at, updated_at, last_login_at, last_login_attempt_at)
+       VALUES ('${OPERATOR}', 'michael', NULL, NULL, 'America/New_York', 1, ${now}, ${now}, ${now}, ${now})`,
+    );
+    db.raw.exec(
+      `INSERT INTO user_guild_membership (user_id, guild_id, is_member, verified_at)
+       VALUES ('${OPERATOR}', 'real-guild', 1, ${now})`,
+    );
+    // Every fixture, so the cleaner meets each shape it will meet for real.
+    for (const file of ['seed-sandbox.sql', 'seed-poll-demo.sql', 'seed-button-demo.sql', 'seed-resolve-demo.sql']) {
+      db.raw.exec(readFileSync(join(__dirname, '..', 'scripts', file), 'utf8'));
+    }
+    return db;
+  }
+
+  function count(db: ReturnType<typeof createTestDb>, table: string): number {
+    return (db.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+  }
+
+  it('empties the schedule without tripping a foreign key', () => {
+    const db = fullSandbox();
+    expect(count(db, 'events')).toBeGreaterThan(0);
+    expect(count(db, 'groups')).toBeGreaterThan(0);
+
+    expect(() => db.raw.exec(CLEAN_SQL)).not.toThrow();
+
+    for (const table of [
+      'events',
+      'event_invites',
+      'event_poll_options',
+      'event_poll_votes',
+      'event_window_availability',
+      'personal_events',
+      'groups',
+      'group_members',
+      'notification_log',
+      'group_nudge_log',
+    ]) {
+      expect({ table, rows: count(db, table) }).toEqual({ table, rows: 0 });
+    }
+  });
+
+  it('leaves the account, its servers and its session alone', () => {
+    const db = fullSandbox();
+    db.raw.exec(
+      `INSERT INTO sessions (id, user_id, created_at, last_used_at, expires_at, revoked_at, policy_version)
+       VALUES ('s1', '${OPERATOR}', ${Date.now()}, ${Date.now()}, ${Date.now() + 86400000}, NULL, 1)`,
+    );
+
+    db.raw.exec(CLEAN_SQL);
+
+    // Staying logged in is the difference between a cleanup and a reset.
+    expect(count(db, 'sessions')).toBe(1);
+    expect(count(db, 'users')).toBeGreaterThan(0);
+    expect(count(db, 'guilds')).toBeGreaterThan(0);
+    expect(count(db, 'user_guild_membership')).toBeGreaterThan(0);
+  });
+
+  it('is re-runnable, and runs on an already-empty database', () => {
+    const db = fullSandbox();
+    db.raw.exec(CLEAN_SQL);
+    expect(() => db.raw.exec(CLEAN_SQL)).not.toThrow();
+  });
+
+  it('leaves the fixtures re-seedable afterwards', () => {
+    const db = fullSandbox();
+    db.raw.exec(CLEAN_SQL);
+
+    // The seed users survive, so the demos can be rebuilt without starting
+    // from seed-sandbox.sql again -- except that one recreates its own group,
+    // which the cleaner removed, so it goes first.
+    expect(() => {
+      db.raw.exec(readFileSync(join(__dirname, '..', 'scripts', 'seed-sandbox.sql'), 'utf8'));
+      db.raw.exec(readFileSync(join(__dirname, '..', 'scripts', 'seed-poll-demo.sql'), 'utf8'));
+      db.raw.exec(readFileSync(join(__dirname, '..', 'scripts', 'seed-button-demo.sql'), 'utf8'));
+    }).not.toThrow();
+    expect(count(db, 'events')).toBeGreaterThan(0);
+  });
+});

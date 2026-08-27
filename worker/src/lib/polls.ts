@@ -1,5 +1,6 @@
 import type { Env } from '../env';
 import type { EventRow } from './events';
+import { requireActiveGuildMember } from './db';
 import { LIMITS } from './validate';
 
 interface OptionTally {
@@ -518,4 +519,158 @@ export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): P
     }
   }
   return resolvedEventIds;
+}
+
+// Moved here from routes/polls.ts, where it was a private helper, for the
+// reason specs/0010 gives: a permission check that lives in a route handler
+// protects that route and nothing else. The Discord interactions endpoint
+// records votes through the same logic, so the check has to travel with the
+// logic rather than with the HTTP surface.
+//
+// A former member holding a stale invite (or organizer row) must not keep
+// poll access -- current active membership in the event's guild is required
+// on top of being connected to the event at all.
+export async function requireInvitedOrOrganizer(env: Env, eventId: string, userId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT e.guild_id FROM events e
+     LEFT JOIN event_invites i ON i.event_id = e.id AND i.user_id = ?
+     WHERE e.id = ? AND (e.organizer_id = ? OR i.user_id IS NOT NULL)`,
+  )
+    .bind(userId, eventId, userId)
+    .first<{ guild_id: string }>();
+  if (!row) return false;
+  return requireActiveGuildMember(env, userId, row.guild_id);
+}
+
+export type VoteOutcome =
+  | { status: 'recorded'; event: EventRow }
+  | { status: 'no_such_poll' }
+  | { status: 'forbidden' }
+  | { status: 'invalid_option' }
+  | { status: 'closed'; reason: string };
+
+// Loads the poll a vote is being cast on and answers every question that can
+// refuse it, in the order the route used to ask them. Shared by the HTTP
+// route and the interactions endpoint so the two can never drift on what
+// "this poll is still open to you" means.
+async function loadVotablePoll(
+  env: Env,
+  userId: string,
+  eventId: string,
+  optionIds: string[],
+): Promise<VoteOutcome> {
+  const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+  // A windowed poll is answered with a range, not a yes/no. Decided by
+  // window_block_minutes rather than poll_mode, which nothing reads any more
+  // (specs/0013).
+  if (!event || event.event_type !== 'poll' || event.window_block_minutes != null) {
+    return { status: 'no_such_poll' };
+  }
+
+  // One statement for however many candidates were chosen, because a Discord
+  // select hands back a whole set at once and asking per candidate would put
+  // a poll at MAX_POLL_OPTIONS well past what one invocation can afford.
+  //
+  // The empty case skips the query rather than building `id IN ()`. SQLite
+  // happens to accept that, but it is a dialect quirk to rely on, and there
+  // is nothing to validate when nothing was picked -- clearing your answer is
+  // a legitimate thing to submit.
+  const options: { id: string; confirmed_at: number | null }[] = [];
+  if (optionIds.length > 0) {
+    const placeholders = optionIds.map(() => '?').join(', ');
+    const { results } = await env.DB.prepare(
+      `SELECT id, confirmed_at FROM event_poll_options WHERE event_id = ? AND id IN (${placeholders})`,
+    )
+      .bind(eventId, ...optionIds)
+      .all<{ id: string; confirmed_at: number | null }>();
+    options.push(...results);
+    if (options.length !== optionIds.length) return { status: 'invalid_option' };
+  }
+
+  if (event.poll_resolution_mode === 'multi_winner') {
+    // Confirmed days stay open forever for late joiners; unconfirmed days
+    // close once the deadline passes.
+    const deadlinePassed = !!event.poll_deadline_at && Date.now() > event.poll_deadline_at;
+    if (deadlinePassed && options.some((o) => !o.confirmed_at)) {
+      return { status: 'closed', reason: 'Voting for this day has closed' };
+    }
+  } else if (event.status !== 'active') {
+    return { status: 'closed', reason: 'Voting is closed for this event' };
+  }
+
+  if (!(await requireInvitedOrOrganizer(env, eventId, userId))) return { status: 'forbidden' };
+
+  return { status: 'recorded', event };
+}
+
+// One vote on one candidate -- what the website's poll screen submits, where
+// yes/no/maybe are all expressible.
+export async function recordPollVote(
+  env: Env,
+  userId: string,
+  eventId: string,
+  optionId: string,
+  vote: 'yes' | 'no' | 'maybe',
+): Promise<VoteOutcome> {
+  const loaded = await loadVotablePoll(env, userId, eventId, [optionId]);
+  if (loaded.status !== 'recorded') return loaded;
+
+  await env.DB.prepare(
+    `INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(option_id, user_id) DO UPDATE SET vote = excluded.vote, voted_at = excluded.voted_at`,
+  )
+    .bind(optionId, userId, vote, Date.now())
+    .run();
+
+  await checkThresholdAndResolve(env, loaded.event);
+  return loaded;
+}
+
+// A whole answer at once -- what a Discord string select submits, where the
+// only thing a component can express is which candidates were picked.
+//
+// Chosen candidates are recorded as `yes`. Unchosen ones record no vote at
+// all rather than a `no`, which is how getOptionTallies's LEFT JOIN already
+// treats absence, and it is the only reading a select supports: a candidate
+// left unticked is not a statement that the night is impossible.
+//
+// The delete is what makes a *re-submission* mean what it says. Without it,
+// deselecting a candidate you had previously voted yes on would leave the old
+// yes standing, so the DM would show one answer and the tally would count
+// another -- the poll screen's yes/maybe/no nuance stays website-only, but
+// this much has to agree with what the person just pressed.
+export async function recordPollSelection(
+  env: Env,
+  userId: string,
+  eventId: string,
+  submitted: string[],
+): Promise<VoteOutcome> {
+  // Deduplicated because the count check in loadVotablePoll compares rows
+  // found against ids asked for, and a repeated id would fail that check --
+  // refusing a perfectly ordinary answer because it was written down twice.
+  const optionIds = [...new Set(submitted)];
+  const loaded = await loadVotablePoll(env, userId, eventId, optionIds);
+  if (loaded.status !== 'recorded') return loaded;
+
+  const statements = [];
+  const keep = optionIds.map(() => '?').join(', ');
+  statements.push(
+    env.DB.prepare(
+      `DELETE FROM event_poll_votes WHERE user_id = ?
+       AND option_id IN (SELECT id FROM event_poll_options WHERE event_id = ?)
+       ${optionIds.length ? `AND option_id NOT IN (${keep})` : ''}`,
+    ).bind(userId, eventId, ...optionIds),
+  );
+  for (const optionId of optionIds) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES (?, ?, 'yes', ?)
+         ON CONFLICT(option_id, user_id) DO UPDATE SET vote = excluded.vote, voted_at = excluded.voted_at`,
+      ).bind(optionId, userId, Date.now()),
+    );
+  }
+  await env.DB.batch(statements);
+
+  await checkThresholdAndResolve(env, loaded.event);
+  return loaded;
 }

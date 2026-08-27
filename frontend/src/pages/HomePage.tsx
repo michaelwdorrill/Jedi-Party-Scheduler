@@ -4,7 +4,15 @@ import { DateTime } from 'luxon';
 import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
-import { formatTimeRange, fullWindow, monthWindow } from '../lib/datetime';
+import {
+  AGENDA_DAYS,
+  formatTimeRange,
+  gridWindow,
+  horizonWindow,
+  monthWindow,
+  offsetForMonth,
+  yearOptions,
+} from '../lib/datetime';
 import { getView, setView, type CalendarView } from '../lib/view';
 import { useAsync } from '../lib/async';
 import MonthCalendarGrid from '../components/MonthCalendarGrid';
@@ -30,13 +38,37 @@ import type { EventOccurrence } from '../types';
 // now→+60d and took the first eight, the Calendar asked for the visible range
 // -- which is what made this a pure layout change rather than a data one.
 //
-// One fetch serves both views. The spec assumed the "anchored to now" rail
-// would cost a second, smaller query; it does not, because `fullWindow` already
-// covers this month and next, and idea 22's two-month ceiling means there is no
-// further data to ask for. The rail is that same list filtered to what is still
-// ahead.
+// It used to be one fetch for both views. Spec 0009 assumed the "anchored to
+// now" rail would cost a second, smaller query, and it did not -- because
+// `fullWindow` covered this month and next, and idea 22's two-month ceiling
+// meant there was no further data to ask for.
+//
+// Removing that ceiling makes the spec's prediction come true. The grid can
+// now be any month, and a grid showing next March has nothing to say about
+// what is on this week, so the rail gets the second query 0009 expected. The
+// two are deliberately independent: paging the calendar does not re-fetch the
+// horizon, and a horizon that fails does not take the calendar down with it.
 
 type Filter = 'all' | 'personal' | 'games' | { guildId: string };
+
+// Written out rather than generated from the locale, for the same reason the
+// rest of this app spells its month names: the grid, the agenda and this
+// picker have to agree, and a locale-derived list would drift from the
+// `LLLL` format strings everywhere else.
+const MONTH_NAMES = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
 
 function matchesFilter(occ: EventOccurrence, filter: Filter): boolean {
   if (filter === 'all') return true;
@@ -50,19 +82,35 @@ export default function HomePage() {
   const { guilds, error: guildsError, refreshGuilds } = useGuild();
   const navigate = useNavigate();
   const [view, setViewState] = useState<CalendarView>(getView);
-  const [tab, setTab] = useState<0 | 1>(0);
+  // Months from now: 0 is this month, negative is the past. Unbounded in both
+  // directions (IDEAS item 22).
+  const [monthOffset, setMonthOffset] = useState(0);
   const [filter, setFilter] = useState<Filter>('all');
   const zone = user?.timezone ?? 'America/New_York';
 
+  const monthStart = useMemo(() => monthWindow(monthOffset, zone).start, [monthOffset, zone]);
+  const years = useMemo(() => yearOptions(monthStart.year, zone), [monthStart.year, zone]);
+
   // This call is the one idea 24 was found on: with no `.catch`, a 404 from a
   // Worker without `/me/events` rendered as "nothing scheduled".
+  //
+  // Re-runs on every month change. useAsync guards against a slow earlier
+  // request landing after a newer one, which matters far more now than it did
+  // when there were two tabs: holding the next-month button issues a request
+  // per click and they are not ordered.
   const {
     data,
     error,
     loading,
     reload,
   } = useAsync<EventOccurrence[]>(() => {
-    const { from, to } = fullWindow(zone);
+    const { from, to } = gridWindow(monthStart);
+    return api.get<EventOccurrence[]>(`/me/events?from=${from.toMillis()}&to=${to.toMillis()}`);
+  }, [zone, monthStart.toMillis()]);
+
+  // The rail's own data, anchored to now and unaffected by paging.
+  const horizon = useAsync<EventOccurrence[]>(() => {
+    const { from, to } = horizonWindow(zone);
     return api.get<EventOccurrence[]>(`/me/events?from=${from.toMillis()}&to=${to.toMillis()}`);
   }, [zone]);
 
@@ -74,22 +122,41 @@ export default function HomePage() {
   );
 
   // The rail is anchored to now rather than to the month on screen, so paging
-  // to next month does not empty it. Cancelled sessions are dropped: the rail
+  // to December does not empty it. Cancelled sessions are dropped: the rail
   // answers "what is coming up", and a cancelled one is not.
+  // The agenda answers a different question from the grid, so it reads the
+  // horizon's data rather than the month's. Scoping it to the visible month
+  // was wrong in a way that showed: an event on 3 September appeared under
+  // August, because 3 September is a cell in August's grid.
+  //
+  // No third request -- the horizon fetch already covers 60 days from now, so
+  // a fortnight is a filter on data the rail has loaded anyway.
+  const agenda = useMemo(() => {
+    const now = Date.now();
+    const until = now + AGENDA_DAYS * 24 * 60 * 60 * 1000;
+    return (horizon.data ?? [])
+      .filter((occ) => matchesFilter(occ, filter))
+      .filter((o) => o.startAt != null && o.startAt >= now && o.startAt <= until)
+      .sort((a, b) => a.startAt! - b.startAt!);
+  }, [horizon.data, filter]);
+
   const upNext = useMemo(() => {
     const now = Date.now();
-    return visible
+    return (horizon.data ?? [])
+      .filter((occ) => matchesFilter(occ, filter))
       .filter((o) => o.status !== 'cancelled' && o.startAt != null && o.startAt >= now)
       .sort((a, b) => a.startAt! - b.startAt!)
       .slice(0, 6);
-  }, [visible]);
+  }, [horizon.data, filter]);
 
-  const monthStart = monthWindow(tab, zone).start;
-
+  // Both lists, so paging to a quiet month does not make servers disappear
+  // from the filter -- which would look like losing access to them.
   const guildsWithEvents = useMemo(() => {
-    const present = new Set(occurrences.map((o) => o.guildId).filter(Boolean));
+    const present = new Set(
+      [...occurrences, ...(horizon.data ?? [])].map((o) => o.guildId).filter(Boolean),
+    );
     return guilds.filter((g) => present.has(g.id));
-  }, [occurrences, guilds]);
+  }, [occurrences, horizon.data, guilds]);
 
   const filterValue = typeof filter === 'object' ? filter.guildId : filter;
 
@@ -132,22 +199,76 @@ export default function HomePage() {
             ))}
           </div>
 
+          {/* Any month, in either direction (IDEAS item 22). Month view only:
+              the agenda is a rolling fortnight from today, so a pager beside
+              it would be a control that does nothing. */}
           {view === 'month' && (
+          <div className="flex items-center gap-1">
+            {/* The selects announce their own value on change, but the month
+                *changing* underneath a Previous/Next press is otherwise
+                silent -- the button keeps focus and nothing is read out. */}
+            <span className="sr-only" aria-live="polite">
+              {monthStart.toFormat('LLLL yyyy')}
+            </span>
             <div className="flex overflow-hidden rounded-md border border-edge-strong">
-              {(['This month', 'Next month'] as const).map((label, i) => (
-                <button
-                  key={label}
-                  type="button"
-                  aria-pressed={tab === i}
-                  onClick={() => setTab(i as 0 | 1)}
-                  className={`px-3 py-1.5 font-display text-sm uppercase tracking-wide ${
-                    tab === i ? 'bg-raised-hi text-ink' : 'text-ink-dim hover:bg-raised'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
+              <button
+                type="button"
+                aria-label="Previous month"
+                onClick={() => setMonthOffset((m) => m - 1)}
+                className="px-3 py-1.5 font-display text-sm text-ink-dim hover:bg-raised"
+              >
+                ‹
+              </button>
+              {/* Two selects rather than one label, so a month a year out is
+                  one gesture instead of twelve clicks. The arrows stay for
+                  stepping; these are for jumping. Both write the same
+                  `monthOffset` the arrows do -- there is no second source of
+                  truth for which month is on screen. */}
+              <select
+                aria-label="Month"
+                value={monthStart.month}
+                onChange={(e) => setMonthOffset(offsetForMonth(monthStart.year, Number(e.target.value), zone))}
+                className="border-x border-edge-strong bg-raised px-2 py-1.5 font-display text-sm uppercase tracking-wide text-ink"
+              >
+                {MONTH_NAMES.map((name, i) => (
+                  <option key={name} value={i + 1}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Year"
+                value={monthStart.year}
+                onChange={(e) => setMonthOffset(offsetForMonth(Number(e.target.value), monthStart.month, zone))}
+                className="bg-raised px-2 py-1.5 font-display text-sm uppercase tracking-wide text-ink"
+              >
+                {years.map((y) => (
+                  <option key={y} value={y}>
+                    {y}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                aria-label="Next month"
+                onClick={() => setMonthOffset((m) => m + 1)}
+                className="px-3 py-1.5 font-display text-sm text-ink-dim hover:bg-raised"
+              >
+                ›
+              </button>
             </div>
+            {/* Only when it would do something. A permanent "Today" that is
+                already today is a control that lies about being available. */}
+            {monthOffset !== 0 && (
+              <button
+                type="button"
+                onClick={() => setMonthOffset(0)}
+                className="rounded-md border border-edge-strong px-3 py-1.5 font-display text-sm uppercase tracking-wide text-ink-dim hover:bg-raised"
+              >
+                Today
+              </button>
+            )}
+          </div>
           )}
 
           <select
@@ -192,25 +313,28 @@ export default function HomePage() {
         />
       )}
 
-      {loading ? (
+      {(view === 'agenda' ? horizon.loading : loading) ? (
         <Loading />
-      ) : error ? (
+      ) : (view === 'agenda' ? horizon.error : error) ? (
         // Before the empty state, never instead of it: an empty calendar and a
         // calendar that failed to load are different facts about the day.
         <Card padding="md">
-          <ErrorState message={error} onRetry={reload} />
+          <ErrorState
+            message={(view === 'agenda' ? horizon.error : error) as string}
+            onRetry={view === 'agenda' ? horizon.reload : reload}
+          />
         </Card>
       ) : view === 'agenda' ? (
         <Card padding="md">
-          {upNext.length === 0 ? (
+          {agenda.length === 0 ? (
             <EmptyState
-              title="Nothing on the horizon"
+              title="Nothing in the next two weeks"
               action={!noServers ? <Button to="/events/new">+ New Event</Button> : undefined}
             >
               {emptyBody}
             </EmptyState>
           ) : (
-            <AgendaList occurrences={visible} zone={zone} />
+            <AgendaList occurrences={agenda} zone={zone} />
           )}
         </Card>
       ) : (
@@ -230,7 +354,15 @@ export default function HomePage() {
               </span>
             </h2>
 
-            {upNext.length === 0 ? (
+            {/* Idea 24's rule applied to the second query: a rail that failed
+                to load and a horizon with nothing on it are different facts,
+                and only one of them should be said out loud. The calendar
+                beside it is unaffected either way. */}
+            {horizon.error ? (
+              <InlineError message={horizon.error} onRetry={horizon.reload} />
+            ) : horizon.loading ? (
+              <Loading />
+            ) : upNext.length === 0 ? (
               <EmptyState
                 title="Nothing on the horizon"
                 className="py-2"

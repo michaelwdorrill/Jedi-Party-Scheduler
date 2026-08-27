@@ -18,6 +18,9 @@
     "check:env-parity": "node scripts/check-env-parity.mjs",
     "seed:sandbox": "wrangler d1 execute jedi-party-scheduler-db-sandbox --remote --env sandbox --file scripts/seed-sandbox.sql",
     "seed:poll-demo": "wrangler d1 execute jedi-party-scheduler-db-sandbox --remote --env sandbox --file scripts/seed-poll-demo.sql",
+    "seed:button-demo": "wrangler d1 execute jedi-party-scheduler-db-sandbox --remote --env sandbox --file scripts/seed-button-demo.sql",
+    "seed:resolve-demo": "wrangler d1 execute jedi-party-scheduler-db-sandbox --remote --env sandbox --file scripts/seed-resolve-demo.sql",
+    "clean:sandbox": "wrangler d1 execute jedi-party-scheduler-db-sandbox --remote --env sandbox --file scripts/clean-sandbox.sql",
     "test": "vitest run",
     "test:watch": "vitest"
   },

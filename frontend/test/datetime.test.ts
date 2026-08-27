@@ -1,6 +1,20 @@
 import { DateTime } from 'luxon';
 import { describe, expect, it } from 'vitest';
-import { buildMonthGrid, formatDuration, hasEnded, isValidRange, startsInPast } from '../src/lib/datetime';
+import {
+  buildMonthGrid,
+  formatDuration,
+  gridWindow,
+  hasEnded,
+  HORIZON_DAYS,
+  horizonWindow,
+  isValidRange,
+  monthWindow,
+  offsetForMonth,
+  startsInPast,
+  YEAR_RANGE_BACK,
+  YEAR_RANGE_FORWARD,
+  yearOptions,
+} from '../src/lib/datetime';
 
 describe('buildMonthGrid', () => {
   it('starts on a Sunday and ends on a Saturday for a month starting on a Sunday', () => {
@@ -134,5 +148,113 @@ describe('formatDuration', () => {
 
   it('is singular at exactly one hour', () => {
     expect(formatDuration(60)).toBe('1 hour');
+  });
+});
+
+describe('monthWindow, unbounded (IDEAS item 22)', () => {
+  const zone = 'America/New_York';
+
+  it('walks forwards and backwards past the old two-month ceiling', () => {
+    const now = DateTime.now().setZone(zone);
+    // The ceiling this replaces was a `0 | 1` literal type, so these two calls
+    // did not previously compile, let alone work.
+    expect(monthWindow(7, zone).start.month).toBe(now.plus({ months: 7 }).month);
+    expect(monthWindow(-7, zone).start.month).toBe(now.minus({ months: 7 }).month);
+  });
+
+  it('lands on the first and last instant of the month, in the given zone', () => {
+    const { start, end } = monthWindow(3, zone);
+    expect(start.day).toBe(1);
+    expect(start.hour).toBe(0);
+    expect(end.day).toBe(start.daysInMonth);
+    expect(end.zoneName).toBe(zone);
+  });
+
+  it('crosses a year boundary rather than wrapping within one', () => {
+    const now = DateTime.now().setZone(zone);
+    const far = monthWindow(18, zone).start;
+    expect(far.year).toBeGreaterThan(now.year);
+  });
+});
+
+describe('gridWindow', () => {
+  it('covers the padding days the grid draws, not just the month', () => {
+    // September 2025 starts on a Monday and ends on a Tuesday, so the grid
+    // pads at both ends.
+    const monthStart = DateTime.fromISO('2025-09-01T00:00:00', { zone: 'America/New_York' });
+    const { from, to } = gridWindow(monthStart);
+
+    expect(from < monthStart).toBe(true);
+    expect(to > monthStart.endOf('month')).toBe(true);
+    // This is the bug the old two-month fetch had at its far edge: the last
+    // grid's trailing days fell outside the requested range and were always
+    // drawn empty.
+    expect(from.weekday % 7).toBe(0);
+    expect(to.weekday % 7).toBe(6);
+  });
+
+  it('still covers every day of the month itself', () => {
+    const monthStart = DateTime.fromISO('2026-02-01T00:00:00', { zone: 'America/New_York' });
+    const { from, to } = gridWindow(monthStart);
+    expect(from <= monthStart).toBe(true);
+    expect(to >= monthStart.endOf('month')).toBe(true);
+  });
+});
+
+describe('horizonWindow', () => {
+  it('runs from now, not from the month on screen', () => {
+    const { from, to } = horizonWindow('America/New_York');
+    expect(Math.abs(from.toMillis() - Date.now())).toBeLessThan(5000);
+    expect(Math.round(to.diff(from, 'days').days)).toBe(HORIZON_DAYS);
+  });
+
+  it('stays inside the API\'s range cap', () => {
+    // worker/src/lib/validate.ts caps a calendar query at ~366 days; a rail
+    // that asked for more would 400 rather than render.
+    const { from, to } = horizonWindow('America/New_York');
+    expect(to.diff(from, 'days').days).toBeLessThan(366);
+  });
+});
+
+describe('the month/year picker (IDEAS item 22)', () => {
+  const zone = 'America/New_York';
+
+  it('round-trips: an offset lands on a month, and that month gives the offset back', () => {
+    for (const offset of [-14, -1, 0, 1, 25]) {
+      const start = monthWindow(offset, zone).start;
+      expect(offsetForMonth(start.year, start.month, zone)).toBe(offset);
+    }
+  });
+
+  it('crosses a year boundary in both directions', () => {
+    const now = DateTime.now().setZone(zone);
+    const nextJan = offsetForMonth(now.year + 1, 1, zone);
+    expect(monthWindow(nextJan, zone).start.toFormat('LLLL yyyy')).toBe(`January ${now.year + 1}`);
+
+    const lastDec = offsetForMonth(now.year - 1, 12, zone);
+    expect(monthWindow(lastDec, zone).start.toFormat('LLLL yyyy')).toBe(`December ${now.year - 1}`);
+  });
+
+  it('offers a bounded range of years around today', () => {
+    const thisYear = DateTime.now().setZone(zone).year;
+    const years = yearOptions(thisYear, zone);
+    expect(years[0]).toBe(thisYear - YEAR_RANGE_BACK);
+    expect(years[years.length - 1]).toBe(thisYear + YEAR_RANGE_FORWARD);
+  });
+
+  it('includes a year the arrows reached outside that range, so the select is never blank', () => {
+    const thisYear = DateTime.now().setZone(zone).year;
+    const far = thisYear + 40;
+    const years = yearOptions(far, zone);
+    expect(years).toContain(far);
+    // Still sorted, and still contains the ordinary range around today.
+    expect(years).toEqual([...years].sort((a, b) => a - b));
+    expect(years).toContain(thisYear);
+  });
+
+  it('does not duplicate the viewed year when it is already in range', () => {
+    const thisYear = DateTime.now().setZone(zone).year;
+    const years = yearOptions(thisYear + 1, zone);
+    expect(years.filter((y) => y === thisYear + 1)).toHaveLength(1);
   });
 });

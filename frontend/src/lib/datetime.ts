@@ -1,16 +1,77 @@
 import { DateTime } from 'luxon';
 
-export function monthWindow(monthsFromNow: 0 | 1, zone: string) {
+// Any month, forwards or back (IDEAS item 22). This took a `0 | 1` until
+// v0.5: the calendar could show this month and next and nothing else, which
+// was a data limit as much as a UI one, and it quietly became load-bearing --
+// specs/0014 had to decide how far ahead someone may answer for a recurring
+// session, and the honest answer was "as far as the calendar goes".
+export function monthWindow(monthsFromNow: number, zone: string) {
   const base = DateTime.now().setZone(zone).plus({ months: monthsFromNow });
   const start = base.startOf('month');
   const end = base.endOf('month');
   return { start, end };
 }
 
-export function fullWindow(zone: string) {
-  const thisMonth = monthWindow(0, zone);
-  const nextMonth = monthWindow(1, zone);
-  return { from: thisMonth.start, to: nextMonth.end };
+// The month offset that lands on a given month and year — the inverse of
+// `monthWindow`, so a dropdown can set the same state the arrows do rather
+// than introducing a second source of truth for "which month am I looking
+// at".
+export function offsetForMonth(year: number, month: number, zone: string): number {
+  const now = DateTime.now().setZone(zone);
+  return (year - now.year) * 12 + (month - now.month);
+}
+
+// The years a picker offers. Bounded because a dropdown has to be, while the
+// arrows stay unbounded — so the viewed year is always included even when it
+// is outside the range, or a select would sit blank on a month its own arrows
+// reached.
+//
+// Nothing before this year: the calendar can still *reach* last March with
+// the arrows, but offering a list of past years in a scheduling app is
+// offering to plan something that already happened.
+export const YEAR_RANGE_BACK = 0;
+export const YEAR_RANGE_FORWARD = 5;
+
+export function yearOptions(viewedYear: number, zone: string): number[] {
+  const thisYear = DateTime.now().setZone(zone).year;
+  const years = new Set<number>();
+  for (let y = thisYear - YEAR_RANGE_BACK; y <= thisYear + YEAR_RANGE_FORWARD; y++) years.add(y);
+  years.add(viewedYear);
+  return [...years].sort((a, b) => a - b);
+}
+
+// The range the *grid* covers, which is not the same as the month.
+// buildMonthGrid pads with leading and trailing days from the adjacent months
+// so every week row is complete, and those days have to show their events like
+// any other.
+//
+// The old two-month fetch got this wrong at one edge and nobody noticed: it
+// asked for the start of this month to the end of next, so the "next month"
+// grid's trailing days -- up to six days into the month after -- were always
+// drawn empty, whatever was actually scheduled on them. Asking for the grid
+// rather than the month removes the class of bug rather than that instance.
+export function gridWindow(monthStart: DateTime) {
+  const days = buildMonthGrid(monthStart);
+  return { from: days[0].startOf('day'), to: days[days.length - 1].endOf('day') };
+}
+
+// How far "on the horizon" looks. The rail is anchored to now rather than to
+// whatever month is on screen, so it needs its own range: paging to December
+// must not empty the list of what is coming up this week.
+//
+// Sixty days is the Dashboard's old query, from before spec 0009 merged it
+// into this page.
+export const HORIZON_DAYS = 60;
+
+// The agenda answers "what am I doing soon", which is a different question
+// from the grid's "what does this month look like". Scoping it to the month
+// on screen made it inherit the grid's padding days -- an event on 3
+// September showed up under August, because that is a cell in August's grid.
+export const AGENDA_DAYS = 14;
+
+export function horizonWindow(zone: string) {
+  const now = DateTime.now().setZone(zone);
+  return { from: now, to: now.plus({ days: HORIZON_DAYS }) };
 }
 
 // Builds a 7-column calendar grid (Sun-Sat) covering the whole month, including

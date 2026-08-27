@@ -67,6 +67,16 @@ const PAID_D1_QUERIES = 1000;
 // bumped to match and re-asserted against a real empty-tick count in
 // worker/test/d1limits.test.ts and worker/test/pass9.test.ts rather than
 // guessed.
+//
+// IDEAS item 47's reminders for confirmed multi-winner days deliberately do
+// NOT appear here, and that is worth recording: they were first written as a
+// sweep of their own, which cost one more fixed query per tick and pushed
+// this to 25. Measuring what that did was alarming out of proportion to the
+// change -- sweepPurgeTerminalHistory stopped running *entirely*, not just
+// later, because one less query of usable allowance left it permanently
+// short of what it needs to start. The reminders were folded into
+// sweepConfirmedMultiWinnerOptions instead, which already scans exactly
+// those rows, so the fixed cost is unchanged and this stays at 24.
 const RESERVED_QUERIES = 24;
 const RESERVED_SUBREQUESTS = 4;
 

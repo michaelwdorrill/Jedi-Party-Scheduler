@@ -160,7 +160,7 @@ const DISCORD_MAX_CONTENT_LENGTH = 2000;
 // one place that guarantees Discord never rejects a message for being too
 // long, which would otherwise leave a notification permanently "sent" in our
 // dedupe log (see notifyOnce) despite never actually reaching the recipient.
-function boundContent(content: string): string {
+export function boundContent(content: string): string {
   return content.length > DISCORD_MAX_CONTENT_LENGTH
     ? `${content.slice(0, DISCORD_MAX_CONTENT_LENGTH - 1)}…`
     : content;
@@ -176,18 +176,79 @@ function boundContent(content: string): string {
 // both hang.
 export const DISCORD_FETCH_TIMEOUT_MS = 20_000;
 
+// Rewrites a message the bot already sent (specs/0010, edit-on-resolve).
+//
+// Every failure here is an ordinary outcome rather than something to retry,
+// and that is the whole design of this path. A message is editable only by
+// the application that sent it, so a production id is not editable by the
+// sandbox bot and vice versa; a recipient can delete a DM; a channel can go
+// away. In all of those Discord answers 4xx and the right response is to
+// leave the message alone -- which is exactly what the app did before this
+// feature existed, so the fallback is the old behaviour rather than a broken
+// one.
+//
+// Returns whether the edit landed, so the caller can record it and stop
+// trying. `retryable` separates "Discord was briefly unavailable" from "this
+// will never work", because only the first is worth another tick.
+export async function editBotDm(
+  botToken: string,
+  channelId: string,
+  messageId: string,
+  content: string,
+  components?: unknown[] | null,
+): Promise<{ ok: boolean; status: number; retryable: boolean }> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/channels/${channelId}/messages/${messageId}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bot ${botToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        content: boundContent(content),
+        allowed_mentions: { parse: [] },
+        // Always sent, unlike on create: [] is how Discord is told to *remove*
+        // the controls, which is most of the point of editing at all.
+        components: components ?? [],
+      }),
+      signal: AbortSignal.timeout(DISCORD_FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, status: 0, retryable: true };
+  }
+
+  if (res.ok) return { ok: true, status: res.status, retryable: false };
+  const retryable = res.status === 429 || res.status >= 500;
+  return { ok: false, status: res.status, retryable };
+}
+
 // Opens (or reuses) a DM channel with the given user and sends `content` via
 // the bot. Returns enough info for the caller to decide whether to retry.
 // Never throws for a network-level failure (including a timeout) -- those
 // come back as the same shape a 5xx would, since to a caller deciding
 // whether to retry, "Discord didn't answer" and "Discord errored" mean the
 // same thing.
+//
+// `messageId` is the sent message's own id, read out of the create response
+// (IDEAS.md item 32: it used to be discarded at the moment it arrived, which
+// is what made specs/0010's edit-the-message-in-place feature a schema change
+// rather than the freebie idea 19 assumed). It is null whenever the send did
+// not succeed, and also whenever Discord answered 2xx with a body this can't
+// read -- an id we are not sure of is worse than none, because the edit path
+// treats "no id" as "leave the message alone" and would otherwise PATCH
+// something arbitrary.
 export async function sendBotDm(
   botToken: string,
   recipientUserId: string,
   content: string,
   existingChannelId?: string | null,
-): Promise<{ result: DmSendResult; channelId: string | null }> {
+  // Discord message components (specs/0010) -- the buttons and selects that
+  // let a DM be answered in place. Passed straight through as the caller
+  // assembled them; this module does not build them (lib/dmComponents.ts
+  // does) and does not interpret them.
+  components?: unknown[] | null,
+): Promise<{ result: DmSendResult; channelId: string | null; messageId: string | null }> {
   let channelId = existingChannelId ?? null;
 
   if (!channelId) {
@@ -203,10 +264,10 @@ export async function sendBotDm(
         signal: AbortSignal.timeout(DISCORD_FETCH_TIMEOUT_MS),
       });
     } catch {
-      return { result: { ok: false, status: 0 }, channelId: null };
+      return { result: { ok: false, status: 0 }, channelId: null, messageId: null };
     }
     if (!channelRes.ok) {
-      return { result: { ok: false, status: channelRes.status }, channelId: null };
+      return { result: { ok: false, status: channelRes.status }, channelId: null, messageId: null };
     }
     const channel = (await channelRes.json()) as { id: string };
     channelId = channel.id;
@@ -223,11 +284,19 @@ export async function sendBotDm(
       // allowed_mentions suppresses @everyone/@here/user/role pings that
       // could otherwise be smuggled in through a user-controlled
       // event/group/channel name and fired off by the trusted bot account.
-      body: JSON.stringify({ content: boundContent(content), allowed_mentions: { parse: [] } }),
+      body: JSON.stringify({
+        content: boundContent(content),
+        allowed_mentions: { parse: [] },
+        // Omitted entirely rather than sent as [] when there are none: an
+        // empty array is a meaningful value to Discord (it *clears*
+        // components) and this is a message-create, where there is nothing
+        // to clear.
+        ...(components && components.length > 0 ? { components } : {}),
+      }),
       signal: AbortSignal.timeout(DISCORD_FETCH_TIMEOUT_MS),
     });
   } catch {
-    return { result: { ok: false, status: 0 }, channelId };
+    return { result: { ok: false, status: 0 }, channelId, messageId: null };
   }
 
   if (messageRes.status === 429) {
@@ -243,8 +312,20 @@ export async function sendBotDm(
     return {
       result: { ok: false, status: 429, retryAfterMs: seconds * 1000 },
       channelId,
+      messageId: null,
     };
   }
 
-  return { result: { ok: messageRes.ok, status: messageRes.status }, channelId };
+  if (!messageRes.ok) {
+    return { result: { ok: false, status: messageRes.status }, channelId, messageId: null };
+  }
+
+  // A body that doesn't parse, or parses without an id, is not a failed send
+  // -- Discord accepted the message and the recipient has it. Only the
+  // ability to edit it later is lost, so this degrades to null rather than
+  // turning a delivered notification into a retry.
+  const message = (await messageRes.json().catch(() => null)) as { id?: unknown } | null;
+  const messageId = typeof message?.id === 'string' ? message.id : null;
+
+  return { result: { ok: true, status: messageRes.status }, channelId, messageId };
 }

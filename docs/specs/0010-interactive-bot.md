@@ -1,6 +1,6 @@
 # 0010 — An interactive bot
 
-**Status:** Draft
+**Status:** Built (v0.5) — embeds deferred, see below
 **Covers:** `IDEAS.md` item 19, and item 32 (which is a cost inside it)
 **Phase:** 3.75 → **v0.5**
 
@@ -126,6 +126,36 @@ which is a materially different amount of work — so this is the first thing to
 put on the sandbox, as a ten-line route, before the rest of the release is
 planned around it.
 
+**Answered (Aug 2026), by the probe route this asks for.** `GET
+/discord/ed25519-probe` (`worker/src/routes/discordProbe.ts`) reports native
+`Ed25519` importing a raw public key, verifying a valid signature and
+rejecting a tampered one, under workerd 1.20260722.1 at this Worker's
+`compatibility_date`. So verification is `crypto.subtle` and nothing more,
+and the userland fallback this paragraph priced is not needed. The legacy
+`NODE-ED25519` works too, once asked for in its own shape — it was specified
+as an elliptic curve, so it wants a `namedCurve` beside the name and rejects
+the bare `{ name }` the native algorithm takes — which means nothing in this
+release depends on which of the two a given compatibility date gets.
+
+**Confirmed on the deployed sandbox Worker**, 25 Aug 2026, which is what this
+section asked for and what local workerd could only stand in for:
+
+```
+curl.exe https://jedi-party-scheduler-worker-sandbox.<you>.workers.dev/discord/ed25519-probe
+{"usable":"Ed25519","results":[{"algorithm":"Ed25519","imported":true,
+"acceptsValidSignature":true,"rejectsTamperedSignature":true,"error":null},
+{"algorithm":"NODE-ED25519","imported":true,"acceptsValidSignature":true,
+"rejectsTamperedSignature":true,"error":null}]}
+```
+
+The edge runtime agrees with the local one exactly, on both algorithms and
+on both halves of each. Two notes for whoever runs the probe again: it is
+`curl.exe`, not `curl`, in PowerShell — the bare name is an alias for
+`Invoke-WebRequest`, which HTML-parses the response and interrupts with a
+script-execution warning that has nothing to do with this endpoint. And the
+probe reads no env, no secrets and no D1, so it is inert wherever it runs;
+it still goes away with the release it exists to size.
+
 ### The three-second deadline
 
 Discord requires a response within 3 seconds. Two ways to meet it, and this
@@ -141,6 +171,17 @@ spec picks the first wherever it fits:
   genuinely unbounded. The one place that could be is a vote that resolves a
   poll, since `checkThresholdAndResolve` can fan out. Measure it on the
   sandbox; defer only if the measurement says to.
+
+The edit **keeps the controls**. The first build cleared them, on the theory
+that a message showing "Recorded: you're in." has nothing left to press --
+which turned out to make every DM a one-shot, so anyone whose plans changed
+was sent to the website, the exact journey this endpoint exists to remove. It
+also made `recordPollSelection`'s clearing of dropped candidates unreachable
+from Discord, since a second answer could never arrive. A select comes back
+with its picks marked `default: true`, rebuilt from the components Discord
+returns with the interaction rather than re-queried, so it reopens showing
+what is on record. Buttons are echoed rather than rebuilt, so the ladder in
+specs/0014 can send two of the three without this putting the third back.
 
 Do not use `ctx.waitUntil` to do the work and answer early: the interaction
 token is valid for 15 minutes, but a `waitUntil` that fails leaves the user
@@ -285,8 +326,10 @@ The sandbox is a separate Discord application with its own bot, its own
 public key and its own interactions URL, which is what makes this release
 safe to develop in the open: a wrong endpoint in the sandbox DMs nobody real.
 
-1. Put the ten-line Ed25519 probe route on the sandbox and settle the
-   platform question above. Everything else depends on the answer.
+1. ~~Put the ten-line Ed25519 probe route on the sandbox and settle the
+   platform question above.~~ Done — deployed, and confirmed against the
+   sandbox Worker itself: native `Ed25519`, so verification is
+   `crypto.subtle` and the release is planned around that.
 2. Set the sandbox application's **Interactions Endpoint URL** to the sandbox
    Worker's `/discord/interactions` in the Discord developer portal, and save
    — Discord's PING probe must pass before it will accept the URL. This is a
@@ -310,6 +353,121 @@ safe to develop in the open: a wrong endpoint in the sandbox DMs nobody real.
    where someone realises they can't make it after all, which is the strongest
    argument for buttons anywhere in this release — but it multiplies the
    message ids to track. Undecided, and cheap to add later.
+
+## What is built, and what is left
+
+Written down at the point the endpoint landed, so the gap between this design
+and the code is legible rather than remembered.
+
+**Built:**
+
+- `POST /discord/interactions`, mounted outside every `requireAuth` group,
+  with Ed25519 verification over `timestamp + rawBody`, a 401 before any D1
+  statement, the five-minute replay window, and PING → `{type: 1}`. An unset
+  `DISCORD_PUBLIC_KEY` rejects with 401 and logs why, rather than erroring:
+  failing closed is the only safe direction for the one route with no session
+  behind it.
+- Both handlers, answering synchronously with `type: 7` (UPDATE_MESSAGE) as
+  this spec preferred. Nothing measured needed a defer.
+- The extraction: `recordRsvp` in `lib/attendance.ts`, `recordPollVote` and
+  `recordPollSelection` in `lib/polls.ts`, with `requireInvitedOrOrganizer`
+  moved out of `routes/polls.ts` so the check travels with the logic rather
+  than with the HTTP surface. The routes are now shape-only, and the whole
+  366-test suite passed unchanged across the move, which is the evidence that
+  the website's behaviour did not shift underneath it.
+- Item 32's half: `sendBotDm` returns the message id, `deliverThroughOutbox`
+  records it in the statement it was already issuing, migration 0022 adds the
+  column.
+- `custom_id` exactly as designed above, with `parseCustomId` distinguishing
+  "not ours" from "ours but stale".
+
+- **The components themselves**, in `lib/dmComponents.ts` and attached in
+  `cron/reminders.ts`: three RSVP buttons on an invite to a fixed-time event,
+  a candidate select on an invite to an options poll, a link button on a
+  window poll, RSVP buttons on both reminder types and on a poll that has
+  resolved into a time, and the candidate select on the deadline nudge. A
+  cancelled poll carries nothing, because there is nothing left to answer.
+- **Migration 0023**, which was not in this design and should have been. See
+  below.
+- **Item 45's answer** (`IDEAS.md`): a press from someone behind on the Terms
+  is refused ephemerally with a link, not recorded.
+
+- **The edit when a poll resolves** (`editSettledPollDms`), with the budget
+  ordering this spec asked for: it runs only after that poll's notifications,
+  reserves like a cached-channel delivery, and stops the moment the tick is
+  out. Migration 0024 records that the edit happened, because without it the
+  sweep would redo it every fifteen minutes for as long as the poll stays in
+  the recency window. A 403 or 404 is marked done rather than retried -- the
+  wrong application can never edit that message, so trying again forever
+  spends the allowance on a call that cannot succeed.
+
+**Not built, and deferred deliberately:**
+
+- **Embeds.** This spec lists them as in-scope and they are the one thing
+  that did not ship. The reason is worth recording, because "we ran out of
+  time" would be the wrong lesson.
+
+  Making an embed durable costs a *third* column on `notification_log`,
+  beside `content` (0014) and `components` (0023), for the same reason those
+  exist: the retry consumer cannot re-derive what the source sweep rendered.
+  Not making it durable is worse in a subtler way -- a DM whose first
+  delivery failed would arrive looking different from everyone else's, and
+  only for the people who hit a transient error, which is exactly the kind of
+  difference nobody ever notices or reports.
+
+  Neither is a bad option, but choosing between a schema change and a visible
+  inconsistency, for a purely presentational feature that has to be *looked
+  at* to be judged, is not a call to make from a session that cannot see
+  Discord. It wants an hour with a client open. **v0.5.1.**
+
+- The manual portal steps (`docs/SETUP.md` 1.8 and 1.9) -- **done for the
+  sandbox application**, 25 Aug 2026: key pasted, endpoint URL accepted by
+  Discord, which means the deployed Worker passed Discord's own PING and
+  bad-signature probes. Production's key is committed and takes effect when
+  this reaches `main`; its endpoint URL is still unset.
+
+## What the build added to this design
+
+**Migration 0023, `notification_log.components`.** This spec priced item 32's
+message-id column and missed its sibling. Migration 0014's argument -- a retry
+cannot re-derive what the source sweep rendered, because by the time a retry
+is due the source may no longer produce it -- applies to a message's controls
+at least as strongly as to its text: an options poll's select lists that
+poll's candidates *as they were when the DM was written*. Without the column,
+a retried invite would have arrived with its text and no buttons, silently
+worse than the delivery it replaced, and only for the people whose first
+attempt happened to fail.
+
+**One query per poll per tick, and what happens when the tick cannot afford
+it.** A select needs the candidate list, which the invite sweep's query does
+not carry. It is fetched once per poll, cached for that poll's other invitees,
+and charged to the budget like everything else. When the budget cannot afford
+the lookup, the DM goes out *without* its select rather than not going out:
+a notification with no buttons is what this app sent before this release, and
+a notification withheld to save a statement is a person not told their poll is
+closing.
+
+**Two of the three open questions below are now answered.** Reminder DMs do
+get components (question 3) -- a reminder is where someone realises they can't
+make it after all, which was the strongest argument in the question itself.
+Question 1's link button was not added beside the RSVP buttons: every one of
+these DMs already carries the event link in its text, and a fourth control
+for the same destination is noise. Question 2 (what happens to the buttons
+after the event starts) stands: they are left alone.
+
+**One design point this spec did not settle, decided during the build.** A
+select hands back a whole set at once, so `recordPollSelection` *deletes* the
+presser's votes on candidates they did not pick, rather than only inserting
+the ones they did. Without the delete, deselecting a night you had previously
+said yes to would leave the old yes standing, and the DM would show one answer
+while the tally counted another. The yes/maybe/no nuance stays website-only as
+designed; this much has to agree with what was just pressed.
+
+**And one gap it opened**, captured as `IDEAS.md` item 45: the endpoint is
+outside `requirePolicyAcceptance` by construction, so a button press records
+an answer from someone the website would gate. A DM has nowhere to show a
+consent document, so the options are to record it or to refuse it ephemerally
+-- worth deciding with the components work rather than by default.
 
 ## Rejected alternatives
 
