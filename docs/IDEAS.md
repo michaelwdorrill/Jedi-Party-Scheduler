@@ -413,6 +413,57 @@ calls that make it tractable: a multi-winner poll fans out into separate
 events on confirmation, and a recurring event is accepted one occurrence at a
 time with the next ladder starting 24 hours after the last session ends.
 
+### 49. Everyone in an event should see everyone's answer, whatever kind of event it is
+
+Asked for by Michael, Aug 2026, looking at a multi-winner poll showing "1 in"
+and "2 in" per night with no way to find out who.
+
+**Most of this is already true, which makes it much cheaper than it sounds.**
+`GET /events/:eventId` returns `rsvpStatus` for every invitee to anyone
+`loadEventIfVisible` lets through — the organizer and every invitee, gated on
+active membership of the event's server. There is no permission change here
+and no new privacy surface: the data is already shared with exactly the
+people this asks for.
+
+What blocks it is one expression in `EventDetailPage`:
+
+```tsx
+{event.eventType === 'single' ? inv.rsvpStatus : ''}
+```
+
+And that expression is *defensible*, which is the part worth thinking about
+before deleting it. `rsvp_status` on a poll invitee is almost always
+`pending`, because nobody RSVPs to a poll — they vote. A column reading
+"pending" beside everybody's name is worse than a blank one.
+
+So the gap is narrower than the request, and it is one event type:
+
+- **Fixed-time events** already do this.
+- **Window polls** already do it too, and better: since v0.4.5 (idea 39) the
+  availability view names everyone and draws the hours they gave.
+- **Options polls** show tallies and nothing else. `getOptionTallies` returns
+  counts plus the caller's own vote; no names, so the frontend could not
+  render them even if it wanted to.
+
+**The work**, then: attach voters to the poll response, and render them per
+candidate. Bounded by `MAX_POLL_OPTIONS` x invitees, which is the product
+spec 0006 was careful about — one extra query joined on the options rather
+than one per option.
+
+**And a question v0.5 created an hour before this was asked.** Edit-on-resolve
+gives people RSVP buttons once a poll settles, so a resolved poll now carries
+*both* a historical vote and a current RSVP. "Voted yes on Thursday, has
+since said they can't make it" is precisely what an organizer needs to see
+and precisely what one column cannot say. Probably: votes while the poll is
+open, RSVPs once it has resolved, and both on a resolved poll's detail page
+with the vote shown as history rather than as an answer.
+
+Worth doing with `specs/0014` in view rather than before it: that spec makes
+attendance per occurrence, and a multi-winner poll fans out into separate
+events — at which point "who is coming to this night" stops being a poll
+question at all and becomes an ordinary event's invitee list, which already
+works.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
