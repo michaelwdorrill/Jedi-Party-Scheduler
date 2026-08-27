@@ -504,6 +504,50 @@ Options, roughly in order of honesty:
 Worth doing with idea 46, since both are about a DM whose contents no longer
 match the state behind it.
 
+### 51. A resolved poll's RSVP is recorded but never read
+
+Found while testing v0.5 (Aug 2026), one layer under item 50 and sharper.
+
+v0.5 puts RSVP buttons on a poll's DM once it settles — edit-on-resolve
+rewrites the vote message into "is settled: Thursday" with *I'm in / Maybe /
+Can't make it*, and the poll_resolved notification carries them too. Pressing
+one writes `event_invites.rsvp_status`, and the event page shows it back.
+
+But **nothing about a poll's attendance reads that column.**
+`getConfirmedAttendeeIds` answers "who is coming" from the yes-votes (or, for
+a windowed poll, from availability covering the resolved span). `rsvp_status`
+enters only through `ORGANIZER_UNLESS_DECLINED`, which applies to the
+organizer alone.
+
+So on a resolved poll: an invitee who presses *Can't make it* is still in the
+confirmed set, still gets the voice-channel DM, still counts as attending. A
+vote cast a week ago outranks an answer given a minute ago, and the app shows
+no sign of the disagreement.
+
+**This is a data-model question, not a bug to patch.** A poll's vote and an
+event's RSVP are two different statements — "that night works for me" and "I
+am coming" — and the app has quietly used the first as a proxy for the second
+since polls existed. That was fine while the second did not exist for polls.
+v0.5 created it.
+
+Three ways it could go:
+- **Once resolved, a poll is an event**: attendance comes from `rsvp_status`,
+  and the winning votes seed it (everyone who voted yes starts as accepted).
+  Clean, and it is a migration plus a rule about which votes convert.
+- **RSVP overrides the vote where one exists**, votes fill in the rest. No
+  migration, one `LEFT JOIN`, and a confirmed-set query that is harder to
+  read.
+- **Take the buttons off a resolved poll.** Honest, and it gives up the thing
+  v0.5 was for.
+
+Wants deciding with `specs/0014`, whose fan-out makes a confirmed poll day
+into a real event — at which point the first option is what happens anyway
+and this stops being a question.
+
+Related: item 50 (a settled poll still invites people to vote) and the
+comment in `sweepConfirmedMultiWinnerOptions` explaining why a multi-winner
+day's reminder carries no buttons at all.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the

@@ -1240,6 +1240,24 @@ async function sweepConfirmedMultiWinnerOptions(
       if (remindLimit <= 0) return 'incomplete';
 
       const due = await confirmedFor(reminder.type, remindLimit);
+      // Deliberately no buttons, unlike every other reminder in this file.
+      //
+      // A multi-winner poll confirms several days under one event, and
+      // `event_invites.rsvp_status` is one answer per *event* -- so "I'm in"
+      // pressed on Thursday's reminder cannot mean Thursday. It would mean
+      // the whole poll, which is specs/0014's first collision arriving early.
+      //
+      // Worse than ambiguous, in both directions. For an invitee it records
+      // a status that nothing about a poll's attendance ever reads:
+      // getConfirmedAttendeeIds asks the votes (or the submitted
+      // availability), never rsvp_status. For the organizer it is read, via
+      // ORGANIZER_UNLESS_DECLINED -- so their "Can't make it" would drop them
+      // from every confirmed day of the poll rather than the one they were
+      // being reminded about.
+      //
+      // So the reminder says the thing it is for (item 47: these days had no
+      // reminder at all) and offers no control until attendance is
+      // per-occurrence and a button can mean one day.
       await notifyPending(
         env,
         budget,
@@ -1248,7 +1266,6 @@ async function sweepConfirmedMultiWinnerOptions(
         reminder.type,
         opt.id,
         (user) => `"${opt.title}" ${reminder.render(user, opt.start_at)}.\n${eventLink(env, opt.event_id)}`,
-        () => rsvpControls({ id: opt.event_id, event_type: 'poll', window_block_minutes: opt.window_block_minutes }),
       );
       if (due.length >= remindLimit || budget.exhausted) return 'incomplete';
     },

@@ -302,7 +302,7 @@ describe('a confirmed multi-winner day', () => {
       .run();
   }
 
-  it('is reminded about 24 hours out, with the buttons', async () => {
+  it('is reminded about 24 hours out', async () => {
     const { db, env } = setup();
     await seedConfirmedDay(db, 20 * HOUR_MS);
     fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
@@ -312,7 +312,21 @@ describe('a confirmed multi-winner day', () => {
     const reminder = sentMessages(fetchStub).find((m) => m.content.includes('is coming up'));
     expect(reminder).toBeDefined();
     expect(reminder!.content).toContain('Wednesday game');
-    expect(firstRow<Button>(reminder!).map((b) => b.label)).toEqual(["I'm in", 'Maybe', "Can't make it"]);
+  });
+
+  it('carries no buttons, because one rsvp_status cannot answer for one day', async () => {
+    const { db, env } = setup();
+    await seedConfirmedDay(db, 20 * HOUR_MS);
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    await runReminderSweep(env);
+
+    const reminder = sentMessages(fetchStub).find((m) => m.content.includes('is coming up'));
+    // Every other reminder in the app has the three buttons. This one must
+    // not: a multi-winner poll has several confirmed days under one event and
+    // a single rsvp_status, so "I'm in" here would answer for all of them --
+    // and for the organizer, "Can't make it" would drop them from every day.
+    expect(reminder!.components).toBeUndefined();
   });
 
   it('is reminded again an hour out, and only once each', async () => {
