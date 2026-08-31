@@ -495,18 +495,33 @@ are stage 3. So v0.6 is deliberately the least visible release since v0.4.2,
 and the one most able to break things quietly, which is an argument for
 running it through the sandbox with the seeds rather than reading the diff.
 
-**Two build questions are open, and both are Michael's**, per the spec's
-"Still open" section:
+**Both of the spec's open questions were closed in Aug 2026**, and one of
+them stopped being a question on inspection rather than on decision.
 
-1. **What the event page shows for a recurring event.** An occurrence picker,
-   or the next occurrence's answer with a way to reach the others. The spec
-   calls this the largest remaining unknown and does not cost it, and its
-   decision 2 makes it load-bearing rather than cosmetic — the site becomes
-   the only place a further-out occurrence can be answered. This one blocks
-   stage 1's scope.
-2. **Whether `expandOccurrencesForEvent` can carry the attendance join
-   cheaply**, per event per tick, against `cron/budget.ts`. Worth measuring
-   before stage 2 rather than discovering in it.
+- **What the event page shows for a recurring event** — the spec's "largest
+  remaining unknown" — is now decision 6: the calendar is the picker, each
+  occurrence gets its own page, the series is a label. It cost nothing to
+  decide because the app already navigates that way (`EventChip` links
+  `?occurrence=`, `EventDetailPage` reads it, `specs/0005` already ruled that
+  an invite link means the series). **Worth recording as a scheduling lesson:
+  an item was carried as the biggest unknown in a spec for a release because
+  nobody checked whether it was already built.** The two sub-calls it left —
+  reminder DMs linking to their own occurrence, and what the bare
+  `/events/:id` shows — are stage 1 and small.
+- **What "independent occurrences" means** was not on the list and should have
+  been. It is now decision 7: per-occurrence *state*, not per-occurrence
+  *nagging*. The readings are identical at weekly or sparser and diverge only
+  for daily events — which are creatable from the New Event form today
+  (`RecurrenceForm.tsx:53`), so this was a live way to build four concurrent
+  ladders out of one ambiguous word.
+
+**One build question remains, and it is a measurement rather than a call.**
+Whether `expandOccurrencesForEvent` can carry the attendance join cheaply, per
+event per tick, against `cron/budget.ts`. The reminder sweep expands over a
+24-hour window today (`reminders.ts:708`) and the ladder's furthest rung is 96
+hours, so the window widens fourfold — though for weekly events the occurrence
+count per tick is unchanged, and the cost really lands on the join. Measured
+on the sandbox before stage 2, not discovered in it.
 
 **Item 47 already shipped in v0.5**, ahead of the spec that found it, exactly
 as `specs/0014`'s staging note permits — its missing reminders were a
