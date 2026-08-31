@@ -302,6 +302,15 @@ Unblock-File <path-to-script>
 Pasting the same text straight into the console is never blocked, because
 console input is not a script file.
 
+And an installer script **cannot** leave `Use-CF` behind in the shell that
+ran it. A `.ps1` runs in a child scope, so a `. $PROFILE` inside one loads
+the function into that scope and throws it away on exit — a script that
+dot-sources and then checks `Get-Command Use-CF` will find it and report
+success to a session that still has nothing. Only the caller can load into
+the caller: `. $PROFILE` typed at the prompt, or a new window. This is worth
+knowing because the failure looks like the install silently not working,
+immediately after being told it worked.
+
 ```powershell
 function Use-CF {
     param([Parameter(Mandatory)][string]$Account)
