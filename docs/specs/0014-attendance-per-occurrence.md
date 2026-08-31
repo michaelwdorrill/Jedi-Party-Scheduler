@@ -1,9 +1,9 @@
 # 0014 — Attendance per occurrence, and a reminder ladder that reads it
 
-**Status:** Draft — decisions locked (see below), two build questions open
+**Status:** Draft — decisions locked (see below), one build question open
 **Covers:** `IDEAS.md` items 47 and 48. Absorbs item 46, which is one symptom
 of the same thing.
-**Phase:** TBD → after v0.5
+**Phase:** 3.8x → **v0.6** (stage 1), 0.6.x (stages 2 and 3)
 
 ## The change in one sentence
 
@@ -135,7 +135,10 @@ accept one occurrence at a time.**
 - When the gap between occurrences is **shorter than the ladder** (a daily
   event, where "24 hours after the last one" is already inside the next one's
   24-hour rung), the nearest-due-rung rule handles it: rungs that no longer
-  apply are skipped rather than collapsed into a burst.
+  apply are skipped rather than collapsed into a burst. **Decision 7 makes
+  this rule load-bearing** rather than a detail — it is the whole difference
+  between per-occurrence state and per-occurrence nagging, and daily events
+  are creatable from the New Event form today.
 
 This is also what makes "declined → no reminders" safe. Under the old
 per-event model, one press of *Can't make it* for the week of a wedding
@@ -385,20 +388,86 @@ here rather than being discovered later:
   nobody was ever shown manufactures commitments, which is the exact failure
   per-occurrence attendance exists to prevent.
 
+**6. The event page is an occurrence page; the series is only a label.** The
+calendar shows a recurring event on every date its rule puts it on. Clicking
+one opens *that* occurrence. The page may say "Part of the *X* series", but it
+carries no occurrence picker and no navigation to its siblings — each
+occurrence stands on its own, and the calendar is how you reach any other.
+
+This was written up here as the largest remaining unknown, and it is not one,
+because **the app already navigates exactly this way**:
+
+- `EventChip.tsx` already links a recurring occurrence to
+  `/events/:id?occurrence=YYYY-MM-DD`.
+- `EventDetailPage` already reads that parameter, and already gates *Cancel
+  this occurrence* on it — beside the series-level *Edit* and *Cancel event*,
+  so "each stands alone but the series still exists" is the shape that is
+  built.
+- `specs/0005` already decided the matching half in the same direction: the
+  copy-invite-link deliberately reconstructs the URL *without* `?occurrence=`,
+  because an invitation means the event, not the day the organizer happened to
+  be looking at.
+
+So per-occurrence attendance hangs off a structure that exists and is already
+consistent with itself. Two sub-calls follow, both stage 1 and both small:
+
+**6a. A reminder DM links to the occurrence it is about.** `eventLink`
+(`worker/src/cron/reminders.ts:345`) builds `/#/events/:id` with no occurrence,
+and it is the link in every invite, reminder and change-request DM. A ladder
+rung is per occurrence by construction, so its link has to be too — otherwise
+the DM asking about the 10th opens a page with no idea which night it meant.
+Mechanical, and that path is already being rewritten for `custom_id` v2. **The
+invite DM keeps the bare link**, per 0005: you are invited to the series.
+
+**6b. The bare `/events/:id` shows the next upcoming occurrence.** Someone
+arriving from an invite link, a copied link or an older DM has to land on
+something, and "choose a day before you can see anything" is a worse landing
+than the page they get today. It shows the next occurrence's answer, and the
+calendar reaches the rest. No redirect to an occurrence URL — the bare link
+must keep meaning the series, or 0005's rule is undone by the fix.
+
+**7. A recurring occurrence carries its own state, not its own nagging.**
+Per occurrence: the answer, and where that answer sits on the ladder. *Not*
+per occurrence: a DM each tick for every occurrence inside the ladder window.
+
+The distinction sounds academic and is not, though it is invisible at weekly
+or sparser — a 168-hour gap never puts two occurrences inside a 96-hour
+ladder, so both readings behave identically for a normal game night. **Daily
+is where they diverge, and daily is creatable today**:
+`frontend/src/components/RecurrenceForm.tsx:53` offers *Daily* with an
+interval, so "every day" and "every 2 days" are both reachable from the New
+Event form right now. Under the rejected reading a daily event puts four
+ladders in flight at once and DMs a person up to four times per tick.
+
+What prevents it is already in this spec, and decision 7 promotes it from
+incidental to load-bearing: the ladder for occurrence N+1 starts 24 hours
+after N ends, and only the nearest due rung ever sends. This decision exists
+so that "occurrences are independent" is never read as licence to build the
+other thing.
+
 ## Still open
 
-1. **What does the event page show for a recurring event?** One answer per
-   occurrence means the detail page needs an occurrence picker, or the next
-   occurrence's answer with a way to reach the others. Decision 2 makes this
-   load-bearing rather than cosmetic — the site is now the *only* place a
-   further-out occurrence can be answered. Not costed here, and it is the
-   largest remaining unknown.
-2. **How are a recurring event's occurrences resolved on each tick?** They are
+*The question that stood first here — what the event page shows for a
+recurring event, "the largest remaining unknown" — is answered by decision 6,
+and turned out to be mostly built already. What remains is a measurement, not
+a decision.*
+
+1. **How are a recurring event's occurrences resolved on each tick?** They are
    computed from the rule, not stored, so "the next one" is a moving target
    and "every one the calendar shows" is a range that has to be expanded per
    event per tick. `expandOccurrencesForEvent` already does this for
    reminders; whether it can carry the attendance join cheaply is a build
    question worth measuring before stage 2.
+
+   Two numbers make it measurable rather than vague. The reminder sweep
+   currently expands each recurring event over `windowEnd = now + 24 * HOUR_MS`
+   (`worker/src/cron/reminders.ts:708`), and the ladder's furthest rung is 96
+   hours — so **the expansion window widens fourfold**, and `pendingRecipients`
+   gains an attendance join per occurrence on top of that. For weekly events
+   the occurrence count per event per tick stays 0 or 1 either way; the cost
+   lands on daily events and on the join, not on the wider window itself.
+   Measure against `cron/budget.ts` with the sandbox seeds before stage 2,
+   which is also when the first-tick backlog from decision 5 wants watching.
 
 ## Rejected alternatives
 

@@ -35,9 +35,16 @@ whatever is freshest.
    views exist. Doing 8 first means paying for it twice.
 
 4. **A new dependency is paid for once, so group what needs it.** Outbound
-   email doesn't exist anywhere in the Worker today; ideas 9 and 10 both want
-   it. Google OAuth doesn't exist either, and only idea 2 wants it — which is
+   email doesn't exist anywhere in the Worker today, and idea 9 wants it.
+   Google OAuth doesn't exist either, and only idea 2 wants it — which is
    part of why idea 2 is last.
+
+   *Corrected Aug 2026:* this rule originally said ideas 9 **and 10** both
+   want email, and grouped them on that basis. 10 does not — it warns by DM,
+   which the bot already does, as Phase 4's own entry has always said. The
+   rule stands; its worked example was wrong, and the grouping it justified
+   was doing less work than it looked like. That mattered once Phase 3.8x
+   needed a reason to go first.
 
 ## The phases
 
@@ -405,29 +412,133 @@ cost a third column on `notification_log`, non-durable ones make a retried DM
 look different from everyone else's, and choosing between those for a
 presentational feature wants someone looking at Discord. v0.5.1.
 
-### Phase 3.8x — What v0.5 turned up (ideas 46, 48) → **v0.6 or later**
+### Phase 3.76 — DMs that outlived the state behind them (ideas 50, 51, and 0010's embeds) → **v0.5.1**
 
-Both came out of using the thing. Idea 46 is small and specific: a reminder
-shows the buttons but not the answer you already gave, so the only way to see
-what you said is to press something. Idea 48 is not small at all — it is the
-reminder ladder, and designing it produced `specs/0014`, whose central
-decision (attendance is per occurrence, not per event) is the largest single
-change to this app's data model since it was built.
+**Spec:** `specs/0010-interactive-bot.md` for the embeds; 50 and 51 need none.
 
-They are listed together because 46 is a special case of 48: once a reminder
-knows what you answered, showing it is the easy half. Doing 46 alone is
-defensible if 48 keeps slipping; doing 46 *inside* 48 is cheaper.
+Making a DM something you can press rather than something you read created a
+class of problem the outbound-only bot could not have: a message whose
+controls outlive the state they were rendered against. Two of the three items
+here are that; the third is the presentational half deferred out of v0.5 on
+purpose, and it belongs with them because they are all the same surface.
 
-`specs/0014` is staged across two or three releases on purpose, and its
-migration ships alone. That sequencing is the reason this phase is "0.6 or
-later" rather than a number — it depends on whether the migration goes first
-or the growth work does.
+- **51 is the one to take seriously, and it is closer to a bug v0.5 shipped
+  than to a backlog item.** `getConfirmedAttendeeIds`
+  (`worker/src/lib/attendance.ts:138`) answers "who is coming to a poll" from
+  `event_poll_votes ... vote = 'yes'`; `rsvp_status` reaches it only through
+  `ORGANIZER_UNLESS_DECLINED`, which covers the organizer alone. So an
+  invitee who presses *Can't make it* on a resolved poll's DM — a button v0.5
+  shipped for precisely that purpose — stays in the confirmed set, still gets
+  the voice-channel DM, and still counts as attending. **A control that
+  records an answer nothing reads**, live in production since 26 Aug. Its
+  capture is right that the fix underneath is a data-model question rather
+  than a patch, which is what makes the call below a real one.
+- **50 is one predicate**, and the capture's claim checks out against the
+  code: `sweepNewInvites` filters on `e.status != 'cancelled'` and nothing
+  else (`worker/src/cron/reminders.ts:475`), so a settled poll is still a poll
+  people get DM'd an invitation to vote on. Rule 2 — nothing left to decide.
+- **Embeds** are `specs/0010`'s deferred half. The reason they were deferred
+  — durable embeds cost a third column on `notification_log`, non-durable
+  ones make a retried DM look different from everyone else's — is a call that
+  wants someone looking at Discord, which is exactly what a release aimed at
+  the DMs puts in front of Michael anyway.
 
-### Phase 4 — Growth and lifecycle (ideas 9, 10) → **v0.6**
+**Decided (Michael, Aug 2026): 51 takes its interim here.** Its option 2 —
+RSVP overrides the vote where one exists, one `LEFT JOIN`, no migration —
+ships in v0.5.1, and its option 1 arrives later as a consequence of
+`specs/0014`'s fan-out rather than as a separate piece of work. The cost
+being accepted is one release with a confirmed-set query that is harder to
+read; the cost being refused is leaving a wrong answer in production for the
+length of a migration.
+
+The symmetry is the argument as much as the timing: **the release that
+created the disagreement is the one that closes it.** v0.5 gave a poll two
+answers — a vote and an RSVP — and shipped no rule for which wins; v0.5.1 is
+the release about those same DMs, so the rule belongs in it rather than
+waiting on a data model change that will make the rule redundant.
+
+### Phase 3.8x — Attendance per occurrence (ideas 46, 48, 49, and 51's endgame) → **v0.6**
+
+**Spec:** `specs/0014-attendance-per-occurrence.md` (Draft — decisions locked,
+two build questions open).
+
+This phase read "v0.6 or later" until Aug 2026, because the choice between it
+and the growth work had not been made and the entry said so. **It is made
+here: v0.6 is stage 1 of `specs/0014`, and Phase 4 moves to v0.7.** Three
+reasons, in the order the rules give them:
+
+- **Four open items resolve into this spec and nowhere else.** 46 is a
+  special case of 48 — once a reminder knows what you answered, showing it is
+  the easy half. 49 says in its own capture that it wants doing "with
+  `specs/0014` in view", because the fan-out turns "who is coming to this
+  night" from a poll question into an ordinary event's invitee list, which
+  already works. 51's option 1 "is what happens anyway" once that fan-out
+  lands. Four items waiting on one decision means the decision *is* the work,
+  and leaving it unmade is what the phase has been doing.
+- **Nothing pulls the growth work forward.** Phase 4's own entry calls 9 and
+  10 "operational rather than user-requested", and neither has a dependent
+  waiting on it — idea 2 lists 10 as a dependency, and idea 2 is last by
+  design.
+- **Rule 4 argues against idea 9 specifically, for now.** 9 brings the
+  outbound email path with it, and a new dependency is paid for once. The rule
+  groups 9 and 10 because both were assumed to want email — but 10 warns by
+  DM and needs none of it, so the grouping buys less than it looks like, and
+  there is no hurry to pay for email while nothing else is queued behind it.
+
+**The staging is the spec's, not this file's**, and it is the whole reason
+this is one release rather than three. Stage 1 is the table, the migration,
+every read and write path and `custom_id` v2, with **no new user-visible
+behaviour except that a recurring event's answer applies to one occurrence**.
+It ships alone — the lesson v0.4.6 recorded about holding `specs/0013` back
+from v0.4.5. The ladder is stage 2 and the fan-out and cancellation cascade
+are stage 3. So v0.6 is deliberately the least visible release since v0.4.2,
+and the one most able to break things quietly, which is an argument for
+running it through the sandbox with the seeds rather than reading the diff.
+
+**Both of the spec's open questions were closed in Aug 2026**, and one of
+them stopped being a question on inspection rather than on decision.
+
+- **What the event page shows for a recurring event** — the spec's "largest
+  remaining unknown" — is now decision 6: the calendar is the picker, each
+  occurrence gets its own page, the series is a label. It cost nothing to
+  decide because the app already navigates that way (`EventChip` links
+  `?occurrence=`, `EventDetailPage` reads it, `specs/0005` already ruled that
+  an invite link means the series). **Worth recording as a scheduling lesson:
+  an item was carried as the biggest unknown in a spec for a release because
+  nobody checked whether it was already built.** The two sub-calls it left —
+  reminder DMs linking to their own occurrence, and what the bare
+  `/events/:id` shows — are stage 1 and small.
+- **What "independent occurrences" means** was not on the list and should have
+  been. It is now decision 7: per-occurrence *state*, not per-occurrence
+  *nagging*. The readings are identical at weekly or sparser and diverge only
+  for daily events — which are creatable from the New Event form today
+  (`RecurrenceForm.tsx:53`), so this was a live way to build four concurrent
+  ladders out of one ambiguous word.
+
+**One build question remains, and it is a measurement rather than a call.**
+Whether `expandOccurrencesForEvent` can carry the attendance join cheaply, per
+event per tick, against `cron/budget.ts`. The reminder sweep expands over a
+24-hour window today (`reminders.ts:708`) and the ladder's furthest rung is 96
+hours, so the window widens fourfold — though for weekly events the occurrence
+count per tick is unchanged, and the cost really lands on the join. Measured
+on the sandbox before stage 2, not discovered in it.
+
+**Item 47 already shipped in v0.5**, ahead of the spec that found it, exactly
+as `specs/0014`'s staging note permits — its missing reminders were a
+one-line change to the reminder sweep's selection and did not need the
+migration.
+
+### Phase 4 — Growth and lifecycle (ideas 9, 10) → **v0.7**
 
 Both are operational rather than user-requested, and both are best done once
 the app is something we're happy to show people — which is what Phase 3
 delivers.
+
+**Moved from v0.6 to v0.7 in Aug 2026**, when Phase 3.8x stopped being "0.6 or
+later" and took the number. The reasoning is written up there rather than
+repeated here; the short version is that nothing depends on this phase, four
+open items depend on that one, and Rule 4's grouping of 9 and 10 buys less
+than it appears to — 10 warns by DM and wants no email at all.
 
 - **9, self-service bot add with owner approval**, brings the outbound email
   path with it. That's the real cost of the item; build it as its own
@@ -441,7 +552,7 @@ delivers.
 Sequenced 9 then 10, but they're independent; 10 can go earlier if the sweep
 work looks cheap.
 
-### Phase 5 — Google Calendar sync (idea 2) → **v0.7**
+### Phase 5 — Google Calendar sync (idea 2) → **v0.8**
 
 The biggest lift, and deliberately last. It wants a second OAuth provider,
 a second set of refreshable tokens to store securely (note that we currently
@@ -491,9 +602,11 @@ shifts.
 | **0.4.5** | Phase 3.10 — every candidate's availability (39), poll candidates on the calendar (41), readable chips (42) | **Shipped 25 Aug 2026** |
 | **0.4.6** | Phase 3.15 — windowed candidates (40), per `specs/0013` | **Shipped 25 Aug 2026** |
 | **0.5** | Phase 3.75 — the interactive bot (19), the message-id cost it carried (32), the calendar's month ceiling removed (22), and reminders for confirmed multi-day polls (47). Embeds deferred to 0.5.1 | **Shipped 26 Aug 2026** |
-| 0.5.1 | Embeds on the DMs that carry controls — see `specs/0010` for why it is its own release | Planned |
-| 0.6 | Self-service bot add + email (9), stale-account purge (10) | Planned |
-| 0.7 | Google Calendar sync (2) | Planned |
+| 0.5.1 | Phase 3.76 — the DMs that outlived their state: a settled poll stops inviting people to vote (50), a resolved poll's RSVP gets read (51), plus `specs/0010`'s deferred embeds | Planned |
+| 0.6 | Phase 3.8x — stage 1 of `specs/0014`: attendance per occurrence, the migration, `custom_id` v2. Ships alone, with no user-visible change but the recurring one | Planned |
+| 0.6.x | `specs/0014` stages 2 and 3 — the reminder ladder (48, absorbing 46), then the multi-winner fan-out, the minimum-attendees field and the cancellation cascade (49, 51 close here) | Planned |
+| 0.7 | Phase 4 — self-service bot add + email (9), stale-account purge (10) | Planned |
+| 0.8 | Phase 5 — Google Calendar sync (2) | Planned |
 | 1.0 | `IDEAS.md`'s **Still open** section empty — leave Beta | When the list clears |
 
 ## Summary
@@ -521,7 +634,7 @@ shifts.
 | 10 | Stale-account auto-delete | M | 4 | 0.6 | — | TBD |
 | 2 | Google Calendar sync | XL | 5 | 0.7 | 1, 5, 10 | TBD |
 | 21 | Calendar chip click opens New Event | S | 3.5 | 0.4 | — | 0009 — done |
-| 22 | Calendar can only show 2 months | M | — | — | — | deferred out of 0009 |
+| 22 | Calendar can only show 2 months | M | 3.75 | 0.5 | — | rode along in 19 |
 | 24 | A failed API call renders as "nothing scheduled" | M | 3.6 | 0.4.1 | — | none needed |
 | 26 | Organizer gets a 403 from their own RSVP buttons | M | 3.6 | 0.4.1 | 24 | none needed |
 | 25 | CI actions on a deprecated Node runtime | XS | 3.6 | 0.4.1 | — | none needed |
@@ -541,6 +654,13 @@ shifts.
 | 41 | Polls render on their deadline, not their candidate days | M | 3.10 | 0.4.5 | — | none needed |
 | 42 | Month chips show the time and truncate the title away | S | 3.10 | 0.4.5 | — | none needed |
 | 44 | Agenda's group-colour gutter never rendered (runtime-built class) | XS | 3.10 | 0.4.5 | — | none needed |
+| 45 | A Discord button press bypasses the policy re-acceptance gate | S | 3.75 | 0.5 | 37 | in 19's spec |
+| 47 | A confirmed multi-winner poll day gets no reminders at all | S | 3.75 | 0.5 | — | 0014 (taken early) |
+| 50 | A settled poll still DMs an invitation to vote on it | XS | 3.76 | 0.5.1 | 19 | none needed |
+| 51 | A resolved poll's RSVP is recorded but never read | M | 3.76 | 0.5.1 | 19 | interim; 0014 closes it |
+| 46 | A reminder shows the buttons but not the answer on record | S | 3.8x | 0.6.x | 48 | 0014 |
+| 48 | Reminders should depend on whether you have answered | XL | 3.8x | 0.6 | — | 0014 |
+| 49 | Everyone should see everyone's answer, whatever the event type | M | 3.8x | 0.6.x | 48 | 0014 |
 | 43 | Nothing guards CURRENT_POLICY_VERSION against an accidental bump | S | — | — | 37 | TBD |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
 | 37 | Re-agree to the Policy/Terms when they change | M | 3.9 | 0.4.4 | — | 0012 |
@@ -557,11 +677,17 @@ notes on that placement:
 
 - **23 ships partially and stays open.** Only its free third option (write the
   rule down) is done; the gap itself is undecided. It still counts against 1.0.
-- **22 remains unscheduled**, and this is now the second release it has sat
-  out. It is a real constraint — you cannot look at a month more than one
-  ahead — but it is a behaviour change with a cost (`GET /me/events` is bounded
-  by `MAX_QUERY_RANGE_MS`, and the two-month window is what makes the landing
-  page one query), so it wants a spec rather than a slot.
+- **22 remained unscheduled through two releases**, on the grounds that it is
+  a behaviour change with a cost (`GET /me/events` is bounded by
+  `MAX_QUERY_RANGE_MS`, and the two-month window is what made the landing page
+  one query) and so wanted a spec rather than a slot. **It shipped in v0.5
+  anyway**, without one — see Phase 3.75. What forced it was not the
+  constraint being felt again but `specs/0014` deciding how far ahead someone
+  may answer for a recurring session, at which point a navigation limit had
+  quietly become a data-model question. Worth recording as the case where
+  "wants a spec rather than a slot" was the right call for the wrong reason:
+  the item was cheap, and what it was really waiting on was a different
+  item's design.
 - **Ideas 29-31 shipped as v0.4.2**, in Phase 3.7 above. They were captured
   here as unscheduled and "not blocking v0.5"; Rule 1 moved them in front of
   it anyway, and 30 and 31 were indeed cheaper together, being the same
@@ -657,6 +783,39 @@ notes on that placement:
   idea gets a phase like everything else — but it is worth saying plainly,
   because six new items landing in one release cycle is also the mechanism by
   which 1.0 keeps moving away.
+
+- **Ideas 45–51 were captured during and just after v0.5, and until Aug 2026
+  none of them appeared in the table above** — which had stood at 44 since
+  v0.4.5, so five open items existed on the capture surface with no position
+  on the ordering one. That is item 29's failure mode (a list that does not
+  say where things stand) reappearing in the file item 29 did not touch, and
+  it is why "are we ready for 0.6" could not be answered from this document.
+  Their placement:
+
+  - **45 and 47 shipped in v0.5** and are recorded above for completeness. 47
+    is the more interesting of the two: it had been true since multi-winner
+    polls shipped, and it was found by *writing a spec* rather than by running
+    the app — the third distinct source of backlog items after the security
+    review cycle and watching someone use it.
+  - **50 and 51 go to v0.5.1** (Phase 3.76), with the embeds. 50 is Rule 2 —
+    one predicate, nothing left to decide. 51 is there because it is a wrong
+    answer in production rather than a missing feature, and because the DM
+    release is the one that already has Michael looking at Discord.
+  - **46, 48 and 49 go to v0.6 and its follow-ons** (Phase 3.8x), because all
+    three resolve into `specs/0014` and two of them say so in their own
+    captures. 46 is a special case of 48; doing it inside 48 is cheaper than
+    doing it alone, and the reason to do it alone (48 keeps slipping) stops
+    applying the moment 48 has a number.
+
+- **The tail did shift this time**, unlike v0.4.1. Phase 4 moves from 0.6 to
+  0.7 and Phase 5 from 0.7 to 0.8, which is the first substitution rather than
+  insertion this roadmap has done. The versions section already says the
+  numbers are a plan rather than a promise, so this is allowed — but it is
+  the more expensive kind of change to the plan, and it is worth being honest
+  that what moved the growth work was not a new idea outranking it. It was
+  five items arriving that all pointed at a spec whose phase field said
+  "TBD", and a phase entry that had deferred its own decision to "0.6 or
+  later" rather than making it.
 
 ## Things this roadmap is not
 
