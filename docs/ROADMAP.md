@@ -443,15 +443,19 @@ purpose, and it belongs with them because they are all the same surface.
   wants someone looking at Discord, which is exactly what a release aimed at
   the DMs puts in front of Michael anyway.
 
-**The open call, and it is Michael's.** Item 51 has an interim (its option 2:
-RSVP overrides the vote where one exists, one `LEFT JOIN`, no migration) and
-an endgame (its option 1: once resolved, a poll is an event — which is what
-`specs/0014`'s fan-out produces regardless). Taking the interim here fixes a
-wrong answer now, at the cost of one release with a confirmed-set query that
-is harder to read. Deferring it to Phase 3.8x leaves the wrong answer in
-production for the length of a migration. This file's job is to say the
-choice exists and that neither side of it is free; the choice itself is not
-the roadmap's to make.
+**Decided (Michael, Aug 2026): 51 takes its interim here.** Its option 2 —
+RSVP overrides the vote where one exists, one `LEFT JOIN`, no migration —
+ships in v0.5.1, and its option 1 arrives later as a consequence of
+`specs/0014`'s fan-out rather than as a separate piece of work. The cost
+being accepted is one release with a confirmed-set query that is harder to
+read; the cost being refused is leaving a wrong answer in production for the
+length of a migration.
+
+The symmetry is the argument as much as the timing: **the release that
+created the disagreement is the one that closes it.** v0.5 gave a poll two
+answers — a vote and an RSVP — and shipped no rule for which wins; v0.5.1 is
+the release about those same DMs, so the rule belongs in it rather than
+waiting on a data model change that will make the rule redundant.
 
 ### Phase 3.8x — Attendance per occurrence (ideas 46, 48, 49, and 51's endgame) → **v0.6**
 
@@ -638,7 +642,7 @@ shifts.
 | 45 | A Discord button press bypasses the policy re-acceptance gate | S | 3.75 | 0.5 | 37 | in 19's spec |
 | 47 | A confirmed multi-winner poll day gets no reminders at all | S | 3.75 | 0.5 | — | 0014 (taken early) |
 | 50 | A settled poll still DMs an invitation to vote on it | XS | 3.76 | 0.5.1 | 19 | none needed |
-| 51 | A resolved poll's RSVP is recorded but never read | M | 3.76 | 0.5.1 | 19 | 0014 (endgame) |
+| 51 | A resolved poll's RSVP is recorded but never read | M | 3.76 | 0.5.1 | 19 | interim; 0014 closes it |
 | 46 | A reminder shows the buttons but not the answer on record | S | 3.8x | 0.6.x | 48 | 0014 |
 | 48 | Reminders should depend on whether you have answered | XL | 3.8x | 0.6 | — | 0014 |
 | 49 | Everyone should see everyone's answer, whatever the event type | M | 3.8x | 0.6.x | 48 | 0014 |
