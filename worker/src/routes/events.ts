@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { DateTime } from 'luxon';
 import type { AppEnv } from '../lib/authMiddleware';
 import type { Env } from '../env';
 import type { EventRow } from '../lib/events';
@@ -39,19 +40,52 @@ export async function loadOwnedActiveEvent(env: Env, eventId: string, userId: st
   return event;
 }
 
-// specs/0014 decision 6b: a recurring event's bare /events/:id -- an invite
-// link, a copied link, an older DM -- has to land on something, and "choose
-// a day before you can see anything" is a worse landing than showing the
-// next upcoming occurrence. A series that has already ended falls back to ''
-// rather than searching backward: a rare, display-only case where the
-// response simply carries an empty invited-list/myRsvpStatus for a key that
-// matches no row, which is harmless.
-async function nextOccurrenceDate(env: Env, event: EventRow): Promise<string> {
+// A recurring event's own row has no start_at/end_at at all -- events.ts's
+// EventRow carries them NULL for every recurring event, always, by design
+// (createEventWithInvites writes isRecurring ? null : input.startAt): the
+// real times live in event_recurrence_rules and are computed per occurrence.
+// GET /:eventId used to just echo those NULLs regardless of ?occurrence=,
+// which is a pre-existing gap this route never closed before -- it happened
+// not to matter until decision 6 made "each occurrence gets its own page"
+// the thing this route is actually for. Resolving a real startAt/endAt here
+// is what lets the page show a time at all, which is also what
+// EventDetailPage.tsx's `event.startAt && event.endAt` RSVP-button gate has
+// silently depended on since before this release.
+//
+// requestedDate present -> resolve that exact occurrence (decision 2: any
+// occurrence at all, not just ones near "now"). requestedDate absent ->
+// decision 6b's next-upcoming default. Both go through
+// expandOccurrencesForEvent so overrides (a moved time, a cancellation) are
+// honoured identically to every other read of this event's occurrences.
+async function resolveOccurrence(
+  env: Env,
+  event: EventRow,
+  requestedDate: string | null,
+): Promise<{ date: string; startAt: number | null; endAt: number | null }> {
   const overridesByEvent = await loadOverridesForEvents(env, [event.id]);
+  const overrides = overridesByEvent.get(event.id) ?? [];
+
+  if (requestedDate) {
+    // A day-wide window in the event's own timezone, not a point in time --
+    // expandOccurrences filters by ms overlap, and the occurrence's actual
+    // start/end (after any override) has to fall inside it to be found.
+    const zone = event.timezone;
+    const dayStart = DateTime.fromISO(requestedDate, { zone }).startOf('day').toMillis();
+    const dayEnd = DateTime.fromISO(requestedDate, { zone }).endOf('day').toMillis();
+    const occurrences = await expandOccurrencesForEvent(env, event, dayStart, dayEnd, overrides);
+    const occ = occurrences.find((o) => o.date === requestedDate);
+    // No match means either a cancelled occurrence (expandOccurrences omits
+    // those entirely) or a date the rule never produces -- either way,
+    // nothing honest to show as a time, so this is the same harmless '' the
+    // rest of this route already treats as "no answer, matches no row".
+    return occ ? occ : { date: requestedDate, startAt: null, endAt: null };
+  }
+
   const now = Date.now();
   const horizon = now + 366 * 24 * 60 * 60 * 1000;
-  const occurrences = await expandOccurrencesForEvent(env, event, now, horizon, overridesByEvent.get(event.id) ?? []);
-  return occurrences[0]?.date ?? '';
+  const occurrences = await expandOccurrencesForEvent(env, event, now, horizon, overrides);
+  const occ = occurrences[0];
+  return occ ? occ : { date: '', startAt: null, endAt: null };
 }
 
 eventRoutes.get('/:eventId', async (c) => {
@@ -61,11 +95,14 @@ eventRoutes.get('/:eventId', async (c) => {
   if (!event) return c.text('Not found', 404);
 
   const requestedOccurrence = c.req.query('occurrence');
-  const occurrenceDate = event.is_recurring
-    ? requestedOccurrence
-      ? assertIsoDate(requestedOccurrence, 'occurrence')
-      : await nextOccurrenceDate(c.env, event)
-    : '';
+  const resolved = event.is_recurring
+    ? await resolveOccurrence(
+        c.env,
+        event,
+        requestedOccurrence ? assertIsoDate(requestedOccurrence, 'occurrence') : null,
+      )
+    : { date: '', startAt: event.start_at, endAt: event.end_at };
+  const occurrenceDate = resolved.date;
 
   const recurrence = event.is_recurring
     ? await c.env.DB.prepare(
@@ -211,8 +248,11 @@ eventRoutes.get('/:eventId', async (c) => {
     eventType: event.event_type,
     status: event.status,
     timezone: event.timezone,
-    startAt: event.start_at,
-    endAt: event.end_at,
+    // For a recurring event this is the resolved occurrence's time, not the
+    // event row's own start_at/end_at -- which are always NULL for a
+    // recurring event (the real schedule lives in event_recurrence_rules).
+    startAt: resolved.startAt,
+    endAt: resolved.endAt,
     isRecurring: !!event.is_recurring,
     organizerId: event.organizer_id,
     organizerUsername: organizer?.username ?? null,
@@ -263,7 +303,11 @@ eventRoutes.get('/:eventId', async (c) => {
       globalName: i.global_name,
       invitedVia: i.invited_via,
       sourceGroupId: i.source_group_id,
-      rsvpStatus: i.rsvp_status,
+      // Same decision-1 fallback as myRsvpStatus above, applied per row so
+      // the organizer doesn't show as "no answer" here while every other
+      // read of this occurrence (the reminder path, myRsvpStatus) treats
+      // them as attending by default.
+      rsvpStatus: i.rsvp_status ?? (i.user_id === event.organizer_id ? 'accepted' : null),
     })),
     pollOptions,
   });
