@@ -479,6 +479,15 @@ describe('custom_id', () => {
     expect(withAnswer('Invite', 'yes.')).toBe('Invite\n\nRecorded: yes.');
     expect(withAnswer('Invite\n\nRecorded: yes.', 'no.')).toBe('Invite\n\nRecorded: no.');
     expect(withAnswer('x'.repeat(2100), 'yes.').length).toBeLessThanOrEqual(2000);
+
+    // Since v0.5.1 a DM with controls keeps its words in an embed, so the
+    // content reaching here is empty on the first press and nothing but the
+    // previous answer on the second. Both must replace rather than stack --
+    // and the second must do so whether or not Discord kept the leading
+    // blank line it was stored with.
+    expect(withAnswer('', 'yes.')).toBe('\n\nRecorded: yes.');
+    expect(withAnswer('\n\nRecorded: yes.', 'no.')).toBe('\n\nRecorded: no.');
+    expect(withAnswer('Recorded: yes.', 'no.')).toBe('\n\nRecorded: no.');
   });
 });
 

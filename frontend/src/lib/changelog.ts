@@ -21,6 +21,18 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.5.1',
+    date: '31 August 2026',
+    summary: 'The bot\u2019s messages look like messages, and stop asking questions they already answered.',
+    changed: [
+      'A DM that can be answered now arrives as a card rather than a wall of text \u2014 the same words, set off by a colour, with the buttons under them. Only the messages you can actually do something with get it; a plain notice stays plain.',
+    ],
+    fixed: [
+      'A poll that has already been decided no longer invites you to vote on it. That invitation still went out if the poll settled before the DM did, and since the DM started carrying a dropdown, the only thing pressing it could say was \u201cvoting is closed\u201d \u2014 a control that existed only to refuse.',
+      'Saying \u201cCan\u2019t make it\u201d on a poll that has settled now means it. The buttons on a settled poll\u2019s DM recorded your answer and showed it back on the site, but nothing that worked out who was coming ever read it: an old vote for the night outranked what you had just said, so you stayed on the list and still got the voice-channel nudge. \u201cMaybe\u201d counts the same way it does everywhere else \u2014 as not yet a yes.',
+    ],
+  },
+  {
     version: '0.5',
     date: '26 August 2026',
     summary: 'The bot can be answered. Press a button in Discord instead of coming here.',

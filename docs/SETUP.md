@@ -260,6 +260,57 @@ notepad $PROFILE
 (If `$PROFILE` doesn't exist yet, `notepad` will offer to create it — accept
 that.)
 
+**If `Use-CF` is not recognised, diagnose before reinstalling.** Three
+different causes produce a byte-identical error, and only one of them is
+fixed by pasting the function in again:
+
+```
+Use-CF : The term 'Use-CF' is not recognized as the name of a cmdlet...
+```
+
+```powershell
+Test-Path $PROFILE          # does the profile file exist at all?
+$PROFILE                    # which file does *this* host read?
+Get-ExecutionPolicy -List   # would a profile be allowed to run?
+```
+
+- **`Test-Path` is `False`** — the profile has never been created, so the
+  function was never installed. Unglamorous, and it is what this actually
+  was on Michael's machine in Aug 2026, after the two more interesting
+  theories below were checked and discarded.
+- **The file exists and contains `Use-CF`, but the function is still
+  missing** — the profile is not being loaded at all. An `ExecutionPolicy`
+  of `Restricted` does that silently, and no amount of re-adding the
+  function will help.
+- **`$PROFILE` is not the file you edited** — Windows PowerShell 5.1 and
+  PowerShell 7 read different paths (`...\Documents\WindowsPowerShell\`
+  against `...\Documents\PowerShell\`), so a function saved under one host
+  does not exist under the other. 5.1's error format is the giveaway: it
+  prints `At line:1 char:1` and a `CategoryInfo` block.
+
+**One more, if you are handed an installer script rather than pasting the
+text.** `RemoteSigned` — the sensible setting, and the one this machine uses
+— refuses any `.ps1` carrying Windows' mark-of-the-web, which every file that
+arrived through a browser or a chat client has. It fails with a
+`PSSecurityException` and "is not digitally signed", which reads like a
+problem with the script and is not:
+
+```powershell
+Unblock-File <path-to-script>
+```
+
+Pasting the same text straight into the console is never blocked, because
+console input is not a script file.
+
+And an installer script **cannot** leave `Use-CF` behind in the shell that
+ran it. A `.ps1` runs in a child scope, so a `. $PROFILE` inside one loads
+the function into that scope and throws it away on exit — a script that
+dot-sources and then checks `Get-Command Use-CF` will find it and report
+success to a session that still has nothing. Only the caller can load into
+the caller: `. $PROFILE` typed at the prompt, or a new window. This is worth
+knowing because the failure looks like the install silently not working,
+immediately after being told it worked.
+
 ```powershell
 function Use-CF {
     param([Parameter(Mandatory)][string]$Account)

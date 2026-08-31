@@ -460,6 +460,21 @@ async function sweepNewInvites(env: Env, budget: TickBudget): Promise<void> {
   //    from a real invite -- so every organizer would be DM'd "You've been
   //    invited to <the event you created>", once per event they have ever
   //    run, the first time the sweep saw the backfilled rows.
+  // 4. It does not invite anyone to vote on a poll that has already settled
+  //    (IDEAS item 50). `status != 'cancelled'` alone is right for a
+  //    fixed-time event -- "you're invited to this thing on Thursday" is true
+  //    whatever the event's status -- but for a poll it is not: the DM says
+  //    "you've been invited to vote on X" about a question with an answer,
+  //    and since v0.5 it carries a select whose only possible reply is
+  //    "Voting is closed for this event". A control that exists only to
+  //    refuse.
+  //
+  //    It half-healed itself, which is what kept it hidden:
+  //    sweepSingleWinnerPollNotifications runs *before* this sweep, so tick N
+  //    sent the stale invite and recorded its message id, and tick N+1's
+  //    edit-on-resolve rewrote it into "is settled: ...". The wrong DM
+  //    existed for about fifteen minutes and then quietly became the right
+  //    one -- so anyone looking later saw nothing wrong.
   const { results } = await env.DB.prepare(
     `SELECT ei.event_id, ei.user_id, e.title, e.event_type, e.window_block_minutes,
             u.notifications_enabled, u.dm_channel_id, u.timezone
@@ -473,6 +488,7 @@ async function sweepNewInvites(env: Env, budget: TickBudget): Promise<void> {
        ON nl.user_id = ei.user_id AND nl.event_id = ei.event_id
        AND nl.notification_type = 'invite' AND nl.occurrence_date = ''
      WHERE e.status != 'cancelled'
+       AND NOT (e.event_type = 'poll' AND e.status != 'active')
        AND ei.user_id != e.organizer_id
        AND (
          nl.id IS NULL
@@ -1174,6 +1190,18 @@ async function sweepConfirmedMultiWinnerOptions(
       // Whoever is confirmed for this day and has not yet had the given
       // notification. Shared by the two things this sweep now sends, so the
       // "who is coming on this day" rule cannot drift between them.
+      //
+      // It does *not* carry item 51's "an RSVP overrides the vote" rule,
+      // which lib/attendance.ts's getConfirmedAttendeeIds does, and that is
+      // deliberate rather than the drift this comment warns about: a
+      // multi-winner day's DM carries no buttons and the website offers RSVP
+      // controls only for a fixed-time event, so no invitee to a multi-winner
+      // poll can have an rsvp_status other than 'pending'. Adding the join
+      // here would spend a correlated lookup per candidate per tick to read a
+      // column that is provably constant -- against a budget that has already
+      // been measured starving sweepPurgeTerminalHistory. specs/0014's
+      // fan-out removes the asymmetry by making each confirmed day a real
+      // event that the ordinary attendance path already handles.
       const confirmedFor = async (notificationType: NotificationType, rows: number) => {
         const { results } = await env.DB.prepare(
           `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone

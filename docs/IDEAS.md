@@ -472,90 +472,6 @@ events — at which point "who is coming to this night" stops being a poll
 question at all and becomes an ordinary event's invitee list, which already
 works.
 
-### 50. An invite DM is still sent for a poll that has already resolved
-
-Found by accident, Aug 2026, while testing v0.5: the resolve fixture's poll
-was voted on *in the app* before its invitation DM had gone out, which left
-an invite queued for a poll that was already settled.
-
-`sweepNewInvites` filters on `e.status != 'cancelled'` and nothing else, so a
-resolved event is still an event people get invited to. For a fixed-time
-event that is correct — "you're invited to this thing on Thursday" is true
-whatever the event's status. For a *poll* it is not: the DM says "you've been
-invited to vote on X" about a question that has an answer.
-
-**Pre-existing, and v0.5 is what made it visible.** Before, that DM was text
-ending in a link, and following the link showed a resolved poll — mildly
-odd, easy to miss. Now it carries a select of candidates, and pressing it
-answers "Voting is closed for this event", which is a control that exists
-only to refuse.
-
-It half-heals itself, which is its own trap. Within a tick the sweeps run in
-this order: `sweepSingleWinnerPollNotifications` (which now performs
-edit-on-resolve) comes *before* `sweepNewInvites`. So tick N sends the stale
-invite and records its message id; tick N+1's edit finds that id and rewrites
-the message into "is settled: …" with RSVP buttons. The wrong DM therefore
-exists for about fifteen minutes and then quietly becomes the right one —
-which means anyone who looks later sees nothing wrong.
-
-Options, roughly in order of honesty:
-- **Don't invite anyone to vote on a settled poll.** Add `AND NOT (e.event_type
-  = 'poll' AND e.status <> 'active')` to the sweep. One predicate, and it
-  stops the wrong message being sent rather than fixing it afterwards.
-- **Send it, but as the settled message.** More code, and it duplicates what
-  edit-on-resolve already renders.
-- **Leave it**, on the grounds that the edit tidies up within a tick. Rejected
-  in advance: a DM that says the wrong thing for fifteen minutes is a DM that
-  says the wrong thing, and "it fixes itself before most people look" is the
-  reasoning that let item 47 hide for a whole release.
-
-Worth doing with idea 46, since both are about a DM whose contents no longer
-match the state behind it.
-
-### 51. A resolved poll's RSVP is recorded but never read
-
-Found while testing v0.5 (Aug 2026), one layer under item 50 and sharper.
-
-v0.5 puts RSVP buttons on a poll's DM once it settles — edit-on-resolve
-rewrites the vote message into "is settled: Thursday" with *I'm in / Maybe /
-Can't make it*, and the poll_resolved notification carries them too. Pressing
-one writes `event_invites.rsvp_status`, and the event page shows it back.
-
-But **nothing about a poll's attendance reads that column.**
-`getConfirmedAttendeeIds` answers "who is coming" from the yes-votes (or, for
-a windowed poll, from availability covering the resolved span). `rsvp_status`
-enters only through `ORGANIZER_UNLESS_DECLINED`, which applies to the
-organizer alone.
-
-So on a resolved poll: an invitee who presses *Can't make it* is still in the
-confirmed set, still gets the voice-channel DM, still counts as attending. A
-vote cast a week ago outranks an answer given a minute ago, and the app shows
-no sign of the disagreement.
-
-**This is a data-model question, not a bug to patch.** A poll's vote and an
-event's RSVP are two different statements — "that night works for me" and "I
-am coming" — and the app has quietly used the first as a proxy for the second
-since polls existed. That was fine while the second did not exist for polls.
-v0.5 created it.
-
-Three ways it could go:
-- **Once resolved, a poll is an event**: attendance comes from `rsvp_status`,
-  and the winning votes seed it (everyone who voted yes starts as accepted).
-  Clean, and it is a migration plus a rule about which votes convert.
-- **RSVP overrides the vote where one exists**, votes fill in the rest. No
-  migration, one `LEFT JOIN`, and a confirmed-set query that is harder to
-  read.
-- **Take the buttons off a resolved poll.** Honest, and it gives up the thing
-  v0.5 was for.
-
-Wants deciding with `specs/0014`, whose fan-out makes a confirmed poll day
-into a real event — at which point the first option is what happens anyway
-and this stops being a question.
-
-Related: item 50 (a settled poll still invites people to vote) and the
-comment in `sweepConfirmedMultiWinnerOptions` explaining why a multi-winner
-day's reminder carries no buttons at all.
-
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
@@ -2114,3 +2030,118 @@ So the rule this leaves behind: **a new cursored sweep is not free, and its
 cost is paid by whatever runs last.** Folding work into a scan that already
 visits the right rows costs nothing fixed at all. `test/pass6.test.ts` is
 what caught it, and it now says so.
+
+### 50. An invite DM is still sent for a poll that has already resolved — shipped in v0.5.1
+
+Found by accident, Aug 2026, while testing v0.5: the resolve fixture's poll
+was voted on *in the app* before its invitation DM had gone out, which left
+an invite queued for a poll that was already settled.
+
+`sweepNewInvites` filters on `e.status != 'cancelled'` and nothing else, so a
+resolved event is still an event people get invited to. For a fixed-time
+event that is correct — "you're invited to this thing on Thursday" is true
+whatever the event's status. For a *poll* it is not: the DM says "you've been
+invited to vote on X" about a question that has an answer.
+
+**Pre-existing, and v0.5 is what made it visible.** Before, that DM was text
+ending in a link, and following the link showed a resolved poll — mildly
+odd, easy to miss. Now it carries a select of candidates, and pressing it
+answers "Voting is closed for this event", which is a control that exists
+only to refuse.
+
+It half-heals itself, which is its own trap. Within a tick the sweeps run in
+this order: `sweepSingleWinnerPollNotifications` (which now performs
+edit-on-resolve) comes *before* `sweepNewInvites`. So tick N sends the stale
+invite and records its message id; tick N+1's edit finds that id and rewrites
+the message into "is settled: …" with RSVP buttons. The wrong DM therefore
+exists for about fifteen minutes and then quietly becomes the right one —
+which means anyone who looks later sees nothing wrong.
+
+Options, roughly in order of honesty:
+- **Don't invite anyone to vote on a settled poll.** Add `AND NOT (e.event_type
+  = 'poll' AND e.status <> 'active')` to the sweep. One predicate, and it
+  stops the wrong message being sent rather than fixing it afterwards.
+- **Send it, but as the settled message.** More code, and it duplicates what
+  edit-on-resolve already renders.
+- **Leave it**, on the grounds that the edit tidies up within a tick. Rejected
+  in advance: a DM that says the wrong thing for fifteen minutes is a DM that
+  says the wrong thing, and "it fixes itself before most people look" is the
+  reasoning that let item 47 hide for a whole release.
+
+Worth doing with idea 46, since both are about a DM whose contents no longer
+match the state behind it.
+
+**How it shipped.** One predicate, as the capture predicted:
+`AND NOT (e.event_type = 'poll' AND e.status != 'active')` in
+`sweepNewInvites` — the "don't send it" option, since "send it as the settled
+message" duplicates what edit-on-resolve already renders.
+
+Worth keeping the note on why it hid. The resolve sweep runs *before* the
+invite sweep, so tick N sent the wrong DM and tick N+1 rewrote it into the
+right one: fifteen minutes of wrongness that leaves no trace afterwards. Same
+shape as item 47, and both were found by watching a tick happen rather than
+by reading the code.
+
+### 51. A resolved poll's RSVP is recorded but never read — shipped in v0.5.1
+
+Found while testing v0.5 (Aug 2026), one layer under item 50 and sharper.
+
+v0.5 puts RSVP buttons on a poll's DM once it settles — edit-on-resolve
+rewrites the vote message into "is settled: Thursday" with *I'm in / Maybe /
+Can't make it*, and the poll_resolved notification carries them too. Pressing
+one writes `event_invites.rsvp_status`, and the event page shows it back.
+
+But **nothing about a poll's attendance reads that column.**
+`getConfirmedAttendeeIds` answers "who is coming" from the yes-votes (or, for
+a windowed poll, from availability covering the resolved span). `rsvp_status`
+enters only through `ORGANIZER_UNLESS_DECLINED`, which applies to the
+organizer alone.
+
+So on a resolved poll: an invitee who presses *Can't make it* is still in the
+confirmed set, still gets the voice-channel DM, still counts as attending. A
+vote cast a week ago outranks an answer given a minute ago, and the app shows
+no sign of the disagreement.
+
+**This is a data-model question, not a bug to patch.** A poll's vote and an
+event's RSVP are two different statements — "that night works for me" and "I
+am coming" — and the app has quietly used the first as a proxy for the second
+since polls existed. That was fine while the second did not exist for polls.
+v0.5 created it.
+
+Three ways it could go:
+- **Once resolved, a poll is an event**: attendance comes from `rsvp_status`,
+  and the winning votes seed it (everyone who voted yes starts as accepted).
+  Clean, and it is a migration plus a rule about which votes convert.
+- **RSVP overrides the vote where one exists**, votes fill in the rest. No
+  migration, one `LEFT JOIN`, and a confirmed-set query that is harder to
+  read.
+- **Take the buttons off a resolved poll.** Honest, and it gives up the thing
+  v0.5 was for.
+
+Wants deciding with `specs/0014`, whose fan-out makes a confirmed poll day
+into a real event — at which point the first option is what happens anyway
+and this stops being a question.
+
+Related: item 50 (a settled poll still invites people to vote) and the
+comment in `sweepConfirmedMultiWinnerOptions` explaining why a multi-winner
+day's reminder carries no buttons at all.
+
+**How it shipped: option 2, the interim.** An RSVP overrides the vote where
+one exists; votes fill in the rest. `tentative` overrides too and lands
+outside the confirmed set — not a judgement about maybes, just the reading a
+fixed-time event already gives them. A `pending` row, or no row at all, is
+not an answer and falls through to the vote, which is what stops the change
+emptying every poll nobody has pressed anything on.
+
+Option 1 — once resolved, a poll is an event — remains the endgame, and
+arrives as a consequence of `specs/0014`'s fan-out rather than as work of its
+own. The interim went first because this was a wrong answer live in
+production rather than a missing feature.
+
+**What it deliberately did not touch:** the sibling confirmed-set query in
+`sweepConfirmedMultiWinnerOptions`. No invitee to a multi-winner poll can
+have an `rsvp_status` other than `pending` today — those DMs carry no buttons
+and the website offers RSVP controls only for a fixed-time event — so the
+join would cost a correlated lookup per candidate per tick to read a
+constant, against a budget already measured starving another sweep. The
+asymmetry is written down in both files rather than left to be rediscovered.

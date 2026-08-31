@@ -412,7 +412,7 @@ cost a third column on `notification_log`, non-durable ones make a retried DM
 look different from everyone else's, and choosing between those for a
 presentational feature wants someone looking at Discord. v0.5.1.
 
-### Phase 3.76 — DMs that outlived the state behind them (ideas 50, 51, and 0010's embeds) → **v0.5.1**
+### Phase 3.76 — DMs that outlived the state behind them (ideas 50, 51, and 0010's embeds) → **v0.5.1** ✅ shipped
 
 **Spec:** `specs/0010-interactive-bot.md` for the embeds; 50 and 51 need none.
 
@@ -442,6 +442,24 @@ purpose, and it belongs with them because they are all the same surface.
   ones make a retried DM look different from everyone else's — is a call that
   wants someone looking at Discord, which is exactly what a release aimed at
   the DMs puts in front of Michael anyway.
+
+**Shipped 31 Aug 2026.** The embeds turned out to cost nothing: the choice
+`specs/0010` framed — a third `notification_log` column, or embeds that a
+retry would render differently — was a choice between two answers to "how
+does the retry consumer know what the source sweep rendered?", and deriving
+the embed from `content` inside the send path means it never has to. The
+retry consumer already redelivers from stored `content`, so it reproduces the
+embed without knowing embeds exist. The price is that an embed can
+re-present the message but not restructure it, which the chosen design did
+not want to do anyway.
+
+Two things the sandbox caught that the tests could not. The **push
+notification preview** survives the words moving out of `content` — the risk
+that would have sunk this shape, checked on a real phone rather than
+reasoned about. And a **second button press on an embedded DM** would have
+stacked a second "Recorded:" line instead of replacing the first, because
+the replace worked by splitting `content` at a marker that assumed there was
+message text in front of it. Found by reading a screenshot.
 
 **Decided (Michael, Aug 2026): 51 takes its interim here.** Its option 2 —
 RSVP overrides the vote where one exists, one `LEFT JOIN`, no migration —
@@ -602,7 +620,7 @@ shifts.
 | **0.4.5** | Phase 3.10 — every candidate's availability (39), poll candidates on the calendar (41), readable chips (42) | **Shipped 25 Aug 2026** |
 | **0.4.6** | Phase 3.15 — windowed candidates (40), per `specs/0013` | **Shipped 25 Aug 2026** |
 | **0.5** | Phase 3.75 — the interactive bot (19), the message-id cost it carried (32), the calendar's month ceiling removed (22), and reminders for confirmed multi-day polls (47). Embeds deferred to 0.5.1 | **Shipped 26 Aug 2026** |
-| 0.5.1 | Phase 3.76 — the DMs that outlived their state: a settled poll stops inviting people to vote (50), a resolved poll's RSVP gets read (51), plus `specs/0010`'s deferred embeds | Planned |
+| **0.5.1** | Phase 3.76 — the DMs that outlived their state: a settled poll stops inviting people to vote (50), a resolved poll's RSVP gets read (51), plus `specs/0010`'s embeds — which cost no migration after all | **Shipped 31 Aug 2026** |
 | 0.6 | Phase 3.8x — stage 1 of `specs/0014`: attendance per occurrence, the migration, `custom_id` v2. Ships alone, with no user-visible change but the recurring one | Planned |
 | 0.6.x | `specs/0014` stages 2 and 3 — the reminder ladder (48, absorbing 46), then the multi-winner fan-out, the minimum-attendees field and the cancellation cascade (49, 51 close here) | Planned |
 | 0.7 | Phase 4 — self-service bot add + email (9), stale-account purge (10) | Planned |

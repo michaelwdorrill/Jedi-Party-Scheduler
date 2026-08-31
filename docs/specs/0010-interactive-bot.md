@@ -1,6 +1,6 @@
 # 0010 — An interactive bot
 
-**Status:** Built (v0.5) — embeds deferred, see below
+**Status:** Built — v0.5, and the deferred embeds in v0.5.1
 **Covers:** `IDEAS.md` item 19, and item 32 (which is a cost inside it)
 **Phase:** 3.75 → **v0.5**
 
@@ -401,24 +401,45 @@ and the code is legible rather than remembered.
   wrong application can never edit that message, so trying again forever
   spends the allowance on a call that cannot succeed.
 
-**Not built, and deferred deliberately:**
+**Deferred out of v0.5, and shipped in v0.5.1:**
 
-- **Embeds.** This spec lists them as in-scope and they are the one thing
-  that did not ship. The reason is worth recording, because "we ran out of
-  time" would be the wrong lesson.
+- **Embeds.** The reason for deferring was worth recording, because "we ran
+  out of time" would have been the wrong lesson -- and so is what happened
+  when the deferral was picked up, because the deferral's own framing turned
+  out to be wrong.
 
-  Making an embed durable costs a *third* column on `notification_log`,
-  beside `content` (0014) and `components` (0023), for the same reason those
-  exist: the retry consumer cannot re-derive what the source sweep rendered.
-  Not making it durable is worse in a subtler way -- a DM whose first
-  delivery failed would arrive looking different from everyone else's, and
-  only for the people who hit a transient error, which is exactly the kind of
-  difference nobody ever notices or reports.
+  As written here, the choice was: make an embed durable at the cost of a
+  *third* column on `notification_log`, beside `content` (0014) and
+  `components` (0023), for the same reason those exist -- the retry consumer
+  cannot re-derive what the source sweep rendered. Or don't, and accept that
+  a DM whose first delivery failed arrives looking different from everyone
+  else's, for only the people who hit a transient error, which is exactly the
+  kind of difference nobody ever notices or reports.
 
-  Neither is a bad option, but choosing between a schema change and a visible
-  inconsistency, for a purely presentational feature that has to be *looked
-  at* to be judged, is not a call to make from a session that cannot see
-  Discord. It wants an hour with a client open. **v0.5.1.**
+  **Both are answers to the same question, and the question can be avoided.**
+  Derive the embed from `content` *inside* `sendBotDm`/`editBotDm`, below the
+  outbox rather than above it, and `sweepDueNotificationRetries` -- which
+  already redelivers from the stored `content` -- reproduces it exactly
+  without knowing embeds exist. Durability is inherited from a column that is
+  already durable. No migration, no inconsistency.
+
+  What that costs is expressive range, and it is a real cost rather than a
+  free lunch: the embed can re-present the message but never restructure it.
+  Labelled When/Where/Who's-in fields are not derivable from a flat sentence
+  and would need the column after all. The v0.5.1 design did not want them,
+  so the constraint was free *this time*; a later redesign that does want
+  them pays migration 0025 and this paragraph is why.
+
+  **The deferral was still right, for its actual reason.** Two things were
+  settled by looking at the deployed sandbox on a phone and could not have
+  been settled here. The **push notification preview** survives the words
+  moving out of `content` into the embed -- the risk that would have sunk
+  this shape entirely, since a notification reading "Uncle Owen" and nothing
+  else is worse than no embed at all. And a **second button press** on an
+  embedded DM would have stacked a second "Recorded:" line rather than
+  replacing the first, because `withAnswer` replaced by splitting `content`
+  at a marker that assumed message text in front of it. Neither was reachable
+  from a test; the first was a screenshot, the second was reading one.
 
 - The manual portal steps (`docs/SETUP.md` 1.8 and 1.9) -- **done for the
   sandbox application**, 25 Aug 2026: key pasted, endpoint URL accepted by

@@ -22,18 +22,36 @@ put`) needs that account's credentials active in the current terminal
 first, and a fresh terminal window does **not** inherit them from another
 one — this has to be redone per session/window.
 
-If a `Use-CF` PowerShell function is set up on the machine:
+**Give him this form, which works whether or not anything is set up on the
+machine** (values come from wherever the user stores them — never ask for or
+accept the raw token/account-id in chat, and never write them to a file in
+this repo):
 ```powershell
-Use-CF uncleowen
-```
-
-Otherwise, set the two env vars directly for this session (values come
-from wherever the user stores them — never ask for or accept the raw
-token/account-id in chat, and never write them to a file in this repo):
-```powershell
-$env:CLOUDFLARE_API_TOKEN = [Environment]::GetEnvironmentVariable("CF_TOKEN_UNCLEOWEN", "User")
+$env:CLOUDFLARE_API_TOKEN  = [Environment]::GetEnvironmentVariable("CF_TOKEN_UNCLEOWEN", "User")
 $env:CLOUDFLARE_ACCOUNT_ID = [Environment]::GetEnvironmentVariable("CF_ACCOUNT_UNCLEOWEN", "User")
 ```
+
+There is also a `Use-CF uncleowen` shorthand, and **it is a convenience, not
+the instruction** — `Use-CF` is not a PowerShell cmdlet, it exists only if
+the function in `docs/SETUP.md` has been saved into `$PROFILE` on the machine
+you are talking about, and on Michael's it repeatedly has not been. This
+entry used to lead with it, conditioned on an "if it's set up" that neither
+side ever checked, which meant sessions opened by handing him a command that
+errors:
+
+```
+Use-CF : The term 'Use-CF' is not recognized as the name of a cmdlet...
+```
+
+So: lead with the two `$env:` lines. Offer `Use-CF` only after he has
+confirmed it exists (`Get-Command Use-CF`), or when helping him install it.
+
+**The trap if he is installing it:** PowerShell 5.1 and PowerShell 7 read
+different `$PROFILE` paths (`WindowsPowerShell\` vs `PowerShell\`), so a
+function added under one host is invisible from the other, with exactly the
+error above and no hint as to why. Have him print `$PROFILE` from the shell
+that is actually failing before pasting anything into it.
+
 Full setup details: `docs/SETUP.md`, "Working with more than one Cloudflare
 account."
 

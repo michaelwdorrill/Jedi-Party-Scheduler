@@ -1,3 +1,5 @@
+import { dmEmbeds } from './dmComponents';
+
 const API_BASE = 'https://discord.com/api/v10';
 
 export interface DiscordTokenResponse {
@@ -197,6 +199,8 @@ export async function editBotDm(
   content: string,
   components?: unknown[] | null,
 ): Promise<{ ok: boolean; status: number; retryable: boolean }> {
+  const embeds = dmEmbeds(content, components);
+
   let res: Response;
   try {
     res = await fetch(`${API_BASE}/channels/${channelId}/messages/${messageId}`, {
@@ -206,7 +210,11 @@ export async function editBotDm(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        content: boundContent(content),
+        content: embeds ? '' : boundContent(content),
+        // Always sent, for the same reason as `components` below: an edit that
+        // strips the controls (a cancelled poll) must strip the embed with
+        // them, and [] is how Discord is told to remove one.
+        embeds: embeds ?? [],
         allowed_mentions: { parse: [] },
         // Always sent, unlike on create: [] is how Discord is told to *remove*
         // the controls, which is most of the point of editing at all.
@@ -273,6 +281,12 @@ export async function sendBotDm(
     channelId = channel.id;
   }
 
+  // Derived here rather than by the caller, so that every path into this
+  // function -- a source sweep's first attempt and the retry consumer's
+  // redelivery from the stored content -- produces identical embeds
+  // (specs/0010, and see dmEmbeds for why that is what makes them free).
+  const embeds = dmEmbeds(content, components);
+
   let messageRes: Response;
   try {
     messageRes = await fetch(`${API_BASE}/channels/${channelId}/messages`, {
@@ -285,7 +299,11 @@ export async function sendBotDm(
       // could otherwise be smuggled in through a user-controlled
       // event/group/channel name and fired off by the trusted bot account.
       body: JSON.stringify({
-        content: boundContent(content),
+        // The text goes in the embed when there is one, and in `content`
+        // otherwise. Never both: Discord renders each, so setting the two
+        // would say everything twice.
+        content: embeds ? '' : boundContent(content),
+        ...(embeds ? { embeds } : {}),
         allowed_mentions: { parse: [] },
         // Omitted entirely rather than sent as [] when there are none: an
         // empty array is a meaningful value to Discord (it *clears*
