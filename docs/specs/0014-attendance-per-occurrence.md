@@ -3,7 +3,7 @@
 **Status:** Draft — decisions locked (see below), two build questions open
 **Covers:** `IDEAS.md` items 47 and 48. Absorbs item 46, which is one symptom
 of the same thing.
-**Phase:** TBD → after v0.5
+**Phase:** 3.8x → **v0.6** (stage 1), 0.6.x (stages 2 and 3)
 
 ## The change in one sentence
 
