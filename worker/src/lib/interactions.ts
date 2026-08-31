@@ -179,10 +179,31 @@ export function parseCustomId(customId: string | undefined): ParsedCustomId {
 
 // Everything the DM says after an answer is recorded goes after this marker,
 // so a second press replaces the first line rather than stacking on it.
-const ANSWER_MARKER = '\n\nRecorded: ';
+const ANSWER_PREFIX = 'Recorded: ';
+const ANSWER_MARKER = `\n\n${ANSWER_PREFIX}`;
 
 export function withAnswer(originalContent: string, answer: string): string {
-  return boundContent(`${originalContent.split(ANSWER_MARKER)[0]}${ANSWER_MARKER}${answer}`);
+  // What the message said before any answer was recorded. Two shapes reach
+  // here, because v0.5.1 moved a DM's words into an embed when it carries
+  // components:
+  //
+  // - **Words in `content`** (a DM sent before v0.5.1, and any that carries
+  //   no components). Split at the marker; everything before it is the
+  //   message.
+  // - **Words in an embed**, so `content` is empty and the whole of it is a
+  //   previous answer or nothing at all. There is no marker to split on --
+  //   the answer *is* the content -- so splitting would keep the old answer
+  //   and stack the new one under it.
+  //
+  // Testing `startsWith` separates them without having to know whether
+  // Discord preserves the leading blank line that the marker puts in front
+  // of an answer written into empty content. It renders trimmed either way,
+  // and depending on which it stores is exactly the kind of assumption that
+  // holds until it doesn't.
+  const before = originalContent.startsWith(ANSWER_PREFIX)
+    ? ''
+    : originalContent.split(ANSWER_MARKER)[0];
+  return boundContent(`${before}${ANSWER_MARKER}${answer}`);
 }
 
 function ephemeral(content: string): InteractionResponse {
