@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { chunkIds, chunkRows, D1_MAX_BIND_PARAMS } from '../src/lib/d1';
-import { loadMyRsvpForEvents, loadOverridesForEvents, loadPrimaryGroupForEvents } from '../src/lib/events';
+import { loadMyAttendanceForEvents, loadOverridesForEvents, loadPrimaryGroupForEvents } from '../src/lib/events';
 import { expandPersonalOccurrences } from '../src/lib/personalEvents';
 import { createEventWithInvites, updateEvent } from '../src/lib/eventWrites';
 import { LIMITS } from '../src/lib/validate';
@@ -11,6 +11,7 @@ import {
   loadEventRow,
   seedEvent,
   seedGuild,
+  seedAttendance,
   seedInvite,
   seedMembership,
   seedUser,
@@ -87,6 +88,7 @@ describe('calendar helpers at and beyond the parameter ceiling', () => {
     for (const id of eventIds) {
       await seedEvent(ctx.db, { id, organizerId: 'u1' });
       await seedInvite(ctx.db, id, 'u1');
+      await seedAttendance(ctx.db, id, 'u1');
     }
     return { ...ctx, eventIds };
   }
@@ -96,9 +98,9 @@ describe('calendar helpers at and beyond the parameter ceiling', () => {
     await expect(loadOverridesForEvents(env, eventIds)).resolves.toBeInstanceOf(Map);
   });
 
-  it.each([99, 100, 101, 300])('loadMyRsvpForEvents handles %i events', async (count) => {
+  it.each([99, 100, 101, 300])('loadMyAttendanceForEvents handles %i events', async (count) => {
     const { env, eventIds } = await seedManyEvents(count);
-    const map = await loadMyRsvpForEvents(env, eventIds, 'u1');
+    const map = await loadMyAttendanceForEvents(env, eventIds, 'u1');
     expect(map.size).toBe(count);
   });
 

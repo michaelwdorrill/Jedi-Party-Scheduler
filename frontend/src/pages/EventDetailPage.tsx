@@ -57,7 +57,9 @@ export default function EventDetailPage() {
 
   const { data, error, loading, reload } = useAsync<EventBundle | null>(async () => {
     if (!eventId) return null;
-    const ev = await api.get<EventDetail>(`/events/${eventId}`);
+    const ev = await api.get<EventDetail>(
+      `/events/${eventId}${occurrenceDate ? `?occurrence=${occurrenceDate}` : ''}`,
+    );
     // `windowBlockMinutes` is what decides a poll's shape now -- pollMode is
     // still returned but nothing reads it (specs/0013).
     const windowInfo =
@@ -110,7 +112,14 @@ export default function EventDetailPage() {
 
   const handleRsvp = (status: RsvpStatus) =>
     action.run(async () => {
-      await api.post(`/events/${event.eventId}/rsvp`, { status });
+      // specs/0014: attendance is per occurrence. The URL's ?occurrence= wins
+      // when present (it's what the calendar linked to); otherwise fall back
+      // to the occurrence the server already resolved this page to (decision
+      // 6b's next-upcoming default).
+      await api.post(`/events/${event.eventId}/rsvp`, {
+        status,
+        occurrenceDate: occurrenceDate ?? event.occurrenceDate,
+      });
       reload();
     });
 
@@ -420,7 +429,7 @@ export default function EventDetailPage() {
                 )}
               </span>
               <span className="text-muted">
-                {event.eventType === 'single' ? inv.rsvpStatus : ''}
+                {event.eventType === 'single' ? (inv.rsvpStatus ?? 'no answer') : ''}
               </span>
             </li>
           ))}

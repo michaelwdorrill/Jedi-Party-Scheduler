@@ -107,6 +107,7 @@ meRoutes.get('/export', async (c) => {
     personalEvents: `SELECT * FROM personal_events WHERE user_id = ?`,
     organisedEvents: `SELECT * FROM events WHERE organizer_id = ?`,
     invitations: `SELECT * FROM event_invites WHERE user_id = ?`,
+    attendance: `SELECT * FROM event_attendance WHERE user_id = ?`,
     pollVotes: `SELECT * FROM event_poll_votes WHERE user_id = ?`,
     windowAvailability: `SELECT * FROM event_window_availability WHERE user_id = ?`,
     groupsCreated: `SELECT * FROM groups WHERE created_by = ?`,

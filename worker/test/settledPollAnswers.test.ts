@@ -8,6 +8,7 @@ import {
   HOUR_MS,
   loadEventRow,
   membershipRule,
+  seedAttendance,
   seedEvent,
   seedGuild,
   seedInvite,
@@ -91,7 +92,7 @@ async function seedResolvedPoll(
 
 async function confirmed(db: ShimDatabase, env: Parameters<typeof getConfirmedAttendeeIds>[0]): Promise<string[]> {
   const event = await loadEventRow(db, 'p1');
-  const rows = await getConfirmedAttendeeIds(env, event, 'opt-1', {
+  const rows = await getConfirmedAttendeeIds(env, event, 'opt-1', '', {
     notificationType: 'voice_channel_invite',
     occurrenceDate: '',
     limit: 50,
@@ -114,9 +115,10 @@ describe("a resolved poll's RSVP overrides the vote behind it", () => {
   it("drops a yes-voter who then pressed Can't make it", async () => {
     const { db, env } = setup();
     await seedResolvedPoll(db);
-    await db
-      .prepare(`UPDATE event_invites SET rsvp_status = 'declined' WHERE event_id = 'p1' AND user_id = 'decliner'`)
-      .run();
+    // specs/0014: the RSVP override is an event_attendance row now, not an
+    // event_invites one -- occurrence_date '' since a poll has no
+    // occurrences of its own until stage 3's fan-out.
+    await seedAttendance(db, 'p1', 'decliner', 'declined');
 
     expect(await confirmed(db, env)).not.toContain('decliner');
   });
@@ -124,9 +126,7 @@ describe("a resolved poll's RSVP overrides the vote behind it", () => {
   it('drops a yes-voter who then pressed Maybe', async () => {
     const { db, env } = setup();
     await seedResolvedPoll(db);
-    await db
-      .prepare(`UPDATE event_invites SET rsvp_status = 'tentative' WHERE event_id = 'p1' AND user_id = 'maybe'`)
-      .run();
+    await seedAttendance(db, 'p1', 'maybe', 'tentative');
 
     // Not a judgement about maybes -- the same reading a fixed-time event
     // already gives them, where the confirmed query is `= 'accepted'`.
@@ -136,9 +136,7 @@ describe("a resolved poll's RSVP overrides the vote behind it", () => {
   it("adds someone who never voted but pressed I'm in", async () => {
     const { db, env } = setup();
     await seedResolvedPoll(db);
-    await db
-      .prepare(`UPDATE event_invites SET rsvp_status = 'accepted' WHERE event_id = 'p1' AND user_id = 'late-yes'`)
-      .run();
+    await seedAttendance(db, 'p1', 'late-yes', 'accepted');
 
     expect(await confirmed(db, env)).toContain('late-yes');
   });
@@ -146,12 +144,10 @@ describe("a resolved poll's RSVP overrides the vote behind it", () => {
   it('applies the same rule to a window poll, where availability is the vote', async () => {
     const { db, env } = setup();
     await seedResolvedPoll(db, { windowed: true });
-    await db
-      .prepare(`UPDATE event_invites SET rsvp_status = 'declined' WHERE event_id = 'p1' AND user_id = 'decliner'`)
-      .run();
+    await seedAttendance(db, 'p1', 'decliner', 'declined');
 
     const event = await loadEventRow(db, 'p1');
-    const rows = await getConfirmedAttendeeIds(env, event, null, {
+    const rows = await getConfirmedAttendeeIds(env, event, null, '', {
       notificationType: 'voice_channel_invite',
       occurrenceDate: '',
       limit: 50,
@@ -164,8 +160,9 @@ describe("a resolved poll's RSVP overrides the vote behind it", () => {
   it('leaves the organizer rule alone', async () => {
     const { db, env } = setup();
     await seedResolvedPoll(db);
-    // The organizer has no vote to read and no invite row here, which is the
-    // pre-backfill shape ORGANIZER_UNLESS_DECLINED exists to preserve.
+    // The organizer has no vote to read and no event_attendance row here,
+    // which is the ordinary default for an organizer who hasn't pressed
+    // anything -- ORGANIZER_UNLESS_DECLINED counts them regardless.
     expect(await confirmed(db, env)).toContain('organizer');
   });
 });

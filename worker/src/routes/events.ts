@@ -2,6 +2,8 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import type { Env } from '../env';
 import type { EventRow } from '../lib/events';
+import { loadOverridesForEvents } from '../lib/events';
+import { expandOccurrencesForEvent } from '../lib/recurrence';
 import { requireActiveGuildMember } from '../lib/db';
 import { recordRsvp, type RsvpStatus } from '../lib/attendance';
 import { newId } from '../lib/ids';
@@ -37,11 +39,33 @@ export async function loadOwnedActiveEvent(env: Env, eventId: string, userId: st
   return event;
 }
 
+// specs/0014 decision 6b: a recurring event's bare /events/:id -- an invite
+// link, a copied link, an older DM -- has to land on something, and "choose
+// a day before you can see anything" is a worse landing than showing the
+// next upcoming occurrence. A series that has already ended falls back to ''
+// rather than searching backward: a rare, display-only case where the
+// response simply carries an empty invited-list/myRsvpStatus for a key that
+// matches no row, which is harmless.
+async function nextOccurrenceDate(env: Env, event: EventRow): Promise<string> {
+  const overridesByEvent = await loadOverridesForEvents(env, [event.id]);
+  const now = Date.now();
+  const horizon = now + 366 * 24 * 60 * 60 * 1000;
+  const occurrences = await expandOccurrencesForEvent(env, event, now, horizon, overridesByEvent.get(event.id) ?? []);
+  return occurrences[0]?.date ?? '';
+}
+
 eventRoutes.get('/:eventId', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
   const event = await loadEventIfVisible(c.env, eventId, userId);
   if (!event) return c.text('Not found', 404);
+
+  const requestedOccurrence = c.req.query('occurrence');
+  const occurrenceDate = event.is_recurring
+    ? requestedOccurrence
+      ? assertIsoDate(requestedOccurrence, 'occurrence')
+      : await nextOccurrenceDate(c.env, event)
+    : '';
 
   const recurrence = event.is_recurring
     ? await c.env.DB.prepare(
@@ -65,18 +89,20 @@ eventRoutes.get('/:eventId', async (c) => {
     : null;
 
   const { results: inviteRows } = await c.env.DB.prepare(
-    `SELECT i.user_id, u.username, u.global_name, i.invited_via, i.source_group_id, i.rsvp_status
-     FROM event_invites i JOIN users u ON u.id = i.user_id
+    `SELECT i.user_id, u.username, u.global_name, i.invited_via, i.source_group_id, a.rsvp_status
+     FROM event_invites i
+     JOIN users u ON u.id = i.user_id
+     LEFT JOIN event_attendance a ON a.event_id = i.event_id AND a.occurrence_date = ? AND a.user_id = i.user_id
      WHERE i.event_id = ? ORDER BY u.username`,
   )
-    .bind(eventId)
+    .bind(occurrenceDate, eventId)
     .all<{
       user_id: string;
       username: string;
       global_name: string | null;
       invited_via: string;
       source_group_id: string | null;
-      rsvp_status: string;
+      rsvp_status: string | null;
     }>();
 
   const organizer = await c.env.DB.prepare(`SELECT username, global_name FROM users WHERE id = ?`)
@@ -199,8 +225,14 @@ eventRoutes.get('/:eventId', async (c) => {
     // server-observed revision was always current by construction, and the
     // guard it built compared that fresh read to itself.
     revision: event.revision ?? 0,
+    occurrenceDate,
+    // Decision 1, carried over per-occurrence: an organizer with no explicit
+    // answer for this occurrence is implicitly attending, same as
+    // getConfirmedAttendeeIds' ORGANIZER_UNLESS_DECLINED -- so the website
+    // and the notification path tell the same story about them.
     myRsvpStatus:
-      inviteRows.find((i) => i.user_id === userId)?.rsvp_status ?? null,
+      inviteRows.find((i) => i.user_id === userId)?.rsvp_status ??
+      (userId === event.organizer_id ? 'accepted' : null),
     pollStrategy: event.poll_strategy,
     pollThresholdCount: event.poll_threshold_count,
     pollDeadlineAt: event.poll_deadline_at,
@@ -319,9 +351,13 @@ eventRoutes.delete('/:eventId/invites/:userId', async (c) => {
   const event = await loadOwnedActiveEvent(c.env, eventId, requesterId);
   if (!event) return c.text('Not found', 404);
 
-  await c.env.DB.prepare(`DELETE FROM event_invites WHERE event_id = ? AND user_id = ?`)
-    .bind(eventId, targetUserId)
-    .run();
+  // event_attendance (specs/0014) has no FK back to event_invites -- it only
+  // cascades from events -- so revoking access has to clear it explicitly,
+  // the same reasoning as replaceInviteStatements' matching delete.
+  await c.env.DB.batch([
+    c.env.DB.prepare(`DELETE FROM event_invites WHERE event_id = ? AND user_id = ?`).bind(eventId, targetUserId),
+    c.env.DB.prepare(`DELETE FROM event_attendance WHERE event_id = ? AND user_id = ?`).bind(eventId, targetUserId),
+  ]);
   return c.json({ ok: true });
 });
 
@@ -332,10 +368,16 @@ eventRoutes.delete('/:eventId/invites/:userId', async (c) => {
 eventRoutes.post('/:eventId/rsvp', async (c) => {
   const userId = c.get('userId');
   const eventId = c.req.param('eventId');
-  const body = await readJsonBody<{ status: RsvpStatus }>(c);
+  const body = await readJsonBody<{ status: RsvpStatus; occurrenceDate?: string }>(c);
   const status = assertOneOf(body.status, 'status', ['accepted', 'declined', 'tentative'] as const);
+  const occurrenceDate = body.occurrenceDate ? assertIsoDate(body.occurrenceDate, 'occurrenceDate') : '';
 
-  const outcome = await recordRsvp(c.env, userId, eventId, status);
+  const outcome = await recordRsvp(c.env, userId, eventId, occurrenceDate, status);
+  // invalid_occurrence is a client-bug shape (an occurrence date that
+  // doesn't match whether the event is recurring), distinct enough from the
+  // existing collapsed 403 to deserve its own status -- unlike no_such_event
+  // vs. not_invited, there's no probing concern here worth hiding it for.
+  if (outcome === 'invalid_occurrence') return c.text('Occurrence does not match this event', 400);
   // A missing event and an uninvited caller stay one answer, as they were
   // before the extraction: telling someone which of the two it is would let
   // an event id be probed for existence.

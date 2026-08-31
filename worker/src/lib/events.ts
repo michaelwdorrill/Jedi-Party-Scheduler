@@ -73,7 +73,14 @@ export async function loadOverridesForEvents(
   return map;
 }
 
-export async function loadMyRsvpForEvents(
+// Keyed `${eventId}::${occurrenceDate}` -- '' for a non-recurring event's
+// only occurrence -- rather than by event id alone (specs/0014). A recurring
+// event's occurrences aren't rows here; they're computed by
+// expandOccurrencesForEvent, so the caller looks up one key per expanded
+// occurrence instead of once per event, which is the fix for the bug this
+// replaces: every occurrence of a recurring event used to be stamped with
+// the same single event-wide answer.
+export async function loadMyAttendanceForEvents(
   env: Env,
   eventIds: string[],
   userId: string,
@@ -81,12 +88,12 @@ export async function loadMyRsvpForEvents(
   const map = new Map<string, string>();
   for (const chunk of chunkIds(eventIds, 1)) {
     const { results } = await env.DB.prepare(
-      `SELECT event_id, rsvp_status FROM event_invites
+      `SELECT event_id, occurrence_date, rsvp_status FROM event_attendance
        WHERE user_id = ? AND event_id IN (${placeholders(chunk.length)})`,
     )
       .bind(userId, ...chunk)
-      .all<{ event_id: string; rsvp_status: string }>();
-    for (const row of results) map.set(row.event_id, row.rsvp_status);
+      .all<{ event_id: string; occurrence_date: string; rsvp_status: string }>();
+    for (const row of results) map.set(`${row.event_id}::${row.occurrence_date}`, row.rsvp_status);
   }
   return map;
 }

@@ -58,13 +58,23 @@ async function seedGroup(db: ShimDatabase, id: string, createdBy: string, member
   }
 }
 
+// specs/0014: findSuccessorOwner now reads two tables -- event_invites for
+// the group attribution (source_group_id, which event_attendance doesn't
+// carry) and event_attendance for the real accepted/declined answer.
 async function seedAttendance(db: ShimDatabase, eventId: string, groupId: string, userId: string, status: string) {
   await db
     .prepare(
       `INSERT INTO event_invites (id, event_id, user_id, invited_via, source_group_id, rsvp_status, invited_at)
-       VALUES (?, ?, ?, 'group', ?, ?, ?)`,
+       VALUES (?, ?, ?, 'group', ?, 'pending', ?)`,
     )
-    .bind(`inv-${eventId}-${userId}`, eventId, userId, groupId, status, Date.now())
+    .bind(`inv-${eventId}-${userId}`, eventId, userId, groupId, Date.now())
+    .run();
+  await db
+    .prepare(
+      `INSERT INTO event_attendance (id, event_id, occurrence_date, user_id, rsvp_status, responded_at)
+       VALUES (?, ?, '', ?, ?, ?)`,
+    )
+    .bind(`att-${eventId}-${userId}`, eventId, userId, status, Date.now())
     .run();
 }
 

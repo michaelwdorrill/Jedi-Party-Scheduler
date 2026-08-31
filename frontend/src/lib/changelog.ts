@@ -21,6 +21,15 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.6',
+    date: '31 August 2026',
+    summary: 'Answering for a recurring session now answers for that session alone.',
+    changed: [
+      'Accepting, declining or saying maybe to a recurring event now applies to that one session, not the whole series. Say yes to this Thursday and no to the next without either answer touching the other.',
+      'Because there is no honest way to know which session an old, series-wide answer meant, this release does not carry any of them forward. Everyone starts unanswered on every recurring event — including anyone who had already said they could not make it, who may be asked again for a session they thought they had settled. That is a one-time, deliberate reset rather than a bug.',
+    ],
+  },
+  {
     version: '0.5.1',
     date: '31 August 2026',
     summary: 'The bot\u2019s messages look like messages, and stop asking questions they already answered.',

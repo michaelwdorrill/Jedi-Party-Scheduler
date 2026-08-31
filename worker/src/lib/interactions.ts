@@ -127,33 +127,37 @@ export async function verifyInteractionSignature(
 }
 
 // `custom_id` is 100 characters and is the only state Discord hands back with
-// a press. Event ids are crypto.randomUUID() (36 chars), so the longest of
-// these is about 53.
+// a press. Event ids are crypto.randomUUID() (36 chars) and an occurrence
+// date is 10 more, so the longest of these (v2's rsvp form) is about 67.
 //
 // Three rules, all of which matter more than the format itself:
 //
 //   * It is versioned. These messages sit in people's DMs indefinitely, so a
 //     button pressed a year from now has to be recognisably old rather than
 //     misinterpreted by whatever the format has become by then.
-//   * It carries no date. rsvp_status is per *event*, not per occurrence, so a
-//     recurring event's RSVP is one answer -- which is how the website already
-//     behaves. A date here would imply a per-occurrence model the schema does
-//     not have.
+//   * It carries an occurrence date (specs/0014, v2). Attendance is per
+//     *occurrence*, not per event -- a recurring series is answered one
+//     session at a time -- so the id has to say which one. '' for a
+//     non-recurring event, matching notification_log's convention. **Live v1
+//     ids carry no date at all**, from when the schema had nowhere to put
+//     one; a v1 press degrades to `stale` below rather than being
+//     reinterpreted under v2 rules, which is exactly what versioning this id
+//     is for.
 //   * It carries no authorisation. It says what was pressed, never who may
 //     press it. The presser is the signed payload's user, and permission is a
 //     database read on every single press.
 const CUSTOM_ID_PREFIX = 'uo';
-const CUSTOM_ID_VERSION = 'v1';
+const CUSTOM_ID_VERSION = 'v2';
 
 export type ParsedCustomId =
-  | { kind: 'rsvp'; status: RsvpStatus; eventId: string }
+  | { kind: 'rsvp'; status: RsvpStatus; eventId: string; occurrenceDate: string }
   | { kind: 'vote'; eventId: string }
   // Ours, but from a format this build no longer speaks.
   | { kind: 'stale' }
   | null;
 
-export function rsvpCustomId(status: RsvpStatus, eventId: string): string {
-  return `${CUSTOM_ID_PREFIX}:${CUSTOM_ID_VERSION}:rsvp:${status}:${eventId}`;
+export function rsvpCustomId(status: RsvpStatus, eventId: string, occurrenceDate: string): string {
+  return `${CUSTOM_ID_PREFIX}:${CUSTOM_ID_VERSION}:rsvp:${status}:${eventId}:${occurrenceDate}`;
 }
 
 export function voteCustomId(eventId: string): string {
@@ -166,10 +170,13 @@ export function parseCustomId(customId: string | undefined): ParsedCustomId {
   if (parts[0] !== CUSTOM_ID_PREFIX) return null;
   if (parts[1] !== CUSTOM_ID_VERSION) return { kind: 'stale' };
 
-  if (parts[2] === 'rsvp' && parts.length === 5) {
+  if (parts[2] === 'rsvp' && parts.length === 6) {
     const status = parts[3];
     if (status !== 'accepted' && status !== 'declined' && status !== 'tentative') return { kind: 'stale' };
-    return parts[4] ? { kind: 'rsvp', status, eventId: parts[4] } : { kind: 'stale' };
+    // parts[5] (occurrenceDate) is checked for presence via the length test
+    // above, not truthiness -- an empty trailing segment is the valid
+    // non-recurring case and must not fall through to stale.
+    return parts[4] ? { kind: 'rsvp', status, eventId: parts[4], occurrenceDate: parts[5] } : { kind: 'stale' };
   }
   if (parts[2] === 'vote' && parts.length === 4) {
     return parts[3] ? { kind: 'vote', eventId: parts[3] } : { kind: 'stale' };
@@ -285,8 +292,8 @@ const COMPONENT_TYPE_STRING_SELECT = 3;
 // custom_id parse that got us into this branch, so echoing it is not trust in
 // Discord's payload so much as reuse of a structure we authored one message
 // ago.
-export function keepButtons(components: unknown[] | undefined, eventId: string): unknown[] {
-  return Array.isArray(components) && components.length > 0 ? components : rsvpButtons(eventId);
+export function keepButtons(components: unknown[] | undefined, eventId: string, occurrenceDate: string): unknown[] {
+  return Array.isArray(components) && components.length > 0 ? components : rsvpButtons(eventId, occurrenceDate);
 }
 
 const RSVP_ANSWER: Record<RsvpStatus, string> = {
@@ -348,12 +355,23 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
   const original = interaction.message?.content ?? '';
 
   if (parsed.kind === 'rsvp') {
-    const outcome = await recordRsvp(env, userId, parsed.eventId, parsed.status);
+    const outcome = await recordRsvp(env, userId, parsed.eventId, parsed.occurrenceDate, parsed.status);
     if (outcome === 'no_such_event') return ephemeral(`That event no longer exists. ${siteLink(env)}`);
     if (outcome === 'not_invited') {
       return ephemeral(`You're not on the invite list for that one any more. ${siteLink(env)}`);
     }
-    return updateMessage(original, RSVP_ANSWER[parsed.status], keepButtons(interaction.message?.components, parsed.eventId));
+    // Defensive: unreachable from a bot-authored button, since every id we
+    // ever emit pairs a real occurrence date with the event's own
+    // is_recurring. A genuine mismatch here means the message itself is
+    // corrupted rather than merely out of date.
+    if (outcome === 'invalid_occurrence') {
+      return ephemeral(`That control looks corrupted. ${siteLink(env)}`);
+    }
+    return updateMessage(
+      original,
+      RSVP_ANSWER[parsed.status],
+      keepButtons(interaction.message?.components, parsed.eventId, parsed.occurrenceDate),
+    );
   }
 
   const picked = interaction.data?.values ?? [];

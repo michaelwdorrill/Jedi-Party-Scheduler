@@ -537,7 +537,14 @@ function eventQuotaGuardParams(guildId: string, organizerId: string, includeRecu
 // Multi-row inserts rather than one statement per invitee: an event may
 // resolve to MAX_RESOLVED_INVITEES people, and a batch of that many separate
 // statements pushes against D1's per-invocation query limit for no reason.
-// ON CONFLICT DO NOTHING is what preserves an existing invitee's RSVP.
+//
+// rsvp_status is vestigial as of specs/0014: nothing reads it any more (real
+// attendance lives in event_attendance, keyed per occurrence), but the
+// column is still NOT NULL, so a value still has to be written here to
+// satisfy it -- and stays exactly as it always did (organizer 'accepted',
+// everyone else 'pending') until a later release drops the column outright.
+// ON CONFLICT DO NOTHING no longer preserves anything that matters on
+// re-invite; it just avoids clobbering the row's id/invited_at.
 const INVITE_COLUMNS = ['id', 'event_id', 'user_id', 'invited_via', 'source_group_id', 'rsvp_status', 'invited_at'] as const;
 
 // `guarded` conditions every row on the parent event existing, which the
@@ -623,8 +630,15 @@ function pollOptionStatements(
 // newly-resolved list. This is what the edit form's invitee picker implies --
 // it submits the complete desired list, so unchecking someone and saving
 // should actually revoke their access, not just leave the old row in place
-// alongside whatever got added. RSVP state for anyone who remains is
-// preserved via inviteStatements' ON CONFLICT DO NOTHING.
+// alongside whatever got added.
+//
+// Their event_attendance rows (every occurrence, specs/0014) are removed in
+// the same pass. Under the old model this was automatic -- rsvp_status lived
+// on the invite row itself, so deleting it deleted the answer too.
+// event_attendance is a separate table with no FK back to event_invites (it
+// only cascades from events), so revoking access has to say so explicitly or
+// a removed invitee's stale accepted row would keep counting them as
+// confirmed for a voice-channel invite they can no longer even see.
 //
 // Expressed as a read-then-diff rather than the obvious `NOT IN (...every
 // invitee...)`: that list can hold up to MAX_RESOLVED_INVITEES entries, three
@@ -661,10 +675,21 @@ async function replaceInviteStatements(
            AND EXISTS (SELECT 1 FROM events WHERE id = ? AND mutation_token = ?)`,
         ).bind(eventId, ...chunk, eventId, mutationToken),
       );
+      statements.push(
+        env.DB.prepare(
+          `DELETE FROM event_attendance WHERE event_id = ? AND user_id IN (${placeholders(chunk.length)})
+           AND EXISTS (SELECT 1 FROM events WHERE id = ? AND mutation_token = ?)`,
+        ).bind(eventId, ...chunk, eventId, mutationToken),
+      );
     } else {
       statements.push(
         env.DB.prepare(
           `DELETE FROM event_invites WHERE event_id = ? AND user_id IN (${placeholders(chunk.length)})`,
+        ).bind(eventId, ...chunk),
+      );
+      statements.push(
+        env.DB.prepare(
+          `DELETE FROM event_attendance WHERE event_id = ? AND user_id IN (${placeholders(chunk.length)})`,
         ).bind(eventId, ...chunk),
       );
     }

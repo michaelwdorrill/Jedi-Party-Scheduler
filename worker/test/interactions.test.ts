@@ -122,9 +122,9 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
 
     const { body, headers } = signed({
       type: 3,
-      data: { custom_id: rsvpCustomId('accepted', 'e1') },
+      data: { custom_id: rsvpCustomId('accepted', 'e1', '') },
       user: { id: 'u1' },
-      message: { content: "You're invited to Test event", components: rsvpButtons('e1') },
+      message: { content: "You're invited to Test event", components: rsvpButtons('e1', '') },
     });
     const res = await post(envWithKey(env), body, headers);
 
@@ -138,9 +138,9 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
     // The buttons survive the edit. Taking them away would make the DM a
     // one-shot and send anyone changing their mind to the website, which is
     // the journey this endpoint exists to remove.
-    expect(json.data.components).toEqual(rsvpButtons('e1'));
+    expect(json.data.components).toEqual(rsvpButtons('e1', ''));
 
-    expect(await countRows(db, 'event_invites', `event_id = 'e1' AND user_id = 'u1' AND rsvp_status = 'accepted'`)).toBe(1);
+    expect(await countRows(db, 'event_attendance', `event_id = 'e1' AND user_id = 'u1' AND rsvp_status = 'accepted'`)).toBe(1);
   });
 
   it('keeps a partial button set rather than putting the missing ones back', async () => {
@@ -149,13 +149,13 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
 
     // What specs/0014's ladder sends someone who already said maybe: yes and
     // no only. Answering it must not resurrect a Maybe button.
-    const all = rsvpButtons('e1') as { components: unknown[] }[];
+    const all = rsvpButtons('e1', '') as { components: unknown[] }[];
     const [row] = all;
     const twoButtons = [{ ...row, components: [row.components[0], row.components[2]] }];
 
     const { body, headers } = signed({
       type: 3,
-      data: { custom_id: rsvpCustomId('declined', 'e1') },
+      data: { custom_id: rsvpCustomId('declined', 'e1', '') },
       user: { id: 'u1' },
       message: { content: 'Game night', components: twoButtons },
     });
@@ -173,7 +173,7 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
 
     const { body, headers } = signed({
       type: 3,
-      data: { custom_id: rsvpCustomId('accepted', 'e1') },
+      data: { custom_id: rsvpCustomId('accepted', 'e1', '') },
       user: { id: 'u1' },
       message: { content: 'Game night' },
     });
@@ -184,7 +184,7 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
     // Not reachable from a real DM -- you cannot press a button that is not
     // there -- so this pins the fallback rather than a journey: a signed but
     // odd payload still leaves a usable message behind.
-    expect(json.data.components).toEqual(rsvpButtons('e1'));
+    expect(json.data.components).toEqual(rsvpButtons('e1', ''));
   });
 
   it('replaces its own previous answer rather than stacking a second one', async () => {
@@ -193,7 +193,7 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
 
     const first = signed({
       type: 3,
-      data: { custom_id: rsvpCustomId('accepted', 'e1') },
+      data: { custom_id: rsvpCustomId('accepted', 'e1', '') },
       user: { id: 'u1' },
       message: { content: 'Game night' },
     });
@@ -203,7 +203,7 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
 
     const second = signed({
       type: 3,
-      data: { custom_id: rsvpCustomId('declined', 'e1') },
+      data: { custom_id: rsvpCustomId('declined', 'e1', '') },
       user: { id: 'u1' },
       message: { content: firstJson.data.content },
     });
@@ -212,7 +212,10 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
     };
 
     expect(secondJson.data.content).toBe("Game night\n\nRecorded: you can't make it.");
-    expect(await countRows(db, 'event_invites', `user_id = 'u1' AND rsvp_status = 'declined'`)).toBe(1);
+    // One row, not two: the second press upserts the first occurrence's
+    // answer rather than adding a row (specs/0014's ON CONFLICT DO UPDATE).
+    expect(await countRows(db, 'event_attendance', `user_id = 'u1'`)).toBe(1);
+    expect(await countRows(db, 'event_attendance', `user_id = 'u1' AND rsvp_status = 'declined'`)).toBe(1);
   });
 
   it('refuses a press from someone who is no longer invited, and changes nothing', async () => {
@@ -223,7 +226,7 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
 
     const { body, headers } = signed({
       type: 3,
-      data: { custom_id: rsvpCustomId('accepted', 'e1') },
+      data: { custom_id: rsvpCustomId('accepted', 'e1', '') },
       user: { id: 'stranger' },
       message: { content: 'Game night' },
     });
@@ -237,7 +240,7 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
     expect(json.type).toBe(4);
     expect(json.data.flags).toBe(64);
     expect(json.data.content).toContain('invite list');
-    expect(await countRows(db, 'event_invites', `rsvp_status <> 'pending'`)).toBe(0);
+    expect(await countRows(db, 'event_attendance', `1=1`)).toBe(0);
   });
 
   it('refuses a press from someone whose account has since been deleted', async () => {
@@ -246,7 +249,7 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
 
     const { body, headers } = signed({
       type: 3,
-      data: { custom_id: rsvpCustomId('accepted', 'e1') },
+      data: { custom_id: rsvpCustomId('accepted', 'e1', '') },
       user: { id: 'deleted-account' },
       message: { content: 'Game night' },
     });
@@ -264,13 +267,13 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
 
     const { body, headers } = signed({
       type: 3,
-      data: { custom_id: rsvpCustomId('tentative', 'e1') },
+      data: { custom_id: rsvpCustomId('tentative', 'e1', '') },
       member: { user: { id: 'u1' } },
       message: { content: 'Game night' },
     });
     const json = (await (await post(envWithKey(env), body, headers)).json()) as { type: number };
     expect(json.type).toBe(7);
-    expect(await countRows(db, 'event_invites', `user_id = 'u1' AND rsvp_status = 'tentative'`)).toBe(1);
+    expect(await countRows(db, 'event_attendance', `user_id = 'u1' AND rsvp_status = 'tentative'`)).toBe(1);
   });
 
   it('tells the presser a year-old button is out of date instead of guessing', async () => {
@@ -289,7 +292,7 @@ describe('POST /discord/interactions -- RSVP buttons', () => {
     };
     expect(json.type).toBe(4);
     expect(json.data.content).toContain('out of date');
-    expect(await countRows(db, 'event_invites', `rsvp_status <> 'pending'`)).toBe(0);
+    expect(await countRows(db, 'event_attendance', `1=1`)).toBe(0);
   });
 });
 
@@ -460,19 +463,33 @@ describe('POST /discord/interactions -- poll select', () => {
 describe('custom_id', () => {
   it('round-trips, and stays inside Discord\'s 100-character limit', () => {
     const eventId = crypto.randomUUID();
-    const id = rsvpCustomId('declined', eventId);
+    const id = rsvpCustomId('declined', eventId, '2026-10-14');
     expect(id.length).toBeLessThanOrEqual(100);
-    expect(parseCustomId(id)).toEqual({ kind: 'rsvp', status: 'declined', eventId });
+    expect(parseCustomId(id)).toEqual({ kind: 'rsvp', status: 'declined', eventId, occurrenceDate: '2026-10-14' });
     expect(voteCustomId(eventId).length).toBeLessThanOrEqual(100);
     expect(parseCustomId(voteCustomId(eventId))).toEqual({ kind: 'vote', eventId });
+  });
+
+  it('round-trips the empty occurrence date a non-recurring event uses', () => {
+    const eventId = crypto.randomUUID();
+    const id = rsvpCustomId('accepted', eventId, '');
+    expect(parseCustomId(id)).toEqual({ kind: 'rsvp', status: 'accepted', eventId, occurrenceDate: '' });
   });
 
   it('reports someone else\'s component as not ours, and our own old formats as stale', () => {
     expect(parseCustomId('some-other-bot-button')).toBeNull();
     expect(parseCustomId(undefined)).toBeNull();
-    expect(parseCustomId('uo:v9:rsvp:accepted:e1')).toEqual({ kind: 'stale' });
-    expect(parseCustomId('uo:v1:something-new:e1')).toEqual({ kind: 'stale' });
-    expect(parseCustomId('uo:v1:rsvp:maybe-not-a-status:e1')).toEqual({ kind: 'stale' });
+    expect(parseCustomId('uo:v9:rsvp:accepted:e1:2026-10-14')).toEqual({ kind: 'stale' });
+    expect(parseCustomId('uo:v2:something-new:e1')).toEqual({ kind: 'stale' });
+    expect(parseCustomId('uo:v2:rsvp:maybe-not-a-status:e1:2026-10-14')).toEqual({ kind: 'stale' });
+  });
+
+  it('treats a live v1 button -- no occurrence date at all -- as stale rather than reinterpreting it', () => {
+    // specs/0014: this is the exact format v0.5/v0.5.1 sent, sitting in
+    // real DMs when v2 ships. It must not be misread as a v2 id missing its
+    // occurrence date.
+    expect(parseCustomId('uo:v1:rsvp:accepted:e1')).toEqual({ kind: 'stale' });
+    expect(parseCustomId('uo:v1:vote:e1')).toEqual({ kind: 'stale' });
   });
 
   it('keeps the answer line replaceable and the content bounded', () => {
@@ -500,7 +517,7 @@ describe('what the endpoint sends back to Discord', () => {
     // trusted bot account would fire the ping on the way back out.
     const { body, headers } = signed({
       type: 3,
-      data: { custom_id: rsvpCustomId('accepted', 'e1') },
+      data: { custom_id: rsvpCustomId('accepted', 'e1', '') },
       user: { id: 'u1' },
       message: { content: 'You are invited to @everyone night' },
     });
@@ -571,7 +588,7 @@ describe('a press from someone behind on the Terms (item 45)', () => {
 
     const { body, headers } = signed({
       type: 3,
-      data: { custom_id: rsvpCustomId('accepted', 'e1') },
+      data: { custom_id: rsvpCustomId('accepted', 'e1', '') },
       user: { id: 'u1' },
       message: { content: 'Game night' },
     });
@@ -584,7 +601,7 @@ describe('a press from someone behind on the Terms (item 45)', () => {
     expect(json.data.flags).toBe(64);
     expect(json.data.content).toContain('have changed');
     expect(json.data.content).toContain(env.FRONTEND_URL);
-    expect(await countRows(db, 'event_invites', `rsvp_status <> 'pending'`)).toBe(0);
+    expect(await countRows(db, 'event_attendance', `1=1`)).toBe(0);
   });
 
   it('works again once they have agreed', async () => {
@@ -597,13 +614,13 @@ describe('a press from someone behind on the Terms (item 45)', () => {
 
     const { body, headers } = signed({
       type: 3,
-      data: { custom_id: rsvpCustomId('accepted', 'e1') },
+      data: { custom_id: rsvpCustomId('accepted', 'e1', '') },
       user: { id: 'u1' },
       message: { content: 'Game night' },
     });
     const json = (await (await post(envWithKey(env), body, headers)).json()) as { type: number };
     expect(json.type).toBe(7);
-    expect(await countRows(db, 'event_invites', `user_id = 'u1' AND rsvp_status = 'accepted'`)).toBe(1);
+    expect(await countRows(db, 'event_attendance', `user_id = 'u1' AND rsvp_status = 'accepted'`)).toBe(1);
   });
 });
 
@@ -625,7 +642,7 @@ describe('keepSelection', () => {
   });
 
   it('leaves anything that is not a string select alone', () => {
-    const buttons = rsvpButtons('e1');
+    const buttons = rsvpButtons('e1', '');
     expect(keepSelection(buttons, ['whatever'])).toEqual(buttons);
   });
 
