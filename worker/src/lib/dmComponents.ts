@@ -25,9 +25,46 @@ const BUTTON_STYLE = { SECONDARY: 2, SUCCESS: 3, DANGER: 4, LINK: 5 } as const;
 const MAX_SELECT_OPTIONS = 25;
 const MAX_LABEL_LENGTH = 80;
 const MAX_SELECT_LABEL_LENGTH = 100;
+// Discord allows 4096 in an embed description, against 2000 for message
+// content -- so moving the text into an embed can never truncate something
+// that fit before.
+const MAX_EMBED_DESCRIPTION = 4096;
+
+// `#E8913A`, "Tatoo I" -- the accent the v0.4 palette already uses for the
+// app's primary surfaces (frontend/tailwind.config). One colour for every DM
+// rather than one per notification type: the job here is "this is Uncle
+// Owen", which a consistent stripe does and a shifting one undoes. It is also
+// one less input to the derivation below, and every input is something that
+// could differ between a first delivery and a retry.
+const EMBED_COLOR = 0xe8913a;
 
 function bound(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+// specs/0010's deferred half: rich embeds on the DMs that grow components,
+// and only those.
+//
+// **Derived from the content at send time rather than stored beside it**,
+// which is what makes this cost no migration. The spec priced embeds as a
+// choice between a third `notification_log` column (durable, beside `content`
+// and `components`) and non-durable embeds that would make a retried DM look
+// different from everyone else's. Both were answers to the same question --
+// how does the retry consumer know what the source sweep rendered? -- and
+// this sidesteps it: `sendBotDm` and `editBotDm` build the embed from the
+// `content` they are handed, so `sweepDueNotificationRetries`, which
+// redelivers from the stored `content`, reproduces it exactly without knowing
+// embeds exist. Durability is inherited from a column that is already durable.
+//
+// The constraint that buys it: the embed can only re-present the text, never
+// restructure it. Labelled When/Where/Who's-in fields are not derivable from
+// a flat sentence and would need the column after all.
+//
+// The text moves *into* the embed rather than sitting above it, because
+// Discord renders both and the message would otherwise say everything twice.
+export function dmEmbeds(content: string, components: unknown[] | null | undefined): unknown[] | null {
+  if (!components || components.length === 0) return null;
+  return [{ description: bound(content, MAX_EMBED_DESCRIPTION), color: EMBED_COLOR }];
 }
 
 export interface SelectCandidate {

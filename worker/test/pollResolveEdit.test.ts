@@ -29,11 +29,17 @@ afterEach(() => {
 
 // A PATCH to a specific message, which is the call under test. Matched
 // separately from the POST that sends a new DM -- both live under /messages.
-function edits(stub: FetchStub): { url: string; body: Record<string, unknown> }[] {
+function edits(stub: FetchStub): { url: string; body: Record<string, unknown>; text: string }[] {
   return stub.calls
     .map((url, i) => ({ url, body: stub.bodies[i] }))
     .filter((c) => /\/messages\/[^/]+$/.test(c.url) && c.body)
-    .map((c) => ({ url: c.url, body: JSON.parse(c.body!) as Record<string, unknown> }));
+    .map((c) => {
+      const body = JSON.parse(c.body!) as Record<string, unknown>;
+      // Since v0.5.1 an edit that keeps controls carries its words in an
+      // embed and blanks `content`; one that strips them puts the words back.
+      const embeds = body.embeds as { description?: string }[] | undefined;
+      return { url: c.url, body, text: embeds?.[0]?.description ?? (body.content as string) };
+    });
 }
 
 function editRule(status: number): FetchRule {
@@ -86,7 +92,11 @@ describe('when a poll resolves', () => {
     const [edit] = edits(fetchStub);
     expect(edit).toBeDefined();
     expect(edit.url).toContain('/channels/dm-1/messages/msg-1');
-    expect(edit.body.content).toContain('is settled');
+    expect(edit.text).toContain('is settled');
+    // The rewritten message keeps its controls, so its words move into the
+    // embed exactly as a freshly sent one's would.
+    expect((edit.body.embeds as { description?: string }[])[0].description).toContain('is settled');
+    expect(edit.body.content).toBe('');
     const row = (edit.body.components as { components: { custom_id?: string }[] }[])[0];
     expect(row.components.map((c) => c.custom_id)).toEqual([
       'uo:v1:rsvp:accepted:p1',
@@ -119,10 +129,17 @@ describe('when a poll resolves', () => {
     await runReminderSweep(env);
 
     const [edit] = edits(fetchStub);
-    expect(edit.body.content).toContain('was cancelled');
+    expect(edit.text).toContain('was cancelled');
     // [] rather than omitted: an empty array is how Discord is told to remove
     // the controls, which is the point of the edit.
     expect(edit.body.components).toEqual([]);
+    // And the embed goes with them (v0.5.1). An edit that left the embed
+    // behind would strand the old text inside it while the new text sat in
+    // `content` -- the message would then say two different things at once,
+    // which is a worse failure than the stale controls this edit exists to
+    // remove.
+    expect(edit.body.embeds).toEqual([]);
+    expect(edit.body.content).toContain('was cancelled');
   });
 
   it('leaves a delivery that predates the message id alone', async () => {
