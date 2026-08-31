@@ -260,6 +260,24 @@ notepad $PROFILE
 (If `$PROFILE` doesn't exist yet, `notepad` will offer to create it — accept
 that.)
 
+**Check which `$PROFILE` you are about to open, and open it from the shell
+that is actually failing.** Windows PowerShell 5.1 and PowerShell 7 read
+different profile paths — `...\Documents\WindowsPowerShell\` and
+`...\Documents\PowerShell\` respectively — so a function saved under one
+host does not exist under the other. The symptom is indistinguishable from
+never having installed it at all:
+
+```
+Use-CF : The term 'Use-CF' is not recognized as the name of a cmdlet...
+```
+
+This has bitten more than once, and the reason it keeps working the second
+time is that people reinstall rather than diagnose. Print `$PROFILE` first;
+if it says `PowerShell\` and the shell erroring at you says
+`WindowsPowerShell\` (5.1's error format is the giveaway — it prints
+`At line:1 char:1` and a `CategoryInfo` block), you are editing the wrong
+file. Either install into both, or settle on one host.
+
 ```powershell
 function Use-CF {
     param([Parameter(Mandatory)][string]$Account)
