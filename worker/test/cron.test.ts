@@ -201,7 +201,7 @@ describe('recurring sweep resilience', () => {
     // Every event should have produced reminder rows -- not zero, which is
     // what a preload failure looked like.
     const row = await db
-      .prepare(`SELECT COUNT(DISTINCT event_id) AS n FROM notification_log WHERE notification_type LIKE 'reminder%'`)
+      .prepare(`SELECT COUNT(DISTINCT event_id) AS n FROM notification_log WHERE notification_type LIKE 'reminder%' OR notification_type LIKE 'ladder%'`)
       .first<{ n: number }>();
     expect(row?.n).toBe(150);
   });
@@ -234,7 +234,7 @@ describe('recurring sweep resilience', () => {
 
     const covered = async (): Promise<number> => {
       const row = await db
-        .prepare(`SELECT COUNT(DISTINCT event_id) AS n FROM notification_log WHERE notification_type LIKE 'reminder%'`)
+        .prepare(`SELECT COUNT(DISTINCT event_id) AS n FROM notification_log WHERE notification_type LIKE 'reminder%' OR notification_type LIKE 'ladder%'`)
         .first<{ n: number }>();
       return row?.n ?? 0;
     };
@@ -278,7 +278,9 @@ describe('recurring sweep resilience', () => {
 
     for (const [i, eventId] of eventIds.entries()) {
       // Staggered by a minute each so ORDER BY start_at is deterministic,
-      // and all inside the same reminder_1h bucket.
+      // and all inside the same ladder_unanswered_48h bucket -- none of
+      // these invitees have an event_attendance row, so they're unanswered,
+      // and 30-32 minutes out is inside that status's nearer 48h rung.
       await seedEvent(db, { id: eventId, organizerId: 'organizer', startAt: Date.now() + 30 * 60_000 + i * 60_000 });
       for (let u = 0; u < invitedPerEvent; u++) {
         const userId = `${eventId}-u${u}`;
@@ -290,11 +292,16 @@ describe('recurring sweep resilience', () => {
 
     fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
 
+    // The 20 invited-but-unanswered recipients and the implicitly-accepted
+    // organizer are due two different rungs at this remaining time --
+    // ladder_unanswered_48h and ladder_accepted_1h respectively (decision
+    // 1) -- so both types have to count toward "this event is fully
+    // notified."
     const notifiedCount = async (eventId: string): Promise<number> => {
       const row = await db
         .prepare(
           `SELECT COUNT(*) AS n FROM notification_log
-           WHERE event_id = ? AND notification_type = 'reminder_1h' AND delivered_at IS NOT NULL`,
+           WHERE event_id = ? AND notification_type LIKE 'ladder_%' AND delivered_at IS NOT NULL`,
         )
         .bind(eventId)
         .first<{ n: number }>();

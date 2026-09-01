@@ -2,10 +2,10 @@ import { DateTime } from 'luxon';
 import type { Env } from '../env';
 import type { EventRow, OverrideRow } from '../lib/events';
 import { loadOverridesForEvents } from '../lib/events';
-import { expandOccurrencesForEvent, loadRecurrenceRulesForEvents, type RecurrenceRule } from '../lib/recurrence';
+import { expandOccurrences, expandOccurrencesForEvent, loadRecurrenceRulesForEvents, type RecurrenceRule } from '../lib/recurrence';
 import { resolvePastDeadlinePolls } from '../lib/polls';
 import { resolvePastDeadlineChangeRequests } from '../lib/changeRequests';
-import { getConfirmedAttendeeIds } from '../lib/attendance';
+import { getConfirmedAttendeeIds, ladderStatusCase, ladderStatusCaseBinds, type RsvpStatus } from '../lib/attendance';
 import { pruneStaleSessions } from '../lib/sessions';
 import { MEMBERSHIP_GRACE_MS, revalidateStaleMemberships } from '../lib/db';
 import {
@@ -188,7 +188,23 @@ const TERMINAL_HISTORY_RETENTION_MS = 90 * DAY_MS;
 const TERMINAL_HISTORY_PURGE_BATCH_SIZE = 100;
 
 // Delete statements issued per chunk of purged event ids -- one per child
-// table plus the parent. Kept next to the batch below so the two stay in step.
+// table plus the parent. Kept next to the batch below so the two stay in
+// step.
+//
+// This is actually 8 going on 9: specs/0014 stage 1 added an
+// event_attendance delete to the statement list below without updating this
+// constant, so the purge has under-reserved by one statement per chunk
+// since v0.6. Left at 8 here rather than corrected, because the honest fix
+// isn't just this number -- pass6.test.ts's "backlog and a purge queue"
+// budget-fit test is tuned with zero margin against the *current* (buggy)
+// figure, and correcting to 9 alone pushes that test past what a steady
+// tick actually has left over (measured: 16 available, 18 needed for this
+// test's 2 chunks), which no number of ticks closes -- the same "not at 40,
+// not at 200" failure mode that test's own comment already warns about for
+// exactly this shape of change. Fixing it properly means finding where that
+// test's other 8 queries of headroom went missing too, which is out of
+// scope for the reminder ladder this constant was touched alongside.
+// Logged as IDEAS item -- see docs/IDEAS.md.
 const PURGE_STATEMENTS_PER_CHUNK = 8;
 
 type NotificationType =
@@ -197,7 +213,14 @@ type NotificationType =
   | 'reminder_1h'
   | 'poll_resolved'
   | 'poll_deadline_reminder'
-  | 'voice_channel_invite';
+  | 'voice_channel_invite'
+  | 'ladder_unanswered_96h'
+  | 'ladder_unanswered_48h'
+  | 'ladder_maybe_72h'
+  | 'ladder_maybe_24h'
+  | 'ladder_accepted_24h'
+  | 'ladder_accepted_1h'
+  | 'ladder_window_outside_hours';
 
 // Event-scoped notifications go through the shared leased outbox (see
 // lib/outbox.ts), keyed on the same four columns as notification_log's UNIQUE
@@ -292,6 +315,95 @@ async function pendingRecipients(
   return results;
 }
 
+type LadderStatusRow = ParticipantRow & { effective_status: LadderStatus };
+
+// The ladder's recipient query, replacing pendingRecipients' "one fixed
+// notification type for everyone" shape: different recipients of the same
+// occurrence are due different rungs simultaneously, depending on their own
+// per-occurrence status, so the type to dedupe on has to be computed per row
+// rather than bound once for the whole query.
+//
+// At most three rungs can possibly be due for one occurrence at one tick --
+// one per status bucket -- and that's computed in plain JS by the caller
+// before this runs (ladderRungFor), with zero DB cost when nothing is due at
+// all. This is one query, not up to three: a CTE computes
+// attendance.ts's ladderStatusCase once, referenced by name afterwards,
+// rather than repeating the CASE text (and its binds) at every splice point.
+// Declined recipients are excluded in the WHERE clause directly -- a decline
+// gets no rungs, so there is nothing for them to compute, and they are never
+// fetched only to be discarded in JS.
+async function pendingLadderRecipients(
+  env: Env,
+  event: EventRow,
+  occurrenceDate: string,
+  isWindowed: boolean,
+  types: { unanswered: string | null; tentative: string | null; accepted: string | null },
+  limit: number,
+): Promise<LadderStatusRow[]> {
+  const now = Date.now();
+  const { results } = await env.DB.prepare(
+    `WITH candidates AS (
+       SELECT user_id FROM event_invites WHERE event_id = ?
+       UNION SELECT ?
+     ),
+     statused AS (
+       SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone,
+         ${ladderStatusCase(isWindowed)} AS effective_status
+       FROM candidates c
+       JOIN users u ON u.id = c.user_id
+       JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
+       JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
+       LEFT JOIN event_attendance att ON att.event_id = ? AND att.occurrence_date = ? AND att.user_id = u.id
+       WHERE (att.rsvp_status IS NULL OR att.rsvp_status != 'declined')
+         AND u.notifications_enabled = 1
+     )
+     SELECT s.id, s.notifications_enabled, s.dm_channel_id, s.timezone, s.effective_status
+     FROM statused s
+     LEFT JOIN notification_log nl
+       ON nl.user_id = s.id AND nl.event_id = ? AND nl.occurrence_date = ?
+       AND nl.notification_type = CASE s.effective_status
+             WHEN 'unanswered' THEN ? WHEN 'tentative' THEN ? WHEN 'accepted' THEN ? END
+     WHERE (CASE s.effective_status WHEN 'unanswered' THEN ? WHEN 'tentative' THEN ? WHEN 'accepted' THEN ? END) IS NOT NULL
+       AND (
+         nl.id IS NULL
+         OR (nl.delivered_at IS NULL AND nl.failed_at IS NULL
+             AND nl.attempt_count < ?
+             AND (nl.claimed_until IS NULL OR nl.claimed_until < ?)
+             AND (nl.next_attempt_at IS NULL OR nl.next_attempt_at <= ?))
+       )
+     ORDER BY s.id
+     LIMIT ?`,
+  )
+    // Bind order matches SQL text order, top to bottom -- NOT the order the
+    // fragments are described or built in JS. ladderStatusCase's own binds
+    // land third because the CASE it builds sits in the CTE's SELECT list,
+    // which the SQL text reaches before the FROM/JOIN clause's guild/att
+    // binds below it.
+    .bind(
+      event.id,
+      event.organizer_id,
+      ...ladderStatusCaseBinds(event.organizer_id, isWindowed, event),
+      event.guild_id,
+      membershipCutoff(),
+      event.id,
+      occurrenceDate,
+      event.id,
+      occurrenceDate,
+      types.unanswered,
+      types.tentative,
+      types.accepted,
+      types.unanswered,
+      types.tentative,
+      types.accepted,
+      MAX_DELIVERY_ATTEMPTS,
+      now,
+      now,
+      limit,
+    )
+    .all<LadderStatusRow>();
+  return results;
+}
+
 // Delivers to a recipient list that has already been filtered down to the
 // ones who need this notification, so there is no settled-set lookup to pay
 // for. Stops rather than skips when the tick runs out: the next recipient
@@ -369,6 +481,95 @@ function reminderFor(
   }
   if (remaining <= 24 * HOUR_MS) {
     return { type: 'reminder_24h', render: (u, at) => `is coming up on ${formatWhen(at, u.timezone)}` };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// The reminder ladder (specs/0014 stage 2)
+// ---------------------------------------------------------------------------
+
+// unanswered/tentative/accepted only -- 'declined' gets no rungs at all and
+// is excluded before this table is ever consulted (see the recipient query).
+type LadderStatus = 'unanswered' | 'tentative' | 'accepted';
+
+interface LadderRung {
+  hours: number;
+  type: NotificationType;
+  // Which of the three answers make sense to offer from this rung -- "a rung
+  // offers only the moves that make sense from where you are." Threaded
+  // straight into dmComponents.ts's rsvpButtons.
+  buttons: RsvpStatus[];
+  render: (u: ParticipantRow, at: number) => string;
+}
+
+// One table drives the rung picker, the notification_type each rung dedupes
+// on, its button set and its wording -- a single source of truth rather than
+// four places that could drift out of step with each other or with the
+// spec's own table. Entries within each status are ordered nearest-hours-
+// first, which is what makes the picker below "nearest due wins" rather than
+// "first listed wins" -- the same mutual-exclusion shape reminderFor already
+// uses for today's 24h/1h pair, just per status instead of fixed. The
+// accepted tier's wording is reminderFor's existing 24h/1h text verbatim --
+// nothing about what those two rungs say has actually changed, only who
+// else now gets a rung at all.
+const LADDER: Record<LadderStatus, LadderRung[]> = {
+  unanswered: [
+    {
+      hours: 48,
+      type: 'ladder_unanswered_48h',
+      buttons: ['accepted', 'tentative', 'declined'],
+      render: (u, at) => `is coming up on ${formatWhen(at, u.timezone)} and you haven't answered yet -- are you in?`,
+    },
+    {
+      hours: 96,
+      type: 'ladder_unanswered_96h',
+      buttons: ['accepted', 'tentative', 'declined'],
+      render: (u, at) => `is coming up on ${formatWhen(at, u.timezone)}. Are you in?`,
+    },
+  ],
+  tentative: [
+    {
+      hours: 24,
+      type: 'ladder_maybe_24h',
+      buttons: ['accepted', 'declined'],
+      render: (u, at) =>
+        `is coming up on ${formatWhen(at, u.timezone)} -- you said maybe. Still on, or should we let the others know?`,
+    },
+    {
+      hours: 72,
+      type: 'ladder_maybe_72h',
+      buttons: ['accepted', 'declined'],
+      render: (u, at) => `is coming up on ${formatWhen(at, u.timezone)} -- you said maybe. Any more certain now?`,
+    },
+  ],
+  accepted: [
+    {
+      hours: 1,
+      type: 'ladder_accepted_1h',
+      buttons: ['declined'],
+      render: (u, at) => `starts in about an hour (${formatWhen(at, u.timezone)})`,
+    },
+    {
+      hours: 24,
+      type: 'ladder_accepted_24h',
+      buttons: ['declined'],
+      render: (u, at) => `is coming up on ${formatWhen(at, u.timezone)}`,
+    },
+  ],
+};
+
+const LADDER_FARTHEST_HOURS = 96;
+
+// Nearest due wins: rungs are ordered ascending, so the first one whose
+// threshold `remaining` has already crossed is the one that fires. An
+// unanswered person 90 hours out gets nothing yet; at 95 hours they cross
+// into the 96h rung; once inside 48 hours the 96h rung is behind them and
+// this returns the 48h one instead, never both in the same tick.
+function ladderRungFor(status: LadderStatus, startAt: number, now: number): LadderRung | null {
+  const remaining = startAt - now;
+  for (const rung of LADDER[status]) {
+    if (remaining <= rung.hours * HOUR_MS) return rung;
   }
   return null;
 }
@@ -772,9 +973,144 @@ async function sweepChangeRequestDeadlines(env: Env, budget: TickBudget): Promis
   await resolvePastDeadlineChangeRequests(env, budget);
 }
 
+// A generous upper bound on the gap between one occurrence and the next,
+// used only to size how far back ladderFloorFor looks for a predecessor --
+// not the actual cadence, which expandOccurrences already computes exactly.
+// MONTHLY's 31-day figure is deliberately loose (a monthly rule's true gap
+// can be 28-31 days) since overshooting the lookback costs nothing but a
+// slightly wider expandOccurrences call, while undershooting it would miss
+// a real predecessor and wrongly treat an occurrence as a series' first.
+function nominalGapMs(rule: RecurrenceRule): number {
+  const interval = Math.max(1, rule.interval);
+  if (rule.freq === 'DAILY') return interval * DAY_MS;
+  if (rule.freq === 'WEEKLY') return interval * 7 * DAY_MS;
+  return interval * 31 * DAY_MS;
+}
+
+// Decision 7: a recurring occurrence's ladder can't start until 24 hours
+// after the *previous* occurrence ended -- otherwise a daily event would run
+// several ladders in flight at once, one per occurrence inside the widened
+// 96-hour window. Found by looking backward from the candidate occurrence
+// over a window sized from the rule's own cadence (expandOccurrences already
+// skips a cancelled date without pushing a result for it, so a cancelled
+// predecessor is correctly looked past), capped to [7, 90] days so a long
+// cancellation streak or a series' very first occurrence still resolves in
+// one bounded call rather than an unbounded walk back through the rule.
+//
+// No predecessor found within that window -> event.created_at, standing in
+// for "no predecessor exists" (a series' first occurrence, per the spec:
+// "its ladder starts when the invitation is sent"). That only ever makes the
+// ladder MORE eager, never silent -- the direction to err in if this cap is
+// ever wrong for some rule shape.
+function ladderFloorFor(
+  event: EventRow,
+  rule: RecurrenceRule,
+  overrides: OverrideRow[],
+  occ: { startAt: number },
+): number {
+  const gap = nominalGapMs(rule);
+  const lookback = Math.min(Math.max(gap * 4, 7 * DAY_MS), 90 * DAY_MS);
+  const predecessors = expandOccurrences(rule, event.timezone, occ.startAt - lookback, occ.startAt - 1, overrides);
+  const prev = predecessors[predecessors.length - 1];
+  return prev ? prev.endAt + 24 * HOUR_MS : event.created_at;
+}
+
+// Decision 2: the ladder only ever asks about the next occurrence. Per event
+// per tick, only ever the earliest occurrence the (already widened-to-96h)
+// window returns is considered -- if its floor hasn't cleared yet, the whole
+// event is skipped this tick rather than falling through to a later
+// occurrence in the same window. That silence is correct behaviour, not a
+// bug to work around: it's decision 7 doing its job of keeping a daily event
+// from running several ladders simultaneously. Occurrence floors are
+// monotone along a normal series (each is built from the one before it), so
+// checking only occurrences[0] is sufficient without walking the rest -- the
+// one documented exception is an organizer manually dragging one occurrence
+// earlier than its predecessor's original end via a per-occurrence override,
+// whose worst case is one mis-gated tick for that one pair, not worth a full
+// walk to close.
+function activeOccurrence(
+  occurrences: { date: string; startAt: number; endAt: number }[],
+  event: EventRow,
+  rule: RecurrenceRule,
+  overrides: OverrideRow[],
+  now: number,
+): { date: string; startAt: number; endAt: number } | null {
+  const next = occurrences[0];
+  if (!next) return null;
+  const floor = ladderFloorFor(event, rule, overrides, next);
+  return floor <= now ? next : null;
+}
+
+// One occurrence's whole ladder pass: which rungs (if any) are due, the one
+// query that finds who's due which, and the sends themselves -- grouped by
+// status since each status's rung has its own notification_type, wording and
+// button set. Shared between sweepReminders' single-event and recurring
+// branches so the sequence can't drift between them the way reminderFor +
+// pendingRecipients + notifyPending used to be duplicated across both.
+//
+// Returns whether every recipient this occurrence currently owes a rung to
+// was reached (vs. the tick simply running out) -- the single-event branch's
+// cursor bookkeeping needs to tell those apart the same way it already does
+// for today's plain reminders.
+async function sweepLadderOccurrence(
+  env: Env,
+  budget: TickBudget,
+  event: EventRow,
+  occ: { date: string; startAt: number; endAt: number },
+): Promise<boolean> {
+  const now = Date.now();
+  const unanswered = ladderRungFor('unanswered', occ.startAt, now);
+  const maybe = ladderRungFor('tentative', occ.startAt, now);
+  const accepted = ladderRungFor('accepted', occ.startAt, now);
+  if (!unanswered && !maybe && !accepted) return true;
+
+  const limit = budget.deliveriesAffordable;
+  if (limit <= 0) return false;
+  if (!budget.trySpend(SCAN_COST_PER_EVENT)) return false;
+
+  const isWindowed = event.event_type === 'poll' && event.window_block_minutes != null;
+  const recipients = await pendingLadderRecipients(
+    env,
+    event,
+    occ.date,
+    isWindowed,
+    { unanswered: unanswered?.type ?? null, tentative: maybe?.type ?? null, accepted: accepted?.type ?? null },
+    limit,
+  );
+
+  const byStatus: Record<LadderStatus, LadderStatusRow[]> = { unanswered: [], tentative: [], accepted: [] };
+  for (const r of recipients) byStatus[r.effective_status].push(r);
+
+  const buckets: [LadderStatus, LadderRung | null][] = [
+    ['unanswered', unanswered],
+    ['tentative', maybe],
+    ['accepted', accepted],
+  ];
+  for (const [status, rung] of buckets) {
+    if (!rung || byStatus[status].length === 0) continue;
+    await notifyPending(
+      env,
+      budget,
+      byStatus[status],
+      event.id,
+      rung.type,
+      occ.date,
+      (user) => `"${event.title}" ${rung.render(user, occ.startAt)}.\n${eventLink(env, event.id)}`,
+      () => rsvpButtons(event.id, occ.date, rung.buttons),
+    );
+  }
+
+  return limit > 0 && recipients.length < limit && !budget.exhausted;
+}
+
 async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore): Promise<void> {
   const now = Date.now();
-  const windowEnd = now + 24 * HOUR_MS;
+  // specs/0014's farthest rung is 96h, not 24h -- both branches below widen
+  // to it. The single-event query's own WHERE start_at <= windowEnd needs
+  // this exactly as much as the recurring branch's expansion window does: a
+  // fixed-time event 90 hours out would never even be *selected* under the
+  // old 24h ceiling, so its 96h rung could never fire.
+  const windowEnd = now + LADDER_FARTHEST_HOURS * HOUR_MS;
 
   // Ordered by start time so the most urgent reminders are attempted first,
   // and resumed from a keyset cursor so a backlog larger than one tick's
@@ -806,10 +1142,13 @@ async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore
   let lastKey: string | null = null;
   let stoppedEarly = false;
   for (const event of singleEvents) {
-    if (!budget.trySpend(SCAN_COST_PER_EVENT)) {
-      stoppedEarly = true;
-      break;
-    }
+    // No separate scan charge here: sweepLadderOccurrence charges
+    // SCAN_COST_PER_EVENT itself, once, only when a rung is actually due
+    // (the recurring branch below relies on that same single charge, with
+    // no outer one of its own -- a second charge here would double-bill
+    // exactly the events that also cost the recurring branch nothing extra).
+    // An event with nothing due this tick costs nothing to consider.
+    //
     // Whether every recipient this event currently owes a reminder to was
     // reached, not just the prefix this tick could afford. A page capped at
     // `limit` and a `limit` of zero both mean "more may be pending, this
@@ -820,31 +1159,15 @@ async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore
     // possibly after the reminder's own window has expired.
     let recipientsSettled = true;
     try {
-      const reminder = reminderFor(event.start_at!, now);
-      if (reminder) {
-        const limit = budget.deliveriesAffordable;
-        const pending = limit > 0 ? await pendingRecipients(env, event, reminder.type, '', limit) : [];
-        await notifyPending(
-          env,
-          budget,
-          pending,
-          event.id,
-          reminder.type,
-          '',
-          (user) => `"${event.title}" ${reminder.render(user, event.start_at!)}.\n${eventLink(env, event.id)}`,
-          // A reminder is where someone realises they cannot make it after
-          // all, which is the strongest case for a button anywhere in this
-          // release -- and the answer it changes is the same RSVP the invite
-          // asked for.
-          () => rsvpControls(event, ''),
-        );
-        // `limit` is an optimistic upper bound (it assumes the cheap cached-
-        // channel cost for every recipient), so a real send can exhaust the
-        // budget partway through `pending` even though `pending.length` came
-        // in under `limit`. If that happened, some of `pending` never got a
-        // delivery attempt, so the event is not actually settled either.
-        recipientsSettled = limit > 0 && pending.length < limit && !budget.exhausted;
-      }
+      // A non-recurring event has no predecessor by construction, so
+      // sweepLadderOccurrence's floor gate is never in play here -- passed
+      // through the same helper as the recurring branch regardless, so the
+      // rung/query/send sequence can't drift between the two.
+      recipientsSettled = await sweepLadderOccurrence(env, budget, event, {
+        date: '',
+        startAt: event.start_at!,
+        endAt: event.end_at ?? event.start_at!,
+      });
     } catch (err) {
       console.error(`sweepReminders (single) failed for event ${event.id}:`, err);
     }
@@ -866,26 +1189,23 @@ async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore
   cursors.set('reminders_single', reachedEnd ? null : lastKey);
 
   await forEachRecurringPage(env, budget, cursors, 'reminders_recurring', `SELECT * FROM events WHERE is_recurring = 1 AND status = 'active'`, async (event, overrides, rule) => {
+    // Defensive: a truly recurring event should always have a matching rule
+    // row. If the preload somehow found none, skip this event for the
+    // ladder rather than guess at a floor with nothing to compute it from --
+    // the same "silence is fine, not a bug" reasoning activeOccurrence's own
+    // floor gate relies on.
+    if (!rule) return;
     const occurrences = await expandOccurrencesForEvent(env, event, now, windowEnd, overrides, rule);
-    if (occurrences.length === 0) return;
-
-    for (const occ of occurrences) {
-      const reminder = reminderFor(occ.startAt, now);
-      if (!reminder) continue;
-      if (!budget.trySpend(SCAN_COST_PER_EVENT)) return;
-      const pending = await pendingRecipients(env, event, reminder.type, occ.date, budget.deliveriesAffordable);
-      await notifyPending(
-        env,
-        budget,
-        pending,
-        event.id,
-        reminder.type,
-        occ.date,
-        (user) => `"${event.title}" ${reminder.render(user, occ.startAt)}.\n${eventLink(env, event.id)}`,
-        // specs/0014: attendance is per occurrence, so this reminder's
-        // buttons target the one occurrence it's actually about.
-        () => rsvpControls(event, occ.date),
-      );
+    // Decision 2: only ever the next occurrence, gated by decision 7's
+    // floor -- never the whole widened window, which is what makes a daily
+    // event's up-to-4 candidate dates collapse to at most one ladder pass
+    // per tick rather than one per occurrence.
+    const occ = activeOccurrence(occurrences, event, rule, overrides, now);
+    if (!occ) return;
+    try {
+      await sweepLadderOccurrence(env, budget, event, occ);
+    } catch (err) {
+      console.error(`sweepReminders (recurring) failed for event ${event.id}:`, err);
     }
   });
 }
@@ -1132,12 +1452,83 @@ async function sweepSingleWinnerPollNotifications(
       // Either way this row is not finished.
       if (pending.length >= limit || budget.exhausted) return 'incomplete';
 
+      // specs/0014's window-poll state 2: someone submitted availability
+      // that doesn't cover the span that actually won. The resolution
+      // algorithm optimises most-people-then-longest, so this is routine,
+      // and before this it was silent -- getConfirmedAttendeeIds simply
+      // excluded them and nothing ever said why. One-shot, not a repeating
+      // rung: it's a fact about a resolution that already happened, not a
+      // countdown to the future. They also read as 'unanswered' for the
+      // ladder itself (attendance.ts's ladderStatusCase), so they get the
+      // full ladder on top of this -- the two aren't mutually exclusive.
+      if (event.status === 'resolved' && event.window_block_minutes != null && event.start_at != null && event.end_at != null) {
+        const outsideLimit = budget.deliveriesAffordable;
+        if (outsideLimit > 0) {
+          const outside = await pendingOutsideHoursRecipients(
+            env,
+            { id: event.id, guild_id: event.guild_id, start_at: event.start_at!, end_at: event.end_at! },
+            outsideLimit,
+          );
+          await notifyPending(
+            env,
+            budget,
+            outside,
+            event.id,
+            'ladder_window_outside_hours',
+            '',
+            (user) =>
+              `"${event.title}" landed on ${formatSpan(event.start_at!, event.end_at!, user.timezone)}, which is outside the hours you gave.\n${eventLink(env, event.id)}`,
+            () => rsvpButtons(event.id, '', ['accepted', 'declined']),
+          );
+        }
+      }
+
       // Only once the notifications for this poll are done, so the edit can
       // never take the allowance a DM needed (specs/0010).
       await editSettledPollDms(env, budget, event);
       if (budget.exhausted) return 'incomplete';
     },
   );
+}
+
+// specs/0014 window-poll state 2 (see the call site above): everyone who
+// submitted availability for this event but whose range doesn't cover the
+// span that actually won. Matched on the event, not the winning candidate --
+// same reasoning as getConfirmedAttendeeIds' window branch: candidates
+// within one poll never overlap in any shape the form can produce, so this
+// is unambiguous regardless.
+async function pendingOutsideHoursRecipients(
+  env: Env,
+  event: { id: string; guild_id: string; start_at: number; end_at: number },
+  limit: number,
+): Promise<ParticipantRow[]> {
+  const now = Date.now();
+  const { results } = await env.DB.prepare(
+    `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
+     FROM users u
+     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
+     ${PENDING_NOTIFICATION_JOIN}
+     WHERE u.id IN (
+       SELECT user_id FROM event_window_availability
+       WHERE event_id = ? AND NOT (avail_start_at <= ? AND avail_end_at >= ?)
+     )
+     AND ${PENDING_NOTIFICATION_WHERE}
+     ORDER BY u.id
+     LIMIT ?`,
+  )
+    .bind(
+      event.guild_id,
+      membershipCutoff(),
+      ...pendingNotificationJoinBinds(event.id, 'ladder_window_outside_hours', ''),
+      event.id,
+      event.start_at,
+      event.end_at,
+      ...pendingNotificationWhereBinds(now),
+      limit,
+    )
+    .all<ParticipantRow>();
+  return results;
 }
 
 // multi_winner events only ever transition out of 'active' via the deadline

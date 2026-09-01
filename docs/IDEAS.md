@@ -34,6 +34,42 @@ identity, not a position — it never changes and is never reused.
 
 ## Still open
 
+### 53. The terminal-history purge under-reserves its own budget by one statement per chunk
+
+Found building v0.6.1's reminder ladder (Aug 2026), not while looking for it.
+`sweepPurgeTerminalHistory`'s `PURGE_STATEMENTS_PER_CHUNK` constant
+(`worker/src/cron/reminders.ts`) says 8; the statement list right below it
+issues 9 -- specs/0014 stage 1 added an `event_attendance` delete to that
+list without updating the count next to it, despite the constant's own
+comment saying explicitly that the two are supposed to stay in step.
+
+The consequence: `budget.trySpend(chunks.length * PURGE_STATEMENTS_PER_CHUNK)`
+under-reserves by one real D1 statement per chunk, every time the purge
+actually runs. `TickBudget` exists specifically so a tick's real query count
+never exceeds what Cloudflare enforces -- this is exactly the class of bug
+it's meant to catch, quietly not caught.
+
+**Why it wasn't just fixed on the spot:** correcting the constant to 9 breaks
+`worker/test/pass6.test.ts`'s "a full terminal purge and a spent notification
+budget still fit one tick" test, and not by a small margin that more ticks
+would close -- measured, a steady tick has exactly 16 queries left by the
+time the purge sweep runs and a two-chunk purge needs 18 under the corrected
+count, a gap that stays fixed forever once the notification backlog that
+test seeds has fully drained. That test's own comment already documents this
+exact failure shape from a past change ("not at 40 ticks, not at 200"), so
+this isn't a new kind of problem -- it's the same one, caused by fixing a
+different bug this time.
+
+The real fix has two parts, and both are outside a stage-2 reminder-ladder
+release: (1) correct `PURGE_STATEMENTS_PER_CHUNK` to 9, and (2) find where
+this test's other ~8 queries of assumed headroom actually went (the four
+sweeps between `reminders` and `purgeTerminalHistory` -- `pollDeadlineReminders`,
+`voiceChannelInvites`, `idleGroups`, `pruneStaleSessions` -- cost that much
+even fully idle, and it's not obvious yet whether that's expected or itself
+worth tightening). Until both land together, the constant stays at its
+current, wrong value rather than trading a live under-reservation for a
+silently-differently-wrong test.
+
 ### 52. The calendar chip never shows your own answer
 
 Found verifying v0.6 on the sandbox (Michael, Aug 2026): declining a
@@ -378,70 +414,6 @@ Options, roughly in order of cost:
 Related to item 31's lesson from the other direction. There the guardrail
 existed and could not fail usefully; here the guardrail does not exist at all
 for the change most in need of one.
-
-### 46. A reminder DM shows the buttons but not the answer already on record
-
-Found by pressing them (v0.5, sandbox, Aug 2026). The invite DM was answered
-"I'm in" at 5:45 and edited itself to say so. The 24-hour reminder for the
-same event arrived at 6:30 carrying all three buttons and no indication that
-an answer exists at all — so the only way to find out what you had said is to
-press something and see what it changes to.
-
-Offering the buttons again is *right*: a reminder is exactly when someone
-changes their mind, and that was the argument for putting controls on
-reminders in the first place. The gap is narrower than "don't show buttons"
-— it is that the message states the event and the time and omits the one
-fact the recipient already gave it.
-
-Cheap version: the reminder's text carries the current answer ("You said:
-I'm in") and the buttons stay as they are. The sweep already loads the
-invite row it filters recipients on, so the status is in hand and needs no
-extra query — worth confirming that claim against `pendingRecipients` before
-building, since it selects users rather than invites.
-
-Sharper version, and probably better: the *pressed* button is styled as the
-current answer, so the DM shows state rather than describing it. Discord has
-no "selected" style for buttons, so this means rebuilding the row with the
-current answer's button disabled or relabelled ("✓ You're in"), which is
-more code and a second thing to keep in step with `rsvp_status`.
-
-Related to the edit-on-resolve work in `specs/0010`, which is the same shape
-from the other end — a message whose controls should reflect state that has
-moved since it was sent.
-
-One half of this landed for polls without being aimed at it. Keeping the
-controls after an answer (v0.5) meant the select had to be rebuilt, and a
-rebuilt select can carry `default: true` on the picks — so a poll DM you
-have answered *does* reopen showing what is on record. That only covers the
-message you answered, though. A **new** reminder about the same poll is a
-fresh send with a fresh select, and it still arrives blank. So the gap here
-is unchanged for reminders, and buttons never had the mechanism at all.
-
-
-### 48. Reminders should depend on whether you have answered
-
-Asked for by Michael, Aug 2026, after pressing the v0.5 buttons: the app
-sends everyone the same two reminders — 24 hours and 1 hour — whether they
-accepted, said maybe, declined, or never answered at all. `pendingRecipients`
-does not read `rsvp_status` in any form.
-
-The proposal is a ladder: no answer gets nudged at 96 and 48 hours, a maybe
-at 72 and 24, an accepted at 24 and 1, a decline gets nothing further. Each
-rung carries only the controls that make sense from where the person is —
-which is the part that makes item 46 fall out as a special case rather than
-a separate fix.
-
-Designing it turned up the thing underneath, and Michael decided it:
-**attendance is per occurrence, not per event.** `notification_log` and
-`event_occurrence_overrides` are both keyed per occurrence; `event_invites`
-holds one `rsvp_status` per event. Nothing had forced those to agree because
-nothing read attendance in the notification path. The ladder is the first
-thing that does.
-
-Fully specced in `specs/0014-attendance-per-occurrence.md`, including the two
-calls that make it tractable: a multi-winner poll fans out into separate
-events on confirmation, and a recurring event is accepted one occurrence at a
-time with the next ladder starting 24 hours after the last session ends.
 
 ### 49. Everyone in an event should see everyone's answer, whatever kind of event it is
 
@@ -2167,3 +2139,88 @@ and the website offers RSVP controls only for a fixed-time event — so the
 join would cost a correlated lookup per candidate per tick to read a
 constant, against a budget already measured starving another sweep. The
 asymmetry is written down in both files rather than left to be rediscovered.
+
+### 48. Reminders should depend on whether you have answered — shipped in v0.6.1
+
+Asked for by Michael, Aug 2026, after pressing the v0.5 buttons: the app
+sends everyone the same two reminders — 24 hours and 1 hour — whether they
+accepted, said maybe, declined, or never answered at all. `pendingRecipients`
+does not read `rsvp_status` in any form.
+
+The proposal is a ladder: no answer gets nudged at 96 and 48 hours, a maybe
+at 72 and 24, an accepted at 24 and 1, a decline gets nothing further. Each
+rung carries only the controls that make sense from where the person is —
+which is the part that makes item 46 fall out as a special case rather than
+a separate fix.
+
+Designing it turned up the thing underneath, and Michael decided it:
+**attendance is per occurrence, not per event.** `notification_log` and
+`event_occurrence_overrides` are both keyed per occurrence; `event_invites`
+holds one `rsvp_status` per event. Nothing had forced those to agree because
+nothing read attendance in the notification path. The ladder is the first
+thing that does.
+
+Fully specced in `specs/0014-attendance-per-occurrence.md`, including the two
+calls that make it tractable: a multi-winner poll fans out into separate
+events on confirmation, and a recurring event is accepted one occurrence at a
+time with the next ladder starting 24 hours after the last session ends.
+
+**How it shipped: in two releases.** v0.6 (stage 1) built the per-occurrence
+`event_attendance` table the ladder needed underneath — nothing about the
+ladder itself yet. v0.6.1 (stage 2) built the ladder proposed above, exactly
+as designed: six rungs across the three answered-or-not buckets, each with
+its own button subset, plus decision 7's floor (a recurring occurrence's
+ladder cannot start until 24 hours after the previous occurrence ended, so a
+frequent series never runs two ladders at once). The multi-winner poll
+fan-out and the minimum-attendees cancellation cascade are stage 3, still
+open.
+
+### 46. A reminder DM shows the buttons but not the answer already on record — mostly closed by v0.6.1's ladder
+
+Found by pressing them (v0.5, sandbox, Aug 2026). The invite DM was answered
+"I'm in" at 5:45 and edited itself to say so. The 24-hour reminder for the
+same event arrived at 6:30 carrying all three buttons and no indication that
+an answer exists at all — so the only way to find out what you had said is to
+press something and see what it changes to.
+
+Offering the buttons again is *right*: a reminder is exactly when someone
+changes their mind, and that was the argument for putting controls on
+reminders in the first place. The gap is narrower than "don't show buttons"
+— it is that the message states the event and the time and omits the one
+fact the recipient already gave it.
+
+Cheap version: the reminder's text carries the current answer ("You said:
+I'm in") and the buttons stay as they are. The sweep already loads the
+invite row it filters recipients on, so the status is in hand and needs no
+extra query — worth confirming that claim against `pendingRecipients` before
+building, since it selects users rather than invites.
+
+Sharper version, and probably better: the *pressed* button is styled as the
+current answer, so the DM shows state rather than describing it. Discord has
+no "selected" style for buttons, so this means rebuilding the row with the
+current answer's button disabled or relabelled ("✓ You're in"), which is
+more code and a second thing to keep in step with `rsvp_status`.
+
+Related to the edit-on-resolve work in `specs/0010`, which is the same shape
+from the other end — a message whose controls should reflect state that has
+moved since it was sent.
+
+One half of this landed for polls without being aimed at it. Keeping the
+controls after an answer (v0.5) meant the select had to be rebuilt, and a
+rebuilt select can carry `default: true` on the picks — so a poll DM you
+have answered *does* reopen showing what is on record. That only covers the
+message you answered, though. A **new** reminder about the same poll is a
+fresh send with a fresh select, and it still arrives blank. So the gap here
+is unchanged for reminders, and buttons never had the mechanism at all.
+
+**How item 48 closed most of this as a side effect.** Each rung's own
+wording now states the recipient's bucket: an unanswered rung says "you
+haven't answered yet — are you in?", a maybe rung says "you said maybe" and
+asks if that's still true. Getting an accepted-tier rung at all (24h/1h,
+offering only "can't make it") already tells you your answer is on record,
+even though its wording doesn't restate "you said yes" the way the maybe
+rung restates "you said maybe" — the cheap version above, in spirit, applied
+selectively rather than uniformly. The sharper version (styling the pressed
+button itself) remains undone; Discord's lack of a "selected" button style
+means it would still cost a rebuilt row and a second thing to keep in step
+with `rsvp_status`, which is more than this closes for free.

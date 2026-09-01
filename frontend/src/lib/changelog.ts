@@ -21,6 +21,16 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.6.1',
+    date: '1 September 2026',
+    summary: 'Reminders now match what you already said, and offer only the answers that still make sense.',
+    changed: [
+      "Reminder DMs now depend on your own answer, not just the clock. Haven't answered yet? You get one at 96 hours out and another at 48. Said maybe? 72 hours and 24. Said you're in? Just the usual 24-hour and 1-hour heads-up. Said you can't make it, and you hear nothing more — that answer was final.",
+      'Each reminder only offers the buttons that make sense from where you are. An unanswered invite still offers all three; once you’ve said maybe, the reminder only asks "in, or out?"; once you’ve said yes, it only offers "can’t make it after all."',
+      "Answering a poll with your free hours, and getting a time outside them anyway, now gets a DM saying so — instead of just quietly leaving you off the confirmed list with no explanation.",
+    ],
+  },
+  {
     version: '0.6',
     date: '31 August 2026',
     summary: 'Answering for a recurring session now answers for that session alone.',
