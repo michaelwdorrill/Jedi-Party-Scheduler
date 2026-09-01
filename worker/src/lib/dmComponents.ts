@@ -1,4 +1,4 @@
-import { rsvpCustomId, voteCustomId } from './interactions';
+import { cancelCustomId, rsvpCustomId, voteCustomId } from './interactions';
 import type { RsvpStatus } from './attendance';
 
 // The outbound half of specs/0010: the controls a bot DM carries, so that
@@ -125,6 +125,22 @@ export function pollSelect(eventId: string, candidates: SelectCandidate[]): unkn
           max_values: options.length,
           options,
         },
+      ],
+    },
+  ];
+}
+
+// specs/0014 stage 3, decision 4: the one-button prompt on the DM that asks
+// the organizer whether to cancel a session that has dropped below its
+// minimum. Danger-styled like the RSVP row's own decline button -- this is
+// the same weight of action, just for the whole session rather than one
+// person's attendance.
+export function cancelButton(eventId: string): unknown[] {
+  return [
+    {
+      type: COMPONENT_TYPE.ACTION_ROW,
+      components: [
+        { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.DANGER, label: 'Cancel this session', custom_id: cancelCustomId(eventId) },
       ],
     },
   ];

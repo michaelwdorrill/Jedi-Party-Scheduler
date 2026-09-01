@@ -1,7 +1,22 @@
 import { formatTimeRange } from '../lib/datetime';
-import type { PollOption, PollVote } from '../types';
+import type { PollOption, PollVote, PollVoter } from '../types';
 
 const VOTE_LABEL: Record<PollVote, string> = { yes: "I'm in", maybe: 'Maybe', no: "Can't make it" };
+
+// IDEAS item 49: what to show for one voter -- their vote if there's
+// nothing to override it with, or the overriding RSVP if there is
+// (item 51's rule: an RSVP recorded since outranks the vote it disagrees
+// with). Distinguishing the two rather than just picking one is the whole
+// point -- "voted yes, now says can't make it" is the fact this display
+// exists to surface.
+function voterLabel(voter: PollVoter): string {
+  const name = voter.globalName ?? voter.username;
+  if (voter.currentRsvpStatus == null || voter.currentRsvpStatus === 'accepted') {
+    return `${name} (${VOTE_LABEL[voter.vote]})`;
+  }
+  const override = voter.currentRsvpStatus === 'declined' ? "can't make it now" : 'maybe now';
+  return `${name} (voted ${VOTE_LABEL[voter.vote]}, ${override})`;
+}
 
 export default function PollOptionRow({
   option,
@@ -36,6 +51,12 @@ export default function PollOptionRow({
         <p className="mb-2 text-xs text-muted">
           Going: {option.confirmedUsers.map((u) => u.globalName ?? u.username).join(', ')}
         </p>
+      )}
+      {/* IDEAS item 49: everyone's answer, visible whether or not the poll
+          has resolved -- the same thing a fixed-time event's invitee list
+          and a window poll's submissions already show. */}
+      {option.voters.length > 0 && (
+        <p className="mb-2 text-xs text-faint">{option.voters.map(voterLabel).join(', ')}</p>
       )}
       {votingDisabled ? (
         <p className="text-xs text-faint">Voting for this day has closed.</p>

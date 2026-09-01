@@ -21,6 +21,19 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.6.2',
+    date: '1 September 2026',
+    summary: 'A confirmed poll night is a real event now, and a session that loses too many people can cancel itself.',
+    added: [
+      'A day confirmed on a multi-winner poll is now its own event, with its own invite list, its own reminders, and its own "I\'m in / Maybe / Can\'t make it" buttons — the same as any other night. It used to be a line on the poll with a one-time "you\'re confirmed" DM and nothing after.',
+      'An event can be given a minimum number of attendees. If declines drop it below that, you get a DM asking whether to cancel — or, if you\'d rather it handle itself, tick "cancel automatically" and it will, telling everyone still coming the moment it does.',
+      'A poll now shows everyone\'s answer on every option, not just the ones that got enough votes to confirm — the same as a fixed-time event already shows who\'s in. Once a poll settles, an answer given since is shown alongside the original vote when the two disagree.',
+    ],
+    fixed: [
+      'Editing an event only re-asks everyone if the session actually moves to a different day. Nudging the time by half an hour, or fixing a timezone that was wrong from the start, no longer wipes out answers that still apply.',
+    ],
+  },
+  {
     version: '0.6.1',
     date: '1 September 2026',
     summary: 'Reminders now match what you already said, and offer only the answers that still make sense.',

@@ -80,9 +80,19 @@ pollRoutes.get('/:eventId/window', async (c) => {
   // getWindowedCandidates is shared with the resolution path, which needs
   // ranges and nothing else, and a poll's submitters are bounded by
   // MAX_RESOLVED_INVITEES so this is one small statement either way.
+  //
+  // IDEAS item 49: currentRsvpStatus is the same override-aware addition
+  // routes/events.ts's poll-option voters carry -- a submission is what
+  // someone offered before the poll resolved, and an RSVP recorded since
+  // can disagree with it (rsvpOverridesVote's rule in lib/attendance.ts).
+  // Occurrence_date is always '' here: a poll has no occurrences of its own
+  // (specs/0014).
   const { results: rows } = await c.env.DB.prepare(
-    `SELECT a.option_id, a.user_id, u.username, u.global_name, a.avail_start_at, a.avail_end_at
-     FROM event_window_availability a JOIN users u ON u.id = a.user_id
+    `SELECT a.option_id, a.user_id, u.username, u.global_name, a.avail_start_at, a.avail_end_at,
+            att.rsvp_status AS current_rsvp_status
+     FROM event_window_availability a
+     JOIN users u ON u.id = a.user_id
+     LEFT JOIN event_attendance att ON att.event_id = a.event_id AND att.occurrence_date = '' AND att.user_id = a.user_id
      WHERE a.event_id = ?`,
   )
     .bind(eventId)
@@ -93,6 +103,7 @@ pollRoutes.get('/:eventId/window', async (c) => {
       global_name: string | null;
       avail_start_at: number;
       avail_end_at: number;
+      current_rsvp_status: string | null;
     }>();
 
   const byOption = new Map<string, typeof rows>();
@@ -119,6 +130,7 @@ pollRoutes.get('/:eventId/window', async (c) => {
           globalName: s.global_name,
           startAt: s.avail_start_at,
           endAt: s.avail_end_at,
+          currentRsvpStatus: s.current_rsvp_status,
         })),
         bestCandidate: best.get(candidate.id) ?? null,
       };

@@ -116,8 +116,16 @@ describe('a whole cron tick stays inside the Free-plan D1 ceiling (F-04-G1)', ()
     // folded into a sweep that already scans confirmed options rather than
     // being given a sweep of their own. This assertion is what caught the
     // first attempt, which cost a 25th.
-    expect(firstTick).toBeLessThanOrEqual(24);
-    expect(secondTick).toBeLessThanOrEqual(24);
+    //
+    // 25, not 24, since specs/0014 stage 3: sweepCancellationCascade's own
+    // discovery read is one more real query every tick, deliberately
+    // uncharged against the *ledger* (RESERVED_QUERIES itself stays at 24 --
+    // see its own comment for why bumping it to "match" a new charged query
+    // does not actually work), but a real, counted statement all the same,
+    // and this assertion's job is to catch exactly that kind of growth
+    // rather than hide it.
+    expect(firstTick).toBeLessThanOrEqual(25);
+    expect(secondTick).toBeLessThanOrEqual(25);
     // One flush statement, not ten: the ten fresh cursors cost the first tick
     // barely more than the second, which has none to write.
     expect(firstTick - secondTick).toBeLessThanOrEqual(2);
@@ -141,23 +149,27 @@ describe('a global cursor records completed work, not read work (F-04-G2)', () =
     await runReminderSweep(env);
 
     // Whatever this tick managed, the cursor must sit at or before the last
-    // option it actually notified -- never past options it never looked at.
+    // option it actually fanned out -- never past options it never looked at.
+    // specs/0014 stage 3: sweepConfirmedMultiWinnerOptions now fans a
+    // confirmed option out into its own event (created_from_option_id)
+    // instead of sending a per-option poll_resolved notification, so that's
+    // what "processed" means here now.
     const cursor = await readCursorKey(env, 'confirmed_options');
-    const notified = await db
+    const fannedOut = await db
       .prepare(
-        `SELECT occurrence_date FROM notification_log
-         WHERE notification_type = 'poll_resolved' AND occurrence_date != ''
-         ORDER BY occurrence_date DESC LIMIT 1`,
+        `SELECT created_from_option_id FROM events
+         WHERE created_from_option_id IS NOT NULL
+         ORDER BY created_from_option_id DESC LIMIT 1`,
       )
-      .first<{ occurrence_date: string }>();
+      .first<{ created_from_option_id: string }>();
 
     if (cursor !== null) {
-      expect(notified).not.toBeNull();
-      expect(cursor <= notified!.occurrence_date).toBe(true);
+      expect(fannedOut).not.toBeNull();
+      expect(cursor <= fannedOut!.created_from_option_id).toBe(true);
     }
   });
 
-  it('eventually notifies every option rather than skipping the unprocessed tail', async () => {
+  it('eventually fans out every option rather than skipping the unprocessed tail', async () => {
     const { db, env } = setup();
     await seedGuild(db);
     await seedUser(db, 'organizer');
@@ -166,20 +178,17 @@ describe('a global cursor records completed work, not read work (F-04-G2)', () =
 
     fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
 
-    const notifiedCount = async (): Promise<number> => {
+    const fannedOutCount = async (): Promise<number> => {
       const row = await db
-        .prepare(
-          `SELECT COUNT(DISTINCT occurrence_date) AS n FROM notification_log
-           WHERE notification_type = 'poll_resolved' AND occurrence_date != ''`,
-        )
+        .prepare(`SELECT COUNT(*) AS n FROM events WHERE created_from_option_id IS NOT NULL`)
         .first<{ n: number }>();
       return row?.n ?? 0;
     };
 
-    for (let tick = 0; tick < 40 && (await notifiedCount()) < 200; tick++) {
+    for (let tick = 0; tick < 40 && (await fannedOutCount()) < 200; tick++) {
       await runReminderSweep(env);
     }
-    expect(await notifiedCount()).toBe(200);
+    expect(await fannedOutCount()).toBe(200);
   });
 });
 

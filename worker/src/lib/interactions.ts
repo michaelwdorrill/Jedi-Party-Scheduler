@@ -152,6 +152,13 @@ const CUSTOM_ID_VERSION = 'v2';
 export type ParsedCustomId =
   | { kind: 'rsvp'; status: RsvpStatus; eventId: string; occurrenceDate: string }
   | { kind: 'vote'; eventId: string }
+  // specs/0014 stage 3, decision 4: the organizer's "cancel this session"
+  // button. No occurrence date -- the minimum-attendees cascade only ever
+  // applies to a non-recurring event (see validateEventWriteInput), so
+  // there is no per-occurrence form of this id to speak of yet. Adding one
+  // later for a recurring occurrence is a new kind, not a reinterpretation
+  // of this one, the same discipline v1->v2 already established.
+  | { kind: 'cancel'; eventId: string }
   // Ours, but from a format this build no longer speaks.
   | { kind: 'stale' }
   | null;
@@ -162,6 +169,10 @@ export function rsvpCustomId(status: RsvpStatus, eventId: string, occurrenceDate
 
 export function voteCustomId(eventId: string): string {
   return `${CUSTOM_ID_PREFIX}:${CUSTOM_ID_VERSION}:vote:${eventId}`;
+}
+
+export function cancelCustomId(eventId: string): string {
+  return `${CUSTOM_ID_PREFIX}:${CUSTOM_ID_VERSION}:cancel:${eventId}`;
 }
 
 export function parseCustomId(customId: string | undefined): ParsedCustomId {
@@ -180,6 +191,9 @@ export function parseCustomId(customId: string | undefined): ParsedCustomId {
   }
   if (parts[2] === 'vote' && parts.length === 4) {
     return parts[3] ? { kind: 'vote', eventId: parts[3] } : { kind: 'stale' };
+  }
+  if (parts[2] === 'cancel' && parts.length === 4) {
+    return parts[3] ? { kind: 'cancel', eventId: parts[3] } : { kind: 'stale' };
   }
   return { kind: 'stale' };
 }
@@ -360,6 +374,11 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
     if (outcome === 'not_invited') {
       return ephemeral(`You're not on the invite list for that one any more. ${siteLink(env)}`);
     }
+    // specs/0014 stage 3: the minimum-attendees cascade can cancel an event
+    // between when this DM was sent and when someone presses it.
+    if (outcome === 'event_not_active') {
+      return ephemeral(`That session isn't happening any more. ${siteLink(env)}`);
+    }
     // Defensive: unreachable from a bot-authored button, since every id we
     // ever emit pairs a real occurrence date with the event's own
     // is_recurring. A genuine mismatch here means the message itself is
@@ -372,6 +391,33 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
       RSVP_ANSWER[parsed.status],
       keepButtons(interaction.message?.components, parsed.eventId, parsed.occurrenceDate),
     );
+  }
+
+  if (parsed.kind === 'cancel') {
+    const event = await env.DB.prepare(`SELECT organizer_id, status FROM events WHERE id = ?`)
+      .bind(parsed.eventId)
+      .first<{ organizer_id: string; status: string }>();
+    if (!event) return ephemeral(`That event no longer exists. ${siteLink(env)}`);
+    // Re-checked from the database rather than trusted from the fact that
+    // this DM was only ever sent to the organizer -- the presser is the
+    // signed payload's user, and every other press in this handler is
+    // authorised the same way: by asking the database, not by who the
+    // message was addressed to.
+    if (event.organizer_id !== userId) {
+      return ephemeral(`Only the organizer can cancel this one. ${siteLink(env)}`);
+    }
+    if (event.status !== 'active') {
+      return ephemeral(`That session isn't active any more. ${siteLink(env)}`);
+    }
+    await env.DB.prepare(
+      `UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND organizer_id = ? AND status = 'active'`,
+    )
+      .bind(Date.now(), parsed.eventId, userId)
+      .run();
+    // No components after -- a fired cancel button must not be pressable
+    // twice. Everyone still marked as coming is told through the outbox
+    // (sweepCancelledEventNotices), same as an auto-cancel.
+    return updateMessage(original, 'this session is cancelled.', []);
   }
 
   const picked = interaction.data?.values ?? [];

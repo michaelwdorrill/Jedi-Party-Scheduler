@@ -357,9 +357,19 @@ describe('scripts/seed-button-demo.sql', () => {
   });
 });
 
-// IDEAS item 47. A confirmed multi-winner day has a time on the *option*, not
-// on the event, and sweepReminders only ever looked at events with a
-// start_at -- so these reminders had never been sent, by anyone, ever.
+// IDEAS item 47, superseded by specs/0014 stage 3's fan-out: a confirmed
+// multi-winner day used to have a time on the *option*, not on the event
+// (sweepReminders only ever looked at events with a start_at, so these
+// reminders had never been sent, by anyone, ever), and its own hand-rolled
+// reminder carried no buttons at all -- one event_invites.rsvp_status
+// covering several confirmed days meant a button here could not honestly
+// answer for just one of them.
+//
+// Fan-out removes the problem instead of working around it: a confirmed day
+// is now a real, standalone event with its own event_attendance, so
+// sweepReminders' ordinary path and the ladder pick it up with no special
+// case, buttons included. These tests now exercise that hook-up rather than
+// bespoke reminder logic that no longer exists.
 describe('a confirmed multi-winner day', () => {
   async function seedConfirmedDay(db: ShimDatabase, startsInMs: number): Promise<void> {
     await seedGuild(db);
@@ -406,19 +416,34 @@ describe('a confirmed multi-winner day', () => {
     expect(reminder!.text).toContain('Wednesday game');
   });
 
-  it('carries no buttons, because one rsvp_status cannot answer for one day', async () => {
+  it('carries the ordinary per-status buttons now, because fan-out gives the day its own event', async () => {
     const { db, env } = setup();
+    // 20h out puts the organizer (implicitly accepted, decision 1) inside
+    // the accepted tier's 24h rung, and the never-answered "player" inside
+    // the unanswered tier's 48h rung, on the *fanned-out* event -- a vote
+    // cast on the old poll is not an event_attendance row, so voting yes
+    // does not carry over into being answered on the day it confirmed.
     await seedConfirmedDay(db, 20 * HOUR_MS);
     fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
 
     await runReminderSweep(env);
 
-    const reminder = sentMessages(fetchStub).find((m) => m.text.includes('is coming up'));
-    // Every other reminder in the app has the three buttons. This one must
-    // not: a multi-winner poll has several confirmed days under one event and
-    // a single rsvp_status, so "I'm in" here would answer for all of them --
-    // and for the organizer, "Can't make it" would drop them from every day.
-    expect(reminder!.components).toBeUndefined();
+    const sent = sentMessages(fetchStub);
+    // Distinguished from the unanswered rung's message by wording alone --
+    // both contain "is coming up", only the unanswered one adds "haven't
+    // answered".
+    const accepted = sent.find((m) => m.text.includes('is coming up') && !m.text.includes("haven't answered"));
+    const unanswered = sent.find((m) => m.text.includes("haven't answered"));
+
+    // Old behaviour (pre-fan-out) was no buttons at all, for either. Now
+    // each gets exactly the buttons its own status calls for -- the same
+    // rule every other event in the app already follows.
+    expect((accepted!.components as { components: { label: string }[] }[])[0].components.map((c) => c.label)).toEqual([
+      "Can't make it",
+    ]);
+    expect(
+      (unanswered!.components as { components: { label: string }[] }[])[0].components.map((c) => c.label),
+    ).toEqual(["I'm in", 'Maybe', "Can't make it"]);
   });
 
   it('is reminded again an hour out, and only once each', async () => {

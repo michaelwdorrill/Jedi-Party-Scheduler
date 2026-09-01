@@ -37,6 +37,13 @@ export interface EventRow {
   // Optional because narrower test fixtures and rows selected before
   // migration 0013 will not carry it; treated as 0 when absent.
   revision?: number;
+  // specs/0014 stage 3. Optional for the same reason revision is: narrower
+  // test fixtures and rows selected before migration 0027 will not carry
+  // them.
+  minimum_attendees?: number | null;
+  auto_cancel_below_minimum?: number;
+  created_from_poll_id?: string | null;
+  created_from_option_id?: string | null;
 }
 
 export interface OverrideRow {

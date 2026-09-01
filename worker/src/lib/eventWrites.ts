@@ -1,3 +1,4 @@
+import { DateTime } from 'luxon';
 import type { Env } from '../env';
 import { chunkIds, chunkRows, conditionalRowsSql, placeholders } from './d1';
 import { filterActiveGuildMembers } from './db';
@@ -40,6 +41,13 @@ export interface EventWriteInput {
   invites: { userIds: string[]; groupIds: string[] };
   voiceChannelId?: string | null;
   voiceChannelName?: string | null;
+
+  // specs/0014 stage 3, decision 4. Optional; `null`/absent means no
+  // minimum. Only settable on a non-recurring, non-poll event -- see
+  // assertCoherentMergedEvent and assertCompleteEventShape for why the
+  // other shapes are rejected outright rather than silently ignored.
+  minimumAttendees?: number | null;
+  autoCancelBelowMinimum?: boolean;
 
   // single
   isRecurring?: boolean;
@@ -237,7 +245,13 @@ async function resolveInviteeUserIds(
   return [...out.values()];
 }
 
-type ResolvedInvitee = {
+// Exported for specs/0014 stage 3's fan-out (cron/reminders.ts), the one
+// caller outside this file that needs to build invite rows for an event it
+// didn't create through the normal HTTP path -- a confirmed multi-winner
+// day's invite list is copied from its parent poll, not resolved from a
+// request body, so it constructs this shape directly rather than going
+// through resolveInviteeUserIds.
+export type ResolvedInvitee = {
   userId: string;
   invitedVia: 'individual' | 'group';
   sourceGroupId: string | null;
@@ -306,6 +320,23 @@ function validateEventWriteInput(input: Partial<EventWriteInput>, requireComplet
   if (input.revision !== undefined) {
     const revision = assertSafeInt(input.revision, 'revision');
     if (revision < 0) throw new ValidationError('revision must not be negative');
+  }
+
+  // specs/0014 stage 3: same reasoning as pollThresholdCount just above --
+  // below 1 is meaningless (an event can't fall below "nobody"), and above
+  // the invitee ceiling can never be reached. Whether this is even settable
+  // on the event's own shape (non-recurring, non-poll) is a separate,
+  // merged-shape question -- assertCompleteEventShape (create) and
+  // assertCoherentMergedEvent (patch) answer it, since only they know the
+  // full picture a partial PATCH delta alone does not.
+  if (input.minimumAttendees != null) {
+    const minimum = assertSafeInt(input.minimumAttendees, 'minimumAttendees');
+    if (minimum < 1 || minimum > LIMITS.MAX_RESOLVED_INVITEES) {
+      throw new ValidationError('minimumAttendees out of range');
+    }
+  }
+  if (input.autoCancelBelowMinimum !== undefined) {
+    assertBoolean(input.autoCancelBelowMinimum, 'autoCancelBelowMinimum');
   }
 
   // `windowBlockMinutes` is no longer part of a separate mode -- it is the
@@ -427,6 +458,19 @@ function assertCoherentMergedEvent(stored: EventRow, input: Partial<EventWriteIn
     throw new ValidationError('Poll settings cannot be set on an event that is not a poll');
   }
 
+  // specs/0014 stage 3: the merged event's shape, not just this delta --
+  // `{minimumAttendees: 3}` alone is a valid delta on an event a PATCH
+  // elsewhere in the same request just made recurring, or on a poll, and
+  // neither shape has anywhere for the cascade to act (a poll has no
+  // occurrence to cancel; a recurring event's minimum is decision 4's
+  // explicitly out-of-scope case for this release -- see IDEAS.md).
+  if (input.minimumAttendees != null) {
+    const mergedIsRecurring = input.isRecurring !== undefined ? input.isRecurring : !!stored.is_recurring;
+    if (isPoll || mergedIsRecurring) {
+      throw new ValidationError('minimumAttendees can only be set on a non-recurring event');
+    }
+  }
+
   // Recurrence belongs to single events. A recurring poll has no meaning
   // here: the poll resolves to one concrete slot (or a set of confirmed
   // ones), which is what a series would otherwise be generating.
@@ -447,9 +491,17 @@ function assertCompleteEventShape(input: Partial<EventWriteInput>): void {
 
   if (eventType === 'single') {
     assertCompleteScheduleShape(input);
+    // specs/0014 stage 3: mirrors assertCoherentMergedEvent's PATCH-side
+    // check, for the create path -- see that check's comment for why.
+    if (input.minimumAttendees != null && input.isRecurring) {
+      throw new ValidationError('minimumAttendees can only be set on a non-recurring event');
+    }
     return;
   }
 
+  if (input.minimumAttendees != null) {
+    throw new ValidationError('minimumAttendees can only be set on a non-recurring event');
+  }
   if (input.pollDeadlineAt == null) throw new ValidationError('pollDeadlineAt is required for a poll');
   // One rule for both shapes, because there is only one shape: a poll is its
   // candidates. A windowed poll is candidates that happen to be windows.
@@ -558,7 +610,7 @@ const INVITE_COLUMNS = ['id', 'event_id', 'user_id', 'invited_via', 'source_grou
 // `is_recurring = 1`, so a quota claim that failed earlier in the very same
 // batch (see updateEvent) makes the invite writes a no-op too, not just the
 // event row itself.
-function inviteStatements(
+export function inviteStatements(
   env: Env,
   eventId: string,
   invitees: ResolvedInvitee[],
@@ -770,8 +822,9 @@ export async function createEventWithInvites(
       `INSERT INTO events (id, guild_id, organizer_id, title, description, game, event_type, timezone,
          start_at, end_at, status, poll_strategy, poll_threshold_count, poll_deadline_at,
          poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
-         is_recurring, voice_channel_id, voice_channel_name, created_at, updated_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         is_recurring, voice_channel_id, voice_channel_name, minimum_attendees, auto_cancel_below_minimum,
+         created_at, updated_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE ${eventQuotaGuardSql(isRecurring)}`,
     ).bind(
       eventId,
@@ -801,6 +854,12 @@ export async function createEventWithInvites(
       isRecurring ? 1 : 0,
       input.voiceChannelId ?? null,
       input.voiceChannelName ?? null,
+      // Validated above to be settable only on a non-recurring single
+      // event, so no eventType/isRecurring gate is needed here the way
+      // poll fields and start_at/end_at have one -- an invalid combination
+      // never reaches this INSERT at all.
+      input.minimumAttendees ?? null,
+      input.autoCancelBelowMinimum ? 1 : 0,
       now,
       now,
       ...eventQuotaGuardParams(guildId, organizerId, isRecurring),
@@ -851,6 +910,19 @@ export async function createEventWithInvites(
   }
 
   return eventId;
+}
+
+// specs/0014 decision 3: the ISO date an instant falls on, local to a given
+// timezone -- the "date" a schedule edit's before/after gets compared by.
+// Deliberately the timezone at each end of the comparison, not one held
+// fixed for both: a pure timezone correction (organizer fixes a wrong zone,
+// touching no UTC instant at all) genuinely changes what date every invitee
+// sees, and decision 3's own test -- "if we move it to a different day,
+// you'll be asked again" -- is about the *displayed* date, not the
+// underlying instant. Holding one zone fixed would let a timezone-only fix
+// silently redisplay a different day without re-asking anyone.
+function localDateKey(ms: number, zone: string): string {
+  return DateTime.fromMillis(ms, { zone }).toISODate() ?? '';
 }
 
 // `stored` is the event row the caller loaded and authorized against. It is
@@ -944,6 +1016,17 @@ export async function updateEvent(
     setClauses.push('voice_channel_id = ?', 'voice_channel_name = ?');
     values.push(input.voiceChannelId, input.voiceChannelName ?? null);
   }
+  // specs/0014 stage 3. Coherence (non-recurring, non-poll) already checked
+  // by assertCoherentMergedEvent against the merged shape, not just this
+  // delta -- see its comment.
+  if (input.minimumAttendees !== undefined) {
+    setClauses.push('minimum_attendees = ?');
+    values.push(input.minimumAttendees);
+  }
+  if (input.autoCancelBelowMinimum !== undefined) {
+    setClauses.push('auto_cancel_below_minimum = ?');
+    values.push(input.autoCancelBelowMinimum ? 1 : 0);
+  }
 
   // isRecurring is the signal that this request is a full single-event
   // schedule edit (the frontend always sends it alongside startAt/endAt or
@@ -952,6 +1035,21 @@ export async function updateEvent(
   // The schedule shape itself was already validated by
   // assertCoherentMergedEvent above, against the stored event rather than the
   // delta alone.
+  // specs/0014 decision 3: a schedule edit clears attendance only if the
+  // *local* date actually moves. Only reachable for a non-recurring event
+  // staying non-recurring (input.isRecurring === false, matching the branch
+  // above that actually writes input.startAt) with a real previous start_at
+  // to compare against -- a series being converted to a one-off has none
+  // (recurring events never carry a start_at), and there is nothing to
+  // clear for it either: event_attendance for occurrence_date = '' cannot
+  // exist yet on a row that has only ever been a series.
+  const clearsAttendanceOnDateMove =
+    input.isRecurring === false &&
+    !wasRecurring &&
+    stored.start_at != null &&
+    input.startAt !== undefined &&
+    localDateKey(stored.start_at, stored.timezone) !== localDateKey(input.startAt, input.timezone ?? stored.timezone);
+
   if (input.isRecurring !== undefined) {
     setClauses.push('is_recurring = ?', 'start_at = ?', 'end_at = ?');
     if (input.isRecurring) {
@@ -1032,6 +1130,12 @@ export async function updateEvent(
   const guardBinds = [eventId, mutationToken];
   const guardedStatement = (sql: string, ...binds: unknown[]): D1PreparedStatement =>
     env.DB.prepare(`${sql}${siblingGuard}`).bind(...binds, ...guardBinds);
+
+  if (clearsAttendanceOnDateMove) {
+    statements.push(
+      guardedStatement(`DELETE FROM event_attendance WHERE event_id = ? AND occurrence_date = ''`, eventId),
+    );
+  }
 
   if (input.isRecurring !== undefined) {
     statements.push(guardedStatement(`DELETE FROM event_recurrence_rules WHERE event_id = ?`, eventId));

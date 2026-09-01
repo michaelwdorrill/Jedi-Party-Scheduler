@@ -5,7 +5,15 @@ import { loadOverridesForEvents } from '../lib/events';
 import { expandOccurrences, expandOccurrencesForEvent, loadRecurrenceRulesForEvents, type RecurrenceRule } from '../lib/recurrence';
 import { resolvePastDeadlinePolls } from '../lib/polls';
 import { resolvePastDeadlineChangeRequests } from '../lib/changeRequests';
-import { getConfirmedAttendeeIds, ladderStatusCase, ladderStatusCaseBinds, type RsvpStatus } from '../lib/attendance';
+import {
+  countConfirmedAttendees,
+  getConfirmedAttendeeIds,
+  ladderStatusCase,
+  ladderStatusCaseBinds,
+  type RsvpStatus,
+} from '../lib/attendance';
+import { inviteStatements, type ResolvedInvitee } from '../lib/eventWrites';
+import { newId } from '../lib/ids';
 import { pruneStaleSessions } from '../lib/sessions';
 import { MEMBERSHIP_GRACE_MS, revalidateStaleMemberships } from '../lib/db';
 import {
@@ -19,7 +27,7 @@ import {
   type DmRecipient,
 } from '../lib/outbox';
 import { editBotDm } from '../lib/discord';
-import { linkButton, pollSelect, rsvpButtons } from '../lib/dmComponents';
+import { cancelButton, linkButton, pollSelect, rsvpButtons } from '../lib/dmComponents';
 import { LIMITS } from '../lib/validate';
 import { chunkIds, placeholders } from '../lib/d1';
 import { planFrom, TickBudget } from './budget';
@@ -220,7 +228,9 @@ type NotificationType =
   | 'ladder_maybe_24h'
   | 'ladder_accepted_24h'
   | 'ladder_accepted_1h'
-  | 'ladder_window_outside_hours';
+  | 'ladder_window_outside_hours'
+  | 'organizer_cancel_prompt'
+  | 'event_cancelled_below_minimum';
 
 // Event-scoped notifications go through the shared leased outbox (see
 // lib/outbox.ts), keyed on the same four columns as notification_log's UNIQUE
@@ -456,33 +466,6 @@ function formatSpan(startAt: number, endAt: number, zone: string): string {
 // informational -- HashRouter, so the fragment is part of the URL.
 function eventLink(env: Env, eventId: string): string {
   return `${env.FRONTEND_URL}/#/events/${eventId}`;
-}
-
-// Which reminder an upcoming session is due, if any.
-//
-// Mutually exclusive, deliberately. These used to both fire for an event
-// inside the hour, which doubled the fan-out of the single most expensive
-// moment in the sweep to say two versions of the same thing -- and a "coming
-// up tomorrow" note is useless once the event is 40 minutes away regardless.
-//
-// `startAt` is passed to `render` as well as read here, because the
-// multi-winner sweep reminds about a confirmed *option's* time rather than
-// the event's, and an event row's own start_at is null there.
-function reminderFor(
-  startAt: number,
-  now: number,
-): { type: NotificationType; render: (u: ParticipantRow, at: number) => string } | null {
-  const remaining = startAt - now;
-  if (remaining <= HOUR_MS) {
-    return {
-      type: 'reminder_1h',
-      render: (u, at) => `starts in about an hour (${formatWhen(at, u.timezone)})`,
-    };
-  }
-  if (remaining <= 24 * HOUR_MS) {
-    return { type: 'reminder_24h', render: (u, at) => `is coming up on ${formatWhen(at, u.timezone)}` };
-  }
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1350,7 +1333,24 @@ async function sweepPollDeadlines(env: Env, budget: TickBudget): Promise<void> {
 //   * A failed edit is not retried into the ground. 404 and 403 are ordinary
 //     here (see editBotDm), so the row is marked as attempted and left alone;
 //     only a 5xx or a network failure is left for the next tick.
-async function editSettledPollDms(env: Env, budget: TickBudget, event: EventRow): Promise<void> {
+// `render`/`controls` are supplied by the caller rather than derived here,
+// because what a settled poll's DM should say and offer is not one rule --
+// single_winner has a settled time (per-recipient timezone) and RSVP
+// buttons once resolved; multi_winner (specs/0014 stage 3) never has its
+// own start_at at all (only its options do) and, once a confirmed day fans
+// out into a real event, offering RSVP on the *poll's* own DM is not just
+// redundant but wrong -- a decline there cannot mean "which day". Before
+// this split, multi_winner always fell through to editSettledPollDms' old
+// "was cancelled" text even when genuinely resolved, because that text's
+// own condition (`start_at != null`) can never be true for a multi_winner
+// event -- found while building the fan-out this same release adds.
+async function editSettledPollDms(
+  env: Env,
+  budget: TickBudget,
+  event: EventRow,
+  render: (timezone: string) => string,
+  controls: unknown[] | null,
+): Promise<void> {
   if (budget.exhausted) return;
   if (!budget.trySpend(1)) return;
 
@@ -1377,22 +1377,12 @@ async function editSettledPollDms(env: Env, budget: TickBudget, event: EventRow)
     // rather than through a second accounting path.
     if (!budget.reserveDelivery(true)) return;
 
-    const settled =
-      event.status === 'resolved' && event.start_at != null && event.end_at != null
-        ? `"${event.title}" is settled: ${
-            event.window_block_minutes != null
-              ? formatSpan(event.start_at, event.end_at, row.timezone)
-              : formatWhen(event.start_at, row.timezone)
-          }.\n${eventLink(env, event.id)}`
-        : `"${event.title}" was cancelled -- voting is closed.\n${eventLink(env, event.id)}`;
-
     const result = await editBotDm(
       env.DISCORD_BOT_TOKEN,
       row.dm_channel_id,
       row.message_id,
-      settled,
-      // A cancelled poll asks nothing, so it keeps no controls at all.
-      event.status === 'resolved' ? rsvpControls(event, '') : [],
+      render(row.timezone),
+      controls,
     );
 
     if (!result.ok && result.retryable) continue;
@@ -1485,7 +1475,21 @@ async function sweepSingleWinnerPollNotifications(
 
       // Only once the notifications for this poll are done, so the edit can
       // never take the allowance a DM needed (specs/0010).
-      await editSettledPollDms(env, budget, event);
+      await editSettledPollDms(
+        env,
+        budget,
+        event,
+        (timezone) =>
+          event.status === 'resolved' && event.start_at != null && event.end_at != null
+            ? `"${event.title}" is settled: ${
+                event.window_block_minutes != null
+                  ? formatSpan(event.start_at, event.end_at, timezone)
+                  : formatWhen(event.start_at, timezone)
+              }.\n${eventLink(env, event.id)}`
+            : `"${event.title}" was cancelled -- voting is closed.\n${eventLink(env, event.id)}`,
+        // A cancelled poll asks nothing, so it keeps no controls at all.
+        event.status === 'resolved' ? rsvpControls(event, '') : [],
+      );
       if (budget.exhausted) return 'incomplete';
     },
   );
@@ -1575,15 +1579,105 @@ async function sweepMultiWinnerPollClosedNotifications(
       // The vote control goes away here too, but not before: a multi-winner
       // poll confirms individual days while it is still collecting votes on
       // the others, so its DM stays answerable until the poll itself closes.
-      await editSettledPollDms(env, budget, event);
+      // No RSVP controls, ever, for multi_winner -- unlike single_winner,
+      // this event never has its own start_at, and once fan-out gives each
+      // confirmed day a real event of its own, "are you coming" belongs on
+      // that day's DM, not on the poll's.
+      await editSettledPollDms(env, budget, event, () => message, []);
       if (budget.exhausted) return 'incomplete';
     },
   );
 }
 
+// specs/0014 stage 3: a confirmed multi-winner day becomes a real,
+// standalone event rather than living only as a confirmed
+// event_poll_options row with a one-off "you're confirmed" DM and no
+// per-occurrence attendance. Once it exists, sweepReminders' ordinary
+// single-event path and the ladder pick it up with no special case at all
+// -- it is not a poll any more.
+//
+// The parent's invite list is copied via inviteStatements rather than a raw
+// SQL `INSERT ... SELECT`: every id in this app is minted in the Worker
+// (lib/ids.ts), never SQL-side, so a literal copy would have no correct way
+// to produce fresh invite ids.
+async function createFannedOutEvent(
+  env: Env,
+  budget: TickBudget,
+  opt: {
+    id: string;
+    event_id: string;
+    start_at: number;
+    end_at: number;
+    title: string;
+    guild_id: string;
+    organizer_id: string;
+    timezone: string;
+    voice_channel_id: string | null;
+    voice_channel_name: string | null;
+  },
+): Promise<RowOutcome> {
+  if (!budget.trySpend(1)) return 'incomplete';
+  const { results: parentInvites } = await env.DB.prepare(
+    `SELECT user_id, invited_via, source_group_id FROM event_invites WHERE event_id = ?`,
+  )
+    .bind(opt.event_id)
+    .all<{ user_id: string; invited_via: 'individual' | 'group'; source_group_id: string | null }>();
+
+  // Same convention inviteStatements' own comment describes: everyone starts
+  // 'pending', only the organizer's row starts 'accepted' -- rsvp_status is
+  // vestigial post-specs/0014 either way (real attendance is event_attendance),
+  // but the column stays NOT NULL until it is dropped outright.
+  const invitees: ResolvedInvitee[] = parentInvites.map((row) => ({
+    userId: row.user_id,
+    invitedVia: row.invited_via,
+    sourceGroupId: row.source_group_id,
+    rsvpStatus: row.user_id === opt.organizer_id ? 'accepted' : 'pending',
+  }));
+
+  const newEventId = newId();
+  const now = Date.now();
+  const inviteStmts = inviteStatements(env, newEventId, invitees, true);
+  if (!budget.trySpend(1 + inviteStmts.length)) return 'incomplete';
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO events (id, guild_id, organizer_id, title, description, game, event_type, timezone,
+         start_at, end_at, status, poll_strategy, poll_threshold_count, poll_deadline_at,
+         poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
+         is_recurring, voice_channel_id, voice_channel_name, created_from_poll_id, created_from_option_id,
+         created_at, updated_at)
+       SELECT ?, ?, ?, ?, NULL, NULL, 'single', ?, ?, ?, 'active', NULL, NULL, NULL,
+         'options', 'single_winner', NULL, NULL, NULL, 0, ?, ?, ?, ?, ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM events WHERE created_from_option_id = ?)`,
+    ).bind(
+      newEventId,
+      opt.guild_id,
+      opt.organizer_id,
+      opt.title,
+      opt.timezone,
+      opt.start_at,
+      opt.end_at,
+      opt.voice_channel_id,
+      opt.voice_channel_name,
+      opt.event_id,
+      opt.id,
+      now,
+      now,
+      opt.id,
+    ),
+    ...inviteStmts,
+  ]);
+}
+
 // Multi-winner polls confirm individual days as soon as they hit quorum
 // (checked synchronously in the vote route), independent of the deadline.
-// This sweep notifies just that day's yes-voters, as soon as we notice.
+// This sweep fans out each newly-confirmed day into its own event
+// (specs/0014 stage 3). The query's own NOT EXISTS keeps the cursor moving
+// forward through genuinely new confirmations rather than revisiting settled
+// ones forever; the guarded INSERT's separate WHERE NOT EXISTS inside
+// createFannedOutEvent is the belt-and-suspenders that makes a second
+// concurrent attempt at the same option -- a race between two ticks, not the
+// steady state -- a no-op rather than a duplicate event.
 async function sweepConfirmedMultiWinnerOptions(
   env: Env,
   budget: TickBudget,
@@ -1596,151 +1690,186 @@ async function sweepConfirmedMultiWinnerOptions(
     end_at: number;
     title: string;
     guild_id: string;
+    organizer_id: string;
     timezone: string;
-    window_block_minutes: number | null;
+    voice_channel_id: string | null;
+    voice_channel_name: string | null;
   }>(
     env,
     budget,
     cursors,
     'confirmed_options',
-    `SELECT epo.id AS id, epo.event_id, epo.start_at, epo.end_at, e.title, e.guild_id, e.timezone,
-            e.window_block_minutes
+    `SELECT epo.id AS id, epo.event_id, epo.start_at, epo.end_at, e.title, e.guild_id, e.organizer_id,
+            e.timezone, e.voice_channel_id, e.voice_channel_name
      FROM event_poll_options epo
      JOIN events e ON e.id = epo.event_id
      WHERE e.poll_resolution_mode = 'multi_winner' AND epo.confirmed_at IS NOT NULL
-       AND e.status != 'cancelled'`,
+       AND e.status != 'cancelled'
+       AND NOT EXISTS (SELECT 1 FROM events fanned WHERE fanned.created_from_option_id = epo.id)`,
     [],
-    async (opt) => {
-      const limit = budget.deliveriesAffordable;
-      if (limit <= 0) return 'incomplete';
-
-      // Who counts as confirmed depends on how the candidate was answered.
-      // A fixed slot has yes-voters. A window has people who submitted a
-      // range -- and since confirming a windowed candidate narrows its row
-      // from the window to the span that won (see confirmWindowedOption),
-      // "covers start_at..end_at" is exactly "can make the session".
-      const windowed = opt.window_block_minutes != null;
-      const recipientSource = windowed
-        ? `FROM event_window_availability ewa
-           JOIN users u ON u.id = ewa.user_id`
-        : `FROM event_poll_votes epv
-           JOIN users u ON u.id = epv.user_id`;
-      const recipientWhere = windowed
-        ? `ewa.option_id = ? AND ewa.avail_start_at <= ? AND ewa.avail_end_at >= ?`
-        : `epv.option_id = ? AND epv.vote = 'yes'`;
-      const recipientBinds = windowed ? [opt.id, opt.start_at, opt.end_at] : [opt.id];
-
-      // Whoever is confirmed for this day and has not yet had the given
-      // notification. Shared by the two things this sweep now sends, so the
-      // "who is coming on this day" rule cannot drift between them.
-      //
-      // It does *not* carry item 51's "an RSVP overrides the vote" rule,
-      // which lib/attendance.ts's getConfirmedAttendeeIds does, and that is
-      // deliberate rather than the drift this comment warns about: a
-      // multi-winner day's DM carries no buttons and the website offers RSVP
-      // controls only for a fixed-time event, so no invitee to a multi-winner
-      // poll can have an rsvp_status other than 'pending'. Adding the join
-      // here would spend a correlated lookup per candidate per tick to read a
-      // column that is provably constant -- against a budget that has already
-      // been measured starving sweepPurgeTerminalHistory. specs/0014's
-      // fan-out removes the asymmetry by making each confirmed day a real
-      // event that the ordinary attendance path already handles.
-      const confirmedFor = async (notificationType: NotificationType, rows: number) => {
-        const { results } = await env.DB.prepare(
-          `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
-           ${recipientSource}
-           JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
-           JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
-           ${PENDING_NOTIFICATION_JOIN}
-           WHERE ${recipientWhere}
-             AND ${PENDING_NOTIFICATION_WHERE}
-           ORDER BY u.id
-           LIMIT ?`,
-        )
-          .bind(
-            opt.guild_id,
-            membershipCutoff(),
-            ...pendingNotificationJoinBinds(opt.event_id, notificationType, opt.id),
-            ...recipientBinds,
-            ...pendingNotificationWhereBinds(),
-            rows,
-          )
-          .all<ParticipantRow>();
-        return results;
-      };
-
-      const voters = await confirmedFor('poll_resolved', limit);
-
-      await notifyPending(
-        env,
-        budget,
-        voters,
-        opt.event_id,
-        'poll_resolved',
-        opt.id,
-        (user) =>
-          `"${opt.title}" is on for ${
-            windowed ? formatSpan(opt.start_at, opt.end_at, user.timezone) : formatWhen(opt.start_at, user.timezone)
-          }! You're confirmed.\n${eventLink(env, opt.event_id)}`,
-      );
-      if (voters.length >= limit || budget.exhausted) return 'incomplete';
-
-      // IDEAS item 47, and the reason it lives here rather than in a sweep of
-      // its own: this scan already visits every confirmed multi-winner day,
-      // so the reminder costs a query only when there is a day due to be
-      // reminded about. A separate cursored sweep would have cost one fixed
-      // query on every tick forever -- and measuring that showed it does not
-      // merely slow the tick down, it permanently starves
-      // sweepPurgeTerminalHistory of the allowance it needs to ever run.
-      //
-      // The bug itself: markResolved is the only thing that sets
-      // events.start_at and it is single_winner only, while sweepReminders
-      // selects WHERE start_at IS NOT NULL -- so a confirmed multi-winner day
-      // got its "this day is confirmed" DM and then silence, no 24-hour and
-      // no 1-hour reminder, ever. Nobody reported it, because a notification
-      // that never arrives leaves no trace at either end: the sweep that
-      // should have sent it reports success for correctly finding nothing.
-      //
-      // specs/0014's fan-out makes this unnecessary eventually -- once a
-      // confirmed day is a real event, every reminder path finds it with no
-      // special case at all.
-      const reminder = reminderFor(opt.start_at, Date.now());
-      if (!reminder) return;
-
-      const remindLimit = budget.deliveriesAffordable;
-      if (remindLimit <= 0) return 'incomplete';
-
-      const due = await confirmedFor(reminder.type, remindLimit);
-      // Deliberately no buttons, unlike every other reminder in this file.
-      //
-      // A multi-winner poll confirms several days under one event, and
-      // `event_invites.rsvp_status` is one answer per *event* -- so "I'm in"
-      // pressed on Thursday's reminder cannot mean Thursday. It would mean
-      // the whole poll, which is specs/0014's first collision arriving early.
-      //
-      // Worse than ambiguous, in both directions. For an invitee it records
-      // a status that nothing about a poll's attendance ever reads:
-      // getConfirmedAttendeeIds asks the votes (or the submitted
-      // availability), never rsvp_status. For the organizer it is read, via
-      // ORGANIZER_UNLESS_DECLINED -- so their "Can't make it" would drop them
-      // from every confirmed day of the poll rather than the one they were
-      // being reminded about.
-      //
-      // So the reminder says the thing it is for (item 47: these days had no
-      // reminder at all) and offers no control until attendance is
-      // per-occurrence and a button can mean one day.
-      await notifyPending(
-        env,
-        budget,
-        due,
-        opt.event_id,
-        reminder.type,
-        opt.id,
-        (user) => `"${opt.title}" ${reminder.render(user, opt.start_at)}.\n${eventLink(env, opt.event_id)}`,
-      );
-      if (due.length >= remindLimit || budget.exhausted) return 'incomplete';
-    },
+    (opt) => createFannedOutEvent(env, budget, opt),
     'epo.id',
+  );
+}
+
+// specs/0014 stage 3, decision 4, both halves of the cascade in one sweep --
+// deliberately, the same discipline sweepChangeRequestNotifications already
+// established: two separate cursored sweeps would each cost one more fixed
+// query on every tick forever, even an empty one, and RESERVED_QUERIES'
+// own comment records what that already did once (folding item 47's
+// reminders into an existing sweep instead of giving them one of their own,
+// because one extra fixed query was measured taking sweepPurgeTerminalHistory
+// from "runs every tick" to "never runs at all"). A flat, uncursored UNION
+// ALL -- not forEachGlobalRow, which appends its cursor predicate in a way
+// that assumes one SELECT, not a union of two -- covers both, matching the
+// same "global scan, capped, dedupe makes re-scanning safe" shape
+// sweepNewInvites and sweepChangeRequestNotifications already use for a
+// population expected to stay small (this is an opt-in field nobody has
+// been able to set before this release).
+//
+// **The prompt half** (`kind = 'prompt'`): a non-recurring event with a
+// minimum set, still active, with auto-cancel off. Its own attendance count
+// is re-read live rather than cached -- there is no cheaper signal for "is
+// this event still below its minimum right now" than asking, and the
+// candidate set is exactly the events that opted into this feature, not
+// every event in the install.
+//
+// **The notice half** (`kind = 'notice'`): an event the cascade already
+// cancelled -- automatically (recordRsvp's guarded UPDATE) or by the
+// organizer's own press (interactions.ts) -- owes a notice to everyone who
+// was still marked as coming. Scoped to `minimum_attendees IS NOT NULL`
+// rather than to `auto_cancel_below_minimum = 1` alone, since both paths
+// this release adds only ever apply to an event with a minimum set in the
+// first place; an event cancelled the ordinary way (DELETE /:eventId)
+// never does, so this does not reach into that older, separate gap.
+// Its own discovery read is deliberately uncharged against the ledger, the
+// same as sweepPurgeTerminalHistory's candidate SELECT just below it: a
+// *charged* fixed query here would come out of the same near-zero-margin
+// pool that sweep already draws its own delete batch from (measured: 16
+// needed, 16 available, before this existed), and RESERVED_QUERIES cannot
+// fix that by being bumped to match -- it reduces the starting ledger by
+// the same amount this would charge it, so the two cancel out to a net
+// *smaller* remainder at the purge, not an unchanged one. That is exactly
+// what happened the first time this trap was hit (see RESERVED_QUERIES'
+// own comment on item 47) and bumping the reserve "to match" didn't save
+// it then either -- the fix was leaving the reserve alone and not adding a
+// new charged call site, which is what this does too.
+async function sweepCancellationCascade(env: Env, budget: TickBudget): Promise<void> {
+  // SELECT * on both halves, not a narrower column list -- UNION ALL
+  // requires matching column sets, and the alternative (a narrow projection,
+  // cast to EventRow at the call sites below) would be typechecked but not
+  // actually true: getConfirmedAttendeeIds branches on event_type and
+  // window_block_minutes, and a row that never selected them would silently
+  // run the *wrong* branch rather than fail loudly.
+  // Each branch wrapped as a subquery, not written as a bare
+  // `SELECT ... LIMIT ? UNION ALL SELECT ... LIMIT ?`: SQLite rejects a
+  // LIMIT on a non-final UNION ALL arm ("LIMIT clause should come after
+  // UNION ALL not before") unless that arm is parenthesized, and this
+  // build's SQLite (node:sqlite, same engine the test shim runs against)
+  // doesn't accept the parenthesized-compound-select form either -- a
+  // newer-SQLite-only grammar addition, not something to rely on D1 having.
+  // The subquery wrapping below is the portable version of the same thing.
+  // Without either fix this whole sweep threw on every tick, silently,
+  // since runIsolated exists precisely to keep one sweep's failure from
+  // taking down the rest -- caught only by actually exercising it in a test.
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM (
+       SELECT *, 'prompt' AS kind FROM events
+       WHERE status = 'active' AND event_type = 'single' AND is_recurring = 0
+         AND minimum_attendees IS NOT NULL AND auto_cancel_below_minimum = 0
+       LIMIT ?
+     )
+
+     UNION ALL
+
+     SELECT * FROM (
+       SELECT *, 'notice' AS kind FROM events
+       WHERE status = 'cancelled' AND minimum_attendees IS NOT NULL AND is_recurring = 0
+         AND updated_at >= ?
+       LIMIT ?
+     )`,
+  )
+    .bind(GLOBAL_SCAN_LIMIT, terminalHistoryHotCutoff(), GLOBAL_SCAN_LIMIT)
+    .all<EventRow & { kind: 'prompt' | 'notice'; minimum_attendees: number }>();
+
+  for (const row of results) {
+    if (budget.exhausted) return;
+    try {
+      if (row.kind === 'prompt') {
+        await maybeSendOrganizerCancelPrompt(env, budget, row);
+      } else {
+        await sendCancelledEventNotice(env, budget, row);
+      }
+    } catch (err) {
+      console.error(`sweepCancellationCascade failed for event ${row.id} (${row.kind}):`, err);
+    }
+  }
+}
+
+async function maybeSendOrganizerCancelPrompt(
+  env: Env,
+  budget: TickBudget,
+  event: EventRow & { minimum_attendees: number },
+): Promise<void> {
+  if (!budget.trySpend(1)) return;
+  const confirmed = await countConfirmedAttendees(env, event, '');
+  if (confirmed >= event.minimum_attendees) return;
+
+  const now = Date.now();
+  const recipient = await env.DB.prepare(
+    `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
+     FROM users u
+     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
+     ${PENDING_NOTIFICATION_JOIN}
+     WHERE u.id = ?
+       AND ${PENDING_NOTIFICATION_WHERE}`,
+  )
+    .bind(
+      event.guild_id,
+      membershipCutoff(),
+      ...pendingNotificationJoinBinds(event.id, 'organizer_cancel_prompt', ''),
+      event.organizer_id,
+      ...pendingNotificationWhereBinds(now),
+    )
+    .first<ParticipantRow>();
+  if (!recipient) return;
+
+  await notifyPending(
+    env,
+    budget,
+    [recipient],
+    event.id,
+    'organizer_cancel_prompt',
+    '',
+    () => `"${event.title}" has dropped below its minimum of ${event.minimum_attendees}. Cancel it?\n${eventLink(env, event.id)}`,
+    () => cancelButton(event.id),
+  );
+}
+
+async function sendCancelledEventNotice(
+  env: Env,
+  budget: TickBudget,
+  event: EventRow,
+): Promise<void> {
+  const limit = budget.deliveriesAffordable;
+  if (limit <= 0) return;
+  // Deliberately not getConfirmedAttendeeIds' `PendingFor` shape -- that
+  // dedupes against a *different* notification's history, which is exactly
+  // wrong for "did we already tell you this one is cancelled."
+  const pending = await getConfirmedAttendeeIds(env, event, null, '', {
+    notificationType: 'event_cancelled_below_minimum',
+    occurrenceDate: '',
+    limit,
+  });
+  await notifyPending(
+    env,
+    budget,
+    pending,
+    event.id,
+    'event_cancelled_below_minimum',
+    '',
+    () => `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`,
   );
 }
 
@@ -2292,6 +2421,7 @@ export async function runReminderSweep(env: Env): Promise<void> {
     sweepMultiWinnerPollClosedNotifications(env, budget, cursors),
   );
   await runIsolated('confirmedMultiWinnerOptions', () => sweepConfirmedMultiWinnerOptions(env, budget, cursors));
+  await runIsolated('cancellationCascade', () => sweepCancellationCascade(env, budget));
   await runIsolated('newInvites', () => sweepNewInvites(env, budget));
   await runIsolated('changeRequestNotifications', () => sweepChangeRequestNotifications(env, budget));
   await runIsolated('reminders', () => sweepReminders(env, budget, cursors));

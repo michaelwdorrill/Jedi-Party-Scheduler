@@ -187,23 +187,24 @@ describe('global cron scans make progress past their page limit (F-04-E)', () =>
 
     fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
 
-    const notifiedOptions = async (): Promise<number> => {
+    // specs/0014 stage 3: sweepConfirmedMultiWinnerOptions now fans a
+    // confirmed option out into its own event rather than sending a
+    // per-option notification, so "processed" means created_from_option_id
+    // is set, not a notification_log row.
+    const fannedOutOptions = async (): Promise<number> => {
       const row = await db
-        .prepare(
-          `SELECT COUNT(DISTINCT occurrence_date) AS n FROM notification_log
-           WHERE notification_type = 'poll_resolved' AND occurrence_date != ''`,
-        )
+        .prepare(`SELECT COUNT(*) AS n FROM events WHERE created_from_option_id IS NOT NULL`)
         .first<{ n: number }>();
       return row?.n ?? 0;
     };
 
     // Enough ticks to wrap the scan more than once. Without a cursor this
     // plateaus at 200 forever; the assertion is that it does not.
-    for (let tick = 0; tick < 12 && (await notifiedOptions()) < total; tick++) {
+    for (let tick = 0; tick < 12 && (await fannedOutOptions()) < total; tick++) {
       await runReminderSweep(env);
     }
 
-    expect(await notifiedOptions()).toBe(total);
+    expect(await fannedOutOptions()).toBe(total);
   });
 });
 
