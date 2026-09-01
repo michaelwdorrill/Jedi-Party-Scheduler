@@ -210,6 +210,28 @@ export async function seedAttendance(
     .run();
 }
 
+// specs/0014 stage 2: a window poll's per-candidate submission, keyed
+// (option_id, user_id) since migration 0021 -- see that migration's own
+// comment for why event_id alone stopped being the key. Callers that only
+// care about "this event, whatever the option" (as the ladder's
+// outside-your-hours query does) can pass any option id; it's carried on the
+// row but not what the query filters by.
+export async function seedWindowAvailability(
+  db: ShimDatabase,
+  eventId: string,
+  optionId: string,
+  userId: string,
+  availStartAt: number,
+  availEndAt: number,
+): Promise<void> {
+  await db.prepare(
+    `INSERT INTO event_window_availability (option_id, event_id, user_id, avail_start_at, avail_end_at, submitted_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(optionId, eventId, userId, availStartAt, availEndAt, Date.now())
+    .run();
+}
+
 export async function countRows(db: ShimDatabase, table: string, where = '1=1', ...values: unknown[]): Promise<number> {
   const row = await db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`).bind(...values).first<{ n: number }>();
   return row?.n ?? 0;

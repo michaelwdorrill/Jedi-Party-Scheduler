@@ -250,6 +250,63 @@ export async function getConfirmedAttendeeIds(
   return results;
 }
 
+// specs/0014 stage 2's ladder needs a *per-row* status -- unanswered /
+// tentative / accepted -- rather than a set of confirmed ids, because a
+// single event's recipients can each be due a different rung on the same
+// tick. This reproduces ORGANIZER_UNLESS_DECLINED's policy (the organizer
+// counts unless they explicitly declined this occurrence) and the window
+// poll's "covers the resolved span" rule from getConfirmedAttendeeIds above,
+// but through a per-row CASE against an already-joined event_attendance row
+// rather than those two functions' UNION-into-a-candidate-set shape -- the
+// two shapes can't share literal SQL text, so if the override or
+// window-coverage policy ever changes, both this and
+// ORGANIZER_UNLESS_DECLINED/the window-poll branch above need the same
+// change made twice.
+//
+// Callers join `event_attendance AS att` themselves (`ON att.event_id = ?
+// AND att.occurrence_date = ? AND att.user_id = u.id`, aliased `u` for the
+// recipient) before splicing this in -- the same "caller owns the join,
+// fragment owns the predicate" split PENDING_NOTIFICATION_JOIN uses.
+// `isWindowed` decides whether the fourth branch (and its three binds) is
+// present at all, since the EXISTS it runs only makes sense for a window
+// poll and every other event shape should not pay for an irrelevant
+// subquery.
+//
+// Never writes anything -- this is a read-time computation, same as the
+// spec's explicit rejection of writing 'accepted' for window-poll coverage:
+// "Do not write accepted on their behalf... Compute it instead."
+export function ladderStatusCase(isWindowed: boolean): string {
+  const windowedBranch = isWindowed
+    ? `WHEN EXISTS (
+         SELECT 1 FROM event_window_availability ewa
+         WHERE ewa.event_id = ? AND ewa.user_id = u.id
+           AND ewa.avail_start_at <= ? AND ewa.avail_end_at >= ?
+       ) THEN 'accepted'`
+    : '';
+  return `CASE
+    WHEN att.rsvp_status = 'tentative' THEN 'tentative'
+    WHEN att.rsvp_status = 'accepted' THEN 'accepted'
+    WHEN att.rsvp_status IS NULL AND u.id = ? THEN 'accepted'
+    ${windowedBranch}
+    ELSE 'unanswered'
+  END`;
+}
+
+// Bind order matches ladderStatusCase's text: organizer id for the third
+// branch, then (only when isWindowed) event id / resolved start / resolved
+// end for the fourth. `event.start_at`/`end_at` are the *resolved* span for
+// a window poll -- null for anything unresolved, which callers must not
+// reach this with (an unresolved poll has no per-occurrence ladder to run:
+// sweepReminders only ever calls this for events with a real start_at).
+export function ladderStatusCaseBinds(
+  organizerId: string,
+  isWindowed: boolean,
+  event?: { id: string; start_at: number | null; end_at: number | null },
+): unknown[] {
+  if (!isWindowed) return [organizerId];
+  return [organizerId, event!.id, event!.start_at, event!.end_at];
+}
+
 // One person's answer to one event's invitation, extracted out of
 // POST /events/:eventId/rsvp so the Discord interactions endpoint can record
 // the same thing (specs/0010). The website reaches this with a session; a

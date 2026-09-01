@@ -333,7 +333,7 @@ describe('cron stays inside one invocation at maximum fan-out (R3/R4/R5)', () =>
     const kinds = await db
       .prepare(`SELECT notification_type FROM notification_log WHERE event_id = 'soon'`)
       .all<{ notification_type: string }>();
-    expect(kinds.results.map((r) => r.notification_type)).toEqual(['reminder_1h']);
+    expect(kinds.results.map((r) => r.notification_type)).toEqual(['ladder_accepted_1h']);
   });
 
   it('leaves outbound budget for notifications instead of spending it all on membership checks', async () => {
@@ -623,7 +623,7 @@ describe('reminder cursors survive a moving window (F-14)', () => {
       // cursor bug. Every event still ahead of `now` must have been visited.
       const stillAhead = eventIds.filter((_, i) => base + (i + 1) * 60_000 > Date.now());
       const notified = await db
-        .prepare(`SELECT DISTINCT event_id FROM notification_log WHERE notification_type LIKE 'reminder%'`)
+        .prepare(`SELECT DISTINCT event_id FROM notification_log WHERE notification_type LIKE 'reminder%' OR notification_type LIKE 'ladder%'`)
         .all<{ event_id: string }>();
       const seen = new Set(notified.results.map((r) => r.event_id));
       missed = stillAhead.filter((id) => !seen.has(id));
@@ -655,7 +655,7 @@ describe('reminder cursors survive a moving window (F-14)', () => {
     for (let tick = 0; tick < 6; tick++) await runReminderSweep(env);
 
     const notified = await db
-      .prepare(`SELECT COUNT(DISTINCT event_id) AS n FROM notification_log WHERE notification_type LIKE 'reminder%'`)
+      .prepare(`SELECT COUNT(DISTINCT event_id) AS n FROM notification_log WHERE notification_type LIKE 'reminder%' OR notification_type LIKE 'ladder%'`)
       .first<{ n: number }>();
     expect(notified?.n).toBe(eventIds.length);
   });
@@ -694,7 +694,7 @@ describe('cursor stores a resumable key, not a count (F-14)', () => {
     // everything after it is untouched -- which is what makes resumption
     // correct no matter what leaves the window in between.
     const notified = await db
-      .prepare(`SELECT DISTINCT event_id FROM notification_log WHERE notification_type LIKE 'reminder%'`)
+      .prepare(`SELECT DISTINCT event_id FROM notification_log WHERE notification_type LIKE 'reminder%' OR notification_type LIKE 'ladder%'`)
       .all<{ event_id: string }>();
     const seen = new Set(notified.results.map((r) => r.event_id));
     // The cursor can lag one event behind the true delivery frontier: a

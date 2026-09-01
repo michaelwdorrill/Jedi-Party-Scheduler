@@ -1,4 +1,5 @@
 import { rsvpCustomId, voteCustomId } from './interactions';
+import type { RsvpStatus } from './attendance';
 
 // The outbound half of specs/0010: the controls a bot DM carries, so that
 // "I'm in" or "Thursday works" can be answered where the message is read
@@ -73,21 +74,29 @@ export interface SelectCandidate {
   description?: string;
 }
 
-// Three buttons that map exactly onto event_attendance's rsvp_status for one
-// occurrence (specs/0014) -- '' for a non-recurring event -- which is why
-// this is full fidelity: there is nothing the website can record for that
-// occurrence that these cannot.
-export function rsvpButtons(eventId: string, occurrenceDate: string): unknown[] {
-  return [
-    {
-      type: COMPONENT_TYPE.ACTION_ROW,
-      components: [
-        { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.SUCCESS, label: "I'm in", custom_id: rsvpCustomId('accepted', eventId, occurrenceDate) },
-        { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.SECONDARY, label: 'Maybe', custom_id: rsvpCustomId('tentative', eventId, occurrenceDate) },
-        { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.DANGER, label: "Can't make it", custom_id: rsvpCustomId('declined', eventId, occurrenceDate) },
-      ],
-    },
-  ];
+// Up to three buttons that map onto event_attendance's rsvp_status for one
+// occurrence (specs/0014) -- '' for a non-recurring event.
+//
+// `allowed` is specs/0014 stage 2's "a rung offers only the moves that make
+// sense from where you are": a reminder ladder rung passes only the subset
+// that applies to its status (e.g. an accepted person's rung is
+// Can't-make-it only), while every stage-1 call site keeps passing nothing
+// and getting the full three-button set it always has. Order follows
+// `allowed`, not a fixed accepted/tentative/declined sequence, so a caller
+// that wants a specific left-to-right order gets it -- though every current
+// caller passes them in that order regardless.
+export function rsvpButtons(
+  eventId: string,
+  occurrenceDate: string,
+  allowed: RsvpStatus[] = ['accepted', 'tentative', 'declined'],
+): unknown[] {
+  const byStatus: Record<RsvpStatus, unknown> = {
+    accepted: { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.SUCCESS, label: "I'm in", custom_id: rsvpCustomId('accepted', eventId, occurrenceDate) },
+    tentative: { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.SECONDARY, label: 'Maybe', custom_id: rsvpCustomId('tentative', eventId, occurrenceDate) },
+    declined: { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.DANGER, label: "Can't make it", custom_id: rsvpCustomId('declined', eventId, occurrenceDate) },
+  };
+  const components = allowed.map((status) => byStatus[status]);
+  return components.length === 0 ? [] : [{ type: COMPONENT_TYPE.ACTION_ROW, components }];
 }
 
 // One select of the candidate nights, `min_values: 0` so clearing your answer

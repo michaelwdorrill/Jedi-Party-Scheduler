@@ -11,6 +11,7 @@ import {
   ids,
   loadEventRow,
   membershipRule,
+  seedAttendance,
   seedEvent,
   seedGuild,
   seedInvite,
@@ -55,7 +56,7 @@ describe('a stranded delivery retry is still reachable once its source leaves th
       endAt: base + 5 * 60_000 + HOUR_MS,
     });
 
-    // Tick 1: the event starts in 5 minutes, so it's inside the reminder_1h
+    // Tick 1: the event starts in 5 minutes, so it's inside the ladder_accepted_1h
     // window. The send itself fails with a retryable 500.
     fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(500)]);
     await runReminderSweep(env);
@@ -65,7 +66,7 @@ describe('a stranded delivery retry is still reachable once its source leaves th
     const afterTick1 = await db
       .prepare(
         `SELECT delivered_at, next_attempt_at, content FROM notification_log
-         WHERE event_id = 'event-1' AND user_id = 'organizer' AND notification_type = 'reminder_1h'`,
+         WHERE event_id = 'event-1' AND user_id = 'organizer' AND notification_type = 'ladder_accepted_1h'`,
       )
       .first<{ delivered_at: number | null; next_attempt_at: number | null; content: string | null }>();
     expect(afterTick1?.delivered_at).toBeNull();
@@ -83,7 +84,7 @@ describe('a stranded delivery retry is still reachable once its source leaves th
     const afterTick2 = await db
       .prepare(
         `SELECT delivered_at FROM notification_log
-         WHERE event_id = 'event-1' AND user_id = 'organizer' AND notification_type = 'reminder_1h'`,
+         WHERE event_id = 'event-1' AND user_id = 'organizer' AND notification_type = 'ladder_accepted_1h'`,
       )
       .first<{ delivered_at: number | null }>();
     expect(afterTick2?.delivered_at).not.toBeNull();
@@ -299,6 +300,99 @@ describe('a whole cron tick fits the Free-plan budget at the supported 25-user g
     await runReminderSweep(env);
 
     expect(db.queryCount).toBeLessThanOrEqual(D1_FREE_PLAN_QUERY_BUDGET);
+  });
+
+  // specs/0014 stage 2: the variant above only ever exercises the unanswered
+  // bucket, since every invitee it seeds has no attendance row at all. The
+  // ladder's recipient query is built to answer all three status buckets
+  // (unanswered/tentative/accepted) with one query per occurrence rather than
+  // one per bucket -- this is what actually proves that, by putting a single
+  // maxed-population event 30 minutes from start (inside the accepted 1h
+  // rung, and therefore also inside tentative's 24h and unanswered's 48h
+  // rungs at once) with its invitees split across all three statuses.
+  it('stays within the Free-plan budget when a single maxed event has all three ladder buckets due at once', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+
+    const userIds = ids('member', LIMITS.SUPPORTED_ACTIVE_USERS_PER_GUILD);
+    for (const id of userIds) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    const organizerId = userIds[0];
+
+    await seedEvent(db, {
+      id: 'reminder-event',
+      organizerId,
+      startAt: Date.now() + 30 * 60_000,
+      endAt: Date.now() + 90 * 60_000,
+    });
+    for (const id of userIds) await seedInvite(db, 'reminder-event', id);
+    // Pre-mark every invite as already delivered so sweepNewInvites (which
+    // runs before sweepReminders in the same tick) has nothing left to do --
+    // the point of this test is the ladder recipient query's own budget,
+    // not the invite sweep's, and 24 fresh invite DMs would exhaust the
+    // tick before the reminders sweep is ever reached.
+    for (const id of userIds) {
+      await db.prepare(
+        `INSERT INTO notification_log (id, user_id, event_id, notification_type, occurrence_date, sent_at, delivered_at)
+         VALUES (?, ?, 'reminder-event', 'invite', '', ?, ?)`,
+      )
+        .bind(`invite-preseed-${id}`, id, Date.now(), Date.now())
+        .run();
+    }
+
+    // Split the population roughly into thirds across the three ladder
+    // buckets. The organizer (userIds[0]) is left with no attendance row --
+    // decision 1 reads that as implicitly accepted, so it lands in the
+    // accepted bucket alongside the explicit accepted rows.
+    const third = Math.floor(userIds.length / 3);
+    const acceptedIds = userIds.slice(1, third);
+    const tentativeIds = userIds.slice(third, third * 2);
+    const unansweredIds = userIds.slice(third * 2);
+    for (const id of acceptedIds) await seedAttendance(db, 'reminder-event', id, 'accepted', '');
+    for (const id of tentativeIds) await seedAttendance(db, 'reminder-event', id, 'tentative', '');
+    // unansweredIds are left unanswered on purpose (no attendance row).
+
+    // The recipient *query* has to walk the whole 25-person candidate set
+    // regardless of how many of them still need a fresh send, so the query
+    // cost stays realistic at this population. Delivery cost is a separate
+    // concern, capped by the tick's own budget: sweepLadderOccurrence sends
+    // one bucket's DMs at a time in a fixed unanswered/tentative/accepted
+    // order, so with 24 genuinely-pending recipients the accepted bucket
+    // (sent last) would be starved before the tick ever reached it, purely
+    // an artefact of bucket ordering rather than anything this test is
+    // meant to exercise. Pre-marking most of each bucket as already
+    // delivered leaves only a couple of live recipients per bucket, so all
+    // three buckets' sends fit in one tick's delivery budget while the
+    // query still runs at the full candidate-set cost.
+    // Leave the organizer (implicitly accepted) as one live recipient, plus
+    // one explicit member per bucket; pre-deliver the rest of each bucket.
+    const alreadyDelivered: [string, string][] = [
+      ...acceptedIds.slice(1).map((id): [string, string] => [id, 'ladder_accepted_1h']),
+      ...tentativeIds.slice(1).map((id): [string, string] => [id, 'ladder_maybe_24h']),
+      ...unansweredIds.slice(1).map((id): [string, string] => [id, 'ladder_unanswered_48h']),
+    ];
+    for (const [id, type] of alreadyDelivered) {
+      await db.prepare(
+        `INSERT INTO notification_log (id, user_id, event_id, notification_type, occurrence_date, sent_at, delivered_at)
+         VALUES (?, ?, 'reminder-event', ?, '', ?, ?)`,
+      )
+        .bind(`ladder-preseed-${id}`, id, type, Date.now(), Date.now())
+        .run();
+    }
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    db.resetQueryCount();
+    await runReminderSweep(env);
+
+    expect(db.queryCount).toBeLessThanOrEqual(D1_FREE_PLAN_QUERY_BUDGET);
+
+    const { results: kinds } = await db
+      .prepare(`SELECT DISTINCT notification_type FROM notification_log WHERE event_id = 'reminder-event' AND notification_type LIKE 'ladder_%'`)
+      .all<{ notification_type: string }>();
+    const types = kinds.map((r) => r.notification_type).sort();
+    expect(types).toEqual(['ladder_accepted_1h', 'ladder_maybe_24h', 'ladder_unanswered_48h']);
   });
 });
 
