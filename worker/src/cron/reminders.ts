@@ -438,8 +438,54 @@ const VOTE_NUANCE = "\nPick every night that works. Anything you don't pick is l
 // The controls for a DM about something with a settled time -- an invite to a
 // fixed-time event, a reminder, or a poll that has resolved into one. All
 // three ask the same question, so all three get the same three buttons.
-function rsvpControls(event: EventShape): unknown[] {
-  return rsvpButtons(event.id);
+// occurrenceDate is '' for a non-recurring event or a poll (specs/0014: polls
+// have no occurrences of their own until stage 3's fan-out).
+function rsvpControls(event: EventShape, occurrenceDate: string): unknown[] {
+  return rsvpButtons(event.id, occurrenceDate);
+}
+
+// A recurring event's invite DM keeps its bare series link (specs/0005,
+// decision 6a), but its RSVP buttons need one concrete occurrence to target
+// -- there's no such thing as an occurrence-less event_attendance row. Rather
+// than drop the buttons (a visible regression: a working control
+// disappearing), this targets the series' next upcoming occurrence, the same
+// default the website falls back to for a bare /events/:id link (decision
+// 6b) -- so the button's outward behaviour is unchanged, only its previously
+// implicit scope now has to be named.
+//
+// null means "couldn't determine one" (no budget left, or the series has
+// already ended) -- callers must render no buttons rather than guess '',
+// which recordRsvp would reject outright for a recurring event.
+async function inviteOccurrenceDate(
+  env: Env,
+  budget: TickBudget,
+  eventId: string,
+  isRecurring: boolean,
+  cache: Map<string, string | null>,
+): Promise<string | null> {
+  if (!isRecurring) return '';
+  const cached = cache.get(eventId);
+  if (cached !== undefined) return cached;
+  if (!budget.trySpend(1)) {
+    cache.set(eventId, null);
+    return null;
+  }
+  const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
+  if (!event) {
+    cache.set(eventId, null);
+    return null;
+  }
+  const overrides = await loadOverridesForEvents(env, [eventId]);
+  const occurrences = await expandOccurrencesForEvent(
+    env,
+    event,
+    Date.now(),
+    Date.now() + 366 * DAY_MS,
+    overrides.get(eventId) ?? [],
+  );
+  const date = occurrences[0]?.date ?? null;
+  cache.set(eventId, date);
+  return date;
 }
 
 async function sweepNewInvites(env: Env, budget: TickBudget): Promise<void> {
@@ -476,7 +522,7 @@ async function sweepNewInvites(env: Env, budget: TickBudget): Promise<void> {
   //    existed for about fifteen minutes and then quietly became the right
   //    one -- so anyone looking later saw nothing wrong.
   const { results } = await env.DB.prepare(
-    `SELECT ei.event_id, ei.user_id, e.title, e.event_type, e.window_block_minutes,
+    `SELECT ei.event_id, ei.user_id, e.title, e.event_type, e.window_block_minutes, e.is_recurring,
             u.notifications_enabled, u.dm_channel_id, u.timezone
      FROM event_invites ei
      JOIN events e ON e.id = ei.event_id
@@ -515,12 +561,15 @@ async function sweepNewInvites(env: Env, budget: TickBudget): Promise<void> {
         title: string;
         event_type: EventRow['event_type'];
         window_block_minutes: number | null;
+        is_recurring: number;
       } & Omit<ParticipantRow, 'id'>
     >();
 
-  // Rows arrive grouped by event, so one poll's candidates are fetched once
-  // and reused for every invitee of it in this tick.
+  // Rows arrive grouped by event, so one poll's candidates -- or one
+  // recurring event's next occurrence -- are fetched once and reused for
+  // every invitee of it in this tick.
   const candidateCache = new Map<string, PollCandidate[] | null>();
+  const occurrenceDateCache = new Map<string, string | null>();
 
   for (const row of results) {
     if (budget.exhausted) return;
@@ -540,9 +589,13 @@ async function sweepNewInvites(env: Env, budget: TickBudget): Promise<void> {
       // inviting you to: "are you coming?" for a fixed time, "which of these
       // works?" for a poll.
       const isOpenPoll = row.event_type === 'poll';
-      const controls = isOpenPoll
-        ? voteControls(event, await pollCandidates(env, budget, row.event_id, candidateCache), env, row.timezone)
-        : rsvpControls(event);
+      let controls: unknown[] | null;
+      if (isOpenPoll) {
+        controls = voteControls(event, await pollCandidates(env, budget, row.event_id, candidateCache), env, row.timezone);
+      } else {
+        const rsvpDate = await inviteOccurrenceDate(env, budget, row.event_id, !!row.is_recurring, occurrenceDateCache);
+        controls = rsvpDate !== null ? rsvpControls(event, rsvpDate) : [];
+      }
       const body = isOpenPoll
         ? `You've been invited to vote on "${row.title}" on Uncle Owen.${VOTE_NUANCE}\n${eventLink(env, row.event_id)}`
         : `You've been invited to "${row.title}" on Uncle Owen.\n${eventLink(env, row.event_id)}`;
@@ -783,7 +836,7 @@ async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore
           // all, which is the strongest case for a button anywhere in this
           // release -- and the answer it changes is the same RSVP the invite
           // asked for.
-          () => rsvpControls(event),
+          () => rsvpControls(event, ''),
         );
         // `limit` is an optimistic upper bound (it assumes the cheap cached-
         // channel cost for every recipient), so a real send can exhaust the
@@ -829,10 +882,9 @@ async function sweepReminders(env: Env, budget: TickBudget, cursors: CursorStore
         reminder.type,
         occ.date,
         (user) => `"${event.title}" ${reminder.render(user, occ.startAt)}.\n${eventLink(env, event.id)}`,
-        // No occurrence date in the custom_id, deliberately: rsvp_status is
-        // per event, not per occurrence, so a recurring event's RSVP is one
-        // answer -- which is exactly how the website already behaves.
-        () => rsvpControls(event),
+        // specs/0014: attendance is per occurrence, so this reminder's
+        // buttons target the one occurrence it's actually about.
+        () => rsvpControls(event, occ.date),
       );
     }
   });
@@ -1020,7 +1072,7 @@ async function editSettledPollDms(env: Env, budget: TickBudget, event: EventRow)
       row.message_id,
       settled,
       // A cancelled poll asks nothing, so it keeps no controls at all.
-      event.status === 'resolved' ? rsvpControls(event) : [],
+      event.status === 'resolved' ? rsvpControls(event, '') : [],
     );
 
     if (!result.ok && result.retryable) continue;
@@ -1073,7 +1125,7 @@ async function sweepSingleWinnerPollNotifications(
         // The poll question is settled, so this DM asks the *next* one: now
         // that there is a time, are you coming? A cancelled poll asks nothing
         // and carries no controls -- there is nothing left to answer.
-        () => (event.status === 'resolved' ? rsvpControls(event) : null),
+        () => (event.status === 'resolved' ? rsvpControls(event, '') : null),
       );
       // A full page of recipients means there may be more behind it, and an
       // exhausted budget means we stopped part-way through the ones we had.
@@ -1423,7 +1475,7 @@ async function sweepVoiceChannelInvites(env: Env, budget: TickBudget, cursors: C
       // branch of getConfirmedAttendeeIds handles those polls anyway.
       const optionId =
         event.event_type === 'poll' && event.resolved_option_id !== 'window' ? event.resolved_option_id : null;
-      const attendees = await getConfirmedAttendeeIds(env, event, optionId, {
+      const attendees = await getConfirmedAttendeeIds(env, event, optionId, '', {
         notificationType: 'voice_channel_invite',
         occurrenceDate: '',
         limit,
@@ -1447,7 +1499,7 @@ async function sweepVoiceChannelInvites(env: Env, budget: TickBudget, cursors: C
 
       for (const occ of occurrences) {
         if (!budget.trySpend(SCAN_COST_PER_EVENT)) return;
-        const attendees = await getConfirmedAttendeeIds(env, event, null, {
+        const attendees = await getConfirmedAttendeeIds(env, event, null, occ.date, {
           notificationType: 'voice_channel_invite',
           occurrenceDate: occ.date,
           limit: budget.deliveriesAffordable,
@@ -1481,7 +1533,7 @@ async function sweepVoiceChannelInvites(env: Env, budget: TickBudget, cursors: C
       for (const opt of options) {
         const limit = budget.deliveriesAffordable;
         if (limit <= 0) return 'incomplete';
-        const attendees = await getConfirmedAttendeeIds(env, poll, opt.id, {
+        const attendees = await getConfirmedAttendeeIds(env, poll, opt.id, '', {
           notificationType: 'voice_channel_invite',
           occurrenceDate: opt.id,
           limit,
@@ -1783,6 +1835,7 @@ async function sweepPurgeTerminalHistory(env: Env, budget: TickBudget): Promise<
       env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id IN (${ph})`).bind(...chunk),
       env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id IN (${ph})`).bind(...chunk),
       env.DB.prepare(`DELETE FROM event_invites WHERE event_id IN (${ph})`).bind(...chunk),
+      env.DB.prepare(`DELETE FROM event_attendance WHERE event_id IN (${ph})`).bind(...chunk),
       env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id IN (${ph})`).bind(...chunk),
       env.DB.prepare(`DELETE FROM event_occurrence_overrides WHERE event_id IN (${ph})`).bind(...chunk),
       env.DB.prepare(`DELETE FROM notification_log WHERE event_id IN (${ph})`).bind(...chunk),

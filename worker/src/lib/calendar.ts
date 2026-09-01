@@ -4,7 +4,7 @@ import type { EventRow } from './events';
 import {
   loadConfirmedOptionsForEvents,
   loadPendingOptionsForEvents,
-  loadMyRsvpForEvents,
+  loadMyAttendanceForEvents,
   loadOverridesForEvents,
   loadPrimaryGroupForEvents,
   mapOccurrence,
@@ -138,7 +138,7 @@ export async function buildCalendarOccurrences(
 
   const eventIds = events.map((e) => e.id);
   const overridesByEvent = await loadOverridesForEvents(env, eventIds);
-  const rsvpByEvent = await loadMyRsvpForEvents(env, eventIds, userId);
+  const attendanceByEvent = await loadMyAttendanceForEvents(env, eventIds, userId);
   const groupByEvent = await loadPrimaryGroupForEvents(env, eventIds);
   const guildNames = await loadGuildNames(env, events.map((e) => e.guild_id));
   // Both bulk-loaded once for the whole visible list rather than once per
@@ -177,7 +177,12 @@ export async function buildCalendarOccurrences(
 
   const occurrences = [];
   for (const event of events) {
-    const rsvp = rsvpByEvent.get(event.id) ?? null;
+    // Every branch below except the recurring-expansion one has exactly one
+    // occurrence, keyed '' (specs/0014's convention -- a poll's candidates
+    // and deadline chip, and a non-recurring event, are all "the whole
+    // event" as far as attendance is concerned). The recurring branch looks
+    // up its own key per occurrence instead of reusing this.
+    const rsvp = attendanceByEvent.get(`${event.id}::`) ?? null;
     const group = groupByEvent.get(event.id) ?? null;
 
     // Candidate days of a poll that has not settled. Emitted for every open
@@ -233,8 +238,9 @@ export async function buildCalendarOccurrences(
       recurrenceRulesByEvent.get(event.id),
     );
     for (const occ of expanded) {
+      const occRsvp = attendanceByEvent.get(`${event.id}::${occ.date}`) ?? null;
       occurrences.push(
-        withGuild(event, mapOccurrence(event, `${event.id}::${occ.date}`, occ.startAt, occ.endAt, rsvp, group)),
+        withGuild(event, mapOccurrence(event, `${event.id}::${occ.date}`, occ.startAt, occ.endAt, occRsvp, group)),
       );
     }
   }

@@ -34,6 +34,28 @@ identity, not a position — it never changes and is never reused.
 
 ## Still open
 
+### 52. The calendar chip never shows your own answer
+
+Found verifying v0.6 on the sandbox (Michael, Aug 2026): declining a
+fixed-time event's occurrence records correctly and the event page shows it,
+but the calendar's month/agenda chip looks identical to an occurrence you
+haven't answered or have accepted. `EventChip.tsx` only ever reads
+`occurrence.status` (cancelled) and `occurrence.isProvisional` (an open
+poll's candidate day) — it has never read `myRsvpStatus` at all, for any
+event type, so this isn't a v0.6 regression: declining has never been visible
+on the calendar, only on the event page itself.
+
+It stood out now because specs/0014 made per-occurrence answers real and
+independent for the first time — two occurrences of the same recurring event
+can genuinely disagree, and the calendar is the one place you'd see both at
+a glance, but currently can't. A cheap version: a third visual state
+alongside cancelled/provisional, in the spirit of `EventChip`'s own comment
+about composing states rather than adding shades ad hoc — options include a
+dimmed/outlined treatment for `declined`, or nothing at all for `declined`
+(since "I'm not going" arguably doesn't need a chip cluttering your own
+calendar) with `tentative` getting the "maybe" dashed-outline treatment
+`isProvisional` already uses.
+
 ### 2. Google Calendar sync
 
 Pull a single chosen Google calendar (not all of them — e.g. just "D&D

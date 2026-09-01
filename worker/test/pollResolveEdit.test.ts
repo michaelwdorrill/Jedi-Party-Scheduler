@@ -99,9 +99,9 @@ describe('when a poll resolves', () => {
     expect(edit.body.content).toBe('');
     const row = (edit.body.components as { components: { custom_id?: string }[] }[])[0];
     expect(row.components.map((c) => c.custom_id)).toEqual([
-      'uo:v1:rsvp:accepted:p1',
-      'uo:v1:rsvp:tentative:p1',
-      'uo:v1:rsvp:declined:p1',
+      'uo:v2:rsvp:accepted:p1:',
+      'uo:v2:rsvp:tentative:p1:',
+      'uo:v2:rsvp:declined:p1:',
     ]);
   });
 

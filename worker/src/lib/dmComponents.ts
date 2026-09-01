@@ -73,17 +73,18 @@ export interface SelectCandidate {
   description?: string;
 }
 
-// Three buttons that map exactly onto event_invites.rsvp_status, which is why
-// this is full fidelity: there is nothing the website can record for a
-// fixed-time event that these cannot.
-export function rsvpButtons(eventId: string): unknown[] {
+// Three buttons that map exactly onto event_attendance's rsvp_status for one
+// occurrence (specs/0014) -- '' for a non-recurring event -- which is why
+// this is full fidelity: there is nothing the website can record for that
+// occurrence that these cannot.
+export function rsvpButtons(eventId: string, occurrenceDate: string): unknown[] {
   return [
     {
       type: COMPONENT_TYPE.ACTION_ROW,
       components: [
-        { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.SUCCESS, label: "I'm in", custom_id: rsvpCustomId('accepted', eventId) },
-        { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.SECONDARY, label: 'Maybe', custom_id: rsvpCustomId('tentative', eventId) },
-        { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.DANGER, label: "Can't make it", custom_id: rsvpCustomId('declined', eventId) },
+        { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.SUCCESS, label: "I'm in", custom_id: rsvpCustomId('accepted', eventId, occurrenceDate) },
+        { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.SECONDARY, label: 'Maybe', custom_id: rsvpCustomId('tentative', eventId, occurrenceDate) },
+        { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.DANGER, label: "Can't make it", custom_id: rsvpCustomId('declined', eventId, occurrenceDate) },
       ],
     },
   ];

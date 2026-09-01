@@ -110,10 +110,26 @@ export async function computeBusyBlocksForUsers(
       )
         .bind(...chunk, toMs, fromMs, pairLimit)
         .all<{ event_id: string } & ForUserRow>(),
+      // specs/0014: declined-ness now lives in event_attendance, keyed per
+      // occurrence. This stays scoped to occurrence_date = '' rather than
+      // becoming fully occurrence-aware -- for a non-recurring event that's
+      // exactly the row that used to live on event_invites, so behaviour is
+      // unchanged; for a recurring event no row is ever keyed '', so the
+      // exclusion never fires and every invitee's occurrences still
+      // contribute a busy block regardless of any per-occurrence decline.
+      // That's a narrow, safe-direction gap (over-reports busy, never
+      // under-reports it) rather than a full per-occurrence free/busy model,
+      // which would mean joining attendance inside this function's
+      // deliberately occurrence-agnostic range query -- out of scope here.
       env.DB.prepare(
         `SELECT ei.event_id, ei.user_id AS for_user FROM event_invites ei
          JOIN events e ON e.id = ei.event_id
-         WHERE e.status IN ('active','resolved') AND ei.rsvp_status != 'declined'
+         WHERE e.status IN ('active','resolved')
+           AND NOT EXISTS (
+             SELECT 1 FROM event_attendance ea
+             WHERE ea.event_id = ei.event_id AND ea.occurrence_date = '' AND ea.user_id = ei.user_id
+               AND ea.rsvp_status = 'declined'
+           )
            AND ei.user_id IN (${ph}) AND ${inRange}
          LIMIT ?`,
       )

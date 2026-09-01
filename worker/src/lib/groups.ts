@@ -18,12 +18,16 @@ export interface GroupOwnershipRow {
 // Who inherits a group when its owner removes themselves: the member who has
 // actually turned up to the most of that group's sessions.
 //
-// "Turned up" is read as an `accepted` RSVP on an event the group was invited
-// through (`event_invites.source_group_id`), which is the only attendance
-// signal the schema carries -- there's no check-in, and a confirmed poll
-// option's yes-voters aren't recorded as attendance either. It's a proxy, but
-// it's the right shape: the most engaged member is a better default owner
-// than the oldest or the alphabetically-first.
+// "Turned up" is read as an accepted event_attendance row (specs/0014) on an
+// event the group was invited through (`event_invites.source_group_id`),
+// joined through the invite for that attribution -- attendance itself
+// doesn't carry source_group_id -- which is the only attendance signal the
+// schema carries; there's no check-in, and a confirmed poll option's
+// yes-voters aren't recorded as attendance either. It's a proxy, but it's the
+// right shape: the most engaged member is a better default owner than the
+// oldest or the alphabetically-first. This now counts accepted *occurrences*
+// rather than accepted *events*, arguably a better reading of "who actually
+// showed up" for a recurring group.
 //
 // Ties break by earliest `added_at` then user id, so the outcome is
 // deterministic rather than dependent on row order -- the same reason
@@ -39,10 +43,13 @@ export async function findSuccessorOwner(
      LEFT JOIN event_invites ei
        ON ei.user_id = gm.user_id
        AND ei.source_group_id = ?
-       AND ei.rsvp_status = 'accepted'
+     LEFT JOIN event_attendance ea
+       ON ea.event_id = ei.event_id
+       AND ea.user_id = gm.user_id
+       AND ea.rsvp_status = 'accepted'
      WHERE gm.group_id = ? AND gm.user_id != ?
      GROUP BY gm.user_id, gm.added_at
-     ORDER BY COUNT(ei.id) DESC, gm.added_at ASC, gm.user_id ASC
+     ORDER BY COUNT(ea.id) DESC, gm.added_at ASC, gm.user_id ASC
      LIMIT 1`,
   )
     .bind(groupId, groupId, departingOwnerId)

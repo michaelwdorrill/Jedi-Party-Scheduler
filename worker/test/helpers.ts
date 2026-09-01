@@ -193,6 +193,23 @@ export async function seedInvite(db: ShimDatabase, eventId: string, userId: stri
     .run();
 }
 
+// specs/0014: attendance is a separate, per-occurrence table now, with no row
+// until someone actually answers -- seedInvite alone no longer implies one.
+export async function seedAttendance(
+  db: ShimDatabase,
+  eventId: string,
+  userId: string,
+  status: 'accepted' | 'declined' | 'tentative' = 'accepted',
+  occurrenceDate = '',
+): Promise<void> {
+  await db.prepare(
+    `INSERT INTO event_attendance (id, event_id, occurrence_date, user_id, rsvp_status, responded_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(`att-${eventId}-${occurrenceDate}-${userId}`, eventId, occurrenceDate, userId, status, Date.now())
+    .run();
+}
+
 export async function countRows(db: ShimDatabase, table: string, where = '1=1', ...values: unknown[]): Promise<number> {
   const row = await db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`).bind(...values).first<{ n: number }>();
   return row?.n ?? 0;

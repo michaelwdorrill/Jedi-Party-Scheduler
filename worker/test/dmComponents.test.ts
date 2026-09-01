@@ -96,9 +96,9 @@ describe('the controls a DM carries', () => {
     expect(buttons.map((b) => b.label)).toEqual(["I'm in", 'Maybe', "Can't make it"]);
     // Each one has to carry an id the receiving half can actually read back.
     expect(buttons.map((b) => parseCustomId(b.custom_id))).toEqual([
-      { kind: 'rsvp', status: 'accepted', eventId: 'e1' },
-      { kind: 'rsvp', status: 'tentative', eventId: 'e1' },
-      { kind: 'rsvp', status: 'declined', eventId: 'e1' },
+      { kind: 'rsvp', status: 'accepted', eventId: 'e1', occurrenceDate: '' },
+      { kind: 'rsvp', status: 'tentative', eventId: 'e1', occurrenceDate: '' },
+      { kind: 'rsvp', status: 'declined', eventId: 'e1', occurrenceDate: '' },
     ]);
   });
 
@@ -295,7 +295,7 @@ describe('components survive a failed delivery', () => {
     const row = await db
       .prepare(`SELECT components, next_attempt_at FROM notification_log WHERE event_id = 'e3'`)
       .first<{ components: string | null; next_attempt_at: number | null }>();
-    expect(row?.components).toContain('uo:v1:rsvp:accepted:e3');
+    expect(row?.components).toContain('uo:v2:rsvp:accepted:e3:');
 
     // Make the retry due, and let the source sweep no longer be the thing
     // that finds it -- which is the whole reason the columns exist.
@@ -305,7 +305,7 @@ describe('components survive a failed delivery', () => {
 
     const retried = sentMessages(fetchStub).find((m) => m.text.includes('Game night'));
     expect(retried).toBeDefined();
-    expect(firstRow<Button>(retried!).map((b) => b.custom_id)).toContain('uo:v1:rsvp:accepted:e3');
+    expect(firstRow<Button>(retried!).map((b) => b.custom_id)).toContain('uo:v2:rsvp:accepted:e3:');
   });
 });
 

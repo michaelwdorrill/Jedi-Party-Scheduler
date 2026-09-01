@@ -3,7 +3,7 @@ import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
 import { createEventWithInvites, updateEvent } from '../src/lib/eventWrites';
-import { getConfirmedAttendeeIds } from '../src/lib/attendance';
+import { getConfirmedAttendeeIds, recordRsvp } from '../src/lib/attendance';
 import { createChangeRequest } from '../src/lib/changeRequests';
 import { runReminderSweep } from '../src/cron/reminders';
 import { applyMigration } from './d1shim';
@@ -102,8 +102,10 @@ describe('the organizer of an event is on its invite list', () => {
     );
 
     expect(res.status).toBe(200);
+    // specs/0014: the answer lands in event_attendance now, keyed '' for
+    // this non-recurring event -- not the vestigial event_invites column.
     const row = await db
-      .prepare(`SELECT rsvp_status FROM event_invites WHERE event_id = ? AND user_id = 'organizer'`)
+      .prepare(`SELECT rsvp_status FROM event_attendance WHERE event_id = ? AND occurrence_date = '' AND user_id = 'organizer'`)
       .bind(eventId)
       .first<{ rsvp_status: string }>();
     expect(row?.rsvp_status).toBe('declined');
@@ -182,10 +184,11 @@ describe('the organizer of an event is on its invite list', () => {
     fetchStub = stubFetch([]);
 
     const eventId = await createEventWithInvites(env, 'guild-1', 'organizer', baseInput);
-    await db
-      .prepare(`UPDATE event_invites SET rsvp_status = 'declined' WHERE event_id = ? AND user_id = 'organizer'`)
-      .bind(eventId)
-      .run();
+    // specs/0014: the real answer is an event_attendance row now.
+    // updateEvent's invite-list replacement never touches event_attendance
+    // for anyone who stays invited (only for someone actually removed), so
+    // this is what "does not re-accept" means under the new model.
+    await recordRsvp(env, 'organizer', eventId, '', 'declined');
 
     await updateEvent(
       env,
@@ -196,7 +199,7 @@ describe('the organizer of an event is on its invite list', () => {
     );
 
     const row = await db
-      .prepare(`SELECT rsvp_status FROM event_invites WHERE event_id = ? AND user_id = 'organizer'`)
+      .prepare(`SELECT rsvp_status FROM event_attendance WHERE event_id = ? AND occurrence_date = '' AND user_id = 'organizer'`)
       .bind(eventId)
       .first<{ rsvp_status: string }>();
     expect(row?.rsvp_status).toBe('declined');
@@ -210,7 +213,7 @@ describe('the organizer of an event is on its invite list', () => {
 // while changing nothing that matters.
 describe('the organizer union no longer overrides a real row', () => {
   async function confirmedFor(env: Env, event: EventRow) {
-    const rows = await getConfirmedAttendeeIds(env, event, null, {
+    const rows = await getConfirmedAttendeeIds(env, event, null, '', {
       notificationType: 'voice_channel_invite',
       occurrenceDate: '',
       limit: 50,
@@ -238,20 +241,20 @@ describe('the organizer union no longer overrides a real row', () => {
       ...baseInput,
       invites: { userIds: ['friend'], groupIds: [] },
     });
-    await db
-      .prepare(`UPDATE event_invites SET rsvp_status = 'declined' WHERE event_id = ? AND user_id = 'organizer'`)
-      .bind(eventId)
-      .run();
-    await db
-      .prepare(`UPDATE event_invites SET rsvp_status = 'accepted' WHERE event_id = ? AND user_id = 'friend'`)
-      .bind(eventId)
-      .run();
+    // specs/0014: the real answer lives in event_attendance now.
+    await recordRsvp(env, 'organizer', eventId, '', 'declined');
+    await recordRsvp(env, 'friend', eventId, '', 'accepted');
 
     expect(await confirmedFor(env, await loadEventRow(db, eventId))).toEqual(['friend']);
   });
 
-  // An event created before the backfill has no organizer row at all. The
-  // NOT EXISTS form has to leave those behaving exactly as they did.
+  // Under the old model this covered an event predating migration 0019's
+  // backfill, with no organizer event_invites row at all. Under specs/0014,
+  // ORGANIZER_UNLESS_DECLINED reads event_attendance exclusively and never
+  // looks at event_invites, so "no row" is now the ordinary default for
+  // every organizer who hasn't pressed anything -- not a backfill edge case
+  // -- and this just confirms the union doesn't secretly depend on
+  // event_invites carrying an organizer row at all.
   it('still counts an organizer with no row at all', async () => {
     const { db, env } = setup();
     await seedPeople(db, 'organizer', 'friend');

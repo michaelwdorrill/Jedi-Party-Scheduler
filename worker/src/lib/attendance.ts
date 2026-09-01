@@ -1,6 +1,7 @@
 import type { Env } from '../env';
 import { MEMBERSHIP_GRACE_MS, requireActiveGuildMember } from './db';
 import type { EventRow } from './events';
+import { newId } from './ids';
 import {
   PENDING_NOTIFICATION_JOIN,
   PENDING_NOTIFICATION_WHERE,
@@ -78,15 +79,17 @@ function membershipCutoff(): number {
 //
 // So: the organizer still counts unless they have explicitly declined. Not
 // "unless they have a row", because a poll's organizer has no vote to read and
-// a single event's organizer may sit at 'pending' or 'tentative'; in both of
+// a single event's organizer may have no answer on record yet; in both of
 // those the old behaviour (they are running it, they are there) is still the
-// right reading. Only an actual decline overturns it. Written as NOT EXISTS
-// rather than a join so events predating the backfill -- with no organizer row
-// at all -- behave exactly as they did before.
+// right reading. Only an actual decline overturns it -- and specs/0014 makes
+// that per occurrence: declining the 10/14 session doesn't decline the
+// 10/21 one. Written as NOT EXISTS rather than a join so an occurrence
+// nobody has answered for -- which is every occurrence, for an
+// organizer who has never pressed anything -- behaves exactly like "there".
 const ORGANIZER_UNLESS_DECLINED = `UNION
        SELECT ? WHERE NOT EXISTS (
-         SELECT 1 FROM event_invites
-         WHERE event_id = ? AND user_id = ? AND rsvp_status = 'declined'
+         SELECT 1 FROM event_attendance
+         WHERE event_id = ? AND occurrence_date = ? AND user_id = ? AND rsvp_status = 'declined'
        )`;
 
 // IDEAS item 51, and the interim half of it (its option 2; option 1 arrives
@@ -96,11 +99,11 @@ const ORGANIZER_UNLESS_DECLINED = `UNION
 // v0.5 put RSVP buttons on a poll's DM once it settles -- edit-on-resolve
 // rewrites the vote message into "is settled: Thursday" with I'm in / Maybe /
 // Can't make it, and the poll_resolved DM carries them too. Pressing one
-// writes event_invites.rsvp_status. Nothing about a poll's attendance read
-// that column, so an invitee who pressed *Can't make it* stayed in the
-// confirmed set and still got the voice-channel DM: a vote cast a week ago
-// outranked an answer given a minute ago, and the app showed no sign of the
-// disagreement.
+// writes an event_attendance row. Nothing about a poll's attendance read
+// that table before v0.5.1's interim fix, so an invitee who pressed *Can't
+// make it* stayed in the confirmed set and still got the voice-channel DM: a
+// vote cast a week ago outranked an answer given a minute ago, and the app
+// showed no sign of the disagreement.
 //
 // The rule: **an RSVP overrides the vote where one exists; votes fill in the
 // rest.** A vote and an RSVP are two different statements -- "that night works
@@ -110,22 +113,24 @@ const ORGANIZER_UNLESS_DECLINED = `UNION
 // 'tentative' overrides too, and lands outside the confirmed set. That is not
 // a judgement about maybes; it is the same reading a fixed-time event already
 // gives them, where the confirmed query is `rsvp_status = 'accepted'`.
-// A 'pending' row, or no row at all, is not an answer and falls through to the
-// vote -- which is what keeps this from silently emptying every poll that
-// nobody has pressed anything on.
+// No row at all is not an answer and falls through to the vote -- which is
+// what keeps this from silently emptying every poll that nobody has pressed
+// anything on.
 //
-// The limitation to know about is multi-winner, where one rsvp_status column
-// covers an event with several confirmed days: a decline there can only mean
-// "none of them", because there is nowhere to record "out for Thursday, in
-// for Saturday". Nothing can set it today -- a multi-winner day's DM carries
-// no buttons (see sweepConfirmedMultiWinnerOptions) and the website offers
-// RSVP controls only for `eventType === 'single'` -- so this is defensive
-// rather than active, and specs/0014's fan-out is what makes the question go
-// away by giving each day its own event and its own answer.
+// The limitation to know about is multi-winner, where one occurrence_date
+// ('', specs/0014's convention -- a poll has no real occurrences of its own
+// until stage 3's fan-out) covers an event with several confirmed days: a
+// decline there can only mean "none of them", because there is nowhere yet
+// to record "out for Thursday, in for Saturday". Nothing can set it today --
+// a multi-winner day's DM carries no buttons (see
+// sweepConfirmedMultiWinnerOptions) and the website offers RSVP controls
+// only for `eventType === 'single'` -- so this is defensive rather than
+// active, and specs/0014's fan-out is what makes the question go away by
+// giving each day its own event and its own answer.
 function rsvpOverridesVote(voteTable: string): string {
   return `AND NOT EXISTS (
-           SELECT 1 FROM event_invites ovr
-           WHERE ovr.event_id = ? AND ovr.user_id = ${voteTable}.user_id
+           SELECT 1 FROM event_attendance ovr
+           WHERE ovr.event_id = ? AND ovr.occurrence_date = ? AND ovr.user_id = ${voteTable}.user_id
              AND ovr.rsvp_status IN ('declined','tentative')
          )`;
 }
@@ -133,7 +138,7 @@ function rsvpOverridesVote(voteTable: string): string {
 // The other half of the same rule: someone who never voted but pressed *I'm
 // in* on the settled DM is coming, whatever the tallies say.
 const RSVP_ACCEPTED = `UNION
-       SELECT user_id FROM event_invites WHERE event_id = ? AND rsvp_status = 'accepted'`;
+       SELECT user_id FROM event_attendance WHERE event_id = ? AND occurrence_date = ? AND rsvp_status = 'accepted'`;
 
 // Who actually committed to a given occurrence -- the organizer counts unless
 // they declined, plus (for single events) accepted invitees, or (for polls)
@@ -141,10 +146,19 @@ const RSVP_ACCEPTED = `UNION
 // the resolved window, minus anyone whose RSVP has since overridden that.
 // Used to scope the voice-channel-invite DM to people who said they'd be
 // there, not everyone who was ever invited.
+//
+// occurrenceDate is the event_attendance key, separate from
+// pending.occurrenceDate (the notification_log dedupe key -- at the
+// multi-winner call site that's a poll-option id, not a date). Both poll
+// branches always pass '': a poll has no occurrences of its own until
+// specs/0014's stage-3 fan-out. The fixed-time branch passes whatever the
+// caller passes -- '' for a non-recurring event, the occurrence date for a
+// recurring one.
 export async function getConfirmedAttendeeIds(
   env: Env,
   event: EventRow,
   optionId: string | null,
+  occurrenceDate: string,
   pending: PendingFor,
 ): Promise<AttendeeRow[]> {
   if (pending.limit <= 0) return [];
@@ -176,9 +190,12 @@ export async function getConfirmedAttendeeIds(
           event.start_at,
           event.end_at,
           event.id,
+          occurrenceDate,
           event.id,
+          occurrenceDate,
           event.organizer_id,
           event.id,
+          occurrenceDate,
           event.organizer_id,
         ]),
       )
@@ -200,9 +217,12 @@ export async function getConfirmedAttendeeIds(
         ...attendeeBinds(event, pending, [
           optionId,
           event.id,
+          occurrenceDate,
           event.id,
+          occurrenceDate,
           event.organizer_id,
           event.id,
+          occurrenceDate,
           event.organizer_id,
         ]),
       )
@@ -212,12 +232,19 @@ export async function getConfirmedAttendeeIds(
 
   const { results } = await env.DB.prepare(
     membershipJoin(
-      `SELECT user_id FROM event_invites WHERE event_id = ? AND rsvp_status = 'accepted'
+      `SELECT user_id FROM event_attendance WHERE event_id = ? AND occurrence_date = ? AND rsvp_status = 'accepted'
        ${ORGANIZER_UNLESS_DECLINED}`,
     ),
   )
     .bind(
-      ...attendeeBinds(event, pending, [event.id, event.organizer_id, event.id, event.organizer_id]),
+      ...attendeeBinds(event, pending, [
+        event.id,
+        occurrenceDate,
+        event.organizer_id,
+        event.id,
+        occurrenceDate,
+        event.organizer_id,
+      ]),
     )
     .all<AttendeeRow>();
   return results;
@@ -241,27 +268,49 @@ export async function getConfirmedAttendeeIds(
 // fact that we once sent them a message.
 export type RsvpStatus = 'accepted' | 'declined' | 'tentative';
 
-export type RsvpOutcome = 'recorded' | 'not_invited' | 'no_such_event';
+export type RsvpOutcome = 'recorded' | 'not_invited' | 'no_such_event' | 'invalid_occurrence';
 
+// occurrenceDate: '' for a non-recurring event, an occurrence date for a
+// recurring one -- and it must agree with which the event actually is.
+// Under the old model every invitee had an event_invites row from the
+// moment they were invited, so the UPDATE that recorded an answer doubled
+// as the authorisation check: a 0-row UPDATE meant "not invited." specs/0014
+// writes no row until someone answers, so there's nothing to conditionally
+// UPDATE against on a first press -- the guard has to be its own clause, and
+// the write becomes an upsert (a second press on the same occurrence changes
+// the answer rather than adding a row). Both live in one statement rather
+// than a separate existence check then a write, so there's no window between
+// "confirmed invited" and "recorded" for a concurrent invite removal to land
+// in.
 export async function recordRsvp(
   env: Env,
   userId: string,
   eventId: string,
+  occurrenceDate: string,
   status: RsvpStatus,
 ): Promise<RsvpOutcome> {
-  const event = await env.DB.prepare(`SELECT guild_id FROM events WHERE id = ?`)
+  const event = await env.DB.prepare(`SELECT guild_id, is_recurring FROM events WHERE id = ?`)
     .bind(eventId)
-    .first<{ guild_id: string }>();
+    .first<{ guild_id: string; is_recurring: number }>();
   if (!event) return 'no_such_event';
+
+  // A non-recurring event's only occurrence is '' and a recurring one's is
+  // never ''. Guarding it here, not just at the callers that construct it,
+  // means a bug anywhere upstream produces a rejected write instead of a row
+  // getConfirmedAttendeeIds' occurrence-scoped queries will silently never
+  // find.
+  if ((occurrenceDate !== '') !== !!event.is_recurring) return 'invalid_occurrence';
+
   if (!(await requireActiveGuildMember(env, userId, event.guild_id))) return 'not_invited';
 
-  // The UPDATE is the authorisation check as well as the write: it only
-  // matches a row that actually invites this user to this event, so an
-  // uninvited presser changes nothing and is told so.
   const result = await env.DB.prepare(
-    `UPDATE event_invites SET rsvp_status = ?, responded_at = ? WHERE event_id = ? AND user_id = ?`,
+    `INSERT INTO event_attendance (id, event_id, occurrence_date, user_id, rsvp_status, responded_at)
+     SELECT ?, ?, ?, ?, ?, ?
+     WHERE EXISTS (SELECT 1 FROM event_invites WHERE event_id = ? AND user_id = ?)
+     ON CONFLICT(event_id, occurrence_date, user_id) DO UPDATE SET
+       rsvp_status = excluded.rsvp_status, responded_at = excluded.responded_at`,
   )
-    .bind(status, Date.now(), eventId, userId)
+    .bind(newId(), eventId, occurrenceDate, userId, status, Date.now(), eventId, userId)
     .run();
 
   return result.meta.changes === 0 ? 'not_invited' : 'recorded';

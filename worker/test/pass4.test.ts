@@ -384,7 +384,15 @@ describe('free/busy bulk computation matches per-user semantics', () => {
     const now = Date.now();
     await seedEvent(db, { id: 'e1', organizerId: 'organizer', startAt: now + HOUR_MS, endAt: now + 2 * HOUR_MS });
     await db.prepare(
-      `INSERT INTO event_invites (id, event_id, user_id, invited_via, rsvp_status, invited_at) VALUES ('i1', 'e1', 'invitee', 'individual', 'declined', ?)`,
+      `INSERT INTO event_invites (id, event_id, user_id, invited_via, rsvp_status, invited_at) VALUES ('i1', 'e1', 'invitee', 'individual', 'pending', ?)`,
+    )
+      .bind(now)
+      .run();
+    // specs/0014: the decline is an event_attendance row now, occurrence_date
+    // '' since this is a non-recurring event -- freeBusy stays scoped to
+    // exactly that key (see lib/freeBusy.ts's comment on the join).
+    await db.prepare(
+      `INSERT INTO event_attendance (id, event_id, occurrence_date, user_id, rsvp_status, responded_at) VALUES ('a1', 'e1', '', 'invitee', 'declined', ?)`,
     )
       .bind(now)
       .run();

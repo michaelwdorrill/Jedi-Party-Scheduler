@@ -42,7 +42,10 @@ export interface Friend {
 
 export type EventType = 'single' | 'poll';
 export type EventStatus = 'active' | 'cancelled' | 'resolved';
-export type RsvpStatus = 'pending' | 'accepted' | 'declined' | 'tentative';
+// specs/0014: attendance is per occurrence now, and there's no 'pending'
+// value any more -- the absence of an answer (myRsvpStatus / rsvpStatus
+// being null) *is* "no answer", rather than an explicit status meaning it.
+export type RsvpStatus = 'accepted' | 'declined' | 'tentative';
 export type PollStrategy = 'threshold' | 'most_votes';
 export type PollVote = 'yes' | 'no' | 'maybe';
 export type PollMode = 'options' | 'window';
@@ -109,7 +112,7 @@ export interface EventInvite {
   globalName: string | null;
   invitedVia: 'individual' | 'group';
   sourceGroupId: string | null;
-  rsvpStatus: RsvpStatus;
+  rsvpStatus: RsvpStatus | null;
 }
 
 // A single occurrence as returned by GET /guilds/:guildId/events?from=&to=
@@ -181,6 +184,12 @@ export interface EventDetail extends EventOccurrence {
   // Optimistic-concurrency token: send this back unchanged on PATCH so the
   // server can tell a stale edit from a current one (F-08-B).
   revision: number;
+  // '' for a non-recurring event; for a recurring one, whichever occurrence
+  // this response is about -- the ?occurrence= query param if one was sent,
+  // otherwise the server's own next-upcoming-occurrence default (specs/0014
+  // decision 6b). Echoed back so a bare link's default is known, and read
+  // back into the RSVP POST body.
+  occurrenceDate: string;
   pollStrategy: PollStrategy | null;
   pollThresholdCount: number | null;
   pollMode: PollMode | null;
