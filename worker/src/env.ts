@@ -21,11 +21,29 @@ export interface Env {
   // pastes it in, and the endpoint has to answer that case with a 401 like
   // any other unverifiable request rather than a 500.
   DISCORD_PUBLIC_KEY?: string;
+  // 'live' sends real mail through Resend; anything else (including unset --
+  // local dev has no reason to set this) stubs the send, logging what would
+  // have gone out instead of calling the provider. specs/0015: the sandbox
+  // runs 'stub' deliberately, since this flow's only recipient is Michael's
+  // own inbox and there's nothing to gain from actually paging it during
+  // routine iteration.
+  EMAIL_MODE?: string;
+  // Where the one email this app ever sends goes, and which Resend-verified
+  // address it comes from. Not secrets -- an email address is no more
+  // sensitive here than OWNER_DISCORD_ID already is -- but both are only
+  // read (and only need to be set) when EMAIL_MODE is 'live'.
+  OWNER_EMAIL_ADDRESS?: string;
+  EMAIL_FROM_ADDRESS?: string;
 
   // Secrets (`wrangler secret put ...`, see docs/SETUP.md)
   DISCORD_CLIENT_SECRET: string;
   DISCORD_BOT_TOKEN: string;
   JWT_SIGNING_KEY: string;
+  // Resend API key (specs/0015). Only read when EMAIL_MODE is 'live';
+  // optional in the type for the same reason DISCORD_PUBLIC_KEY is -- it's
+  // genuinely unset until Michael provisions Resend, and lib/email.ts has to
+  // answer that case (refuse to send, log loudly) rather than crash.
+  RESEND_API_KEY?: string;
 }
 
 export interface AuthedContext {

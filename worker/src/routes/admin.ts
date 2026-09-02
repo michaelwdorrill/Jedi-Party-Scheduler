@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import { placeholders } from '../lib/d1';
 import { isOwner } from '../lib/db';
+import { decideGuildAddRequest, listGuildAddRequests } from '../lib/guildRequests';
 import { assertString, readJsonBody } from '../lib/validate';
 
 export const adminRoutes = new Hono<AppEnv>();
@@ -116,4 +117,31 @@ adminRoutes.post('/guilds', async (c) => {
 adminRoutes.delete('/guilds/:id', async (c) => {
   await c.env.DB.prepare(`UPDATE guilds SET is_active = 0 WHERE id = ?`).bind(c.req.param('id')).run();
   return c.json({ ok: true });
+});
+
+// specs/0015: the fallback for the emailed decision links -- useful if an
+// email is lost, delayed, or the owner just wants to review history. Shares
+// its approve/reject logic with GET /guild-requests/:token/decide via
+// lib/guildRequests.ts rather than duplicating it.
+adminRoutes.get('/guild-requests', async (c) => {
+  const requests = await listGuildAddRequests(c.env);
+  return c.json(
+    requests.map((r) => ({
+      id: r.id,
+      guildId: r.guild_id,
+      guildName: r.guild_name,
+      requestedBy: r.requested_by,
+      status: r.status,
+      requestedAt: r.requested_at,
+      decidedAt: r.decided_at,
+    })),
+  );
+});
+
+adminRoutes.post('/guild-requests/:id/:action', async (c) => {
+  const action = c.req.param('action');
+  if (action !== 'approve' && action !== 'reject') return c.text('Unknown action', 400);
+  const result = await decideGuildAddRequest(c.env, c.req.param('id'), action);
+  if (result === 'not_found') return c.text('Request not found', 404);
+  return c.json({ status: result });
 });

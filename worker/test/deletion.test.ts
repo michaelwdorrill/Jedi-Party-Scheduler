@@ -101,6 +101,14 @@ describe('deleteUserCompletely', () => {
       .bind(now, now)
       .run();
 
+    // IDEAS item 9 / specs/0015: a guild-add request the target filed.
+    await db.prepare(
+      `INSERT INTO guild_add_requests (id, guild_id, guild_name, requested_by, status, requested_at)
+       VALUES ('gar1', 'some-guild', 'Some Guild', 'target', 'pending', ?)`,
+    )
+      .bind(now)
+      .run();
+
     return ctx;
   }
 
@@ -157,6 +165,7 @@ describe('deleteUserCompletely', () => {
     expect(await countRows(db, 'personal_events', "user_id = 'target'")).toBe(0);
     expect(await countRows(db, 'personal_event_overrides', "personal_event_id = 'pe'")).toBe(0);
     expect(await countRows(db, 'account_purge_warnings', "user_id = 'target'")).toBe(0);
+    expect(await countRows(db, 'guild_add_requests', "requested_by = 'target'")).toBe(0);
     expect(await countRows(db, 'user_guild_membership', "user_id = 'target'")).toBe(0);
   });
 

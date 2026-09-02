@@ -12,6 +12,7 @@ import { changeRequestRoutes } from './routes/changeRequests';
 import { personalRoutes } from './routes/personal';
 import { adminRoutes } from './routes/admin';
 import { discordInteractionRoutes } from './routes/discordInteractions';
+import { guildRequestRoutes } from './routes/guildRequests';
 import { MembershipUnavailableError } from './lib/db';
 import { BodyTooLargeError, ConflictError, FreeBusyTooLargeError, MAX_BODY_BYTES, ValidationError } from './lib/validate';
 
@@ -101,6 +102,12 @@ export function buildApp() {
   // policy gate -- a button press is not a place to put a Terms dialog, and
   // the acceptance state is checked where it can actually be shown.
   app.route('/discord', discordInteractionRoutes);
+
+  // Unauthenticated by design (specs/0015): this is its own short-lived
+  // Discord OAuth round trip and a pair of signed-token capabilities, not a
+  // site session -- see routes/guildRequests.ts's header comment for why
+  // reusing requireAuth/the policy gate doesn't fit here.
+  app.route('/guild-requests', guildRequestRoutes);
 
   return app;
 }

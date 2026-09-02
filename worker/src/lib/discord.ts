@@ -19,6 +19,37 @@ export interface DiscordUser {
 export interface DiscordGuild {
   id: string;
   name: string;
+  // Only meaningful on the response to /users/@me/guilds (an OAuth-scoped
+  // call about the caller's own membership) -- owner is true iff the caller
+  // owns that guild, and permissions is the caller's own permission bitfield
+  // in it, stringified because it can exceed a JS safe integer. Both are
+  // present on every real Discord response; declared optional here only
+  // because nothing enforces that at the type level and the login flow
+  // (routes/auth.ts) never reads either, so a mock/fixture without them
+  // shouldn't be forced to add fields it doesn't use.
+  owner?: boolean;
+  permissions?: string;
+}
+
+// MANAGE_GUILD. https://discord.com/developers/docs/topics/permissions
+const MANAGE_GUILD = 0x20n;
+// ADMINISTRATOR implies every permission, MANAGE_GUILD included, but Discord
+// does not also set MANAGE_GUILD's bit for an administrator -- checking only
+// MANAGE_GUILD would wrongly refuse a guild's own admins.
+const ADMINISTRATOR = 0x8n;
+
+// specs/0015: who may request adding the bot to a server that isn't
+// allow-listed yet. `permissions` is a stringified bitfield (can exceed a
+// safe JS integer, hence BigInt) or absent/malformed on anything that isn't
+// a real Discord response -- either of those is "no", not a thrown error.
+export function canAdministerGuild(guild: DiscordGuild): boolean {
+  if (guild.owner) return true;
+  try {
+    const bits = BigInt(guild.permissions ?? '0');
+    return (bits & (MANAGE_GUILD | ADMINISTRATOR)) !== 0n;
+  } catch {
+    return false;
+  }
 }
 
 export interface DiscordVoiceChannel {
