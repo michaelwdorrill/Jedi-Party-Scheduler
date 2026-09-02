@@ -440,6 +440,7 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
     env.DB.prepare(`DELETE FROM event_attendance WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM group_members WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM group_nudge_log WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM account_purge_warnings WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM notification_log WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM user_guild_membership WHERE user_id = ?`).bind(userId),
     // revokeAllSessionsForUser() above only sets revoked_at, so the rows (and

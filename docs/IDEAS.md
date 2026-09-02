@@ -251,19 +251,11 @@ existing `guilds` allow-list, and an approve/reject action (email link with
 a signed token, or a page under `/admin`) that feeds the same allow-list
 insert the manual `curl`/`wrangler d1 execute` step in SETUP.md does today.
 
-### 10. Auto-delete accounts that have gone stale
-
-If someone hasn't logged in for a year, warn them by DM at two weeks and one
-week out, then purge them from the system if they still haven't logged back
-in. Point of it: a synced integration (see idea 2, Google Calendar)
-shouldn't quietly keep running forever for someone who's stopped using the
-site. Needs: a last-login timestamp to sweep on (cron, same pattern as the
-existing reminder sweeps), two new DM types, and reusing the
-account-deletion path `SettingsPage.tsx`'s type-to-confirm delete already
-exercises — minus the user initiating it. Worth deciding whether "logged in"
-should also count as "used" for someone who stays signed in and never opens
-the site, and whether organizing/being invited to a future event should
-suppress the purge even if login is stale.
+**Specced (`specs/0015-self-service-bot-add.md`, decisions locked) but not yet
+built, as of v0.7.** Every design question resolved except one: which email
+provider to use, since that's an account, a verified sending domain, and
+probably a real (if small) cost, not a code decision. Scheduled as v0.7.1
+once that's picked.
 
 
 ### 23. The sandbox has no frontend, so the sandbox-first rule has a blind spot for frontend-only changes — partly shipped in v0.4.1
@@ -562,6 +554,26 @@ page.
 The app has had zero design attention — it's functional, not designed. Wants
 pitches/options for making the whole platform look better (layout, color,
 typography, general polish) before or around release.
+
+### 10. Auto-delete accounts that have gone stale — shipped in v0.7
+
+If someone hasn't logged in for a year, warn them by DM at two weeks and one
+week out, then purge them from the system if they still haven't logged back
+in. Point of it: a synced integration (see idea 2, Google Calendar)
+shouldn't quietly keep running forever for someone who's stopped using the
+site.
+
+Shipped per `specs/0016-stale-account-purge.md`, ahead of idea 9 even though
+both were Phase 4 — Rule 2 (cheap and already-understood ships immediately)
+applied once the design turned up no open questions and no new dependency,
+where 9 still has one of each. Both open questions from this capture were
+answered by code that already existed rather than by new design:
+`last_login_at` already can't go stale for an active user without a fresh
+Discord login for over a week (`sessions.ts`'s 7-day absolute session TTL
+forces one), so "logged in" and "used" turned out to be the same signal
+already; and yes, organizing or holding a non-declined invite to a future
+event suppresses the purge, re-checked on every scan rather than decided
+once.
 
 ### 11. Owner-only view of everyone signed up — shipped in v0.1
 

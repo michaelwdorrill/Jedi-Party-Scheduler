@@ -15,7 +15,7 @@ import {
 import { inviteStatements, type ResolvedInvitee } from '../lib/eventWrites';
 import { newId } from '../lib/ids';
 import { pruneStaleSessions } from '../lib/sessions';
-import { MEMBERSHIP_GRACE_MS, revalidateStaleMemberships } from '../lib/db';
+import { deleteUserCompletely, MEMBERSHIP_GRACE_MS, revalidateStaleMemberships } from '../lib/db';
 import {
   deliverThroughOutbox,
   MAX_DELIVERY_ATTEMPTS,
@@ -2167,6 +2167,138 @@ async function sweepIdleGroups(env: Env, budget: TickBudget, cursors: CursorStor
   );
 }
 
+// IDEAS item 10 / docs/specs/0016: warn, then purge, an account that has gone
+// stale. "Stale" is measured from the last real login, not merely from
+// holding a valid session -- sessions.ts caps a session at a 7-day absolute
+// TTL with no indefinite renewal (SESSION_TTL_MS), so anyone actively using
+// the app is forced through a real Discord login, and therefore a
+// markLoginSucceeded stamp, at least once a week. last_login_at is already
+// exactly the "have they used this" signal item 10 wants; no separate concept
+// is needed.
+//
+// A user who never completed a real login (last_login_at NULL -- upsertUser
+// stamps last_login_attempt_at before the allow-list check that gates
+// issuing a session, so a rejected caller can have a row with no login ever
+// recorded) is measured from created_at instead, so a never-verified row
+// doesn't sit forever.
+const STALE_ACCOUNT_MS = 365 * DAY_MS;
+const STALE_WARNING_2WK_MS = STALE_ACCOUNT_MS - 14 * DAY_MS;
+const STALE_WARNING_1WK_MS = STALE_ACCOUNT_MS - 7 * DAY_MS;
+
+// The erasure this sweep can trigger is deliberately uncounted against the
+// shared TickBudget (see cron/budget.ts's RESERVED_QUERIES comment) and is
+// therefore not self-limiting the way a delivery is -- so it gets its own
+// cap, independent of the budget, purely to bound one tick's worst case.
+// One is enough: two accounts crossing the exact same 365-day boundary in the
+// same 15-minute window is not a case this app's scale needs to plan for, and
+// a second candidate is simply picked up on the very next tick.
+const STALE_PURGE_MAX_PER_TICK = 1;
+
+interface StaleAccountRow {
+  id: string;
+  notifications_enabled: number;
+  dm_channel_id: string | null;
+  timezone: string;
+  created_at: number;
+  last_login_at: number | null;
+}
+
+function staleAccountWarningContent(env: Env, warningType: 'stale_2wk' | 'stale_1wk', referenceAt: number): string {
+  const window = warningType === 'stale_1wk' ? 'one week' : 'two weeks';
+  return (
+    `You haven't logged in since ${new Date(referenceAt).toDateString()}. If you don't log back in within the next ` +
+    `${window}, your account and everything in it will be permanently deleted.\n${env.FRONTEND_URL}/#/calendar`
+  );
+}
+
+// Whether this account still has a live reason to exist despite being stale:
+// organizing, or holding a non-declined invite to, an event that hasn't
+// happened yet. Purging out from under either would change who a still-live
+// session counts on -- an organizer's departure deletes the event outright
+// (deleteUserCompletely), and an invitee's departure can drop a session below
+// its minimum-attendees threshold (specs/0014's cancellation cascade). Both
+// are exactly the kind of surprise item 10 exists to avoid causing, not the
+// integration-runs-forever problem it exists to fix -- that problem is about
+// someone who has stopped using the app entirely, not someone with something
+// scheduled. A poll with no candidate resolved yet has start_at IS NULL and
+// counts as "hasn't happened", same reasoning.
+async function hasUpcomingStake(env: Env, userId: string, now: number): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT 1 FROM events WHERE organizer_id = ? AND status = 'active' AND (start_at IS NULL OR start_at > ?)
+     UNION
+     SELECT 1 FROM event_invites ei JOIN events e ON e.id = ei.event_id
+       WHERE ei.user_id = ? AND ei.rsvp_status != 'declined'
+         AND e.status = 'active' AND (e.start_at IS NULL OR e.start_at > ?)
+     LIMIT 1`,
+  )
+    .bind(userId, now, userId, now)
+    .first();
+  return row != null;
+}
+
+// One combined scan rather than a warning sweep and a purge sweep, for the
+// same reason IDEAS item 47's reminders were folded into an existing sweep
+// (see RESERVED_QUERIES's comment): nothing here needs two passes over the
+// same table to decide "warn" vs "purge" -- it's the same
+// COALESCE(last_login_at, created_at) age compared against three thresholds
+// instead of one.
+//
+// No cursor, and the discovery read below is not charged against the shared
+// budget -- the same shape as sweepCancellationCascade just above, and for
+// the same reason (see RESERVED_QUERIES's comment in cron/budget.ts): this
+// table is small enough for an ordinary install that one bounded scan a tick
+// is not a fairness problem, and this feature's own threshold is a year of
+// inactivity, so a row missed by the LIMIT below simply matches again next
+// tick with nothing lost.
+async function sweepStaleAccounts(env: Env, budget: TickBudget): Promise<void> {
+  const now = Date.now();
+  const { results } = await env.DB.prepare(
+    `SELECT id, notifications_enabled, dm_channel_id, timezone, created_at, last_login_at
+     FROM users
+     WHERE COALESCE(last_login_at, created_at) <= ?
+     ORDER BY id
+     LIMIT ?`,
+  )
+    .bind(now - STALE_WARNING_2WK_MS, GLOBAL_SCAN_LIMIT)
+    .all<StaleAccountRow>();
+
+  let purged = 0;
+  for (const user of results) {
+    if (budget.exhausted) return;
+    const referenceAt = user.last_login_at ?? user.created_at;
+    const age = now - referenceAt;
+
+    if (age >= STALE_ACCOUNT_MS) {
+      if (purged >= STALE_PURGE_MAX_PER_TICK) continue; // picked up again next tick
+      if (await hasUpcomingStake(env, user.id, now)) continue; // re-checked next time this row is scanned
+      await deleteUserCompletely(env, user.id);
+      purged++;
+      continue;
+    }
+
+    const warningType: 'stale_2wk' | 'stale_1wk' = age >= STALE_WARNING_1WK_MS ? 'stale_1wk' : 'stale_2wk';
+    // Sent regardless of notifications_enabled: that toggle opts out of
+    // gameplay pings, not out of the one message that exists to stop an
+    // otherwise-irreversible deletion. Recipient is reconstructed rather than
+    // passing `user` through, so this override is explicit at the call site
+    // rather than hidden in the row shape.
+    const recipient: DmRecipient = {
+      id: user.id,
+      notifications_enabled: 1,
+      dm_channel_id: user.dm_channel_id,
+      timezone: user.timezone,
+    };
+    await deliverThroughOutbox(
+      env,
+      'account_purge_warnings',
+      { user_id: user.id, last_login_at: referenceAt, warning_type: warningType },
+      recipient,
+      staleAccountWarningContent(env, warningType, referenceAt),
+      budget,
+    );
+  }
+}
+
 interface DueRetryRow extends DmRecipient {
   id: string;
   event_id: string;
@@ -2438,6 +2570,13 @@ export async function runReminderSweep(env: Env): Promise<void> {
   // possibly being reaped on a tick it was never actually retried.
   await runIsolated('dueNotificationRetries', () => sweepDueNotificationRetries(env, budget, cursors));
   await runIsolated('dueNudgeRetries', () => sweepDueNudgeRetries(env, budget, cursors));
+  // Last of the budget-charged sweeps, deliberately: its own threshold is a
+  // year of inactivity, so it has nothing to lose by going last and being the
+  // one starved on a busy tick, and everything above it (same-day reminders,
+  // the terminal-history purge with its own zero-margin budget fit -- see
+  // test/pass6.test.ts) is more time-sensitive than a warning DM or a purge
+  // that would fire again next tick regardless.
+  await runIsolated('staleAccounts', () => sweepStaleAccounts(env, budget));
   // Last, so it settles anything that used up its final attempt during this
   // tick rather than leaving it for the next one.
   await runIsolated('reapExhaustedDeliveries', () => reapExhaustedDeliveries(env));

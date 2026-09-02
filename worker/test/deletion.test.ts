@@ -92,6 +92,15 @@ describe('deleteUserCompletely', () => {
     ).run();
     await createSession(env, 'target');
 
+    // IDEAS item 10 / specs/0016: a stale-account warning, purely user-scoped
+    // like personal_events rather than tied to anything the target owns.
+    await db.prepare(
+      `INSERT INTO account_purge_warnings (id, user_id, last_login_at, warning_type, sent_at)
+       VALUES ('apw1', 'target', ?, 'stale_2wk', ?)`,
+    )
+      .bind(now, now)
+      .run();
+
     return ctx;
   }
 
@@ -147,6 +156,7 @@ describe('deleteUserCompletely', () => {
 
     expect(await countRows(db, 'personal_events', "user_id = 'target'")).toBe(0);
     expect(await countRows(db, 'personal_event_overrides', "personal_event_id = 'pe'")).toBe(0);
+    expect(await countRows(db, 'account_purge_warnings', "user_id = 'target'")).toBe(0);
     expect(await countRows(db, 'user_guild_membership', "user_id = 'target'")).toBe(0);
   });
 

@@ -124,8 +124,15 @@ describe('a whole cron tick stays inside the Free-plan D1 ceiling (F-04-G1)', ()
     // does not actually work), but a real, counted statement all the same,
     // and this assertion's job is to catch exactly that kind of growth
     // rather than hide it.
-    expect(firstTick).toBeLessThanOrEqual(25);
-    expect(secondTick).toBeLessThanOrEqual(25);
+    //
+    // 26, not 25, for IDEAS item 10 / specs/0016's sweepStaleAccounts: one
+    // more real query every tick (its own discovery read, unconditional like
+    // sweepCancellationCascade's just above), even though -- like that one --
+    // it is deliberately uncharged against the *ledger*, so RESERVED_QUERIES
+    // itself does not move. See that constant's own comment for why bumping
+    // it to "match" a new charged query does not actually work here.
+    expect(firstTick).toBeLessThanOrEqual(26);
+    expect(secondTick).toBeLessThanOrEqual(26);
     // One flush statement, not ten: the ten fresh cursors cost the first tick
     // barely more than the second, which has none to write.
     expect(firstTick - secondTick).toBeLessThanOrEqual(2);

@@ -41,6 +41,8 @@ enough yet.
 | [0012-policy-reacceptance](0012-policy-reacceptance.md) | Idea 37 | 3.9 | 0.4.4 | Built |
 | [0013-windowed-candidates](0013-windowed-candidates.md) | Idea 40 (and 39, 41) | 3.11 | 0.4.6 | Built |
 | [0014-attendance-per-occurrence](0014-attendance-per-occurrence.md) | Ideas 47, 48 (absorbs 46) | TBD | TBD | Decisions locked |
+| [0015-self-service-bot-add](0015-self-service-bot-add.md) | Idea 9 | 4 | 0.7.1 | Decisions locked (blocked on email provider) |
+| [0016-stale-account-purge](0016-stale-account-purge.md) | Idea 10 | 4 | 0.7 | Built |
 
 This index had drifted: it stopped at 0003 while 0004–0007 existed, and
 listed 0003 as Draft after it shipped. Keeping it current is cheap and it is
