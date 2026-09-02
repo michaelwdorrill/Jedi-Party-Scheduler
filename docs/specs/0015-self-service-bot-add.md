@@ -1,7 +1,6 @@
 # 0015 — Self-service "add this bot" link, gated by owner approval
 
-**Status:** Decisions locked — blocked on one operational choice (see Open
-questions)
+**Status:** Ready
 **Covers:** `IDEAS.md` item 9
 **Phase:** 4 → **v0.7.1**
 
@@ -33,34 +32,73 @@ new-dependency item could stay isolated to this spec alone.
 ## Who may request, and for what
 
 **Only someone who administers the target Discord server may request it** —
-not merely a member. Discord's `GET /users/@me/guilds` (already called during
-login to sync membership, `lib/discord.ts`) returns a `permissions` bitfield
-per guild; a request is only accepted for a guild where the requester's
-bitfield includes `MANAGE_GUILD` or they are the guild's owner. Without this
-check, any logged-in user could submit a request for a server they have no
-authority over, and the owner-approval step would be reviewing a claim with
-no way to verify it beyond trusting the requester's word.
+not merely a member. Discord's OAuth `GET /users/@me/guilds` returns a
+`permissions` bitfield (and an `owner` boolean) per guild; a request is only
+accepted for a guild where the requester's bitfield includes `MANAGE_GUILD`
+(bit `0x20`) or `owner` is true. Without this check, any logged-in user could
+submit a request for a server they have no authority over, and the
+owner-approval step would be reviewing a claim with no way to verify it
+beyond trusting the requester's word.
 
-This makes the request flow **login-gated**, not anonymous: the "public
-page" idea 9's capture describes is public in the sense that anyone can
-reach it and start the flow, not that it collects a server id from an
-unauthenticated visitor. Reusing the existing Discord OAuth login is cheaper
-than building a second identity-proving mechanism, and it is the same trust
-boundary `user_guild_membership` sync already relies on for everything else
-in the app.
+**This cannot reuse the main login session, and the first draft of this spec
+assumed it could — worth recording why, since the fix changes the flow.**
+`routes/auth.ts` fetches `/users/@me/guilds` once, during the OAuth callback,
+and its own comment says the access/refresh tokens are deliberately *not*
+persisted afterward ("nothing in the app needs to act on Discord's behalf
+later, so keeping them would be retaining API Data beyond what the
+functionality requires" — the same discipline `ARCHITECTURE.md` calls out as
+a feature for Phase 5's Google sync question). So there is no live Discord
+token anywhere after login to ask "does this session's user administer guild
+X" with. And it isn't a matter of caching the answer at login time either:
+`user_guild_membership.guild_id` is a foreign key into `guilds(id)` — it
+*structurally cannot hold a row* for a guild that isn't already on the
+allow-list, which is exactly the set idea 9 exists to let someone reach.
+
+**So the permission check gets its own short-lived Discord OAuth round trip,
+separate from login, at the moment someone starts a request — not a standing
+"here are all the servers you administer" table synced at every login.**
+`GET /guild-requests/connect` redirects through Discord's authorize screen
+(scope `identify guilds`, the same scope login already asks for) to
+`GET /guild-requests/callback`, which exchanges the code, calls
+`fetchDiscordUserGuilds`, filters to guilds where the caller has
+`MANAGE_GUILD` or owner, and hands the frontend that filtered list —
+discarding the access/refresh tokens immediately after that one call,
+identical to `routes/auth.ts`'s own discipline. Nothing new is retained
+about which servers someone administers beyond the lifetime of that one
+request; a person who submits a request twice a year re-proves it twice a
+year, which is the honest cost of not keeping a standing record. This also
+sidesteps a staleness question a persisted table would raise for free: admin
+rights on a Discord server can be revoked, and a live check at request time
+can't be wrong about someone's *current* standing the way a cached one could.
+
+The list handed back to the frontend needs its own short-lived proof that it
+came from *this* request's OAuth round trip and wasn't tampered with — a
+signed token (reusing `lib/jwt.ts`, same shape the decision-link token below
+uses) carrying the picked guild's id/name/requester id, minted by the
+callback and consumed by the actual `POST /guild-requests` call. Without it,
+`POST /guild-requests` would have to either trust a bare guild id the browser
+sends (exactly the unverifiable claim this whole check exists to avoid) or
+re-run the OAuth exchange a second time.
+
+This makes the request flow **login-gated** for the main site session (idea
+9's "public page" is public in the sense that anyone can reach it and start
+the flow, not that it accepts a server id from a fully anonymous visitor)
+**and additionally Discord-verified per request** via the round trip above,
+which is the part that actually proves administrator standing.
 
 ## Flow
 
-1. A signed-in user visits a new page (not the raw Discord bot-invite URL) and
-   picks one of their administered servers from the list `GET /me/guilds`
-   already resolves (or a new endpoint filtered to `MANAGE_GUILD`/owner —
-   `GET /me/guilds` today only returns guilds relevant to event membership;
-   check at build time whether it already carries `permissions` or needs one
-   more field added, not a new endpoint).
-2. If that guild id is already in the `guilds` allow-list and active, the page
-   says so and stops — nothing to request.
-3. Otherwise, `POST /guild-requests` creates a **pending** row (schema below)
-   and redirects to Discord's own bot-authorization URL
+1. A signed-in user visits a new page (not the raw Discord bot-invite URL)
+   and starts a request. This kicks off the `/guild-requests/connect` round
+   trip above; they come back with a short list of servers they administer
+   that aren't already allow-listed, each carrying the signed token described
+   above.
+2. If Discord reports every administered guild is already on the allow-list
+   and active, the page says so and stops — nothing to request.
+3. Otherwise the user picks one of the remaining servers. `POST
+   /guild-requests`, carrying that server's signed token from step 1, creates
+   a **pending** row (schema below) and redirects to Discord's own
+   bot-authorization URL
    (`https://discord.com/oauth2/authorize?client_id=...&scope=bot&guild_id=...`),
    scoped to the specific guild so Discord's own consent screen is what
    actually adds the bot — this spec's request/approval flow governs whether
@@ -146,34 +184,65 @@ server changes hands).
   notes login itself has none, "a bigger piece of infrastructure this app
   doesn't have yet").
 
-## Open questions
+## Decided: Resend
 
-**One blocks implementation and needs Michael's answer, not a default guess:
-which email provider.** Every Cloudflare Workers-compatible option is an HTTP
-API call (Workers can't speak SMTP directly), so the code shape barely
-changes between them, but the operational commitment does: an account, a
-sending domain with SPF/DKIM DNS records on a domain Michael controls, an API
-key stored as a Worker secret (`wrangler secret put`, the same pattern
-`DISCORD_BOT_TOKEN` already uses — never in this repo, never in chat), and
-for most providers a real, if small, cost once trial volume is exhausted.
-Candidates: Resend, Postmark, SendGrid, Mailgun. This is exactly the kind of
-external-service commitment this project's own guardrails (CLAUDE.md's
-Cloudflare-account section) treat as needing a person to decide, not a
-default to fall back on.
+**Michael picked Resend** (Sept 2026) — generous free tier at this app's
+volume, an HTTP API (no SMTP, which Workers can't speak anyway), and the
+simplest domain-verification path of the candidates considered. This unblocks
+the build; nothing else in this spec changes.
 
-Two smaller questions follow from the first and can wait until it's answered:
+Operational consequences, spelled out so the build doesn't silently assume
+they're already true:
 
-1. **Does the sandbox send real email?** Either it uses the same provider
-   against a low sending volume (fine if the provider's free tier is generous
-   enough that testing this flow a handful of times doesn't matter), or the
-   sandbox Worker stubs the send entirely and verification confirms "the
-   right email *would* have been sent" from logs, the same shape
-   `test/helpers.ts`'s `stubFetch` already gives the test suite. Leaning
-   toward stubbing in the sandbox specifically: this flow sends to Michael's
-   *own* inbox, so a stub avoids either spamming it during iteration or
-   needing a second throwaway address.
-2. **Should the requester ever be told the outcome?** Rejected out of scope
-   above for the first build, but worth asking once real usage happens: an
-   approved requester currently only learns by trying the site, which is a
-   worse experience than the rest of this app tries to offer. Adding it later
-   is one more outbound email per decision, not a schema change.
+- **`RESEND_API_KEY` is a new Worker secret**, provisioned the same way
+  `DISCORD_BOT_TOKEN` already is (`wrangler secret put`, per environment,
+  never committed, never pasted into chat). Production and sandbox get
+  **separate** Resend API keys if Michael creates a second Resend account or
+  a scoped key for it — not required before the build lands (see the
+  sandbox stubbing decision below), but needed before v0.7.1 actually ships
+  live email from the sandbox for a real end-to-end check.
+- **A sending domain Michael controls needs SPF/DKIM records added** in
+  Resend's dashboard before any real send will deliver rather than bounce or
+  land in spam. This is a one-time setup step outside this repo — nothing in
+  the Worker can do it — and blocks *live* sending, not the code itself,
+  which can be built and merged first and simply left unable to send for
+  real until DNS is verified.
+- `lib/email.ts` wraps Resend's `POST https://api.resend.com/emails` behind
+  one function (`sendOwnerEmail`), matching how `lib/discord.ts` wraps the
+  Discord API — one place that knows the provider, so a future provider swap
+  (unlikely, but idea 9's capture named several candidates for a reason)
+  touches one file.
+
+## Decided: the sandbox stubs the send
+
+Confirmed rather than left as a leaning: `EMAIL_MODE` is a new per-environment
+string var (`wrangler.toml`, alongside `WORKERS_PLAN` and the other
+environment-scoped settings) — `'live'` in production, `'stub'` everywhere
+else including local dev and the sandbox. In `'stub'` mode `sendOwnerEmail`
+logs what it would have sent (recipient, subject, both decision links) via
+`console.log` and returns success without calling Resend at all. This flow
+sends to Michael's *own* inbox, so live-sending it from the sandbox during
+routine iteration would either spam that inbox or need a second throwaway
+address for no real benefit — `wrangler tail --env sandbox` during a
+verification pass shows the stubbed content just as well as an inbox would,
+and is exactly the check step CLAUDE.md's sandbox section already calls out.
+Flipping `EMAIL_MODE` to `'live'` in the sandbox for one real end-to-end
+check, once the sending domain is verified, is a one-line `wrangler.toml`
+edit Michael can make and revert locally — not something this build needs to
+decide for him.
+
+Checked against `check:env-parity` (`scripts/check-env-parity.mjs`) rather
+than assumed: it only requires `[vars]` and `[env.sandbox.vars]` to carry the
+same *key set*, plus one value-equality rule hardcoded to `WORKERS_PLAN`
+specifically (and a value-*inequality* rule for the D1 `database_id`s). A new
+key present in both blocks with different values — exactly `EMAIL_MODE`'s
+shape — already passes with no changes to that script. `DISCORD_PUBLIC_KEY`
+is the existing precedent for a var that's expected to differ in value
+between the two environments.
+
+## Decided: no requester notification in this build
+
+Stays out of scope for v0.7.1 as the spec originally leaned. An approved
+requester learns by trying the site, same as today's fully-manual process.
+Revisit once real usage happens; adding it later is one more outbound email
+per decision, not a schema change.
