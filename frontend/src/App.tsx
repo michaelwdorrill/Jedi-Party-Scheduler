@@ -13,6 +13,8 @@ import TermsPage from './pages/TermsPage';
 import ChangelogPage from './pages/ChangelogPage';
 import SettingsPage from './pages/SettingsPage';
 import AdminUsersPage from './pages/AdminUsersPage';
+import AdminGuildRequestsPage from './pages/AdminGuildRequestsPage';
+import RequestBotPage from './pages/RequestBotPage';
 
 export default function App() {
   return (
@@ -24,6 +26,10 @@ export default function App() {
       <Route path="/privacy" element={<PrivacyPage />} />
       <Route path="/terms" element={<TermsPage />} />
       <Route path="/changelog" element={<ChangelogPage />} />
+      {/* Public (specs/0015): its own short-lived Discord OAuth round trip,
+          not the site's login session -- see RequestBotPage's own header
+          comment for why it can't reuse AuthGuard. */}
+      <Route path="/add-bot" element={<RequestBotPage />} />
 
       <Route element={<AuthGuard />}>
         <Route element={<Layout />}>
@@ -34,6 +40,7 @@ export default function App() {
           <Route path="/groups" element={<GroupsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/admin/users" element={<AdminUsersPage />} />
+          <Route path="/admin/guild-requests" element={<AdminGuildRequestsPage />} />
           <Route path="/events/new" element={<EventFormPage />} />
           <Route path="/events/:eventId" element={<EventDetailPage />} />
           <Route path="/events/:eventId/edit" element={<EventFormPage />} />

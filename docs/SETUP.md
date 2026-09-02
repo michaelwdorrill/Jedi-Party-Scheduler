@@ -702,6 +702,45 @@ rather than found by hand later — all detailed in spec 0002:
    verification instead of being inferred from odd behaviour afterwards
    (IDEAS item 30).
 
+## 6. Outbound email (Resend) — optional, for the self-service bot-add flow
+
+`specs/0015-self-service-bot-add.md` (idea 9) is the one feature in this app
+that sends real email — a pending guild-add request, to you, the owner.
+Everything about the feature works without this section done: `EMAIL_MODE`
+ships `"stub"` in both `[vars]` and `[env.sandbox.vars]` (`worker/wrangler.toml`),
+which logs what would have been sent instead of calling Resend. Do this
+section only when you actually want that email to arrive for real.
+
+1. Create a Resend account (https://resend.com) if you don't have one.
+2. **Verify a sending domain you control.** Resend's dashboard walks you
+   through adding SPF/DKIM DNS records at your registrar — the same kind of
+   one-time DNS step as "4.2 DNS at your registrar" above, just at a
+   different provider's dashboard. Until this is verified, Resend will
+   accept a send but it won't deliver.
+3. Create an API key in Resend's dashboard, scoped to sending only if that
+   option is offered.
+4. Set the secret, same pattern as the three in step 2.10 above:
+   ```
+   npx wrangler secret put RESEND_API_KEY
+   ```
+5. Edit `[vars]` in `worker/wrangler.toml`:
+   - `OWNER_EMAIL_ADDRESS`: where the request notification should land —
+     your own inbox.
+   - `EMAIL_FROM_ADDRESS`: an address on the domain you just verified (e.g.
+     `bot@yourdomain.com`). Resend rejects a send `from` an unverified
+     domain, so this has to be step 2's domain, not an arbitrary address.
+   - `EMAIL_MODE`: change `"stub"` to `"live"`.
+6. Redeploy: `npm run deploy`.
+
+**Leave the sandbox's `EMAIL_MODE` at `"stub"` — this is not a step to skip
+there, unlike everything else in this file.** `worker/wrangler.toml`'s own
+comment on `[env.sandbox.vars]`'s copy explains why: this flow's only real
+recipient is your own inbox, and live-sending it from the sandbox during
+routine iteration would either spam that inbox or need a second throwaway
+address for no real benefit. `wrangler tail --env sandbox` shows the stubbed
+content just as well as an inbox would, which is the verification step this
+feature actually wants from the sandbox.
+
 ## Running the tests
 
 From `worker/`:

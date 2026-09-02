@@ -237,26 +237,6 @@ attendee list. Design and the blockers (the Privacy Policy currently
 promises the exact opposite) are in
 `specs/0007-server-noticeboard.md`. Still open.
 
-### 9. Self-service "add this bot to your server" link, gated by owner approval
-
-A public page/link (distinct from the raw Discord OAuth bot-add URL, which
-just adds the bot with no guardrail) that lets someone add the bot to their
-own Discord server. If that server is already on the allow-list, it just
-works. If it isn't, the request queues instead of silently granting access,
-and the site owner gets an email to approve or reject it before the server
-can actually use the app. Needs: an outbound email path (nothing in the
-Worker sends email today — SETUP.md's contact address is just a mailto link
-on the legal pages), a pending-request state in D1 distinct from the
-existing `guilds` allow-list, and an approve/reject action (email link with
-a signed token, or a page under `/admin`) that feeds the same allow-list
-insert the manual `curl`/`wrangler d1 execute` step in SETUP.md does today.
-
-**Specced (`specs/0015-self-service-bot-add.md`, decisions locked) but not yet
-built, as of v0.7.** Every design question resolved except one: which email
-provider to use, since that's an account, a verified sending domain, and
-probably a real (if small) cost, not a code decision. Scheduled as v0.7.1
-once that's picked.
-
 
 ### 23. The sandbox has no frontend, so the sandbox-first rule has a blind spot for frontend-only changes — partly shipped in v0.4.1
 
@@ -554,6 +534,30 @@ page.
 The app has had zero design attention — it's functional, not designed. Wants
 pitches/options for making the whole platform look better (layout, color,
 typography, general polish) before or around release.
+
+### 9. Self-service "add this bot to your server" link, gated by owner approval — shipped in v0.7.1
+
+A public page/link (distinct from the raw Discord OAuth bot-add URL, which
+just adds the bot with no guardrail) that lets someone add the bot to their
+own Discord server. If that server is already on the allow-list, it just
+works. If it isn't, the request queues instead of silently granting access,
+and the site owner gets an email to approve or reject it before the server
+can actually use the app.
+
+Shipped per `specs/0015-self-service-bot-add.md`, once Michael picked Resend
+as the email provider (the one decision the spec was blocked on). Building it
+turned up a real design gap the spec's first draft missed: the login session
+carries no live Discord token to check "does this person administer guild X"
+with (tokens are deliberately never persisted past login, per
+`ARCHITECTURE.md`'s Phase-5 discussion), and `user_guild_membership.guild_id`
+is a foreign key into `guilds(id)` — it structurally can't hold a row for a
+guild that isn't allow-listed yet, which is exactly the set this feature
+exists to reach. So the request page drives its own short-lived Discord OAuth
+round trip (`/guild-requests/connect` → `/guild-requests/callback`), separate
+from login, rather than reusing existing session or membership state. Ships
+dormant in production (`EMAIL_MODE = "stub"`) until the Resend sending domain
+is DNS-verified; the sandbox stays stubbed permanently, since this flow's only
+real recipient is Michael's own inbox.
 
 ### 10. Auto-delete accounts that have gone stale — shipped in v0.7
 

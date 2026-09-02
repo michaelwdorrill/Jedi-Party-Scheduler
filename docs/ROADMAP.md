@@ -546,7 +546,7 @@ as `specs/0014`'s staging note permits — its missing reminders were a
 one-line change to the reminder sweep's selection and did not need the
 migration.
 
-### Phase 4 — Growth and lifecycle (ideas 9, 10) → **v0.7 / v0.7.1**
+### Phase 4 — Growth and lifecycle (ideas 9, 10) → **v0.7 / v0.7.1** ✅ shipped
 
 Both are operational rather than user-requested, and both are best done once
 the app is something we're happy to show people — which is what Phase 3
@@ -559,12 +559,20 @@ open items depend on that one, and Rule 4's grouping of 9 and 10 buys less
 than it appears to — 10 warns by DM and wants no email at all.
 
 - **9, self-service bot add with owner approval**, brings the outbound email
-  path with it. That's the real cost of the item; build it as its own
+  path with it. That's the real cost of the item; built as its own
   reviewable piece rather than as a detail of the approval flow. `specs/0015`
-  locks the design and is blocked on one operational choice — which email
-  provider — that needs Michael's answer rather than a default guess, the
-  same way CLAUDE.md already treats the Cloudflare account itself as a
-  person's decision, not a default.
+  locks the design; the one operational choice it was blocked on — which
+  email provider — was Michael's to make (Resend), the same way CLAUDE.md
+  already treats the Cloudflare account itself as a person's decision, not a
+  default. Building it also turned up a real design gap the spec's first
+  draft missed: the login session carries no live Discord token to check
+  "does this person administer guild X" with (tokens are deliberately never
+  persisted), and `user_guild_membership` can't hold a row for a guild that
+  isn't allow-listed yet either way — so the request flow needed its own
+  short-lived Discord OAuth round trip, separate from login, rather than
+  reusing existing session/membership state. Ships dormant: `EMAIL_MODE` is
+  `"stub"` in production until Michael finishes the Resend/DNS setup
+  (`docs/SETUP.md` section 6).
 - **10, stale-account purge**, needs no email (it warns by DM, which we
   already do) but does need `users.last_login_at` sweeping on the existing
   cron — and every new sweep draws on the same per-tick budget as
@@ -575,11 +583,11 @@ than it appears to — 10 warns by DM and wants no email at all.
 splitting, not just reordering.** 10 needed no email at all and had no open
 design questions once `specs/0016` worked through it, so Rule 2 (cheap and
 already-understood ships immediately) applied and it shipped alone as
-**v0.7**, without waiting on 9's email-provider decision. 9 stays specced
-(`specs/0015`, decisions locked) but unbuilt, and takes **v0.7.1** once that
-one choice is made — the same shape v0.5's embeds took relative to v0.5
-itself: specced completely, held back by exactly one call that "wants
-someone looking at" something outside the code.
+**v0.7**, without waiting on 9's email-provider decision. 9 followed as
+**v0.7.1** once that choice was made — the same shape v0.5's embeds took
+relative to v0.5 itself: specced completely, held back by exactly one call
+that "wants someone looking at" something outside the code, then built once
+that call was made.
 
 ### Phase 5 — Google Calendar sync (idea 2) → **v0.8**
 
@@ -635,7 +643,7 @@ shifts.
 | 0.6 | Phase 3.8x — stage 1 of `specs/0014`: attendance per occurrence, the migration, `custom_id` v2. Ships alone, with no user-visible change but the recurring one | Planned |
 | 0.6.x | `specs/0014` stages 2 and 3 — the reminder ladder (48, absorbing 46), then the multi-winner fan-out, the minimum-attendees field and the cancellation cascade (49, 51 close here) | Planned |
 | **0.7** | Phase 4 — stale-account purge (10), per `specs/0016` | **Shipped** |
-| 0.7.1 | Phase 4 — self-service bot add + email (9), per `specs/0015` | Planned, blocked on the email-provider decision |
+| **0.7.1** | Phase 4 — self-service bot add + email (9), per `specs/0015` | **Shipped** |
 | 0.8 | Phase 5 — Google Calendar sync (2) | Planned |
 | 1.0 | `IDEAS.md`'s **Still open** section empty — leave Beta | When the list clears |
 

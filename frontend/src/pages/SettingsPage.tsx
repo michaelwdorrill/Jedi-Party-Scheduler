@@ -159,6 +159,16 @@ export default function SettingsPage() {
       </div>
 
       <div className={cardClass('md', 'space-y-3')}>
+        <h2 className="font-semibold">Servers</h2>
+        <p className="text-sm text-muted">
+          Run a Discord server and want this app there too? If you administer it, you can ask.
+        </p>
+        <Link to="/add-bot" className="text-sm text-accent-text underline">
+          Add the bot to another server
+        </Link>
+      </div>
+
+      <div className={cardClass('md', 'space-y-3')}>
         <h2 className="font-semibold">Your data</h2>
         <p className="text-sm text-muted">
           See the{' '}
@@ -179,8 +189,11 @@ export default function SettingsPage() {
       {user?.isOwner && (
         <div className={cardClass('md', 'space-y-3')}>
           <h2 className="font-semibold">Owner</h2>
-          <Link to="/admin/users" className="text-sm text-accent-text underline">
+          <Link to="/admin/users" className="block text-sm text-accent-text underline">
             View all users
+          </Link>
+          <Link to="/admin/guild-requests" className="block text-sm text-accent-text underline">
+            Guild requests
           </Link>
         </div>
       )}
