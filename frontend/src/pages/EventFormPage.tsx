@@ -65,6 +65,11 @@ export default function EventFormPage() {
   const [startTime, setStartTime] = useState('13:00');
   const [endTime, setEndTime] = useState('17:00');
   const [isRecurring, setIsRecurring] = useState(false);
+  // specs/0014 stage 3, decision 4. Only meaningful for a non-recurring
+  // single event -- see the checkbox's own gating below. '' means "no
+  // minimum set", distinct from 0 (which the server rejects anyway).
+  const [minimumAttendees, setMinimumAttendees] = useState('');
+  const [autoCancelBelowMinimum, setAutoCancelBelowMinimum] = useState(false);
   const [recurrence, setRecurrence] = useState<RecurrenceFormValue>({
     freq: 'WEEKLY',
     interval: 1,
@@ -215,6 +220,8 @@ export default function EventFormPage() {
         setEndDate(e.toISODate()!);
         setStartTime(s.toFormat('HH:mm'));
         setEndTime(e.toFormat('HH:mm'));
+        setMinimumAttendees(ev.minimumAttendees != null ? String(ev.minimumAttendees) : '');
+        setAutoCancelBelowMinimum(ev.autoCancelBelowMinimum);
       }
       if (ev.recurrence) {
         setIsRecurring(true);
@@ -405,6 +412,16 @@ export default function EventFormPage() {
           body.startAt = toUtcMillis(date, startTime);
           body.endAt = toUtcMillis(endDate, endTime);
         }
+        // Sent explicitly either way (including null), same reasoning as
+        // pollOptions' windowBlockMinutes below: absent would mean "leave
+        // whatever is stored alone", which on an edit that clears the field
+        // would silently keep the old minimum. Omitted entirely while
+        // repeating -- the server rejects it outright on a recurring event,
+        // and the checkbox is hidden for the same reason.
+        if (!isRecurring) {
+          body.minimumAttendees = minimumAttendees.trim() ? Number(minimumAttendees) : null;
+          body.autoCancelBelowMinimum = autoCancelBelowMinimum;
+        }
       } else {
         body.pollStrategy = pollStrategy;
         body.pollThresholdCount = pollStrategy === 'threshold' ? pollThreshold : null;
@@ -591,6 +608,39 @@ export default function EventFormPage() {
             Repeats
           </label>
           {isRecurring && <RecurrenceForm value={recurrence} onChange={setRecurrence} />}
+
+          {/* specs/0014 stage 3, decision 4. Hidden while repeating: the
+              cascade only applies to a single, non-recurring session -- see
+              docs/IDEAS.md for the recurring case as a captured follow-up. */}
+          {!isRecurring && (
+            <div className="space-y-2 border-t border-edge pt-3">
+              <label className="flex items-center gap-2 text-sm text-ink-dim">
+                <span>Minimum attendees</span>
+                <input
+                  type="number"
+                  min={1}
+                  placeholder="none"
+                  value={minimumAttendees}
+                  onChange={(e) => setMinimumAttendees(e.target.value)}
+                  className={controlClass('sm')}
+                  style={{ width: '5rem' }}
+                />
+              </label>
+              {minimumAttendees.trim() && (
+                <label className="flex items-start gap-2 text-sm text-ink-dim">
+                  <input
+                    type="checkbox"
+                    checked={autoCancelBelowMinimum}
+                    onChange={(e) => setAutoCancelBelowMinimum(e.target.checked)}
+                  />
+                  <span>
+                    Cancel automatically if attendance drops below this. Otherwise you'll get a DM to decide when it
+                    does.
+                  </span>
+                </label>
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <div className={cardClass('md', 'space-y-3')}>

@@ -307,6 +307,44 @@ export function ladderStatusCaseBinds(
   return [organizerId, event!.id, event!.start_at, event!.end_at];
 }
 
+// specs/0014 stage 3: the minimum-attendees cascade needs a plain count of
+// who currently counts as attending a non-recurring, non-poll occurrence --
+// not a notification-shaped query. getConfirmedAttendeeIds exists to answer
+// "who should receive notification X, excluding whoever already has it",
+// and its `pending: PendingFor` argument is load-bearing there: reusing it
+// here would silently undercount, since the dedupe it applies would exclude
+// anyone already sent some unrelated notification for this occurrence. This
+// mirrors only the fixed-time branch of that function's candidate set --
+// accepted invitees, plus the organizer unless they declined this
+// occurrence -- with no notification dedupe and no LIMIT, because a
+// threshold check has to see everyone or it isn't a threshold check.
+export async function countConfirmedAttendees(
+  env: Env,
+  event: { id: string; guild_id: string; organizer_id: string },
+  occurrenceDate: string,
+): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM (
+       SELECT user_id FROM event_attendance WHERE event_id = ? AND occurrence_date = ? AND rsvp_status = 'accepted'
+       ${ORGANIZER_UNLESS_DECLINED}
+     ) confirmed
+     JOIN user_guild_membership m ON m.user_id = confirmed.user_id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1`,
+  )
+    .bind(
+      event.id,
+      occurrenceDate,
+      event.organizer_id,
+      event.id,
+      occurrenceDate,
+      event.organizer_id,
+      event.guild_id,
+      membershipCutoff(),
+    )
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
 // One person's answer to one event's invitation, extracted out of
 // POST /events/:eventId/rsvp so the Discord interactions endpoint can record
 // the same thing (specs/0010). The website reaches this with a session; a
@@ -325,7 +363,7 @@ export function ladderStatusCaseBinds(
 // fact that we once sent them a message.
 export type RsvpStatus = 'accepted' | 'declined' | 'tentative';
 
-export type RsvpOutcome = 'recorded' | 'not_invited' | 'no_such_event' | 'invalid_occurrence';
+export type RsvpOutcome = 'recorded' | 'not_invited' | 'no_such_event' | 'invalid_occurrence' | 'event_not_active';
 
 // occurrenceDate: '' for a non-recurring event, an occurrence date for a
 // recurring one -- and it must agree with which the event actually is.
@@ -346,10 +384,32 @@ export async function recordRsvp(
   occurrenceDate: string,
   status: RsvpStatus,
 ): Promise<RsvpOutcome> {
-  const event = await env.DB.prepare(`SELECT guild_id, is_recurring FROM events WHERE id = ?`)
+  const event = await env.DB.prepare(
+    `SELECT guild_id, organizer_id, is_recurring, status, event_type, minimum_attendees, auto_cancel_below_minimum
+     FROM events WHERE id = ?`,
+  )
     .bind(eventId)
-    .first<{ guild_id: string; is_recurring: number }>();
+    .first<{
+      guild_id: string;
+      organizer_id: string;
+      is_recurring: number;
+      status: 'active' | 'cancelled' | 'resolved';
+      event_type: 'single' | 'poll';
+      minimum_attendees: number | null;
+      auto_cancel_below_minimum: number;
+    }>();
   if (!event) return 'no_such_event';
+
+  // specs/0014 stage 3: a write that lands after the event has already
+  // stopped being active must not succeed as if it still meant something.
+  // Harmless before this release, since nothing read attendance on a
+  // cancelled event -- the minimum-attendees cascade is what makes it
+  // load-bearing: an accept recorded after the cascade already cancelled
+  // the event, and after sweepCancelledEventNotices already ran, would
+  // otherwise never be told the session isn't happening. Checked before the
+  // occurrence guard below so the more specific "this event is over" answer
+  // wins over "that date doesn't match" whenever both would apply.
+  if (event.status !== 'active') return 'event_not_active';
 
   // A non-recurring event's only occurrence is '' and a recurring one's is
   // never ''. Guarding it here, not just at the callers that construct it,
@@ -370,5 +430,39 @@ export async function recordRsvp(
     .bind(newId(), eventId, occurrenceDate, userId, status, Date.now(), eventId, userId)
     .run();
 
-  return result.meta.changes === 0 ? 'not_invited' : 'recorded';
+  if (result.meta.changes === 0) return 'not_invited';
+
+  // The minimum-attendees cascade (decision 4), scoped to exactly what
+  // validateEventWriteInput allows minimum_attendees to be set on: a
+  // non-recurring, non-poll event -- so event.minimum_attendees != null
+  // already implies both of the other two conditions today, and they're
+  // still checked explicitly rather than relied on implicitly. Auto-cancel's
+  // notice to everyone still coming, and the organizer's own prompt when
+  // auto-cancel is off, both go out through the outbox on the next tick
+  // (sweepCancelledEventNotices / sweepOrganizerCancelPrompts) -- what
+  // happens here is only ever the synchronous half decision 4 asks for:
+  // "record the decline and mark the event."
+  if (
+    status === 'declined' &&
+    event.event_type === 'single' &&
+    !event.is_recurring &&
+    event.minimum_attendees != null
+  ) {
+    const confirmed = await countConfirmedAttendees(
+      env,
+      { id: eventId, guild_id: event.guild_id, organizer_id: event.organizer_id },
+      occurrenceDate,
+    );
+    if (confirmed < event.minimum_attendees && event.auto_cancel_below_minimum) {
+      // Guarded on status = 'active' so two declines racing below the
+      // minimum at the same time still cancel the event exactly once.
+      await env.DB.prepare(
+        `UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'active'`,
+      )
+        .bind(Date.now(), eventId)
+        .run();
+    }
+  }
+
+  return 'recorded';
 }

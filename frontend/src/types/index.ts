@@ -66,6 +66,19 @@ export interface RecurrenceRule {
   endCount: number | null;
 }
 
+// IDEAS item 49: one voter's answer on one option -- their vote, cast
+// whenever, plus their current RSVP where one exists (item 51's
+// override rule: an RSVP recorded after voting outranks the vote it
+// disagrees with). Null before the poll resolves, since there is nothing
+// to RSVP to yet.
+export interface PollVoter {
+  userId: string;
+  username: string;
+  globalName: string | null;
+  vote: PollVote;
+  currentRsvpStatus: RsvpStatus | null;
+}
+
 export interface PollOption {
   id: string;
   startAt: number; // unix ms UTC
@@ -73,6 +86,9 @@ export interface PollOption {
   displayOrder: number;
   confirmedAt: number | null;
   confirmedUsers: { userId: string; username: string; globalName: string | null }[];
+  // Everyone who voted on this option, not just the confirmed set above --
+  // visible whether or not the poll (or this option) has resolved.
+  voters: PollVoter[];
   tally: { yes: number; no: number; maybe: number };
   myVote: PollVote | null;
 }
@@ -83,6 +99,8 @@ export interface WindowSubmission {
   globalName: string | null;
   startAt: number;
   endAt: number;
+  // Same override as PollVoter.currentRsvpStatus, for the same reason.
+  currentRsvpStatus: RsvpStatus | null;
 }
 
 // One candidate of a windowed poll (specs/0013). A poll used to have exactly
@@ -199,6 +217,10 @@ export interface EventDetail extends EventOccurrence {
   windowBlockMinutes: number | null;
   voiceChannelId: string | null;
   voiceChannelName: string | null;
+  // specs/0014 stage 3, decision 4. Only meaningful on a non-recurring
+  // single event -- see EventFormPage's own gating.
+  minimumAttendees: number | null;
+  autoCancelBelowMinimum: boolean;
   recurrence: RecurrenceRule | null;
   invites: EventInvite[];
   pollOptions: PollOption[] | null;

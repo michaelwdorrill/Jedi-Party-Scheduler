@@ -34,6 +34,61 @@ identity, not a position — it never changes and is never reused.
 
 ## Still open
 
+### 55. Manually cancelling an event tells nobody
+
+Found while scoping v0.6.2's cancellation cascade (decision 4), and older
+than it: `DELETE /:eventId` (`worker/src/routes/events.ts`) has only ever
+done `UPDATE events SET status = 'cancelled'` — no DM, no notice, to anyone,
+since v0.1. An organizer who cancels a session their invitees were counting
+on has no way to actually tell them through the app; whatever they know
+comes from wherever the organizer says it themselves.
+
+Deliberately not folded into v0.6.2's cascade, which added the *first*
+"event just got cancelled, tell everyone still coming" notice this app has
+ever had (`sweepCancellationCascade` in `cron/reminders.ts`) — but scoped
+narrowly to `minimum_attendees IS NOT NULL`, since both paths that release
+adds (the auto-cancel write, the organizer's own cancel-prompt button) only
+ever apply to an event that opted into a minimum. Widening that sweep's
+`WHERE` to cover every cancellation is very possibly the cheap fix once
+someone looks — the sending mechanism, the dedupe, the "who is still
+confirmed" query are all already built and already correct — but it wants
+its own look at the UX questions decision 4 never had to answer: does the
+DM say *why* (an organizer choice, vs. a decline?), and should there be any
+way for an organizer to cancel *without* telling everyone (a mistaken event,
+created and cancelled in the same minute)?
+
+### 54. The minimum-attendees cascade doesn't cover recurring events
+
+Captured while building v0.6.2 (specs/0014 stage 3, decision 4), and left
+out of that release on purpose rather than discovered afterward.
+`minimum_attendees`/`auto_cancel_below_minimum` are rejected outright by
+`validateEventWriteInput` when the event is recurring, so the whole cascade
+— the synchronous check in `recordRsvp`, the organizer's cancel-prompt DM,
+the cancelled-event notice — only ever runs for a plain one-off event.
+
+The reason wasn't difficulty so much as shape: decision 4's own text and
+every worked example are per-occurrence in spirit but never actually say
+what happens to a recurring session below its minimum, and the honest
+answer is a materially different write path — cancelling *one occurrence*
+of a series means an `event_occurrence_overrides` row
+(`is_cancelled = 1`, the same primitive `POST
+/events/:eventId/occurrences/:date/cancel` already uses), not
+`events.status = 'cancelled'`, which would cancel the whole series. Building
+both shapes at once risked getting the `custom_id` wrong on the first try —
+the organizer's "Cancel this session" button (`uo:v2:cancel:<eventId>`,
+specs/0014's v1→v2 discipline) carries no occurrence date because this
+release never needed one; a recurring version needs one appended, which is
+a new custom_id kind rather than a reinterpretation of the existing one.
+
+The pieces that would extend cleanly: `countConfirmedAttendees` and the
+cancel-prompt/notice sweep already take an `occurrenceDate` parameter
+(currently always `''`); `getConfirmedAttendeeIds`'s occurrence-scoped
+queries already work per-occurrence for everything else. The real design
+work is deciding whether a series-wide `minimum_attendees` applies
+identically to every occurrence, or whether that is itself the wrong
+question — the same "per-occurrence state, not per-occurrence nagging"
+distinction decision 7 already drew for the reminder ladder.
+
 ### 53. The terminal-history purge under-reserves its own budget by one statement per chunk
 
 Found building v0.6.1's reminder ladder (Aug 2026), not while looking for it.

@@ -173,7 +173,8 @@ eventRoutes.get('/:eventId', async (c) => {
     // the response actually carries -- at most 3 rows per option for the
     // tallies, one per option for the viewer's own votes, and named users
     // only for options that are actually confirmed.
-    const [{ results: tallyRows }, { results: myVoteRows }, { results: confirmedRows }] = await Promise.all([
+    const [{ results: tallyRows }, { results: myVoteRows }, { results: confirmedRows }, { results: voterRows }] =
+      await Promise.all([
       c.env.DB.prepare(
         `SELECT ev.option_id, ev.vote, COUNT(*) AS n FROM event_poll_votes ev
          JOIN event_poll_options o ON o.id = ev.option_id
@@ -200,6 +201,35 @@ eventRoutes.get('/:eventId', async (c) => {
       )
         .bind(eventId)
         .all<{ option_id: string; user_id: string; username: string; global_name: string | null }>(),
+      // IDEAS item 49: every voter on every option, not just the confirmed
+      // yes-voters above -- "who voted for what" while the poll is still
+      // open, which today only fixed-time events and window polls show.
+      // currentRsvpStatus is the item-51-shaped override: once an option
+      // resolves, an RSVP recorded since can disagree with the vote cast
+      // before it (rsvpOverridesVote's rule in lib/attendance.ts), and the
+      // vote alone would silently show the wrong answer. Read here as a
+      // plain per-voter LEFT JOIN -- "what is this one person's current
+      // answer" -- rather than attendance.ts's aggregate confirmed-set
+      // shape, which answers a different question ("who is in the set")
+      // that this per-row display does not need.
+      c.env.DB.prepare(
+        `SELECT ev.option_id, ev.user_id, ev.vote, u.username, u.global_name, att.rsvp_status AS current_rsvp_status
+         FROM event_poll_votes ev
+         JOIN event_poll_options o ON o.id = ev.option_id
+         JOIN users u ON u.id = ev.user_id
+         LEFT JOIN event_attendance att ON att.event_id = o.event_id AND att.occurrence_date = '' AND att.user_id = ev.user_id
+         WHERE o.event_id = ?
+         ORDER BY u.username`,
+      )
+        .bind(eventId)
+        .all<{
+          option_id: string;
+          user_id: string;
+          vote: string;
+          username: string;
+          global_name: string | null;
+          current_rsvp_status: string | null;
+        }>(),
     ]);
 
     const talliesByOption = new Map<string, { yes: number; no: number; maybe: number }>();
@@ -225,6 +255,21 @@ eventRoutes.get('/:eventId', async (c) => {
       });
     }
 
+    const votersByOption = new Map<
+      string,
+      { userId: string; username: string; globalName: string | null; vote: string; currentRsvpStatus: string | null }[]
+    >();
+    for (const row of voterRows) {
+      if (!votersByOption.has(row.option_id)) votersByOption.set(row.option_id, []);
+      votersByOption.get(row.option_id)!.push({
+        userId: row.user_id,
+        username: row.username,
+        globalName: row.global_name,
+        vote: row.vote,
+        currentRsvpStatus: row.current_rsvp_status,
+      });
+    }
+
     pollOptions = options.map((opt) => ({
       id: opt.id,
       startAt: opt.start_at,
@@ -232,6 +277,11 @@ eventRoutes.get('/:eventId', async (c) => {
       displayOrder: opt.display_order,
       confirmedAt: opt.confirmed_at,
       confirmedUsers: confirmedByOption.get(opt.id) ?? [],
+      // IDEAS item 49: everyone's answer, not just the confirmed set --
+      // `vote` is what they said before the poll settled; `currentRsvpStatus`
+      // is what they said since (null if they never answered the RSVP,
+      // which is the normal case before resolution).
+      voters: votersByOption.get(opt.id) ?? [],
       tally: talliesByOption.get(opt.id) ?? { yes: 0, no: 0, maybe: 0 },
       myVote: myVoteByOption.get(opt.id) ?? null,
     }));
@@ -283,6 +333,9 @@ eventRoutes.get('/:eventId', async (c) => {
     windowBlockMinutes: event.window_block_minutes,
     voiceChannelId: event.voice_channel_id,
     voiceChannelName: event.voice_channel_name,
+    // specs/0014 stage 3, decision 4.
+    minimumAttendees: event.minimum_attendees ?? null,
+    autoCancelBelowMinimum: !!event.auto_cancel_below_minimum,
     recurrence: recurrence
       ? {
           freq: recurrence.freq,
@@ -422,6 +475,11 @@ eventRoutes.post('/:eventId/rsvp', async (c) => {
   // existing collapsed 403 to deserve its own status -- unlike no_such_event
   // vs. not_invited, there's no probing concern here worth hiding it for.
   if (outcome === 'invalid_occurrence') return c.text('Occurrence does not match this event', 400);
+  // Also its own message, same reasoning as invalid_occurrence: not a
+  // probing concern (the caller already knows this event exists and they
+  // were invited to it), just a stale client trying to answer something
+  // that is no longer answerable.
+  if (outcome === 'event_not_active') return c.text('This event is no longer active', 409);
   // A missing event and an uninvited caller stay one answer, as they were
   // before the extraction: telling someone which of the two it is would let
   // an event id be probed for existence.

@@ -76,7 +76,21 @@ const PAID_D1_QUERIES = 1000;
 // later, because one less query of usable allowance left it permanently
 // short of what it needs to start. The reminders were folded into
 // sweepConfirmedMultiWinnerOptions instead, which already scans exactly
-// those rows, so the fixed cost is unchanged and this stays at 24.
+// those rows, so the fixed cost was unchanged and this stayed at 24.
+//
+// specs/0014 stage 3's cancellation cascade (decision 4) needed a new,
+// genuinely new fixed scan (sweepCancellationCascade in cron/reminders.ts --
+// an active event below its minimum; a cancelled one still owing a notice --
+// a predicate that doesn't belong inside any existing sweep's query). This
+// reserve stays at 24 anyway: bumping it to "match" a new charged query
+// does not work, because the bump reduces the starting ledger by the same
+// amount the new charge takes from it, netting a *smaller* remainder at
+// sweepPurgeTerminalHistory than before, not an unchanged one -- confirmed
+// by measurement, and it is exactly the failure this comment already
+// recorded once for item 47's first attempt. sweepCancellationCascade's own
+// comment explains the fix that actually holds: its discovery read runs
+// uncharged, the same as sweepPurgeTerminalHistory's own candidate SELECT
+// a few lines below it in that file.
 const RESERVED_QUERIES = 24;
 const RESERVED_SUBREQUESTS = 4;
 

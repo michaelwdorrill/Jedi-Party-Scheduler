@@ -70,7 +70,17 @@ export default function WindowAvailabilityPicker({
               left: `${pct(Math.round((s.startAt - windowStartAt) / 60000))}%`,
               width: `${pct(Math.round((s.endAt - s.startAt) / 60000))}%`,
             }}
-            title={`${s.globalName ?? s.username}: ${fmt(s.startAt, zone, spansMultipleDays)}–${fmt(s.endAt, zone, spansMultipleDays)}`}
+            title={`${s.globalName ?? s.username}: ${fmt(s.startAt, zone, spansMultipleDays)}–${fmt(s.endAt, zone, spansMultipleDays)}${
+              // IDEAS item 49: the submission is what they offered; an RSVP
+              // recorded since (once the poll has resolved) can say
+              // something different, and this is the one place that gap
+              // would otherwise be invisible.
+              s.currentRsvpStatus === 'declined'
+                ? ' (now says can’t make it)'
+                : s.currentRsvpStatus === 'tentative'
+                  ? ' (now says maybe)'
+                  : ''
+            }`}
           />
         ))}
         {bestCandidate && bestCandidate.count > 0 && (
