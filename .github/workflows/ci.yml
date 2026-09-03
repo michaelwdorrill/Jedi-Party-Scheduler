@@ -69,6 +69,14 @@ jobs:
         working-directory: worker
         run: npm run check:env-parity
 
+      # IDEAS item 43: CURRENT_POLICY_VERSION bumping by accident logs out
+      # every session in production. Failing the build if it moves without
+      # policy-version.txt moving with it is cheaper than the alternative --
+      # review missing it, as it once already did.
+      - name: Check policy version guard
+        working-directory: worker
+        run: npm run check:policy-version
+
   frontend:
     runs-on: ubuntu-latest
     steps:
