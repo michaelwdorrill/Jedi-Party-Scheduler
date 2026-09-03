@@ -134,6 +134,13 @@ something a deploy can carry.
    approved server with no bot in it, and a bot sitting in a server nobody
    reviewed. Neither is a security failure; both are the flow lying about
    what it did.
+
+   Verified by direct A/B against Discord rather than by test alone, which
+   matters here: the regression test can only prove the Worker *emits* the
+   parameter, not that Discord honours it — a wrong parameter name would
+   leave every check green and the bug live. Loading the same bot-invite URL
+   twice, identical but for that one parameter, the dropdown is locked with
+   it and freely changeable without it.
 4. The owner gets an email: server name, requester's Discord username, a link
    to approve, a link to reject. Both links carry a short-lived signed token
    (see below) rather than requiring the owner to be logged into the site
