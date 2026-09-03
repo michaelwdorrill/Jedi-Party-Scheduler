@@ -38,23 +38,48 @@ export default function EventChip({
   // (`palette.pending`), which composes with "past" (a candidate day already
   // gone by is both) in a way another opacity step could not.
   const provisional = !cancelled && occurrence.isProvisional === true;
+  // idea 52: the chip never said what *you* answered, for any event type --
+  // only cancelled/provisional ever changed how it looked. `tentative`
+  // shares provisional's dashed-outline mark rather than inventing a fourth
+  // treatment, on the theory that both mean "this might not happen, from
+  // where you're standing" and read the same way at a glance. `declined`
+  // gets its own, heavier fade instead of hiding the chip outright -- "I'm
+  // not going" is still useful to see on your own calendar (a reminder you
+  // said no, not just an absence), and hiding it would make a declined
+  // occurrence indistinguishable from one that was never on the calendar at
+  // all. Neither state is checked once `provisional` is already true: a poll
+  // candidate is voted on, not RSVP'd to, so myRsvpStatus is not meaningful
+  // on one yet.
+  const tentative = !cancelled && !provisional && occurrence.myRsvpStatus === 'tentative';
+  const declined = !cancelled && !provisional && occurrence.myRsvpStatus === 'declined';
   const color = cancelled
     ? 'bg-raised-hi line-through opacity-60'
-    : provisional
-      ? `${palette.pending}${past ? ' opacity-45' : ''}`
-      : past
-        ? `${palette.bg} opacity-45`
-        : palette.bg;
+    : declined
+      ? `${palette.bg} opacity-30`
+      : provisional || tentative
+        ? `${palette.pending}${past ? ' opacity-45' : ''}`
+        : past
+          ? `${palette.bg} opacity-45`
+          : palette.bg;
 
   const time = occurrence.startAt
     ? DateTime.fromMillis(occurrence.startAt).setZone(zone).toFormat('h:mm a')
     : 'Poll open';
-  // Said in words as well as in the outline: a dashed border is a hint, and
-  // "maybe" is too important to leave to one. Where there is no room for
-  // both, the word wins over the time -- a candidate day's exact start is
-  // the less useful half while it is still only a proposal, and both are in
-  // the tooltip and the agenda regardless.
-  const qualifier = provisional ? (compact ? 'Maybe' : `Maybe · ${time}`) : time;
+  // Said in words as well as in the outline/fade: a visual mark is a hint,
+  // and each of these is too important to leave to one. Where there is no
+  // room for both, the word wins over the time -- both are in the tooltip
+  // and the agenda regardless.
+  const qualifier = provisional
+    ? compact
+      ? 'Maybe'
+      : `Maybe · ${time}`
+    : tentative
+      ? compact
+        ? 'Tentative'
+        : `Tentative · ${time}`
+      : declined
+        ? 'Declined'
+        : time;
 
   const occurrenceDate =
     occurrence.isRecurring && occurrence.occurrenceId.includes('::')
@@ -82,7 +107,7 @@ export default function EventChip({
     <Link
       to={to}
       className={`block rounded px-1.5 py-0.5 text-xs leading-tight ${color} hover:opacity-90 focus-inset`}
-      title={`${provisional ? 'Proposed: ' : ''}${occurrence.title}${occurrence.game ? ` — ${occurrence.game}` : ''}${occurrence.isPersonal ? ' (personal time)' : occurrence.guildName ? ` — ${occurrence.guildName}` : ''}`}
+      title={`${provisional ? 'Proposed: ' : tentative ? 'Tentative: ' : declined ? 'Declined: ' : ''}${occurrence.title}${occurrence.game ? ` — ${occurrence.game}` : ''}${occurrence.isPersonal ? ' (personal time)' : occurrence.guildName ? ` — ${occurrence.guildName}` : ''}`}
     >
       <span className="block truncate text-[0.65rem] opacity-75">
         {qualifier}
