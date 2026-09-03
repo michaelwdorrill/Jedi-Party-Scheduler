@@ -553,6 +553,41 @@ case too, which is the common one for anyone who runs more than one server.
 Cheap, and it is the difference between a page that answers "where is my
 server?" and one that leaves the person to guess.
 
+### 58. The bot can be added self-service but has no way out
+
+v0.7.1 gave a server admin a one-click path to put the bot *into* a server.
+There is no path back out. `DELETE /admin/guilds/:id` only sets
+`is_active = 0` — the allow-list forgets the server, but the bot is still
+sitting in it on Discord, indefinitely.
+
+`specs/0015` explicitly scoped removal out on the grounds that "the manual
+path still exists for that." Testing v0.7.1 showed that path doesn't
+reliably exist: removing a bot needs Kick Members (or the app's Integrations
+entry to be removable), and Manage Server — the exact permission this
+feature requires to *add* the bot — does not include it. So the person the
+flow is designed around can add the bot to their own server and then be
+unable to remove it. Nor can the operator: the bot token is a Worker secret,
+so getting it out by hand means resetting the token in Discord's portal and
+re-running `wrangler secret put`, which breaks the running deployment until
+it is done. That is a lot of ceremony to undo one click.
+
+The fix is small and pairs with what already exists: `DELETE
+/users/@me/guilds/{id}` with the bot token makes the bot remove itself, no
+permissions needed on anyone's account. Wrap it in `lib/discord.ts`
+(`leaveGuild`), call it from the existing owner-only admin routes alongside
+the `is_active = 0` write, so deactivating a server actually means the bot
+leaves it.
+
+Worth deciding one thing first, which is why this is a capture rather than a
+patch: whether leaving should be automatic on deactivation, or a separate
+deliberate action. Automatic is tidier and matches what "remove this server"
+plainly means; separate is safer, because a temporary deactivation (say,
+while debugging) would otherwise silently require re-inviting the bot, which
+needs the server admin again rather than the operator. Leaning separate, for
+the same reason `specs/0016` made the stale-account purge suppressible
+rather than unconditional — the irreversible half of an operation deserves
+its own yes.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
