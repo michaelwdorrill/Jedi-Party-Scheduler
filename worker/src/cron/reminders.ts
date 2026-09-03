@@ -195,25 +195,29 @@ const TERMINAL_HISTORY_RETENTION_MS = 90 * DAY_MS;
 // batch.
 const TERMINAL_HISTORY_PURGE_BATCH_SIZE = 100;
 
-// Delete statements issued per chunk of purged event ids -- one per child
-// table plus the parent. Kept next to the batch below so the two stay in
-// step.
+// Statements issued for the one chunk a tick processes -- one per
+// non-cascading child table, two to break the fan-out pointer (below), and
+// one for the parent. Kept next to the statement list below so the two stay
+// in step.
 //
-// This is actually 8 going on 9: specs/0014 stage 1 added an
-// event_attendance delete to the statement list below without updating this
-// constant, so the purge has under-reserved by one statement per chunk
-// since v0.6. Left at 8 here rather than corrected, because the honest fix
-// isn't just this number -- pass6.test.ts's "backlog and a purge queue"
-// budget-fit test is tuned with zero margin against the *current* (buggy)
-// figure, and correcting to 9 alone pushes that test past what a steady
-// tick actually has left over (measured: 16 available, 18 needed for this
-// test's 2 chunks), which no number of ticks closes -- the same "not at 40,
-// not at 200" failure mode that test's own comment already warns about for
-// exactly this shape of change. Fixing it properly means finding where that
-// test's other 8 queries of headroom went missing too, which is out of
-// scope for the reminder ladder this constant was touched alongside.
-// Logged as IDEAS item -- see docs/IDEAS.md.
-const PURGE_STATEMENTS_PER_CHUNK = 8;
+// This used to read 8, undercounting by one (specs/0014 stage 1 added an
+// event_attendance delete without updating it -- IDEAS item 53) *and* the
+// purge used to spend `chunks.length * this` in one tick, trying to clear an
+// entire backlog at once. Simply correcting the count to 9 broke
+// pass6.test.ts's "backlog and a purge queue" budget-fit test: at zero
+// margin against the old (buggy) figure, 9 x 2 chunks needed 18 on a tick
+// measured to have only 16 left over, which no number of ticks closes -- the
+// same "not at 40, not at 200" starvation IDEAS item 47 hit for the same
+// reason. Item 56 then wanted an 11th statement here (two more, actually --
+// see below) to fix a real FK error, which only made that arithmetic worse.
+//
+// The fix that closes both: a tick now buys and runs exactly one chunk, not
+// "however many chunks this backlog's SELECT happened to return" (see
+// sweepPurgeTerminalHistory below). That makes the per-tick cost this
+// constant, full stop, independent of backlog size or how many child tables
+// this purge ever grows to cover -- so a future 12th statement is just
+// another safe bump here, not a second look at this same budget math.
+const PURGE_STATEMENTS_PER_CHUNK = 11;
 
 type NotificationType =
   | 'invite'
@@ -230,7 +234,8 @@ type NotificationType =
   | 'ladder_accepted_1h'
   | 'ladder_window_outside_hours'
   | 'organizer_cancel_prompt'
-  | 'event_cancelled_below_minimum';
+  | 'event_cancelled_below_minimum'
+  | 'event_cancelled';
 
 // Event-scoped notifications go through the shared leased outbox (see
 // lib/outbox.ts), keyed on the same four columns as notification_log's UNIQUE
@@ -1734,14 +1739,23 @@ async function sweepConfirmedMultiWinnerOptions(
 // candidate set is exactly the events that opted into this feature, not
 // every event in the install.
 //
-// **The notice half** (`kind = 'notice'`): an event the cascade already
-// cancelled -- automatically (recordRsvp's guarded UPDATE) or by the
-// organizer's own press (interactions.ts) -- owes a notice to everyone who
-// was still marked as coming. Scoped to `minimum_attendees IS NOT NULL`
-// rather than to `auto_cancel_below_minimum = 1` alone, since both paths
-// this release adds only ever apply to an event with a minimum set in the
-// first place; an event cancelled the ordinary way (DELETE /:eventId)
-// never does, so this does not reach into that older, separate gap.
+// **The notice half** (`kind = 'notice'`): any cancelled, non-recurring
+// event owes a notice to everyone who was still marked as coming (IDEAS
+// item 55) -- not just the minimum-attendees cascade's own cancellations
+// (automatic, via recordRsvp's guarded UPDATE, or the organizer's own press
+// in interactions.ts) but also a plain organizer cancel through
+// DELETE /:eventId, which had never told anyone anything since v0.1.
+// sendCancelledEventNotice below picks the wording (and notification_type)
+// based on whether minimum_attendees is set, so the two don't get the same
+// message for different reasons.
+//
+// Still `is_recurring = 0`: DELETE /:eventId cancels a whole recurring
+// series the same way it cancels a one-off, but this app has no settled
+// answer yet for what a per-occurrence notice should mean for a series (the
+// same "per-occurrence state, not per-occurrence nagging" question
+// specs/0014 had to answer for the reminder ladder) -- see IDEAS item 54.
+// Recurring cancellations are left exactly as silent as they already were
+// rather than guessed at here.
 // Its own discovery read is deliberately uncharged against the ledger, the
 // same as sweepPurgeTerminalHistory's candidate SELECT just below it: a
 // *charged* fixed query here would come out of the same near-zero-margin
@@ -1784,19 +1798,21 @@ async function sweepCancellationCascade(env: Env, budget: TickBudget): Promise<v
 
      SELECT * FROM (
        SELECT *, 'notice' AS kind FROM events
-       WHERE status = 'cancelled' AND minimum_attendees IS NOT NULL AND is_recurring = 0
+       WHERE status = 'cancelled' AND is_recurring = 0
          AND updated_at >= ?
        LIMIT ?
      )`,
   )
     .bind(GLOBAL_SCAN_LIMIT, terminalHistoryHotCutoff(), GLOBAL_SCAN_LIMIT)
-    .all<EventRow & { kind: 'prompt' | 'notice'; minimum_attendees: number }>();
+    .all<EventRow & { kind: 'prompt' | 'notice'; minimum_attendees: number | null }>();
 
   for (const row of results) {
     if (budget.exhausted) return;
     try {
       if (row.kind === 'prompt') {
-        await maybeSendOrganizerCancelPrompt(env, budget, row);
+        // Guaranteed non-null by this arm's own WHERE clause above, unlike
+        // the notice arm's rows (a plain cancel has no minimum at all).
+        await maybeSendOrganizerCancelPrompt(env, budget, row as EventRow & { minimum_attendees: number });
       } else {
         await sendCancelledEventNotice(env, budget, row);
       }
@@ -1850,15 +1866,21 @@ async function maybeSendOrganizerCancelPrompt(
 async function sendCancelledEventNotice(
   env: Env,
   budget: TickBudget,
-  event: EventRow,
+  event: EventRow & { minimum_attendees: number | null },
 ): Promise<void> {
   const limit = budget.deliveriesAffordable;
   if (limit <= 0) return;
+  // IDEAS item 55: a plain organizer cancel (DELETE /:eventId) gets its own
+  // type and wording rather than reusing 'event_cancelled_below_minimum' --
+  // that message states a reason ("attendance dropped below the minimum")
+  // that isn't true for it, and the two need separate notification_log rows
+  // anyway since dedupe is keyed on notification_type.
+  const notificationType = event.minimum_attendees != null ? 'event_cancelled_below_minimum' : 'event_cancelled';
   // Deliberately not getConfirmedAttendeeIds' `PendingFor` shape -- that
   // dedupes against a *different* notification's history, which is exactly
   // wrong for "did we already tell you this one is cancelled."
   const pending = await getConfirmedAttendeeIds(env, event, null, '', {
-    notificationType: 'event_cancelled_below_minimum',
+    notificationType,
     occurrenceDate: '',
     limit,
   });
@@ -1867,9 +1889,12 @@ async function sendCancelledEventNotice(
     budget,
     pending,
     event.id,
-    'event_cancelled_below_minimum',
+    notificationType,
     '',
-    () => `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`,
+    () =>
+      event.minimum_attendees != null
+        ? `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`
+        : `"${event.title}" has been cancelled by the organizer.\n${eventLink(env, event.id)}`,
   );
 }
 
@@ -2496,51 +2521,71 @@ async function sweepPurgeTerminalHistory(env: Env, budget: TickBudget): Promise<
     .all<{ id: string }>();
   if (candidates.length === 0) return;
 
-  // Charged, not reserved for. This sweep's cost scales with how much
-  // terminal history is waiting -- eight delete statements per chunk of ids,
-  // so a full batch is another sixteen statements on top of an already-spent
-  // tick. Reserving that permanently would take it away from notifications on
-  // every tick, including the overwhelming majority where there is nothing to
-  // purge at all.
+  // Charged, not reserved for. Reserving PURGE_STATEMENTS_PER_CHUNK
+  // permanently would take it away from notifications on every tick,
+  // including the overwhelming majority where there is nothing to purge at
+  // all. Charging it means a tick that has spent its allowance sending DMs
+  // simply doesn't purge this time. Deleting ninety-day-old cancelled events
+  // is the least urgent thing the cron does; it can wait for a quieter tick.
   //
-  // Charging it means a tick that has spent its allowance sending DMs simply
-  // doesn't purge this time. Deleting ninety-day-old cancelled events is the
-  // least urgent thing the cron does; it can wait for a quieter tick.
-  const chunks = chunkIds(candidates.map((c) => c.id));
-  if (!budget.trySpend(chunks.length * PURGE_STATEMENTS_PER_CHUNK)) {
+  // Only the first chunk, not every chunk this batch's SELECT happened to
+  // return (IDEAS items 53/56 -- see PURGE_STATEMENTS_PER_CHUNK's comment).
+  // `candidates.length > 0` above guarantees chunkIds returns at least one
+  // chunk here. The SELECT re-runs every tick and naturally picks up
+  // wherever the last tick left off, since a purged row simply stops
+  // matching it -- an already-large backlog drains a chunk at a time across
+  // ticks rather than needing its entire size to fit in one.
+  const [chunk] = chunkIds(candidates.map((c) => c.id));
+  if (!budget.trySpend(PURGE_STATEMENTS_PER_CHUNK)) {
     console.log('Skipping terminal-history purge this tick; the allowance went to notifications.');
     return;
   }
 
-  // Deletes are scoped to these specific, already-selected ids (chunked
-  // below D1's parameter ceiling) rather than repeating the SELECT above as
-  // a subquery in each statement -- plain DELETE doesn't support ORDER
-  // BY/LIMIT directly, and re-running an unordered version of the same
-  // predicate per statement would risk each one matching a slightly
-  // different set if a row's state changed between them.
-  // Same child-first, id-scoped shape as deleteUserCompletely: D1 doesn't
-  // enforce these foreign keys, so the children are deleted explicitly
-  // rather than relied on to cascade.
-  const statements: D1PreparedStatement[] = [];
-  for (const chunk of chunks) {
-    const ph = placeholders(chunk.length);
-    statements.push(
-      env.DB.prepare(
-        `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id IN (${ph}))`,
-      ).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_invites WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_attendance WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_occurrence_overrides WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM notification_log WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM events WHERE id IN (${ph})`).bind(...chunk),
-    );
-  }
+  // Deletes are scoped to these specific, already-selected ids rather than
+  // repeating the SELECT above as a subquery in each statement -- plain
+  // DELETE doesn't support ORDER BY/LIMIT directly, and re-running an
+  // unordered version of the same predicate per statement would risk each
+  // one matching a slightly different set if a row's state changed between
+  // them.
+  // Same child-first, id-scoped shape as deleteUserCompletely: not every
+  // table below cascades from `events` (see migration comments), so the
+  // ones that don't are deleted explicitly rather than relied on to cascade.
+  const ph = placeholders(chunk.length);
+  const statements: D1PreparedStatement[] = [
+    // IDEAS item 56: migration 0027's created_from_poll_id/created_from_option_id
+    // are a fanned-out event's pointer back to the multi-winner poll and
+    // option it came from, and neither carries ON DELETE CASCADE. A
+    // still-live fanned-out event (not terminal, so never itself in this
+    // chunk) can hold one of these pointing at a poll or option this chunk
+    // is about to delete -- left set, that's a bare "FOREIGN KEY constraint
+    // failed" naming nothing, the same shape item 38 hit from a different
+    // column, and clean-sandbox.sql already works around it the same way:
+    // break the pointer before anything it points at is removed. Two
+    // statements, not one `OR` -- binding `chunk` on both sides of one
+    // statement would double its parameter count, and a full-size chunk
+    // already sits at D1's per-statement ceiling with one use of it.
+    env.DB.prepare(`UPDATE events SET created_from_poll_id = NULL WHERE created_from_poll_id IN (${ph})`).bind(
+      ...chunk,
+    ),
+    env.DB.prepare(
+      `UPDATE events SET created_from_option_id = NULL
+       WHERE created_from_option_id IN (SELECT id FROM event_poll_options WHERE event_id IN (${ph}))`,
+    ).bind(...chunk),
+    env.DB.prepare(
+      `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id IN (${ph}))`,
+    ).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_invites WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_attendance WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_occurrence_overrides WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM notification_log WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM events WHERE id IN (${ph})`).bind(...chunk),
+  ];
   await env.DB.batch(statements);
 
-  console.log(`Purged ${candidates.length} terminal event(s) older than ${TERMINAL_HISTORY_RETENTION_MS / DAY_MS} days.`);
+  console.log(`Purged ${chunk.length} terminal event(s) older than ${TERMINAL_HISTORY_RETENTION_MS / DAY_MS} days.`);
 }
 
 // Keeps the membership cache fresh enough for every recipient query above to

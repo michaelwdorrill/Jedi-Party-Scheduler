@@ -299,6 +299,71 @@ describe('the minimum-attendees cascade', () => {
   });
 });
 
+// IDEAS item 55: a plain organizer cancel (no minimum_attendees set) used to
+// tell nobody at all -- DELETE /:eventId has only ever flipped
+// events.status, since v0.1. This widens the same cascade sweepCancellationCascade
+// already runs for the minimum-attendees case.
+describe('a plain organizer cancel (no minimum set)', () => {
+  async function seedPlainEvent(db: ShimDatabase, eventId: string, invitees: string[] = ['alice', 'bob']): Promise<void> {
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedEvent(db, { id: eventId, organizerId: 'organizer', title: 'Game night' });
+    for (const id of invitees) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+      await seedInvite(db, eventId, id);
+      await seedAttendance(db, eventId, id, 'accepted', '');
+    }
+  }
+
+  it('notifies everyone still confirmed, with wording that names no minimum, once', async () => {
+    const { db, env } = setup();
+    await seedPlainEvent(db, 'e1');
+    // Alice declines before the cancel -- she should not be told a cancel
+    // she'd already opted out of. Bob stays confirmed, same as the organizer
+    // (implicitly attending unless declined).
+    await recordRsvp(env, 'alice', 'e1', '', 'declined');
+    await db.prepare(`UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = 'e1'`).bind(Date.now()).run();
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    expect(
+      await countRows(db, 'notification_log', `event_id = 'e1' AND notification_type = 'event_cancelled' AND user_id = 'organizer'`),
+    ).toBe(1);
+    expect(
+      await countRows(db, 'notification_log', `event_id = 'e1' AND notification_type = 'event_cancelled' AND user_id = 'bob'`),
+    ).toBe(1);
+    expect(await countRows(db, 'notification_log', `event_id = 'e1' AND notification_type = 'event_cancelled'`)).toBe(2);
+    // Never the minimum-attendees wording -- this event never set one.
+    expect(
+      await countRows(db, 'notification_log', `event_id = 'e1' AND notification_type = 'event_cancelled_below_minimum'`),
+    ).toBe(0);
+
+    const row = await db
+      .prepare(`SELECT content FROM notification_log WHERE event_id = 'e1' AND user_id = 'organizer'`)
+      .first<{ content: string }>();
+    expect(row!.content).toContain('cancelled by the organizer');
+
+    // One-shot: a second tick must not repeat it.
+    await runReminderSweep(env);
+    expect(await countRows(db, 'notification_log', `event_id = 'e1' AND notification_type = 'event_cancelled'`)).toBe(2);
+  });
+
+  it('does not notify anyone for a recurring event -- no settled per-occurrence meaning yet (IDEAS item 54)', async () => {
+    const { db, env } = setup();
+    await seedPlainEvent(db, 'e1');
+    await db.prepare(`UPDATE events SET is_recurring = 1 WHERE id = 'e1'`).run();
+    await db.prepare(`UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = 'e1'`).bind(Date.now()).run();
+
+    fetchStub = stubFetch([]);
+    await runReminderSweep(env);
+
+    expect(await countRows(db, 'notification_log', `event_id = 'e1'`)).toBe(0);
+  });
+});
+
 describe("the organizer's cancel button", () => {
   it('cancels the event and rewrites the DM with no components left to press again', async () => {
     const { db, env } = setup();
