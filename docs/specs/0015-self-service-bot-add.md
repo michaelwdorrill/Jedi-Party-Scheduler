@@ -86,6 +86,19 @@ the flow, not that it accepts a server id from a fully anonymous visitor)
 **and additionally Discord-verified per request** via the round trip above,
 which is the part that actually proves administrator standing.
 
+**A second OAuth round trip means a second registered redirect URI, and this
+was missed until sandbox testing hit it.** Discord refuses an
+`/oauth2/authorize` request with "Invalid OAuth2 redirect_uri" unless the
+exact URI is pre-registered on the application, and only `/auth/callback`
+had ever been added — for either the sandbox or the production Discord
+application; nothing about login breaks without the second one, which is
+exactly why it went unnoticed until `/add-bot` was actually exercised rather
+than just built. `docs/SETUP.md` now lists `/guild-requests/callback`
+alongside `/auth/callback` everywhere the first one is set up, but
+**production's Discord application still needs it added by hand** before
+`/add-bot` will work there — this is a one-time dashboard change, not
+something a deploy can carry.
+
 ## Flow
 
 1. A signed-in user visits a new page (not the raw Discord bot-invite URL)
