@@ -95,7 +95,19 @@ export function pendingNotificationWhereBinds(now = Date.now()): unknown[] {
 
 export type OutboxKey = Record<string, string | number>;
 
-export type OutboxTable = 'notification_log' | 'group_nudge_log' | 'change_request_log';
+// account_purge_warnings (IDEAS item 10 / specs/0016) is deliberately left
+// out of reapExhaustedDeliveries below. That reaper is a fixed, unconditional
+// per-tick cost -- one more table in its list is one more real query on
+// every tick forever, counted against RESERVED_QUERIES in cron/budget.ts,
+// which test/pass6.test.ts's zero-margin purge-and-backlog scenario has no
+// room left to absorb (confirmed by running it: adding this table there
+// starved sweepPurgeTerminalHistory the same way IDEAS item 47's own sweep
+// once did). The gap this leaves is cosmetic, not a correctness one: claim()'s
+// WHERE clause already stops reclaiming a row once attempt_count reaches
+// MAX_DELIVERY_ATTEMPTS regardless of failed_at, so an exhausted warning
+// simply stops being retried -- it just never gets failed_at stamped to say
+// so, on a table nothing else reads.
+export type OutboxTable = 'notification_log' | 'group_nudge_log' | 'change_request_log' | 'account_purge_warnings';
 
 // The outbox tables that carry a message's components and the id of the
 // message they were sent on (migrations 0022 and 0023). Deliberately one
@@ -193,6 +205,8 @@ async function claim(
 // whole backlog rather than one per exhausted row per tick.
 export async function reapExhaustedDeliveries(env: Env): Promise<void> {
   const now = Date.now();
+  // account_purge_warnings deliberately isn't reaped here -- see its own
+  // note where it joins OutboxTable above.
   for (const table of ['notification_log', 'group_nudge_log', 'change_request_log'] as const) {
     const res = await env.DB.prepare(
       `UPDATE ${table} SET failed_at = ?, claim_token = NULL, claimed_until = NULL

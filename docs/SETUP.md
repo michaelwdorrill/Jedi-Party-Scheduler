@@ -12,11 +12,22 @@ those require your own credentials. Do these steps yourself, in order.
    Application** (e.g. "Jedi Party Scheduler").
 2. Under **OAuth2 → General**, note the **Client ID** and **Client Secret**
    (you'll need both later).
-3. Still under **OAuth2 → General**, add a **Redirect URI**:
-   `https://<your-worker-subdomain>.workers.dev/auth/callback`
+3. Still under **OAuth2 → General**, add **two** Redirect URIs (Discord
+   accepts more than one per application — add both now, not just the
+   first):
+   ```
+   https://<your-worker-subdomain>.workers.dev/auth/callback
+   https://<your-worker-subdomain>.workers.dev/guild-requests/callback
+   ```
+   The second is idea 9's self-service bot-add flow (`specs/0015`) — its own
+   short-lived OAuth round trip, separate from login, and Discord will
+   refuse it with "Invalid OAuth2 redirect_uri" if this isn't registered,
+   the same way it would for the login one. Easy to miss because nothing
+   about *login* breaks if you skip it — only the `/add-bot` page does, and
+   not until someone actually tries it.
    (you'll get the exact `workers.dev` URL in step 2.7 below — you can come
-   back and add it once you have it, or add it now with a placeholder and
-   fix it after deploying).
+   back and add both once you have it, or add them now with a placeholder
+   and fix it after deploying).
 4. Go to the **Bot** tab, click **Add Bot**, and copy the **Bot Token** (you
    won't be able to see it again — regenerate it if you lose it).
 5. Under **Bot**, you don't need any privileged gateway intents — the bot
@@ -177,8 +188,9 @@ needs: editing Workers scripts and editing D1 databases.
      right-click your own name → **Copy User ID**). This is who's allowed to
      call the `/admin/*` endpoints to manage the server allow-list.
 12. Deploy: `npm run deploy`. Note the `https://*.workers.dev` URL it prints.
-13. Go back to the Discord Developer Portal (step 1.3) and make sure the
-    redirect URI exactly matches `<that workers.dev URL>/auth/callback`.
+13. Go back to the Discord Developer Portal (step 1.3) and make sure **both**
+    redirect URIs exactly match `<that workers.dev URL>/auth/callback` and
+    `<that workers.dev URL>/guild-requests/callback`.
 14. The cron trigger (`*/15 * * * *`, in `wrangler.toml`) takes effect
     automatically on deploy — no extra step needed.
 15. Seed the server allow-list. Easiest way: log into the site once (once the
@@ -620,8 +632,12 @@ environments). What's actually separate is the *data* and the *bot*.
    npm run deploy:sandbox
    ```
    Note the `https://jedi-party-scheduler-worker-sandbox.<you>.workers.dev`
-   URL it prints, then go back to the second Discord application and set its
-   OAuth redirect to `<that URL>/auth/callback`.
+   URL it prints, then go back to the second Discord application and add
+   **both** `<that URL>/auth/callback` and
+   `<that URL>/guild-requests/callback` as Redirect URIs — missing the
+   second one doesn't break login, only idea 9's `/add-bot` page, so it's
+   easy to not notice until someone actually tries that flow (found exactly
+   this way testing v0.7.1 on the sandbox).
 6. **Allow-list one throwaway test Discord server**, the same way step 2.15
    does for production, but against the sandbox Worker's `/admin/guilds`
    (`OWNER_DISCORD_ID` is the same account in both environments — see spec
@@ -701,6 +717,45 @@ rather than found by hand later — all detailed in spec 0002:
    "verifying against a sandbox several releases old" is visible before the
    verification instead of being inferred from odd behaviour afterwards
    (IDEAS item 30).
+
+## 6. Outbound email (Resend) — optional, for the self-service bot-add flow
+
+`specs/0015-self-service-bot-add.md` (idea 9) is the one feature in this app
+that sends real email — a pending guild-add request, to you, the owner.
+Everything about the feature works without this section done: `EMAIL_MODE`
+ships `"stub"` in both `[vars]` and `[env.sandbox.vars]` (`worker/wrangler.toml`),
+which logs what would have been sent instead of calling Resend. Do this
+section only when you actually want that email to arrive for real.
+
+1. Create a Resend account (https://resend.com) if you don't have one.
+2. **Verify a sending domain you control.** Resend's dashboard walks you
+   through adding SPF/DKIM DNS records at your registrar — the same kind of
+   one-time DNS step as "4.2 DNS at your registrar" above, just at a
+   different provider's dashboard. Until this is verified, Resend will
+   accept a send but it won't deliver.
+3. Create an API key in Resend's dashboard, scoped to sending only if that
+   option is offered.
+4. Set the secret, same pattern as the three in step 2.10 above:
+   ```
+   npx wrangler secret put RESEND_API_KEY
+   ```
+5. Edit `[vars]` in `worker/wrangler.toml`:
+   - `OWNER_EMAIL_ADDRESS`: where the request notification should land —
+     your own inbox.
+   - `EMAIL_FROM_ADDRESS`: an address on the domain you just verified (e.g.
+     `bot@yourdomain.com`). Resend rejects a send `from` an unverified
+     domain, so this has to be step 2's domain, not an arbitrary address.
+   - `EMAIL_MODE`: change `"stub"` to `"live"`.
+6. Redeploy: `npm run deploy`.
+
+**Leave the sandbox's `EMAIL_MODE` at `"stub"` — this is not a step to skip
+there, unlike everything else in this file.** `worker/wrangler.toml`'s own
+comment on `[env.sandbox.vars]`'s copy explains why: this flow's only real
+recipient is your own inbox, and live-sending it from the sandbox during
+routine iteration would either spam that inbox or need a second throwaway
+address for no real benefit. `wrangler tail --env sandbox` shows the stubbed
+content just as well as an inbox would, which is the verification step this
+feature actually wants from the sandbox.
 
 ## Running the tests
 

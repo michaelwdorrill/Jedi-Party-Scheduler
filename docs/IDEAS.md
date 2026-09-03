@@ -237,34 +237,6 @@ attendee list. Design and the blockers (the Privacy Policy currently
 promises the exact opposite) are in
 `specs/0007-server-noticeboard.md`. Still open.
 
-### 9. Self-service "add this bot to your server" link, gated by owner approval
-
-A public page/link (distinct from the raw Discord OAuth bot-add URL, which
-just adds the bot with no guardrail) that lets someone add the bot to their
-own Discord server. If that server is already on the allow-list, it just
-works. If it isn't, the request queues instead of silently granting access,
-and the site owner gets an email to approve or reject it before the server
-can actually use the app. Needs: an outbound email path (nothing in the
-Worker sends email today — SETUP.md's contact address is just a mailto link
-on the legal pages), a pending-request state in D1 distinct from the
-existing `guilds` allow-list, and an approve/reject action (email link with
-a signed token, or a page under `/admin`) that feeds the same allow-list
-insert the manual `curl`/`wrangler d1 execute` step in SETUP.md does today.
-
-### 10. Auto-delete accounts that have gone stale
-
-If someone hasn't logged in for a year, warn them by DM at two weeks and one
-week out, then purge them from the system if they still haven't logged back
-in. Point of it: a synced integration (see idea 2, Google Calendar)
-shouldn't quietly keep running forever for someone who's stopped using the
-site. Needs: a last-login timestamp to sweep on (cron, same pattern as the
-existing reminder sweeps), two new DM types, and reusing the
-account-deletion path `SettingsPage.tsx`'s type-to-confirm delete already
-exercises — minus the user initiating it. Worth deciding whether "logged in"
-should also count as "used" for someone who stays signed in and never opens
-the site, and whether organizing/being invited to a future event should
-suppress the purge even if login is stale.
-
 
 ### 23. The sandbox has no frontend, so the sandbox-first rule has a blind spot for frontend-only changes — partly shipped in v0.4.1
 
@@ -521,6 +493,101 @@ events — at which point "who is coming to this night" stops being a poll
 question at all and becomes an ordinary event's invitee list, which already
 works.
 
+### 56. `sweepPurgeTerminalHistory` can throw a FK error on a poll whose fan-out survived it
+
+Found by accident while diagnosing why `npm run clean:sandbox` failed with a
+bare "FOREIGN KEY constraint failed" — same failure shape as item 38, from a
+different column, and confirmed to reproduce identically against
+`worker/scripts/clean-sandbox.sql` (fixed; see
+`test/cleanSandboxScript.test.ts`) before checking whether the cron sweep
+that inspired that script's "explicit deletes, don't rely on cascade"
+philosophy had the same gap. It does.
+
+`specs/0014` stage 3 (migration 0027, v0.6.2) added
+`events.created_from_poll_id` / `created_from_option_id` — a fanned-out
+event's pointer back to the multi-winner poll and option it came from —
+neither with `ON DELETE CASCADE`. `sweepPurgeTerminalHistory`
+(`cron/reminders.ts`) deletes a purge chunk's `event_poll_options` before its
+`events`, same order the sandbox script had wrong. If a multi-winner poll
+event is ever cancelled (the only status branch this predicate can reach for
+a poll that fanned out, since a multi-winner poll never resolves as a whole —
+see `specs/0003`'s excerpt on that) and survives 90+ days with its fanned-out
+children still active, purging it deletes `event_poll_options` while a child
+event still points at one of those rows — a bare FK error, caught by
+`runIsolated` and logged, so the whole purge for that batch silently fails
+rather than crashing the tick. Easy to miss: nothing surfaces it to a person
+unless they're reading cron logs.
+
+The sandbox script's fix (null both columns on every row before deleting
+anything) doesn't transfer directly: the cron sweep is chunked and
+budget-charged (`PURGE_STATEMENTS_PER_CHUNK`), and that constant is already
+known to under-count by one (`event_attendance`, left uncorrected — see that
+constant's own comment in `cron/reminders.ts` — because fixing it cascades
+into `test/pass6.test.ts`'s zero-margin budget-fit test the same way IDEAS
+item 47 once did). Adding a proper per-chunk nulling statement means either
+widening that gap further or finally doing the `RESERVED_QUERIES`-and-budget
+rework its own comment has been deferring. Wants a deliberate pass against
+that test, not a rushed fix — the same reasoning v0.4.6 gave for holding
+`specs/0013` back a release rather than rushing a migration.
+
+### 57. `/add-bot` silently omits servers you administer that are already allow-listed
+
+Found in the first real run of v0.7.1's flow: Michael owns a server, went to
+`/add-bot` expecting to see it, and it simply wasn't in the list — with no
+indication of why. The filter was doing exactly the right thing (the server
+was already allow-listed and active, so there is nothing to request), but
+"correct and invisible" cost a good ten minutes of hunting, including
+kicking the bot out of that server on the theory that its *Discord*
+membership was what the page keyed on. It isn't — eligibility reads the
+`guilds` allow-list, not whether the bot is a member.
+
+`routes/guildRequests.ts` drops those guilds server-side (`return null` on an
+active allow-list hit), so the page cannot say anything about them; it only
+has an all-or-nothing message for when *every* administered server is
+already added. The fix is to return them flagged rather than filtered —
+`{ guildId, guildName, alreadyAdded: true }` with no token — and render them
+greyed out with "already added" instead of omitting them. Same information
+the empty-list case already tries to convey, just available in the mixed
+case too, which is the common one for anyone who runs more than one server.
+
+Cheap, and it is the difference between a page that answers "where is my
+server?" and one that leaves the person to guess.
+
+### 58. The bot can be added self-service but has no way out
+
+v0.7.1 gave a server admin a one-click path to put the bot *into* a server.
+There is no path back out. `DELETE /admin/guilds/:id` only sets
+`is_active = 0` — the allow-list forgets the server, but the bot is still
+sitting in it on Discord, indefinitely.
+
+`specs/0015` explicitly scoped removal out on the grounds that "the manual
+path still exists for that." Testing v0.7.1 showed that path doesn't
+reliably exist: removing a bot needs Kick Members (or the app's Integrations
+entry to be removable), and Manage Server — the exact permission this
+feature requires to *add* the bot — does not include it. So the person the
+flow is designed around can add the bot to their own server and then be
+unable to remove it. Nor can the operator: the bot token is a Worker secret,
+so getting it out by hand means resetting the token in Discord's portal and
+re-running `wrangler secret put`, which breaks the running deployment until
+it is done. That is a lot of ceremony to undo one click.
+
+The fix is small and pairs with what already exists: `DELETE
+/users/@me/guilds/{id}` with the bot token makes the bot remove itself, no
+permissions needed on anyone's account. Wrap it in `lib/discord.ts`
+(`leaveGuild`), call it from the existing owner-only admin routes alongside
+the `is_active = 0` write, so deactivating a server actually means the bot
+leaves it.
+
+Worth deciding one thing first, which is why this is a capture rather than a
+patch: whether leaving should be automatic on deactivation, or a separate
+deliberate action. Automatic is tidier and matches what "remove this server"
+plainly means; separate is safer, because a temporary deactivation (say,
+while debugging) would otherwise silently require re-inviting the bot, which
+needs the server admin again rather than the operator. Leaning separate, for
+the same reason `specs/0016` made the stale-account purge suppressible
+rather than unconditional — the irreversible half of an operation deserves
+its own yes.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
@@ -562,6 +629,50 @@ page.
 The app has had zero design attention — it's functional, not designed. Wants
 pitches/options for making the whole platform look better (layout, color,
 typography, general polish) before or around release.
+
+### 9. Self-service "add this bot to your server" link, gated by owner approval — shipped in v0.7.1
+
+A public page/link (distinct from the raw Discord OAuth bot-add URL, which
+just adds the bot with no guardrail) that lets someone add the bot to their
+own Discord server. If that server is already on the allow-list, it just
+works. If it isn't, the request queues instead of silently granting access,
+and the site owner gets an email to approve or reject it before the server
+can actually use the app.
+
+Shipped per `specs/0015-self-service-bot-add.md`, once Michael picked Resend
+as the email provider (the one decision the spec was blocked on). Building it
+turned up a real design gap the spec's first draft missed: the login session
+carries no live Discord token to check "does this person administer guild X"
+with (tokens are deliberately never persisted past login, per
+`ARCHITECTURE.md`'s Phase-5 discussion), and `user_guild_membership.guild_id`
+is a foreign key into `guilds(id)` — it structurally can't hold a row for a
+guild that isn't allow-listed yet, which is exactly the set this feature
+exists to reach. So the request page drives its own short-lived Discord OAuth
+round trip (`/guild-requests/connect` → `/guild-requests/callback`), separate
+from login, rather than reusing existing session or membership state. Ships
+dormant in production (`EMAIL_MODE = "stub"`) until the Resend sending domain
+is DNS-verified; the sandbox stays stubbed permanently, since this flow's only
+real recipient is Michael's own inbox.
+
+### 10. Auto-delete accounts that have gone stale — shipped in v0.7
+
+If someone hasn't logged in for a year, warn them by DM at two weeks and one
+week out, then purge them from the system if they still haven't logged back
+in. Point of it: a synced integration (see idea 2, Google Calendar)
+shouldn't quietly keep running forever for someone who's stopped using the
+site.
+
+Shipped per `specs/0016-stale-account-purge.md`, ahead of idea 9 even though
+both were Phase 4 — Rule 2 (cheap and already-understood ships immediately)
+applied once the design turned up no open questions and no new dependency,
+where 9 still has one of each. Both open questions from this capture were
+answered by code that already existed rather than by new design:
+`last_login_at` already can't go stale for an active user without a fresh
+Discord login for over a week (`sessions.ts`'s 7-day absolute session TTL
+forces one), so "logged in" and "used" turned out to be the same signal
+already; and yes, organizing or holding a non-declined invite to a future
+event suppresses the purge, re-checked on every scan rather than decided
+once.
 
 ### 11. Owner-only view of everyone signed up — shipped in v0.1
 

@@ -31,11 +31,25 @@ DELETE FROM change_request_log;
 DELETE FROM notification_log;
 
 -- 2. Everything that hangs off an event.
+--
+-- The UPDATE has to come first. specs/0014 stage 3 (migration 0027) added
+-- events.created_from_poll_id/created_from_option_id -- a fanned-out event's
+-- pointer back to the multi-winner poll and option it came from -- and
+-- neither carries ON DELETE CASCADE. created_from_option_id REFERENCES
+-- event_poll_options(id), so with this script's original order (options
+-- deleted, then events), deleting a poll's options while a still-live
+-- fanned-out event still points at one of them is a bare "FOREIGN KEY
+-- constraint failed" naming nothing -- exactly item 38's failure mode,
+-- from a different column. Nulling both columns on every row first breaks
+-- the reference before anything referenced is removed; self-referencing
+-- created_from_poll_id needs the same treatment for the same reason.
+UPDATE events SET created_from_poll_id = NULL, created_from_option_id = NULL;
 DELETE FROM event_change_request_votes;
 DELETE FROM event_change_requests;
 DELETE FROM event_window_availability;
 DELETE FROM event_poll_votes;
 DELETE FROM event_poll_options;
+DELETE FROM event_attendance;
 DELETE FROM event_occurrence_overrides;
 DELETE FROM event_recurrence_rules;
 DELETE FROM event_invites;

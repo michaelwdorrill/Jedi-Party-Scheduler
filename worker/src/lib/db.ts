@@ -440,6 +440,12 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
     env.DB.prepare(`DELETE FROM event_attendance WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM group_members WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM group_nudge_log WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM account_purge_warnings WHERE user_id = ?`).bind(userId),
+    // IDEAS item 9 / specs/0015: requested_by has no ON DELETE action, same
+    // reasoning as every other child table here -- the request's own record
+    // is this person's, not the guild's, so it goes with them rather than
+    // being reassigned or left dangling.
+    env.DB.prepare(`DELETE FROM guild_add_requests WHERE requested_by = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM notification_log WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM user_guild_membership WHERE user_id = ?`).bind(userId),
     // revokeAllSessionsForUser() above only sets revoked_at, so the rows (and

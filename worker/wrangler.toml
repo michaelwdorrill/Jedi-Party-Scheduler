@@ -22,6 +22,23 @@ OWNER_DISCORD_ID = "346042183486537730"
 # because it is a different application. Until it is set, the interactions
 # endpoint rejects everything with a 401, which is the safe direction to fail.
 DISCORD_PUBLIC_KEY = "ce60fa5ba939ad3e1b22e6386752725ce94da9adacebf9b223c220165b5545e6"
+# specs/0015: 'live' sends real email through Resend (RESEND_API_KEY,
+# provisioned via `wrangler secret put`); anything else stubs the send (logs
+# what would have gone out). Ships "stub" here deliberately, the same
+# dormant-on-day-one launch specs/0012 used for CURRENT_POLICY_VERSION --
+# flip to "live" once OWNER_EMAIL_ADDRESS/EMAIL_FROM_ADDRESS below are real
+# and Resend's sending domain is DNS-verified (docs/SETUP.md). This is the
+# one var this project's sandbox/production parity guardrail
+# (scripts/check-env-parity.mjs) is EXPECTED to report differently between
+# the two environments once flipped -- see env.sandbox.vars' copy for why.
+EMAIL_MODE = "stub"
+# Where the one email this app sends (a pending guild-add request) goes, and
+# which Resend-verified address it comes from. Neither is a secret -- see
+# docs/SETUP.md for the one-time Resend/DNS setup both depend on. Left blank
+# until that setup happens; lib/email.ts refuses to send (loudly, not
+# silently) if EMAIL_MODE is "live" but either is still empty.
+OWNER_EMAIL_ADDRESS = ""
+EMAIL_FROM_ADDRESS = ""
 # Which Cloudflare plan this Worker runs on: "free" or "paid". Free and Paid
 # differ by more than an order of magnitude in D1 queries and outbound
 # subrequests allowed per invocation, and the 15-minute cron sizes its own
@@ -82,6 +99,14 @@ DISCORD_PUBLIC_KEY = "581ea9d6fbb92b712da44102493097cb80113f52297d3eb77a0d24fbbc
 # sandbox is to exercise the cron's budget logic (src/cron/budget.ts) under
 # the same ceiling prod runs under, not a more generous one.
 WORKERS_PLAN = "free"
+# specs/0015: deliberately "stub" here, not just for now like production's
+# but *permanently* -- this flow's only real recipient is Michael's own
+# inbox, and live-sending it from the sandbox during routine iteration would
+# either spam that inbox or need a second throwaway address for no real
+# benefit. wrangler tail --env sandbox shows the stubbed content just as well.
+EMAIL_MODE = "stub"
+OWNER_EMAIL_ADDRESS = ""
+EMAIL_FROM_ADDRESS = ""
 
 [[env.sandbox.d1_databases]]
 binding = "DB"

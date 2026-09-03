@@ -91,6 +91,25 @@ const PAID_D1_QUERIES = 1000;
 // comment explains the fix that actually holds: its discovery read runs
 // uncharged, the same as sweepPurgeTerminalHistory's own candidate SELECT
 // a few lines below it in that file.
+//
+// IDEAS item 10 / specs/0016 added sweepStaleAccounts, a new fixed scan, and
+// this stayed at 24 for it -- test/pass6.test.ts's purge-and-backlog scenario
+// has no margin left to give (its own comment already records IDEAS item 47
+// hitting this exact cliff), confirmed by measurement: even one more charged
+// fixed query starves sweepPurgeTerminalHistory completely, not just slows
+// it. So sweepStaleAccounts takes the same treatment sweepCancellationCascade
+// did just above -- no cursor, no forEachGlobalRow, its own discovery read
+// uncharged -- rather than the default "bump the reserve" one, and
+// account_purge_warnings deliberately does NOT join reapExhaustedDeliveries's
+// fixed per-tick table list either (see that table's own note in
+// lib/outbox.ts), for the identical reason.
+//
+// The one-off account erasure sweepStaleAccounts can trigger is, like its
+// scan, not modelled in the ledger at all: it is capped at one per tick and
+// atomic by construction (lib/db.ts's deleteUserCompletely), so stopping it
+// mid-batch to fit a per-tick allowance sized for notification volume was
+// never an option -- unlike a DM, there is no "retry it next tick" for a
+// delete that already ran.
 const RESERVED_QUERIES = 24;
 const RESERVED_SUBREQUESTS = 4;
 

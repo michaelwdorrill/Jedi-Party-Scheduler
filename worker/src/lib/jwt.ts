@@ -1,6 +1,8 @@
 // Minimal HS256 JWT sign/verify using Web Crypto (available natively in the
 // Workers runtime) -- avoids pulling in a full JWT library for two functions.
 
+import { base64UrlDecode, base64UrlEncode, textToBase64Url } from './base64url';
+
 export interface JwtPayload {
   sub: string; // discord user id
   sid: string; // session id -- looked up in the `sessions` table on every request
@@ -17,22 +19,6 @@ export const ACCESS_TOKEN_TTL_SECONDS = 30 * 60;
 // of which TTL constant signed it -- catches a malformed/forged payload that
 // slipped past signature verification some other way.
 const MAX_TOKEN_LIFETIME_SECONDS = 24 * 60 * 60;
-
-function base64UrlEncode(bytes: Uint8Array): string {
-  let binary = '';
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function base64UrlDecode(str: string): Uint8Array {
-  const padded = str.replace(/-/g, '+').replace(/_/g, '/').padEnd(str.length + ((4 - (str.length % 4)) % 4), '=');
-  const binary = atob(padded);
-  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
-}
-
-function textToBase64Url(text: string): string {
-  return base64UrlEncode(new TextEncoder().encode(text));
-}
 
 async function importHmacKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.importKey(
