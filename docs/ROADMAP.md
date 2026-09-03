@@ -475,10 +475,20 @@ answers — a vote and an RSVP — and shipped no rule for which wins; v0.5.1 is
 the release about those same DMs, so the rule belongs in it rather than
 waiting on a data model change that will make the rule redundant.
 
-### Phase 3.8x — Attendance per occurrence (ideas 46, 48, 49, and 51's endgame) → **v0.6**
+### Phase 3.8x — Attendance per occurrence (ideas 46, 48, 49, and 51's endgame) → **v0.6 / v0.6.1 / v0.6.2** ✅ shipped
 
-**Spec:** `specs/0014-attendance-per-occurrence.md` (Draft — decisions locked,
-two build questions open).
+**Spec:** `specs/0014-attendance-per-occurrence.md` (Built, all three stages).
+
+**Shipped as three releases, one per stage, exactly as this phase's own
+staging note below planned.** v0.6 (stage 1: the table, the migration,
+`custom_id` v2, no user-visible change but the recurring one) shipped
+25 Aug 2026; v0.6.1 (stage 2: the reminder ladder, idea 48, absorbing 46)
+followed; v0.6.2 (stage 3: the multi-winner fan-out, the minimum-attendees
+field and cancellation cascade, closing 49 and 51's option 1) completed the
+phase. This section was left describing the phase as a single undated "v0.6"
+target for a full release cycle after all three had shipped — corrected
+Sept 2026 during the v0.7.2 pass, which is also when idea 49's own entry in
+`IDEAS.md` was found still marked "Still open" despite having shipped here.
 
 This phase read "v0.6 or later" until Aug 2026, because the choice between it
 and the growth work had not been made and the entry said so. **It is made
@@ -640,10 +650,12 @@ shifts.
 | **0.4.6** | Phase 3.15 — windowed candidates (40), per `specs/0013` | **Shipped 25 Aug 2026** |
 | **0.5** | Phase 3.75 — the interactive bot (19), the message-id cost it carried (32), the calendar's month ceiling removed (22), and reminders for confirmed multi-day polls (47). Embeds deferred to 0.5.1 | **Shipped 26 Aug 2026** |
 | **0.5.1** | Phase 3.76 — the DMs that outlived their state: a settled poll stops inviting people to vote (50), a resolved poll's RSVP gets read (51), plus `specs/0010`'s embeds — which cost no migration after all | **Shipped 31 Aug 2026** |
-| 0.6 | Phase 3.8x — stage 1 of `specs/0014`: attendance per occurrence, the migration, `custom_id` v2. Ships alone, with no user-visible change but the recurring one | Planned |
-| 0.6.x | `specs/0014` stages 2 and 3 — the reminder ladder (48, absorbing 46), then the multi-winner fan-out, the minimum-attendees field and the cancellation cascade (49, 51 close here) | Planned |
+| **0.6** | Phase 3.8x stage 1 — attendance per occurrence, the migration, `custom_id` v2. No user-visible change but the recurring one | **Shipped** |
+| **0.6.1** | Phase 3.8x stage 2 — the reminder ladder (48, absorbing 46) | **Shipped** |
+| **0.6.2** | Phase 3.8x stage 3 — the multi-winner fan-out, the minimum-attendees field and the cancellation cascade (49, 51's option 1 close here) | **Shipped** |
 | **0.7** | Phase 4 — stale-account purge (10), per `specs/0016` | **Shipped** |
 | **0.7.1** | Phase 4 — self-service bot add + email (9), per `specs/0015` | **Shipped** |
+| **0.7.2** | What v0.7.1 and the standing backlog turned up — already-allow-listed servers shown, not hidden, on `/add-bot` (57); the bot can leave a server on deactivation (58); the calendar chip shows your own declined/tentative answer (52); a guarded `CURRENT_POLICY_VERSION` (43); the terminal-history purge's budget under-count and FK error fixed together (53, 56); a plain organizer cancel now notifies invitees (55); idea 49 found already shipped in v0.6.2 and documented as such. Idea 54 (recurring events + minimum-attendees) and idea 36/`specs/0011` (groups without servers) assessed and deliberately left open — see their `IDEAS.md` entries for why | **Shipped** |
 | 0.8 | Phase 5 — Google Calendar sync (2) | Planned |
 | 1.0 | `IDEAS.md`'s **Still open** section empty — leave Beta | When the list clears |
 
@@ -696,9 +708,9 @@ shifts.
 | 47 | A confirmed multi-winner poll day gets no reminders at all | S | 3.75 | 0.5 | — | 0014 (taken early) |
 | 50 | A settled poll still DMs an invitation to vote on it | XS | 3.76 | 0.5.1 | 19 | none needed |
 | 51 | A resolved poll's RSVP is recorded but never read | M | 3.76 | 0.5.1 | 19 | interim; 0014 closes it |
-| 46 | A reminder shows the buttons but not the answer on record | S | 3.8x | 0.6.x | 48 | 0014 |
-| 48 | Reminders should depend on whether you have answered | XL | 3.8x | 0.6 | — | 0014 |
-| 49 | Everyone should see everyone's answer, whatever the event type | M | 3.8x | 0.6.x | 48 | 0014 |
+| 46 | A reminder shows the buttons but not the answer on record | S | 3.8x | 0.6.1 | 48 | 0014 |
+| 48 | Reminders should depend on whether you have answered | XL | 3.8x | 0.6.1 | — | 0014 |
+| 49 | Everyone should see everyone's answer, whatever the event type | M | 3.8x | 0.6.2 | 48 | 0014 |
 | 43 | Nothing guards CURRENT_POLICY_VERSION against an accidental bump | S | — | — | 37 | TBD |
 | 36 | Groups server-agnostic, valid on a shared server (intersection rule) | M | — | — | 5, 34, 37 | 0011 |
 | 37 | Re-agree to the Policy/Terms when they change | M | 3.9 | 0.4.4 | — | 0012 |
@@ -854,6 +866,25 @@ notes on that placement:
   five items arriving that all pointed at a spec whose phase field said
   "TBD", and a phase entry that had deferred its own decision to "0.6 or
   later" rather than making it.
+
+- **Ideas 52–58 were captured after v0.6 through v0.7.1 and never got a row in
+  the summary table above**, the same gap the 45–51 note already recorded
+  once — a phase entry or a table row is what makes an item visible here;
+  neither happened for six items in a row. **v0.7.2** (Sept 2026) shipped 43,
+  52, 53, 55, 56, 57 and 58 as one pass — all Rule 2 (cheap, already
+  understood, no design question left) except 53/56, which turned out to be
+  one deliberate pass rather than two separate fixes once the budget math was
+  worked through. That pass also found 49 already shipped in v0.6.2 without
+  ever being marked so in `IDEAS.md`, which is the same failure mode 29 was
+  supposed to have closed, recurring on a single entry rather than the whole
+  file. 54 and 36 were assessed in the same pass and deliberately left open —
+  both need a real decision (54: what a per-occurrence cancellation notice
+  means for a recurring series; 36/`specs/0011`: what replaces the
+  guild-membership half of a group route's access check once groups have no
+  guild) rather than an implementation, and guessing at either risked
+  answering it wrong under time pressure. Not added to the summary table
+  below for the same reason 45–51 weren't at the time: this note is the
+  record until the next pass reconciles it properly.
 
 ## Things this roadmap is not
 

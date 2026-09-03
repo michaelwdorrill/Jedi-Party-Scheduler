@@ -34,29 +34,6 @@ identity, not a position — it never changes and is never reused.
 
 ## Still open
 
-### 55. Manually cancelling an event tells nobody
-
-Found while scoping v0.6.2's cancellation cascade (decision 4), and older
-than it: `DELETE /:eventId` (`worker/src/routes/events.ts`) has only ever
-done `UPDATE events SET status = 'cancelled'` — no DM, no notice, to anyone,
-since v0.1. An organizer who cancels a session their invitees were counting
-on has no way to actually tell them through the app; whatever they know
-comes from wherever the organizer says it themselves.
-
-Deliberately not folded into v0.6.2's cascade, which added the *first*
-"event just got cancelled, tell everyone still coming" notice this app has
-ever had (`sweepCancellationCascade` in `cron/reminders.ts`) — but scoped
-narrowly to `minimum_attendees IS NOT NULL`, since both paths that release
-adds (the auto-cancel write, the organizer's own cancel-prompt button) only
-ever apply to an event that opted into a minimum. Widening that sweep's
-`WHERE` to cover every cancellation is very possibly the cheap fix once
-someone looks — the sending mechanism, the dedupe, the "who is still
-confirmed" query are all already built and already correct — but it wants
-its own look at the UX questions decision 4 never had to answer: does the
-DM say *why* (an organizer choice, vs. a decline?), and should there be any
-way for an organizer to cancel *without* telling everyone (a mistaken event,
-created and cancelled in the same minute)?
-
 ### 54. The minimum-attendees cascade doesn't cover recurring events
 
 Captured while building v0.6.2 (specs/0014 stage 3, decision 4), and left
@@ -89,63 +66,13 @@ identically to every occurrence, or whether that is itself the wrong
 question — the same "per-occurrence state, not per-occurrence nagging"
 distinction decision 7 already drew for the reminder ladder.
 
-### 53. The terminal-history purge under-reserves its own budget by one statement per chunk
-
-Found building v0.6.1's reminder ladder (Aug 2026), not while looking for it.
-`sweepPurgeTerminalHistory`'s `PURGE_STATEMENTS_PER_CHUNK` constant
-(`worker/src/cron/reminders.ts`) says 8; the statement list right below it
-issues 9 -- specs/0014 stage 1 added an `event_attendance` delete to that
-list without updating the count next to it, despite the constant's own
-comment saying explicitly that the two are supposed to stay in step.
-
-The consequence: `budget.trySpend(chunks.length * PURGE_STATEMENTS_PER_CHUNK)`
-under-reserves by one real D1 statement per chunk, every time the purge
-actually runs. `TickBudget` exists specifically so a tick's real query count
-never exceeds what Cloudflare enforces -- this is exactly the class of bug
-it's meant to catch, quietly not caught.
-
-**Why it wasn't just fixed on the spot:** correcting the constant to 9 breaks
-`worker/test/pass6.test.ts`'s "a full terminal purge and a spent notification
-budget still fit one tick" test, and not by a small margin that more ticks
-would close -- measured, a steady tick has exactly 16 queries left by the
-time the purge sweep runs and a two-chunk purge needs 18 under the corrected
-count, a gap that stays fixed forever once the notification backlog that
-test seeds has fully drained. That test's own comment already documents this
-exact failure shape from a past change ("not at 40 ticks, not at 200"), so
-this isn't a new kind of problem -- it's the same one, caused by fixing a
-different bug this time.
-
-The real fix has two parts, and both are outside a stage-2 reminder-ladder
-release: (1) correct `PURGE_STATEMENTS_PER_CHUNK` to 9, and (2) find where
-this test's other ~8 queries of assumed headroom actually went (the four
-sweeps between `reminders` and `purgeTerminalHistory` -- `pollDeadlineReminders`,
-`voiceChannelInvites`, `idleGroups`, `pruneStaleSessions` -- cost that much
-even fully idle, and it's not obvious yet whether that's expected or itself
-worth tightening). Until both land together, the constant stays at its
-current, wrong value rather than trading a live under-reservation for a
-silently-differently-wrong test.
-
-### 52. The calendar chip never shows your own answer
-
-Found verifying v0.6 on the sandbox (Michael, Aug 2026): declining a
-fixed-time event's occurrence records correctly and the event page shows it,
-but the calendar's month/agenda chip looks identical to an occurrence you
-haven't answered or have accepted. `EventChip.tsx` only ever reads
-`occurrence.status` (cancelled) and `occurrence.isProvisional` (an open
-poll's candidate day) — it has never read `myRsvpStatus` at all, for any
-event type, so this isn't a v0.6 regression: declining has never been visible
-on the calendar, only on the event page itself.
-
-It stood out now because specs/0014 made per-occurrence answers real and
-independent for the first time — two occurrences of the same recurring event
-can genuinely disagree, and the calendar is the one place you'd see both at
-a glance, but currently can't. A cheap version: a third visual state
-alongside cancelled/provisional, in the spirit of `EventChip`'s own comment
-about composing states rather than adding shades ad hoc — options include a
-dimmed/outlined treatment for `declined`, or nothing at all for `declined`
-(since "I'm not going" arguably doesn't need a chip cluttering your own
-calendar) with `tentative` getting the "maybe" dashed-outline treatment
-`isProvisional` already uses.
+**Still open after v0.7.2, deliberately.** Item 55 (a plain organizer cancel
+telling nobody) shipped in that pass and widened the same cascade this entry
+is about — but only for `is_recurring = 0`, on purpose, precisely because
+this entry's open design question is unanswered: what a per-occurrence
+cancellation notice should mean for a series. Widening 55 to recurring events
+too would have answered that question by accident, under a different item's
+name, rather than deciding it here on purpose.
 
 ### 2. Google Calendar sync
 
@@ -406,187 +333,30 @@ live call when a candidate venue's rows are all stale.
 Wants a spec — not for the rule, which is now decided, but for the four open
 calls above and the migration. Not v0.5.
 
-### 43. A constant that must only ever change deliberately has nothing stopping it changing by accident
-
-Found the hard way, an hour after `specs/0012` was built (Aug 2026).
-`CURRENT_POLICY_VERSION` was bumped to 2 as an uncommitted edit on a scratch
-branch, `git checkout` carried the modified file across to the release
-branch, and `git add -A` swept it into an unrelated commit — which was then
-pushed. Merging it would have logged out every production user and put an
-acceptance gate in front of them, for a policy that had not changed.
-
-Caught by reading the diff afterwards rather than by anything automatic, and
-that is the point: **the one change in this codebase whose entire design
-principle is "this must never happen unintentionally" had nothing at all
-guarding it.** The spec argued at length about not deriving the version from
-a content hash, so that a typo fix would not log the world out — and then a
-stray `git add` did exactly that.
-
-The class of mistake matters more than the instance. Any constant whose
-value is a *decision* rather than a fact — this one, `APP_VERSION`,
-`PUBLISHED_AT` — can be changed by an editor, a merge or a sweep with no
-signal at all, and the blast radius here is every session in production.
-
-Options, roughly in order of cost:
-- **A CI check on `main` pushes** asserting `CURRENT_POLICY_VERSION` matches
-  a value recorded elsewhere (a lockfile-ish `policy.version` committed
-  alongside), so changing it requires changing two files on purpose. Cheap,
-  and it fails loudly at exactly the right moment.
-- **A required note in the changelog.** If the version moved, the release
-  must carry a changelog entry saying so — which is true of every legitimate
-  bump anyway.
-- **Nothing, and rely on review.** Rejected on the evidence: review is what
-  just missed it.
-
-Related to item 31's lesson from the other direction. There the guardrail
-existed and could not fail usefully; here the guardrail does not exist at all
-for the change most in need of one.
-
-### 49. Everyone in an event should see everyone's answer, whatever kind of event it is
-
-Asked for by Michael, Aug 2026, looking at a multi-winner poll showing "1 in"
-and "2 in" per night with no way to find out who.
-
-**Most of this is already true, which makes it much cheaper than it sounds.**
-`GET /events/:eventId` returns `rsvpStatus` for every invitee to anyone
-`loadEventIfVisible` lets through — the organizer and every invitee, gated on
-active membership of the event's server. There is no permission change here
-and no new privacy surface: the data is already shared with exactly the
-people this asks for.
-
-What blocks it is one expression in `EventDetailPage`:
-
-```tsx
-{event.eventType === 'single' ? inv.rsvpStatus : ''}
-```
-
-And that expression is *defensible*, which is the part worth thinking about
-before deleting it. `rsvp_status` on a poll invitee is almost always
-`pending`, because nobody RSVPs to a poll — they vote. A column reading
-"pending" beside everybody's name is worse than a blank one.
-
-So the gap is narrower than the request, and it is one event type:
-
-- **Fixed-time events** already do this.
-- **Window polls** already do it too, and better: since v0.4.5 (idea 39) the
-  availability view names everyone and draws the hours they gave.
-- **Options polls** show tallies and nothing else. `getOptionTallies` returns
-  counts plus the caller's own vote; no names, so the frontend could not
-  render them even if it wanted to.
-
-**The work**, then: attach voters to the poll response, and render them per
-candidate. Bounded by `MAX_POLL_OPTIONS` x invitees, which is the product
-spec 0006 was careful about — one extra query joined on the options rather
-than one per option.
-
-**And a question v0.5 created an hour before this was asked.** Edit-on-resolve
-gives people RSVP buttons once a poll settles, so a resolved poll now carries
-*both* a historical vote and a current RSVP. "Voted yes on Thursday, has
-since said they can't make it" is precisely what an organizer needs to see
-and precisely what one column cannot say. Probably: votes while the poll is
-open, RSVPs once it has resolved, and both on a resolved poll's detail page
-with the vote shown as history rather than as an answer.
-
-Worth doing with `specs/0014` in view rather than before it: that spec makes
-attendance per occurrence, and a multi-winner poll fans out into separate
-events — at which point "who is coming to this night" stops being a poll
-question at all and becomes an ordinary event's invitee list, which already
-works.
-
-### 56. `sweepPurgeTerminalHistory` can throw a FK error on a poll whose fan-out survived it
-
-Found by accident while diagnosing why `npm run clean:sandbox` failed with a
-bare "FOREIGN KEY constraint failed" — same failure shape as item 38, from a
-different column, and confirmed to reproduce identically against
-`worker/scripts/clean-sandbox.sql` (fixed; see
-`test/cleanSandboxScript.test.ts`) before checking whether the cron sweep
-that inspired that script's "explicit deletes, don't rely on cascade"
-philosophy had the same gap. It does.
-
-`specs/0014` stage 3 (migration 0027, v0.6.2) added
-`events.created_from_poll_id` / `created_from_option_id` — a fanned-out
-event's pointer back to the multi-winner poll and option it came from —
-neither with `ON DELETE CASCADE`. `sweepPurgeTerminalHistory`
-(`cron/reminders.ts`) deletes a purge chunk's `event_poll_options` before its
-`events`, same order the sandbox script had wrong. If a multi-winner poll
-event is ever cancelled (the only status branch this predicate can reach for
-a poll that fanned out, since a multi-winner poll never resolves as a whole —
-see `specs/0003`'s excerpt on that) and survives 90+ days with its fanned-out
-children still active, purging it deletes `event_poll_options` while a child
-event still points at one of those rows — a bare FK error, caught by
-`runIsolated` and logged, so the whole purge for that batch silently fails
-rather than crashing the tick. Easy to miss: nothing surfaces it to a person
-unless they're reading cron logs.
-
-The sandbox script's fix (null both columns on every row before deleting
-anything) doesn't transfer directly: the cron sweep is chunked and
-budget-charged (`PURGE_STATEMENTS_PER_CHUNK`), and that constant is already
-known to under-count by one (`event_attendance`, left uncorrected — see that
-constant's own comment in `cron/reminders.ts` — because fixing it cascades
-into `test/pass6.test.ts`'s zero-margin budget-fit test the same way IDEAS
-item 47 once did). Adding a proper per-chunk nulling statement means either
-widening that gap further or finally doing the `RESERVED_QUERIES`-and-budget
-rework its own comment has been deferring. Wants a deliberate pass against
-that test, not a rushed fix — the same reasoning v0.4.6 gave for holding
-`specs/0013` back a release rather than rushing a migration.
-
-### 57. `/add-bot` silently omits servers you administer that are already allow-listed
-
-Found in the first real run of v0.7.1's flow: Michael owns a server, went to
-`/add-bot` expecting to see it, and it simply wasn't in the list — with no
-indication of why. The filter was doing exactly the right thing (the server
-was already allow-listed and active, so there is nothing to request), but
-"correct and invisible" cost a good ten minutes of hunting, including
-kicking the bot out of that server on the theory that its *Discord*
-membership was what the page keyed on. It isn't — eligibility reads the
-`guilds` allow-list, not whether the bot is a member.
-
-`routes/guildRequests.ts` drops those guilds server-side (`return null` on an
-active allow-list hit), so the page cannot say anything about them; it only
-has an all-or-nothing message for when *every* administered server is
-already added. The fix is to return them flagged rather than filtered —
-`{ guildId, guildName, alreadyAdded: true }` with no token — and render them
-greyed out with "already added" instead of omitting them. Same information
-the empty-list case already tries to convey, just available in the mixed
-case too, which is the common one for anyone who runs more than one server.
-
-Cheap, and it is the difference between a page that answers "where is my
-server?" and one that leaves the person to guess.
-
-### 58. The bot can be added self-service but has no way out
-
-v0.7.1 gave a server admin a one-click path to put the bot *into* a server.
-There is no path back out. `DELETE /admin/guilds/:id` only sets
-`is_active = 0` — the allow-list forgets the server, but the bot is still
-sitting in it on Discord, indefinitely.
-
-`specs/0015` explicitly scoped removal out on the grounds that "the manual
-path still exists for that." Testing v0.7.1 showed that path doesn't
-reliably exist: removing a bot needs Kick Members (or the app's Integrations
-entry to be removable), and Manage Server — the exact permission this
-feature requires to *add* the bot — does not include it. So the person the
-flow is designed around can add the bot to their own server and then be
-unable to remove it. Nor can the operator: the bot token is a Worker secret,
-so getting it out by hand means resetting the token in Discord's portal and
-re-running `wrangler secret put`, which breaks the running deployment until
-it is done. That is a lot of ceremony to undo one click.
-
-The fix is small and pairs with what already exists: `DELETE
-/users/@me/guilds/{id}` with the bot token makes the bot remove itself, no
-permissions needed on anyone's account. Wrap it in `lib/discord.ts`
-(`leaveGuild`), call it from the existing owner-only admin routes alongside
-the `is_active = 0` write, so deactivating a server actually means the bot
-leaves it.
-
-Worth deciding one thing first, which is why this is a capture rather than a
-patch: whether leaving should be automatic on deactivation, or a separate
-deliberate action. Automatic is tidier and matches what "remove this server"
-plainly means; separate is safer, because a temporary deactivation (say,
-while debugging) would otherwise silently require re-inviting the bot, which
-needs the server admin again rather than the operator. Leaning separate, for
-the same reason `specs/0016` made the stale-account purge suppressible
-rather than unconditional — the irreversible half of an operation deserves
-its own yes.
+**`specs/0011-groups-without-servers.md` exists and locks the rule, the four
+calls above, and the migration SQL.** Assessed for build during the v0.7.2
+pass (Sept 2026) and deliberately not built: reading the actual authorization
+code turned up a fifth call the spec doesn't make. Every group route in
+`routes/groups.ts` (`GET/PATCH/DELETE /:groupId`, add/remove member) gates on
+`isGroupMember(...) && requireActiveGuildMember(userId, group.guild_id)` --
+group membership *and* still-active membership of the group's one guild,
+deliberately both, per that file's own comment: "`group_members` rows survive
+someone leaving a server, so membership of the group alone would let a
+departed member keep their access forever." specs/0011 removes `guild_id`
+entirely and says visibility becomes "membership of the group itself (item
+34)" -- but item 34 already shipped in v0.4.3 as exactly that single check,
+before this second one existed, so the spec's text does not actually say what
+replaces the guild-membership half once there is no single guild to check
+membership of. The candidates aren't equivalent: dropping the second check
+outright means a member who has left every server the group ever shared keeps
+full read/write access to the roster and can still be invited to events
+(role 2 above still gates the event itself, but not the group); replacing it
+with "still in the group's current common-server set" is closer to the
+spec's own spirit but is a real design call the spec never states, not an
+implementation detail -- and it's exactly the kind of gap that becomes a
+privacy regression if guessed at under time pressure rather than decided. Left
+open rather than guessed at; the fix, once decided, is small (one query, the
+same shape the common-server-set check already uses elsewhere in the spec).
 
 ## Already built
 
@@ -2390,3 +2160,351 @@ selectively rather than uniformly. The sharper version (styling the pressed
 button itself) remains undone; Discord's lack of a "selected" button style
 means it would still cost a rebuilt row and a second thing to keep in step
 with `rsvp_status`, which is more than this closes for free.
+
+### 49. Everyone in an event should see everyone's answer, whatever kind of event it is — shipped in v0.6.2
+
+Asked for by Michael, Aug 2026, looking at a multi-winner poll showing "1 in"
+and "2 in" per night with no way to find out who.
+
+**Most of this is already true, which makes it much cheaper than it sounds.**
+`GET /events/:eventId` returns `rsvpStatus` for every invitee to anyone
+`loadEventIfVisible` lets through — the organizer and every invitee, gated on
+active membership of the event's server. There is no permission change here
+and no new privacy surface: the data is already shared with exactly the
+people this asks for.
+
+What blocks it is one expression in `EventDetailPage`:
+
+```tsx
+{event.eventType === 'single' ? inv.rsvpStatus : ''}
+```
+
+And that expression is *defensible*, which is the part worth thinking about
+before deleting it. `rsvp_status` on a poll invitee is almost always
+`pending`, because nobody RSVPs to a poll — they vote. A column reading
+"pending" beside everybody's name is worse than a blank one.
+
+So the gap is narrower than the request, and it is one event type:
+
+- **Fixed-time events** already do this.
+- **Window polls** already do it too, and better: since v0.4.5 (idea 39) the
+  availability view names everyone and draws the hours they gave.
+- **Options polls** show tallies and nothing else. `getOptionTallies` returns
+  counts plus the caller's own vote; no names, so the frontend could not
+  render them even if it wanted to.
+
+**The work**, then: attach voters to the poll response, and render them per
+candidate. Bounded by `MAX_POLL_OPTIONS` x invitees, which is the product
+spec 0006 was careful about — one extra query joined on the options rather
+than one per option.
+
+**And a question v0.5 created an hour before this was asked.** Edit-on-resolve
+gives people RSVP buttons once a poll settles, so a resolved poll now carries
+*both* a historical vote and a current RSVP. "Voted yes on Thursday, has
+since said they can't make it" is precisely what an organizer needs to see
+and precisely what one column cannot say. Probably: votes while the poll is
+open, RSVPs once it has resolved, and both on a resolved poll's detail page
+with the vote shown as history rather than as an answer.
+
+Worth doing with `specs/0014` in view rather than before it: that spec makes
+attendance per occurrence, and a multi-winner poll fans out into separate
+events — at which point "who is coming to this night" stops being a poll
+question at all and becomes an ordinary event's invitee list, which already
+works.
+
+**Shipped in v0.6.2, alongside specs/0014 stage 3, exactly as this entry's
+own last paragraph anticipated.** `routes/events.ts`'s `GET /:eventId` grew a
+fourth poll query (`voterRows`) carrying every voter's name, vote, and
+`currentRsvpStatus` (the item-51-shaped override), per option; `PollOptionRow.tsx`
+renders it with `voterLabel()`, which states the vote and, when a
+post-resolution RSVP disagrees with it, the override too ("voted yes on
+Thursday, can't make it now") — the exact case this entry called out.
+Left un-annotated here until Aug 2026's pass found the code already done and
+the entry still marked open; a documentation gap, not a build gap.
+
+### 52. The calendar chip never shows your own answer — shipped in v0.7.2
+
+Found verifying v0.6 on the sandbox (Michael, Aug 2026): declining a
+fixed-time event's occurrence records correctly and the event page shows it,
+but the calendar's month/agenda chip looks identical to an occurrence you
+haven't answered or have accepted. `EventChip.tsx` only ever reads
+`occurrence.status` (cancelled) and `occurrence.isProvisional` (an open
+poll's candidate day) — it has never read `myRsvpStatus` at all, for any
+event type, so this isn't a v0.6 regression: declining has never been visible
+on the calendar, only on the event page itself.
+
+It stood out now because specs/0014 made per-occurrence answers real and
+independent for the first time — two occurrences of the same recurring event
+can genuinely disagree, and the calendar is the one place you'd see both at
+a glance, but currently can't. A cheap version: a third visual state
+alongside cancelled/provisional, in the spirit of `EventChip`'s own comment
+about composing states rather than adding shades ad hoc — options include a
+dimmed/outlined treatment for `declined`, or nothing at all for `declined`
+(since "I'm not going" arguably doesn't need a chip cluttering your own
+calendar) with `tentative` getting the "maybe" dashed-outline treatment
+`isProvisional` already uses.
+
+**Shipped as the dimmed option, not the hidden one.** `declined` fades the
+event's own colour further than `past` does (`opacity-30` vs. `opacity-45`)
+rather than removing the chip — "I'm not going" is still useful to see on
+your own calendar, and hiding it would make a declined occurrence
+indistinguishable from one that was never on the calendar at all. `tentative`
+reuses `provisional`'s dashed-outline mark exactly as leaned. Neither is
+checked once `provisional` is already true, since a poll candidate is voted
+on, not RSVP'd to.
+
+### 53. The terminal-history purge under-reserves its own budget by one statement per chunk — shipped in v0.7.2
+
+Found building v0.6.1's reminder ladder (Aug 2026), not while looking for it.
+`sweepPurgeTerminalHistory`'s `PURGE_STATEMENTS_PER_CHUNK` constant
+(`worker/src/cron/reminders.ts`) says 8; the statement list right below it
+issues 9 -- specs/0014 stage 1 added an `event_attendance` delete to that
+list without updating the count next to it, despite the constant's own
+comment saying explicitly that the two are supposed to stay in step.
+
+The consequence: `budget.trySpend(chunks.length * PURGE_STATEMENTS_PER_CHUNK)`
+under-reserves by one real D1 statement per chunk, every time the purge
+actually runs. `TickBudget` exists specifically so a tick's real query count
+never exceeds what Cloudflare enforces -- this is exactly the class of bug
+it's meant to catch, quietly not caught.
+
+**Why it wasn't just fixed on the spot:** correcting the constant to 9 breaks
+`worker/test/pass6.test.ts`'s "a full terminal purge and a spent notification
+budget still fit one tick" test, and not by a small margin that more ticks
+would close -- measured, a steady tick has exactly 16 queries left by the
+time the purge sweep runs and a two-chunk purge needs 18 under the corrected
+count, a gap that stays fixed forever once the notification backlog that
+test seeds has fully drained. That test's own comment already documents this
+exact failure shape from a past change ("not at 40 ticks, not at 200"), so
+this isn't a new kind of problem -- it's the same one, caused by fixing a
+different bug this time.
+
+The real fix has two parts, and both are outside a stage-2 reminder-ladder
+release: (1) correct `PURGE_STATEMENTS_PER_CHUNK` to 9, and (2) find where
+this test's other ~8 queries of assumed headroom actually went (the four
+sweeps between `reminders` and `purgeTerminalHistory` -- `pollDeadlineReminders`,
+`voiceChannelInvites`, `idleGroups`, `pruneStaleSessions` -- cost that much
+even fully idle, and it's not obvious yet whether that's expected or itself
+worth tightening). Until both land together, the constant stays at its
+current, wrong value rather than trading a live under-reservation for a
+silently-differently-wrong test.
+
+**The fix that actually shipped sidesteps the headroom hunt entirely: a tick
+now buys and processes exactly one chunk, never "however many chunks this
+backlog's SELECT happened to return."** That makes the per-tick cost the
+constant itself, independent of backlog size -- so instead of needing to find
+where 8 queries of headroom went, the corrected count (11, once item 56's
+fix is folded in below) only ever has to fit once, not multiplied by however
+many chunks a large backlog produces. `pass6.test.ts`'s budget-fit test now
+purges a 100-event backlog across two ticks (80 then 20) instead of one,
+which it was never asserting had to happen in a single tick -- only that
+every tick stays under budget and the backlog is gone by the end.
+
+### 56. `sweepPurgeTerminalHistory` can throw a FK error on a poll whose fan-out survived it — shipped in v0.7.2
+
+Found by accident while diagnosing why `npm run clean:sandbox` failed with a
+bare "FOREIGN KEY constraint failed" — same failure shape as item 38, from a
+different column, and confirmed to reproduce identically against
+`worker/scripts/clean-sandbox.sql` (fixed; see
+`test/cleanSandboxScript.test.ts`) before checking whether the cron sweep
+that inspired that script's "explicit deletes, don't rely on cascade"
+philosophy had the same gap. It does.
+
+`specs/0014` stage 3 (migration 0027, v0.6.2) added
+`events.created_from_poll_id` / `created_from_option_id` — a fanned-out
+event's pointer back to the multi-winner poll and option it came from —
+neither with `ON DELETE CASCADE`. `sweepPurgeTerminalHistory`
+(`cron/reminders.ts`) deletes a purge chunk's `event_poll_options` before its
+`events`, same order the sandbox script had wrong. If a multi-winner poll
+event is ever cancelled (the only status branch this predicate can reach for
+a poll that fanned out, since a multi-winner poll never resolves as a whole —
+see `specs/0003`'s excerpt on that) and survives 90+ days with its fanned-out
+children still active, purging it deletes `event_poll_options` while a child
+event still points at one of those rows — a bare FK error, caught by
+`runIsolated` and logged, so the whole purge for that batch silently fails
+rather than crashing the tick. Easy to miss: nothing surfaces it to a person
+unless they're reading cron logs.
+
+The sandbox script's fix (null both columns on every row before deleting
+anything) doesn't transfer directly: the cron sweep is chunked and
+budget-charged (`PURGE_STATEMENTS_PER_CHUNK`), and that constant is already
+known to under-count by one (`event_attendance`, left uncorrected — see that
+constant's own comment in `cron/reminders.ts` — because fixing it cascades
+into `test/pass6.test.ts`'s zero-margin budget-fit test the same way IDEAS
+item 47 once did). Adding a proper per-chunk nulling statement means either
+widening that gap further or finally doing the `RESERVED_QUERIES`-and-budget
+rework its own comment has been deferring. Wants a deliberate pass against
+that test, not a rushed fix — the same reasoning v0.4.6 gave for holding
+`specs/0013` back a release rather than rushing a migration.
+
+**Fixed together with item 53, which turned out to be the same deliberate
+pass this entry asked for.** Two nulling `UPDATE` statements now run before
+the deletes -- one for `created_from_poll_id`, one for `created_from_option_id`
+via its own subquery, kept as two statements rather than one `OR`'d
+together because binding the chunk on both sides of one statement would
+double its parameter count, and a full-size chunk already sits at D1's
+per-statement ceiling with one use of it. `PURGE_STATEMENTS_PER_CHUNK` is
+now 11 (9 original deletes + 2 nulling statements), and the one-chunk-per-tick
+change from item 53 is what makes that number affordable regardless of
+backlog size. Covered by a new regression test seeding exactly this shape: an
+old, resolved multi-winner poll with a confirmed option, and a still-live
+fanned-out event pointing back at both -- the purge now clears the poll and
+its option without throwing, and nulls the fanned-out event's two pointer
+columns rather than leaving them dangling.
+
+### 55. Manually cancelling an event tells nobody — shipped in v0.7.2
+
+Found while scoping v0.6.2's cancellation cascade (decision 4), and older
+than it: `DELETE /:eventId` (`worker/src/routes/events.ts`) has only ever
+done `UPDATE events SET status = 'cancelled'` — no DM, no notice, to anyone,
+since v0.1. An organizer who cancels a session their invitees were counting
+on has no way to actually tell them through the app; whatever they know
+comes from wherever the organizer says it themselves.
+
+Deliberately not folded into v0.6.2's cascade, which added the *first*
+"event just got cancelled, tell everyone still coming" notice this app has
+ever had (`sweepCancellationCascade` in `cron/reminders.ts`) — but scoped
+narrowly to `minimum_attendees IS NOT NULL`, since both paths that release
+adds (the auto-cancel write, the organizer's own cancel-prompt button) only
+ever apply to an event that opted into a minimum. Widening that sweep's
+`WHERE` to cover every cancellation is very possibly the cheap fix once
+someone looks — the sending mechanism, the dedupe, the "who is still
+confirmed" query are all already built and already correct — but it wants
+its own look at the UX questions decision 4 never had to answer: does the
+DM say *why* (an organizer choice, vs. a decline?), and should there be any
+way for an organizer to cancel *without* telling everyone (a mistaken event,
+created and cancelled in the same minute)?
+
+**Shipped with the "say why" question answered and the "silent cancel"
+question deliberately left unbuilt.** The cascade's notice arm now covers
+any cancelled, non-recurring event, not just the minimum-attendees case, and
+`sendCancelledEventNotice` picks the wording (and a new `event_cancelled`
+notification_type, migration 0030) based on whether `minimum_attendees` is
+set -- "attendance dropped below the minimum" when it is, "cancelled by the
+organizer" when it isn't, so the two reasons never get conflated. **No
+escape hatch for a same-minute mistake was added** -- that was a genuinely
+open question in the capture, not a decided requirement, and inventing a
+grace-window heuristic to answer it would have been guessing at a call that
+is Michael's to make, not this pass's. **Recurring events stay exactly as
+silent as they already were**, on purpose: `DELETE /:eventId` cancels a
+whole series the same way it cancels a one-off, but this app has no settled
+answer yet for what a per-occurrence cancellation notice should mean for a
+series -- that question belongs to item 54, which is still open below, and
+guessing at it here risked answering it twice, differently.
+
+### 57. `/add-bot` silently omits servers you administer that are already allow-listed — shipped in v0.7.2
+
+Found in the first real run of v0.7.1's flow: Michael owns a server, went to
+`/add-bot` expecting to see it, and it simply wasn't in the list — with no
+indication of why. The filter was doing exactly the right thing (the server
+was already allow-listed and active, so there is nothing to request), but
+"correct and invisible" cost a good ten minutes of hunting, including
+kicking the bot out of that server on the theory that its *Discord*
+membership was what the page keyed on. It isn't — eligibility reads the
+`guilds` allow-list, not whether the bot is a member.
+
+`routes/guildRequests.ts` drops those guilds server-side (`return null` on an
+active allow-list hit), so the page cannot say anything about them; it only
+has an all-or-nothing message for when *every* administered server is
+already added. The fix is to return them flagged rather than filtered —
+`{ guildId, guildName, alreadyAdded: true }` with no token — and render them
+greyed out with "already added" instead of omitting them. Same information
+the empty-list case already tries to convey, just available in the mixed
+case too, which is the common one for anyone who runs more than one server.
+
+Cheap, and it is the difference between a page that answers "where is my
+server?" and one that leaves the person to guess.
+
+**Shipped exactly as scoped.** `eligible` in `routes/guildRequests.ts` now
+maps every administered guild to either a real candidate (a signed token) or
+`{ guildId, guildName, alreadyAdded: true }`, and `RequestBotPage.tsx` renders
+the latter greyed out with an "Already added" label instead of a button. The
+truly-empty case (Discord reports no administered guilds at all) got its own,
+now-accurate copy, since it no longer shares a branch with "every administered
+guild already has the bot."
+
+### 58. The bot can be added self-service but has no way out — shipped in v0.7.2
+
+v0.7.1 gave a server admin a one-click path to put the bot *into* a server.
+There is no path back out. `DELETE /admin/guilds/:id` only sets
+`is_active = 0` — the allow-list forgets the server, but the bot is still
+sitting in it on Discord, indefinitely.
+
+`specs/0015` explicitly scoped removal out on the grounds that "the manual
+path still exists for that." Testing v0.7.1 showed that path doesn't
+reliably exist: removing a bot needs Kick Members (or the app's Integrations
+entry to be removable), and Manage Server — the exact permission this
+feature requires to *add* the bot — does not include it. So the person the
+flow is designed around can add the bot to their own server and then be
+unable to remove it. Nor can the operator: the bot token is a Worker secret,
+so getting it out by hand means resetting the token in Discord's portal and
+re-running `wrangler secret put`, which breaks the running deployment until
+it is done. That is a lot of ceremony to undo one click.
+
+The fix is small and pairs with what already exists: `DELETE
+/users/@me/guilds/{id}` with the bot token makes the bot remove itself, no
+permissions needed on anyone's account. Wrap it in `lib/discord.ts`
+(`leaveGuild`), call it from the existing owner-only admin routes alongside
+the `is_active = 0` write, so deactivating a server actually means the bot
+leaves it.
+
+Worth deciding one thing first, which is why this is a capture rather than a
+patch: whether leaving should be automatic on deactivation, or a separate
+deliberate action. Automatic is tidier and matches what "remove this server"
+plainly means; separate is safer, because a temporary deactivation (say,
+while debugging) would otherwise silently require re-inviting the bot, which
+needs the server admin again rather than the operator. Leaning separate, for
+the same reason `specs/0016` made the stale-account purge suppressible
+rather than unconditional — the irreversible half of an operation deserves
+its own yes.
+
+**Shipped as the separate action, per the lean.** `POST /admin/guilds/:id/leave`
+calls the new `leaveGuild()` (`lib/discord.ts`, `DELETE /users/@me/guilds/{id}`
+with the bot token) and does not touch `is_active`, so deactivating a server
+and evicting the bot from it stay two deliberate calls, documented together
+in `docs/SETUP.md`'s server-removal step. A 404 from Discord (the bot was
+already removed some other way) is treated as success rather than an error.
+
+### 43. A constant that must only ever change deliberately has nothing stopping it changing by accident — shipped in v0.7.2
+
+Found the hard way, an hour after `specs/0012` was built (Aug 2026).
+`CURRENT_POLICY_VERSION` was bumped to 2 as an uncommitted edit on a scratch
+branch, `git checkout` carried the modified file across to the release
+branch, and `git add -A` swept it into an unrelated commit — which was then
+pushed. Merging it would have logged out every production user and put an
+acceptance gate in front of them, for a policy that had not changed.
+
+Caught by reading the diff afterwards rather than by anything automatic, and
+that is the point: **the one change in this codebase whose entire design
+principle is "this must never happen unintentionally" had nothing at all
+guarding it.** The spec argued at length about not deriving the version from
+a content hash, so that a typo fix would not log the world out — and then a
+stray `git add` did exactly that.
+
+The class of mistake matters more than the instance. Any constant whose
+value is a *decision* rather than a fact — this one, `APP_VERSION`,
+`PUBLISHED_AT` — can be changed by an editor, a merge or a sweep with no
+signal at all, and the blast radius here is every session in production.
+
+Options, roughly in order of cost:
+- **A CI check on `main` pushes** asserting `CURRENT_POLICY_VERSION` matches
+  a value recorded elsewhere (a lockfile-ish `policy.version` committed
+  alongside), so changing it requires changing two files on purpose. Cheap,
+  and it fails loudly at exactly the right moment.
+- **A required note in the changelog.** If the version moved, the release
+  must carry a changelog entry saying so — which is true of every legitimate
+  bump anyway.
+- **Nothing, and rely on review.** Rejected on the evidence: review is what
+  just missed it.
+
+Related to item 31's lesson from the other direction. There the guardrail
+existed and could not fail usefully; here the guardrail does not exist at all
+for the change most in need of one.
+
+**Shipped as the first, cheapest option.** `worker/policy-version.txt` is
+the sidecar; `npm run check:policy-version` (wired into CI, every push and
+PR, not just pushes to `main`) fails the build if it disagrees with
+`CURRENT_POLICY_VERSION`. Deliberately not derived from a hash of the legal
+documents' own content -- `policy.ts`'s own comment already makes this case
+for the version number itself, and a derived sidecar would fail this exact
+check on every typo fix to the Terms or Privacy Policy page.
