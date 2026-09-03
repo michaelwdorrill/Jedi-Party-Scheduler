@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DateTime } from 'luxon';
 import { runReminderSweep } from '../src/cron/reminders';
 import {
   countRows,
   DAY_MS,
   DM_CHANNEL_RULE,
+  HOUR_MS,
   dmSendRule,
   seedEvent,
   seedGuild,
@@ -127,6 +129,41 @@ describe('the two warnings fire at their thresholds and only once each', () => {
     await runReminderSweep(env);
 
     expect(await warningRows(db, 'neverlogged')).toHaveLength(1);
+  });
+
+  // The Worker runs in UTC, so a date formatted without the recipient's zone
+  // can name the day *after* the one they'd remember signing in on. Every
+  // other DM in this file renders in the recipient's timezone (formatWhen);
+  // this one shipped using the server's, and nothing caught it until the
+  // real DM was read on the sandbox.
+  it('dates the warning in the recipient\'s timezone, not the Worker\'s', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'westcoast');
+    await seedMembership(db, 'westcoast', 'guild-1');
+
+    // 03:00 UTC is still the previous evening in Los Angeles, so the two
+    // zones disagree about what day this was -- which is the only reason
+    // this fixture proves anything. Anchored a whole day past the 351-day
+    // threshold so flooring to UTC midnight can't drop it back under.
+    const lastLogin = Math.floor((Date.now() - 352 * DAY_MS) / DAY_MS) * DAY_MS + 3 * HOUR_MS;
+    await db
+      .prepare(`UPDATE users SET last_login_at = ?, created_at = ?, timezone = 'America/Los_Angeles' WHERE id = 'westcoast'`)
+      .bind(lastLogin, lastLogin)
+      .run();
+
+    const inLA = DateTime.fromMillis(lastLogin).setZone('America/Los_Angeles').toFormat('ccc d LLL yyyy');
+    const inUTC = DateTime.fromMillis(lastLogin).setZone('utc').toFormat('ccc d LLL yyyy');
+    // Guards the fixture itself: if these ever agree, the assertions below
+    // pass for the wrong reason and prove nothing.
+    expect(inLA).not.toBe(inUTC);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200)]);
+    await runReminderSweep(env);
+
+    const sent = fetchStub.bodies.find((b) => b?.includes("haven't logged in")) ?? '';
+    expect(sent).toContain(inLA);
+    expect(sent).not.toContain(inUTC);
   });
 });
 

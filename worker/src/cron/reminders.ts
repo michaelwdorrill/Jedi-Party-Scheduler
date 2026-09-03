@@ -2203,10 +2203,22 @@ interface StaleAccountRow {
   last_login_at: number | null;
 }
 
-function staleAccountWarningContent(env: Env, warningType: 'stale_2wk' | 'stale_1wk', referenceAt: number): string {
+// The date is rendered in the recipient's own timezone, for formatWhen's
+// reason above applied to a date rather than a time: a Worker runs in UTC, so
+// someone in Los Angeles who last signed in at 5pm local would otherwise be
+// told a date a day later than the one they remember. Date-only rather than
+// formatWhen's date-and-time -- the hour they last logged in a year ago is
+// noise, and pretending to that precision invites arguing with it.
+function staleAccountWarningContent(
+  env: Env,
+  warningType: 'stale_2wk' | 'stale_1wk',
+  referenceAt: number,
+  zone: string,
+): string {
   const window = warningType === 'stale_1wk' ? 'one week' : 'two weeks';
+  const lastSeen = DateTime.fromMillis(referenceAt).setZone(zone).toFormat('ccc d LLL yyyy');
   return (
-    `You haven't logged in since ${new Date(referenceAt).toDateString()}. If you don't log back in within the next ` +
+    `You haven't logged in since ${lastSeen}. If you don't log back in within the next ` +
     `${window}, your account and everything in it will be permanently deleted.\n${env.FRONTEND_URL}/#/calendar`
   );
 }
@@ -2315,7 +2327,7 @@ async function sweepStaleAccounts(env: Env, budget: TickBudget): Promise<void> {
         'account_purge_warnings',
         { user_id: user.id, last_login_at: referenceAt, warning_type: warningType },
         recipient,
-        staleAccountWarningContent(env, warningType, referenceAt),
+        staleAccountWarningContent(env, warningType, referenceAt, user.timezone),
         budget,
       )
     ) {
