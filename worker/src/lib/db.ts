@@ -307,6 +307,54 @@ export async function listFriends(env: Env, userId: string, guildId: string) {
   return results.map(mapFriend);
 }
 
+export interface FriendWithGuilds {
+  id: string;
+  username: string;
+  globalName: string | null;
+  avatarHash: string | null;
+  // Which of the *caller's own* active servers this person also currently
+  // shares -- never a server the caller isn't in, even though the person
+  // may well be in others too. specs/0011's group picker uses this to
+  // narrow candidates client-side as a roster is built (a candidate is
+  // still addable iff their guildIds intersects the roster's running
+  // common-server set); it must never leak a server the caller can't
+  // already see for themselves.
+  guildIds: string[];
+}
+
+// Every person the caller shares *any* currently-active server with, once,
+// each tagged with which of the caller's servers that is. specs/0011 / IDEAS
+// item 36: group creation stopped being scoped to one server, so its picker
+// needs candidates from everywhere the caller is, not from a guildId the
+// caller has to pick first.
+export async function listFriendsAcrossGuilds(env: Env, userId: string): Promise<FriendWithGuilds[]> {
+  const cutoff = Date.now() - MEMBERSHIP_GRACE_MS;
+  const { results } = await env.DB.prepare(
+    `SELECT u.id, u.username, u.global_name, u.avatar_hash, m.guild_id
+     FROM users u
+     JOIN user_guild_membership m ON m.user_id = u.id
+     WHERE m.is_member = 1 AND m.verified_at >= ? AND u.id != ?
+       AND m.guild_id IN (
+         SELECT guild_id FROM user_guild_membership
+          WHERE user_id = ? AND is_member = 1 AND verified_at >= ?
+       )
+     ORDER BY u.username`,
+  )
+    .bind(cutoff, userId, userId, cutoff)
+    .all<{ id: string; username: string; global_name: string | null; avatar_hash: string | null; guild_id: string }>();
+
+  const byId = new Map<string, FriendWithGuilds>();
+  for (const row of results) {
+    let f = byId.get(row.id);
+    if (!f) {
+      f = { id: row.id, username: row.username, globalName: row.global_name, avatarHash: row.avatar_hash, guildIds: [] };
+      byId.set(row.id, f);
+    }
+    f.guildIds.push(row.guild_id);
+  }
+  return [...byId.values()];
+}
+
 export function isOwner(env: Env, userId: string): boolean {
   return userId === env.OWNER_DISCORD_ID;
 }

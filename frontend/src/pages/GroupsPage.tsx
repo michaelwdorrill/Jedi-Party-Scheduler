@@ -5,7 +5,7 @@ import { useGuild } from '../auth/GuildContext';
 import GroupEditor from '../components/GroupEditor';
 import type { Friend, Group } from '../types';
 import { describeError, useAction, useAsync } from '../lib/async';
-import { Avatar, ErrorState, InlineError, Loading, buttonClass, cardClass, controlClass } from '../components/ui';
+import { Avatar, ErrorState, InlineError, Loading, buttonClass, cardClass } from '../components/ui';
 
 export default function GroupsPage() {
   const { user } = useAuth();
@@ -13,31 +13,19 @@ export default function GroupsPage() {
   const [friends, setFriends] = useState<Friend[]>([]);
   const [friendsError, setFriendsError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Group | 'new' | null>(null);
-  // Which server a *new* group belongs to. Groups are genuinely per-server
-  // (their members have to share one), so unlike the calendar this can't just
-  // span everything -- but it's a choice made when creating, not a mode the
-  // whole page sits in. Defaults to the first server you're in.
-  const [newGroupGuildId, setNewGroupGuildId] = useState('');
-
-  // The server whose roster the picker should offer: the one being edited, or
-  // the one chosen for a new group.
-  const editorGuildId = editing && editing !== 'new' ? editing.guildId : newGroupGuildId;
 
   const { data, error, loading, reload } = useAsync<Group[]>(() => api.get<Group[]>('/me/groups'), []);
   const groups = data ?? [];
   const action = useAction();
 
+  // specs/0011 / IDEAS item 36: a group is no longer scoped to one server, so
+  // there's no server to pick before the picker can load -- it loads once,
+  // covering every server the caller is in, the moment the editor opens.
   useEffect(() => {
-    if (!newGroupGuildId && guilds.length > 0) setNewGroupGuildId(guilds[0].id);
-  }, [guilds, newGroupGuildId]);
-
-  // Friends are legitimately server-scoped -- you can only group people you
-  // share a server with -- so this reloads whenever the editor's server does.
-  useEffect(() => {
-    if (!editorGuildId) return;
+    if (editing === null) return;
     // A failed roster fetch used to leave the member picker silently empty,
-    // which reads as "this server has nobody in it" (idea 24).
-    api.get<Friend[]>(`/me/friends?guild_id=${editorGuildId}`).then(
+    // which reads as "you have nobody to add" (idea 24).
+    api.get<Friend[]>('/me/friends').then(
       (list) => {
         setFriends(list);
         setFriendsError(null);
@@ -47,7 +35,7 @@ export default function GroupsPage() {
         setFriendsError(describeError(e));
       },
     );
-  }, [editorGuildId]);
+  }, [editing]);
 
   if (guilds.length === 0) {
     return <p className="text-muted">You don't share any allow-listed servers yet.</p>;
@@ -59,8 +47,8 @@ export default function GroupsPage() {
   // in this group". The picker still needs to be able to render you, because
   // you are always a member of a group you own (migration 0017) and the
   // editor shows that membership as a locked selection rather than hiding
-  // it. The server has no such exclusion either -- PATCH /groups/:id
-  // validates member_user_ids against active guild membership only.
+  // it. The server has no such exclusion either -- POST /groups and
+  // PATCH /groups/:id validate the whole roster, caller included.
   const pickableMembers = user
     ? [...friends, { id: user.id, username: user.username, globalName: user.globalName, avatarHash: user.avatarHash }].sort(
         (a, b) => (a.globalName ?? a.username).localeCompare(b.globalName ?? b.username),
@@ -82,11 +70,7 @@ export default function GroupsPage() {
     };
     // The editor is only closed once the save lands. It used to close first,
     // so a rejected save threw away everything just typed and said nothing.
-    const saved = await action.run(() =>
-      editing === 'new'
-        ? api.post(`/guilds/${newGroupGuildId}/groups`, body)
-        : api.patch(`/groups/${editing.id}`, body),
-    );
+    const saved = await action.run(() => (editing === 'new' ? api.post('/groups', body) : api.patch(`/groups/${editing.id}`, body)));
     if (!saved) return;
     setEditing(null);
     reload();
@@ -111,26 +95,10 @@ export default function GroupsPage() {
         )}
       </div>
 
-      {editing === 'new' && guilds.length > 1 && (
-        <div>
-          <label className="mb-1 block text-sm text-muted">Server</label>
-          <select
-            value={newGroupGuildId}
-            onChange={(e) => setNewGroupGuildId(e.target.value)}
-            className={controlClass('lg', 'w-full')}
-          >
-            {guilds.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-
       {editing !== null && (
         <GroupEditor
           friends={pickableMembers}
+          callerGuildIds={guilds.map((g) => g.id)}
           initial={editing === 'new' ? undefined : editing}
           // Only lock yourself in on groups you own -- which is every group
           // you can reach this editor for, since editing is owner-only.
@@ -165,11 +133,19 @@ export default function GroupsPage() {
                 <div className="font-medium">
                   {g.name}
                   {g.game && <span className="ml-2 text-sm font-normal text-faint">— {g.game}</span>}
-                  {/* Which server this group lives on. Needed now that the
-                      page lists every server's groups at once. */}
-                  {g.guildName && (
-                    <span className="ml-2 rounded bg-raised px-1.5 py-0.5 text-xs font-normal text-muted">
-                      {g.guildName}
+                  {/* specs/0011: a group's venue is now a set, not a single
+                      server -- shown here rather than in listings elsewhere,
+                      per the spec's own leaning. Empty means no common
+                      server: the repair is removing whoever doesn't fit. */}
+                  {g.commonServers.length > 0 ? (
+                    g.commonServers.map((s) => (
+                      <span key={s.id} className="ml-2 rounded bg-raised px-1.5 py-0.5 text-xs font-normal text-muted">
+                        {s.name}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="ml-2 rounded bg-danger-surface px-1.5 py-0.5 text-xs font-normal text-danger-text">
+                      No common server
                     </span>
                   )}
                 </div>

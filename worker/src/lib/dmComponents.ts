@@ -1,4 +1,4 @@
-import { cancelCustomId, rsvpCustomId, voteCustomId } from './interactions';
+import { cancelCustomId, cancelOccurrenceCustomId, rsvpCustomId, voteCustomId } from './interactions';
 import type { RsvpStatus } from './attendance';
 
 // The outbound half of specs/0010: the controls a bot DM carries, so that
@@ -141,6 +141,25 @@ export function cancelButton(eventId: string): unknown[] {
       type: COMPONENT_TYPE.ACTION_ROW,
       components: [
         { type: COMPONENT_TYPE.BUTTON, style: BUTTON_STYLE.DANGER, label: 'Cancel this session', custom_id: cancelCustomId(eventId) },
+      ],
+    },
+  ];
+}
+
+// IDEAS item 54: the occurrence-scoped form of the button above, for a
+// recurring event's own deadline-based cascade -- one session, not the
+// series.
+export function cancelOccurrenceButton(eventId: string, occurrenceDate: string): unknown[] {
+  return [
+    {
+      type: COMPONENT_TYPE.ACTION_ROW,
+      components: [
+        {
+          type: COMPONENT_TYPE.BUTTON,
+          style: BUTTON_STYLE.DANGER,
+          label: 'Cancel this session',
+          custom_id: cancelOccurrenceCustomId(eventId, occurrenceDate),
+        },
       ],
     },
   ];

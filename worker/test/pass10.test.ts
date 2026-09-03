@@ -266,8 +266,8 @@ describe('a whole cron tick fits the Free-plan budget at the supported 25-user g
     // comment in validate.ts).
     for (const groupId of ids('group', LIMITS.MAX_GROUP_IDS)) {
       await db.prepare(
-        `INSERT INTO groups (id, guild_id, name, idle_reminder_days, created_by, created_at)
-         VALUES (?, 'guild-1', ?, 1, ?, ?)`,
+        `INSERT INTO groups (id, name, idle_reminder_days, created_by, created_at)
+         VALUES (?, ?, 1, ?, ?)`,
       )
         .bind(groupId, groupId, organizerId, now)
         .run();

@@ -131,8 +131,23 @@ describe('a whole cron tick stays inside the Free-plan D1 ceiling (F-04-G1)', ()
     // it is deliberately uncharged against the *ledger*, so RESERVED_QUERIES
     // itself does not move. See that constant's own comment for why bumping
     // it to "match" a new charged query does not actually work here.
-    expect(firstTick).toBeLessThanOrEqual(26);
-    expect(secondTick).toBeLessThanOrEqual(26);
+    //
+    // 27, not 26, for specs/0011 / IDEAS item 36's sweepGroupDrift: the same
+    // shape again -- a genuinely new fixed discovery read, uncharged against
+    // the ledger for the same reason, but still a real statement every tick.
+    //
+    // 31, not 27, for IDEAS item 54's deadline-based minimum-attendees
+    // cascade: two new sweeps (sweepMinimumAttendeesDeadlines,
+    // sweepMinimumAttendeesDeadlineWarnings), each issuing two discovery
+    // reads (the non-recurring and recurring candidate sets) rather than
+    // one, so four more real statements every tick -- same uncharged shape
+    // as every other addition in this list.
+    //
+    // 32, not 31, for the organizer-RSVP-notice idea captured alongside item
+    // 54: one more new fixed discovery read (sweepOrganizerRsvpNotices),
+    // uncharged for the same reason as the rest.
+    expect(firstTick).toBeLessThanOrEqual(32);
+    expect(secondTick).toBeLessThanOrEqual(32);
     // One flush statement, not ten: the ten fresh cursors cost the first tick
     // barely more than the second, which has none to write.
     expect(firstTick - secondTick).toBeLessThanOrEqual(2);

@@ -1,21 +1,12 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
-import { chunkIds, chunkRows, placeholders } from '../lib/d1';
-import { filterActiveGuildMembers, isGuildMember, listUserGuilds, MEMBERSHIP_GRACE_MS } from '../lib/db';
-import { newId } from '../lib/ids';
+import { chunkIds, placeholders } from '../lib/d1';
+import { isGuildMember, listUserGuilds, MEMBERSHIP_GRACE_MS } from '../lib/db';
 import { createEventWithInvites, type EventWriteInput } from '../lib/eventWrites';
 import { buildCalendarOccurrences } from '../lib/calendar';
 import { computeBusyBlocksForUsers } from '../lib/freeBusy';
 import { fetchGuildVoiceChannels } from '../lib/discord';
-import {
-  assertOptionalString,
-  assertSafeInt,
-  assertStringArray,
-  assertString,
-  LIMITS,
-  readJsonBody,
-  ValidationError,
-} from '../lib/validate';
+import { assertStringArray, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
 
 export const guildRoutes = new Hono<AppEnv>();
 
@@ -130,54 +121,9 @@ guildRoutes.get('/:guildId/voice-channels', async (c) => {
 // every group in the server -- and every one of those groups' full member
 // lists -- to anyone in the server, whether or not they were in the group.
 // Groups are now listed only by GET /me/groups, which is scoped to the
-// groups the caller is actually in. Creating one is still server-scoped, so
-// the POST below stays.
-guildRoutes.post('/:guildId/groups', async (c) => {
-  const userId = c.get('userId');
-  const guildId = c.req.param('guildId');
-  if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
-
-  const body = await readJsonBody<{ name: string; game?: string | null; idle_reminder_days?: number; member_user_ids: string[] }>(c);
-  const name = assertString(body.name, 'name', LIMITS.GROUP_NAME);
-  const game = assertOptionalString(body.game, 'game', LIMITS.GAME);
-  const idleReminderDays = body.idle_reminder_days === undefined ? 2 : assertSafeInt(body.idle_reminder_days, 'idle_reminder_days');
-  if (idleReminderDays < 1 || idleReminderDays > 3650) throw new ValidationError('idle_reminder_days out of range');
-  const memberIds = assertStringArray(body.member_user_ids ?? [], 'member_user_ids', LIMITS.MAX_GROUP_MEMBERS, 64);
-
-  const active = await filterActiveGuildMembers(c.env, guildId, memberIds);
-  if (memberIds.some((id) => !active.has(id))) {
-    throw new ValidationError('One or more members are not current members of this server');
-  }
-
-  const groupCount = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM groups WHERE guild_id = ?`)
-    .bind(guildId)
-    .first<{ n: number }>();
-  if ((groupCount?.n ?? 0) >= LIMITS.MAX_GROUPS_PER_GUILD) {
-    throw new ValidationError('This server has reached its limit of groups');
-  }
-
-  const groupId = newId();
-  const now = Date.now();
-  // The creator is always a member of their own group (migration 0017).
-  // Deduped here rather than relying on INSERT OR IGNORE alone, so the count
-  // against MAX_GROUP_MEMBERS below reflects the roster that actually gets
-  // written -- and so a creator who *did* tick themselves in the picker
-  // doesn't silently consume two slots' worth of parameters.
-  const rosterIds = memberIds.includes(userId) ? memberIds : [userId, ...memberIds];
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      `INSERT INTO groups (id, guild_id, name, game, idle_reminder_days, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(groupId, guildId, name, game, idleReminderDays, userId, now),
-    ...chunkRows(rosterIds, 3).map((chunk) =>
-      c.env.DB.prepare(
-        `INSERT OR IGNORE INTO group_members (group_id, user_id, added_at)
-         VALUES ${chunk.map(() => '(?, ?, ?)').join(', ')}`,
-      ).bind(...chunk.flatMap((memberId) => [groupId, memberId, now])),
-    ),
-  ]);
-
-  return c.json({ id: groupId }, 201);
-});
+// groups the caller is actually in. Creating one moved to POST /groups
+// (specs/0011 / IDEAS item 36) -- a group is no longer scoped to a server at
+// creation, so there is nothing left for this guild-scoped route to do.
 
 guildRoutes.get('/:guildId/events', async (c) => {
   const userId = c.get('userId');

@@ -336,6 +336,9 @@ eventRoutes.get('/:eventId', async (c) => {
     // specs/0014 stage 3, decision 4.
     minimumAttendees: event.minimum_attendees ?? null,
     autoCancelBelowMinimum: !!event.auto_cancel_below_minimum,
+    // IDEAS item 54.
+    minimumAttendeesDeadlineAt: event.minimum_attendees_deadline_at ?? null,
+    minimumAttendeesDeadlineHoursBefore: event.minimum_attendees_deadline_hours_before ?? null,
     recurrence: recurrence
       ? {
           freq: recurrence.freq,

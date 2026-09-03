@@ -285,7 +285,13 @@ export const LIMITS = {
   MAX_ACTIVE_EVENTS_PER_GUILD: 300,
   MAX_EVENTS_PER_ORGANIZER_PER_GUILD: 300,
   MAX_RECURRING_EVENTS_PER_GUILD: 100,
-  MAX_GROUPS_PER_GUILD: 100,
+  // specs/0011 / IDEAS item 36: replaces MAX_GROUPS_PER_GUILD now that a
+  // group doesn't belong to one guild. Per-owner (created_by) is the only
+  // denominator that still exists, and it's also the one that matches who's
+  // doing the creating. 100 mirrors the old per-guild figure -- a strict
+  // loosening for everyone except a hypothetical owner already over it
+  // across several servers, which the migration checked for.
+  MAX_GROUPS_PER_OWNER: 100,
   // Counts *every* event row, cancelled ones included. The active quotas
   // above deliberately exclude cancelled events so a guild that tidies up
   // isn't punished for it -- but that also means create-then-cancel is

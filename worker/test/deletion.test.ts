@@ -53,8 +53,8 @@ describe('deleteUserCompletely', () => {
     // A group the target created, referenced by an invite on someone else's
     // event -- the source_group_id foreign key that used to block deletion.
     await db.prepare(
-      `INSERT INTO groups (id, guild_id, name, idle_reminder_days, created_by, created_at)
-       VALUES ('grp', 'guild-1', 'Squad', 2, 'target', ?)`,
+      `INSERT INTO groups (id, name, idle_reminder_days, created_by, created_at)
+       VALUES ('grp', 'Squad', 2, 'target', ?)`,
     )
       .bind(now)
       .run();

@@ -209,7 +209,7 @@ describe('combined direct/group invitee resolution fits the Free-plan budget (F-
       });
     }
     await db.prepare(
-      `INSERT INTO groups (id, guild_id, name, created_by, created_at) VALUES ('g1', 'guild-1', 'Everyone', 'organizer', ?)`,
+      `INSERT INTO groups (id, name, created_by, created_at) VALUES ('g1', 'Everyone', 'organizer', ?)`,
     )
       .bind(Date.now())
       .run();

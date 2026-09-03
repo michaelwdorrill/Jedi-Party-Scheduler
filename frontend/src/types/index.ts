@@ -20,12 +20,19 @@ export interface Guild {
   name: string;
 }
 
+export interface CommonServer {
+  id: string;
+  name: string;
+}
+
 export interface Group {
   id: string;
-  guildId: string;
-  // GET /me/groups spans every server, so it names the one each group
-  // belongs to. It is the only group listing there is since v0.4.3.
-  guildName?: string;
+  // specs/0011 / IDEAS item 36: a group no longer belongs to one server --
+  // this is every server currently containing all of its members, in
+  // display order. Empty means the group has no venue right now (someone
+  // drifted apart from the rest) and can't be used to create a new event
+  // until that's fixed.
+  commonServers: CommonServer[];
   name: string;
   game: string | null;
   idleReminderDays: number;
@@ -38,6 +45,11 @@ export interface Friend {
   username: string;
   globalName: string | null;
   avatarHash: string | null;
+  // Only present when GET /me/friends is called without guild_id (the group
+  // picker's shape) -- which of the *caller's own* servers this person also
+  // currently shares. Used to narrow candidates client-side as a roster is
+  // built; never includes a server the caller isn't in.
+  guildIds?: string[];
 }
 
 export type EventType = 'single' | 'poll';
@@ -217,10 +229,13 @@ export interface EventDetail extends EventOccurrence {
   windowBlockMinutes: number | null;
   voiceChannelId: string | null;
   voiceChannelName: string | null;
-  // specs/0014 stage 3, decision 4. Only meaningful on a non-recurring
-  // single event -- see EventFormPage's own gating.
+  // specs/0014 stage 3, decision 4 / IDEAS item 54. Available on both
+  // recurring and non-recurring single events now -- which of the two
+  // deadline fields below applies is decided by isRecurring.
   minimumAttendees: number | null;
   autoCancelBelowMinimum: boolean;
+  minimumAttendeesDeadlineAt: number | null;
+  minimumAttendeesDeadlineHoursBefore: number | null;
   recurrence: RecurrenceRule | null;
   invites: EventInvite[];
   pollOptions: PollOption[] | null;

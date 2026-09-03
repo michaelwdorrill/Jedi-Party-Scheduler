@@ -203,9 +203,9 @@ describe('invite writes at the configured maxima', () => {
       ['grp-b', userIds.slice(groupSize, groupSize * 2)],
     ] as const) {
       await db.prepare(
-        `INSERT INTO groups (id, guild_id, name, idle_reminder_days, created_by, created_at) VALUES (?, ?, ?, 2, ?, ?)`,
+        `INSERT INTO groups (id, name, idle_reminder_days, created_by, created_at) VALUES (?, ?, 2, ?, ?)`,
       )
-        .bind(groupId, 'guild-1', groupId, 'organizer', now)
+        .bind(groupId, groupId, 'organizer', now)
         .run();
       for (const memberId of members) {
         await db.prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`)

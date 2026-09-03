@@ -65,11 +65,23 @@ export default function EventFormPage() {
   const [startTime, setStartTime] = useState('13:00');
   const [endTime, setEndTime] = useState('17:00');
   const [isRecurring, setIsRecurring] = useState(false);
-  // specs/0014 stage 3, decision 4. Only meaningful for a non-recurring
-  // single event -- see the checkbox's own gating below. '' means "no
-  // minimum set", distinct from 0 (which the server rejects anyway).
+  // specs/0014 stage 3, decision 4 / IDEAS item 54. '' means "no minimum
+  // set", distinct from 0 (which the server rejects anyway). Available on
+  // both event shapes now -- which of the two deadline fields below applies
+  // is decided by isRecurring, mirroring the server's own
+  // assertMinimumAttendeesDeadlineShape.
   const [minimumAttendees, setMinimumAttendees] = useState('');
   const [autoCancelBelowMinimum, setAutoCancelBelowMinimum] = useState(false);
+  // Non-recurring: an absolute point, entered the same way the event's own
+  // start is (separate date/time fields combined via toUtcMillis below).
+  // '' means "no deadline set", which keeps the original v0.6.2 real-time
+  // reactive cascade rather than opting into the deadline-based one.
+  const [minimumAttendeesDeadlineDate, setMinimumAttendeesDeadlineDate] = useState('');
+  const [minimumAttendeesDeadlineTime, setMinimumAttendeesDeadlineTime] = useState('12:00');
+  // Recurring: no single date to anchor to, so a relative offset applied
+  // fresh to each occurrence instead. Required whenever minimumAttendees is
+  // set on a recurring event -- there is no reactive fallback for it.
+  const [minimumAttendeesDeadlineHoursBefore, setMinimumAttendeesDeadlineHoursBefore] = useState('24');
   const [recurrence, setRecurrence] = useState<RecurrenceFormValue>({
     freq: 'WEEKLY',
     interval: 1,
@@ -160,12 +172,16 @@ export default function EventFormPage() {
       // rather than merely convenient: the server re-checks every group
       // against the event's guild when it resolves the invite list
       // (resolveInvitees), so a group id from the wrong server invites
-      // nobody however it got into the request.
+      // nobody however it got into the request. specs/0011 / IDEAS item 36:
+      // a group can now offer *several* servers, not one -- filtered to
+      // those whose common-server set includes this event's guild. A group
+      // with no common server at all (someone drifted apart from the rest)
+      // never appears here, for any guild, until it's repaired.
       api.get<Group[]>('/me/groups'),
     ]).then(
       ([f, g]) => {
         setFriends(f);
-        setGroups(g.filter((group) => group.guildId === effectiveGuildId));
+        setGroups(g.filter((group) => group.commonServers.some((s) => s.id === effectiveGuildId)));
         setInviteesError(null);
       },
       (e: unknown) => {
@@ -220,8 +236,18 @@ export default function EventFormPage() {
         setEndDate(e.toISODate()!);
         setStartTime(s.toFormat('HH:mm'));
         setEndTime(e.toFormat('HH:mm'));
+      }
+      if (ev.eventType === 'single') {
         setMinimumAttendees(ev.minimumAttendees != null ? String(ev.minimumAttendees) : '');
         setAutoCancelBelowMinimum(ev.autoCancelBelowMinimum);
+        if (ev.minimumAttendeesDeadlineAt != null) {
+          const d = DateTime.fromMillis(ev.minimumAttendeesDeadlineAt).setZone(ev.timezone);
+          setMinimumAttendeesDeadlineDate(d.toISODate()!);
+          setMinimumAttendeesDeadlineTime(d.toFormat('HH:mm'));
+        }
+        if (ev.minimumAttendeesDeadlineHoursBefore != null) {
+          setMinimumAttendeesDeadlineHoursBefore(String(ev.minimumAttendeesDeadlineHoursBefore));
+        }
       }
       if (ev.recurrence) {
         setIsRecurring(true);
@@ -415,12 +441,26 @@ export default function EventFormPage() {
         // Sent explicitly either way (including null), same reasoning as
         // pollOptions' windowBlockMinutes below: absent would mean "leave
         // whatever is stored alone", which on an edit that clears the field
-        // would silently keep the old minimum. Omitted entirely while
-        // repeating -- the server rejects it outright on a recurring event,
-        // and the checkbox is hidden for the same reason.
-        if (!isRecurring) {
-          body.minimumAttendees = minimumAttendees.trim() ? Number(minimumAttendees) : null;
-          body.autoCancelBelowMinimum = autoCancelBelowMinimum;
+        // would silently keep the old minimum. IDEAS item 54: available on
+        // both shapes now: exactly one of the two deadline fields is sent,
+        // matching assertMinimumAttendeesDeadlineShape's own rule.
+        body.minimumAttendees = minimumAttendees.trim() ? Number(minimumAttendees) : null;
+        body.autoCancelBelowMinimum = autoCancelBelowMinimum;
+        if (minimumAttendees.trim()) {
+          if (isRecurring) {
+            body.minimumAttendeesDeadlineHoursBefore = minimumAttendeesDeadlineHoursBefore.trim()
+              ? Number(minimumAttendeesDeadlineHoursBefore)
+              : null;
+            body.minimumAttendeesDeadlineAt = null;
+          } else {
+            body.minimumAttendeesDeadlineAt = minimumAttendeesDeadlineDate.trim()
+              ? toUtcMillis(minimumAttendeesDeadlineDate, minimumAttendeesDeadlineTime)
+              : null;
+            body.minimumAttendeesDeadlineHoursBefore = null;
+          }
+        } else {
+          body.minimumAttendeesDeadlineAt = null;
+          body.minimumAttendeesDeadlineHoursBefore = null;
         }
       } else {
         body.pollStrategy = pollStrategy;
@@ -609,24 +649,25 @@ export default function EventFormPage() {
           </label>
           {isRecurring && <RecurrenceForm value={recurrence} onChange={setRecurrence} />}
 
-          {/* specs/0014 stage 3, decision 4. Hidden while repeating: the
-              cascade only applies to a single, non-recurring session -- see
-              docs/IDEAS.md for the recurring case as a captured follow-up. */}
-          {!isRecurring && (
-            <div className="space-y-2 border-t border-edge pt-3">
-              <label className="flex items-center gap-2 text-sm text-ink-dim">
-                <span>Minimum attendees</span>
-                <input
-                  type="number"
-                  min={1}
-                  placeholder="none"
-                  value={minimumAttendees}
-                  onChange={(e) => setMinimumAttendees(e.target.value)}
-                  className={controlClass('sm')}
-                  style={{ width: '5rem' }}
-                />
-              </label>
-              {minimumAttendees.trim() && (
+          {/* specs/0014 stage 3, decision 4 / IDEAS item 54. Available while
+              repeating now -- a deadline is what makes a recurring
+              minimum coherent (per-occurrence, not reactive to every
+              decline the moment it happens). */}
+          <div className="space-y-2 border-t border-edge pt-3">
+            <label className="flex items-center gap-2 text-sm text-ink-dim">
+              <span>Minimum attendees</span>
+              <input
+                type="number"
+                min={1}
+                placeholder="none"
+                value={minimumAttendees}
+                onChange={(e) => setMinimumAttendees(e.target.value)}
+                className={controlClass('sm')}
+                style={{ width: '5rem' }}
+              />
+            </label>
+            {minimumAttendees.trim() && (
+              <>
                 <label className="flex items-start gap-2 text-sm text-ink-dim">
                   <input
                     type="checkbox"
@@ -634,13 +675,44 @@ export default function EventFormPage() {
                     onChange={(e) => setAutoCancelBelowMinimum(e.target.checked)}
                   />
                   <span>
-                    Cancel automatically if attendance drops below this. Otherwise you'll get a DM to decide when it
-                    does.
+                    Cancel automatically if attendance is still below this at the deadline. Otherwise you'll get a
+                    DM to decide when it happens.
                   </span>
                 </label>
-              )}
-            </div>
-          )}
+                {isRecurring ? (
+                  <label className="flex items-center gap-2 text-sm text-ink-dim">
+                    <span>Check attendance</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={minimumAttendeesDeadlineHoursBefore}
+                      onChange={(e) => setMinimumAttendeesDeadlineHoursBefore(e.target.value)}
+                      className={controlClass('sm')}
+                      style={{ width: '5rem' }}
+                    />
+                    <span>hours before each session</span>
+                  </label>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2 text-sm text-ink-dim">
+                    <span>Check attendance by</span>
+                    <input
+                      type="date"
+                      value={minimumAttendeesDeadlineDate}
+                      onChange={(e) => setMinimumAttendeesDeadlineDate(e.target.value)}
+                      className={controlClass('sm')}
+                    />
+                    <input
+                      type="time"
+                      value={minimumAttendeesDeadlineTime}
+                      onChange={(e) => setMinimumAttendeesDeadlineTime(e.target.value)}
+                      className={controlClass('sm')}
+                    />
+                    <span className="text-xs text-faint">(leave blank to decide as soon as someone declines)</span>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
       ) : (
         <div className={cardClass('md', 'space-y-3')}>
