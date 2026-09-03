@@ -34,46 +34,6 @@ identity, not a position — it never changes and is never reused.
 
 ## Still open
 
-### 54. The minimum-attendees cascade doesn't cover recurring events
-
-Captured while building v0.6.2 (specs/0014 stage 3, decision 4), and left
-out of that release on purpose rather than discovered afterward.
-`minimum_attendees`/`auto_cancel_below_minimum` are rejected outright by
-`validateEventWriteInput` when the event is recurring, so the whole cascade
-— the synchronous check in `recordRsvp`, the organizer's cancel-prompt DM,
-the cancelled-event notice — only ever runs for a plain one-off event.
-
-The reason wasn't difficulty so much as shape: decision 4's own text and
-every worked example are per-occurrence in spirit but never actually say
-what happens to a recurring session below its minimum, and the honest
-answer is a materially different write path — cancelling *one occurrence*
-of a series means an `event_occurrence_overrides` row
-(`is_cancelled = 1`, the same primitive `POST
-/events/:eventId/occurrences/:date/cancel` already uses), not
-`events.status = 'cancelled'`, which would cancel the whole series. Building
-both shapes at once risked getting the `custom_id` wrong on the first try —
-the organizer's "Cancel this session" button (`uo:v2:cancel:<eventId>`,
-specs/0014's v1→v2 discipline) carries no occurrence date because this
-release never needed one; a recurring version needs one appended, which is
-a new custom_id kind rather than a reinterpretation of the existing one.
-
-The pieces that would extend cleanly: `countConfirmedAttendees` and the
-cancel-prompt/notice sweep already take an `occurrenceDate` parameter
-(currently always `''`); `getConfirmedAttendeeIds`'s occurrence-scoped
-queries already work per-occurrence for everything else. The real design
-work is deciding whether a series-wide `minimum_attendees` applies
-identically to every occurrence, or whether that is itself the wrong
-question — the same "per-occurrence state, not per-occurrence nagging"
-distinction decision 7 already drew for the reminder ladder.
-
-**Still open after v0.7.2, deliberately.** Item 55 (a plain organizer cancel
-telling nobody) shipped in that pass and widened the same cascade this entry
-is about — but only for `is_recurring = 0`, on purpose, precisely because
-this entry's open design question is unanswered: what a per-occurrence
-cancellation notice should mean for a series. Widening 55 to recurring events
-too would have answered that question by accident, under a different item's
-name, rather than deciding it here on purpose.
-
 ### 2. Google Calendar sync
 
 Pull a single chosen Google calendar (not all of them — e.g. just "D&D
@@ -224,7 +184,13 @@ happen, and the choice between a sandbox Pages project and a CI preview
 bundle is still unmade.
 
 
-### 36. Should a group be server-agnostic, requiring only that people share a server?
+## Already built
+
+Kept for the reasoning, not as a to-do list. Nothing below counts against the
+1.0 test above: where an entry argues its way to a decision and rejects an
+alternative, that argument is why the entry is still here at all.
+
+### 36. Should a group be server-agnostic, requiring only that people share a server? — shipped in v0.7.2
 
 Asked (Aug 2026) alongside the decision on 34, and it is the more interesting
 half: rather than a group belonging to one server, let a group be just a list
@@ -297,31 +263,6 @@ That makes this item substantially smaller than first priced, and it means
    deliberate revocation mechanism, not an accident of the query.
 5. **Label, filter, and 0007's entire scope.**
 
-**Still to decide, and each is small:**
-- **More than one common server.** Who picks the venue? Leaning: the
-  organizer, at creation, defaulting to the venue of the group's last event.
-- **Someone leaves the venue server after the event exists.** Today they
-  silently vanish from the event (role 4) and get no voice link. Leave it,
-  auto-re-anchor to another common server, or warn the organizer? Leaning
-  leave-it-and-warn: silently moving where people are meeting is worse than
-  saying one person can't reach it.
-- **A group member who left the venue server but still shares another.**
-  Leaning: drop them from *that event* (matching today's silent drop for
-  group-derived invitees), never from the group.
-- **Does leaving a server still revoke your view of events you were invited
-  to?** Today yes, deliberately. Leaning keep — and it stays coherent here,
-  since every member is in the venue server at creation by construction.
-
-**What changes in the code**, roughly: `groups.guild_id` goes away, along with
-`assertValidGroupMemberTargets`'s "not current members of this server" check,
-replaced by an intersection check over the proposed roster. `resolveInvitees`
-keeps filtering group-derived invitees against the event's guild, which is now
-redundant-but-stricter rather than the primary boundary. Both frontend group
-surfaces lose their server picker. The Privacy Policy needs a pass: the
-guarantee it can still make is that you are never in a group with someone you
-share no server with — which the intersection rule preserves exactly, and
-which the adder-anchored alternative would have lost.
-
 **One genuinely nice property, worth noting because it is counterintuitive:
 the membership *freshness* check gets cheaper, not dearer.** Today the event's
 guild is fixed, so a stale cached row for that one guild must be revalidated
@@ -330,39 +271,48 @@ live revalidations per request). Asking "which servers do all of these people
 share" can be answered from whichever cached rows are fresh, and only needs a
 live call when a candidate venue's rows are all stale.
 
-Wants a spec — not for the rule, which is now decided, but for the four open
-calls above and the migration. Not v0.5.
+**`specs/0011-groups-without-servers.md` locked the rule and the migration
+SQL, but a fifth call the spec never made — the group-access-control
+replacement — got assessed and flagged during the v0.7.2 pass before being
+answered.** Every group route gated on `isGroupMember(...) &&
+requireActiveGuildMember(userId, group.guild_id)`, and removing `guild_id`
+meant deciding what, if anything, replaced the second half. Put to Michael
+directly; his answer: **membership of the group alone is enough.** No
+still-active-guild check. That, plus his answers to the other four open
+calls, is what shipped:
 
-**`specs/0011-groups-without-servers.md` exists and locks the rule, the four
-calls above, and the migration SQL.** Assessed for build during the v0.7.2
-pass (Sept 2026) and deliberately not built: reading the actual authorization
-code turned up a fifth call the spec doesn't make. Every group route in
-`routes/groups.ts` (`GET/PATCH/DELETE /:groupId`, add/remove member) gates on
-`isGroupMember(...) && requireActiveGuildMember(userId, group.guild_id)` --
-group membership *and* still-active membership of the group's one guild,
-deliberately both, per that file's own comment: "`group_members` rows survive
-someone leaving a server, so membership of the group alone would let a
-departed member keep their access forever." specs/0011 removes `guild_id`
-entirely and says visibility becomes "membership of the group itself (item
-34)" -- but item 34 already shipped in v0.4.3 as exactly that single check,
-before this second one existed, so the spec's text does not actually say what
-replaces the guild-membership half once there is no single guild to check
-membership of. The candidates aren't equivalent: dropping the second check
-outright means a member who has left every server the group ever shared keeps
-full read/write access to the roster and can still be invited to events
-(role 2 above still gates the event itself, but not the group); replacing it
-with "still in the group's current common-server set" is closer to the
-spec's own spirit but is a real design call the spec never states, not an
-implementation detail -- and it's exactly the kind of gap that becomes a
-privacy regression if guessed at under time pressure rather than decided. Left
-open rather than guessed at; the fix, once decided, is small (one query, the
-same shape the common-server-set check already uses elsewhere in the spec).
+- **Group creation is a live-narrowing picker, not a server picker.**
+  `POST /groups/common-servers` returns each candidate friend's own
+  `guildIds`, scoped to servers they share with the caller (never exposing
+  which server a stranger is on). The frontend (`GroupEditor.tsx`) runs the
+  intersection client-side as people are added: picking someone who shares no
+  server with the roster-so-far removes every option that isn't also on one
+  of their servers — Michael's "if I am the only middle part of the venn
+  diagram between two groups, never the twain shall they meet." No server
+  field is ever submitted; the backend re-derives and enforces the
+  intersection itself via `assertValidRoster`, so the live narrowing is a UX
+  convenience, not the boundary.
+- **A group with no common server ("no venue") blocks new events, loudly.**
+  `resolveInviteeUserIds` re-checks `commonServerSet` for the group at event-
+  creation time and throws if it's empty; the organizer sees that error on
+  the New Event form rather than a silently empty invite list.
+- **A member drifting out of a group's common-server set does not touch
+  existing events.** `sweepGroupDrift` (new cron sweep) detects when a
+  group's common-server set has shrunk since an event using that group was
+  created, and sends every other invitee on the affected event a one-time
+  notice naming who left and that the event is unaffected and still
+  happening as scheduled — matching Michael's "the event still happens as
+  scheduled" instruction exactly. It does not touch the group roster itself;
+  people are never ejected from a group, only flagged when an event's venue
+  assumption has gone stale.
+- **Quota moved from per-guild to per-owner.** `MAX_GROUPS_PER_GUILD` became
+  `MAX_GROUPS_PER_OWNER` — the natural reading once a group no longer belongs
+  to a guild.
 
-## Already built
-
-Kept for the reasoning, not as a to-do list. Nothing below counts against the
-1.0 test above: where an entry argues its way to a decision and rejects an
-alternative, that argument is why the entry is still here at all.
+`groups.guild_id` is gone (migration `0031_groups_without_servers.sql`).
+`events.guild_id` is untouched, for exactly the reason worked out above: the
+venue is still a real server every member is in, and none of the five roles
+it holds up needed to change.
 
 ### 1. A sandbox/staging environment separate from production — shipped in v0.1
 
@@ -2508,3 +2458,97 @@ PR, not just pushes to `main`) fails the build if it disagrees with
 documents' own content -- `policy.ts`'s own comment already makes this case
 for the version number itself, and a derived sidecar would fail this exact
 check on every typo fix to the Terms or Privacy Policy page.
+
+### 54. The minimum-attendees cascade doesn't cover recurring events — shipped in v0.7.2
+
+Captured while building v0.6.2 (specs/0014 stage 3, decision 4), and left
+open at the end of the first v0.7.2 pass because the shape of a recurring
+cascade was genuinely undecided — not just unbuilt. Michael settled it with
+a worked example: three occurrences of a series each with
+`minimum_attendees = 4`, A at 3 committed, B at 5, C at 4 — only A is
+cancelled, and if B or C's deadline would otherwise fall *before* A's, it
+gets pulled forward to sit after it, so a session never gets a firmer
+"still on" signal than one that's already been cancelled ahead of it.
+
+**Deadlines are now a real, configurable field, not an implicit "whenever
+someone checks."** `validateEventWriteInput` accepts
+`minimumAttendeesDeadlineAt` (an absolute timestamp) for a non-recurring
+event, or `minimumAttendeesDeadlineHoursBefore` (an offset applied per
+occurrence) for a recurring one — mutually exclusive with each other by
+construction, since only one shape is legal for a given `is_recurring`. Both
+are optional: an event with `auto_cancel_below_minimum` set but no deadline
+falls back to the old synchronous behaviour (`recordRsvp` reacts the moment
+an RSVP drops the count below the floor); setting a deadline switches that
+event onto the new tick-based path and `recordRsvp`'s synchronous guard
+stands down for it, on purpose — the whole point of a deadline is that
+"below minimum, mid-window" is not itself a decision.
+
+**The cascade itself is a new cron sweep, `sweepMinimumAttendeesDeadlines`,**
+not a rewrite of the synchronous check. It expands each recurring event's
+occurrences in the window between now and `now + hoursBefore`, computes
+`occurrence.startAt - hoursBefore` as that occurrence's due deadline, and
+once due, counts confirmed attendees for that specific occurrence
+(`countConfirmedAttendees`, already occurrence-scoped from v0.6.2) against
+`minimum_attendees`. Below it, the occurrence gets an
+`event_occurrence_overrides` row (`is_cancelled = 1`) — the same primitive
+`POST /events/:eventId/occurrences/:date/cancel` already writes — never
+`events.status = 'cancelled'`, which would take out the whole series. At or
+above it, nothing happens; the occurrence simply proceeds. A non-recurring
+event with an absolute deadline goes through the equivalent single-shot
+path and cancels the whole event the ordinary way once its one deadline
+passes below minimum.
+
+**The organizer gets a T-24h warning ahead of a deadline that's trending
+toward cancellation**, via a second new sweep,
+`sweepMinimumAttendeesDeadlineWarnings`, so "your session might not make it"
+lands with enough runway to actually recruit more RSVPs rather than arriving
+as a fait accompli alongside the cancellation notice.
+
+**A per-occurrence cancel got a real custom_id, not a repurposed one.** The
+organizer's existing "Cancel this session" button
+(`uo:v2:cancel:<eventId>`) carries no occurrence date, by design — it always
+meant the whole series or the whole one-off event. A new `cancel_occurrence`
+kind (`cancelOccurrenceCustomId`, `cancelOccurrenceButton`) was added
+alongside it rather than reinterpreting `cancel`, per the same v1→v2
+custom_id discipline used everywhere else in this codebase: old buttons
+already sitting in production DMs keep meaning what they always meant.
+
+Deadline fields round-trip through `GET /events/:eventId`
+(`minimumAttendeesDeadlineAt`/`minimumAttendeesDeadlineHoursBefore`) and the
+New Event form now exposes the matching input — a date/time picker for a
+one-off event, an hours-before number field for a recurring one — un-gated
+from the `!isRecurring` condition that previously hid the whole minimum-
+attendees section from recurring events.
+
+### 59. The organizer should hear about every RSVP, not just guess from the calendar — shipped in v0.7.2
+
+Captured and built in the same motion, while answering the design questions
+for item 54: asked whether the organizer needed a notification for every
+invitee's answer specifically on minimum-attendees events, Michael's answer
+was broader — "every time someone sends in if they can make it, regardless
+of the event." Confirmed on follow-up as every event, every RSVP, not scoped
+to minimum-attendees events at all.
+
+**A new outbox table, not a new use of `notification_log`.** `notification_log`'s
+dedup key is a fixed four columns, sized for "notify this person about this
+event, this occurrence, this notification type, once" — it has no room for
+"once per *responder*, and again if they change their mind." Rather than
+widen an already load-bearing table's key shape, this shipped as its own
+table, `organizer_rsvp_notice_log`, with a five-column `UNIQUE` key
+(`organizer_id`, `event_id`, `occurrence_date`, `responder_id`,
+`responded_at`) — a changed answer is a new `responded_at`, so it is a new
+row and a new notice, not a suppressed duplicate. It plugs into the existing
+`deliverThroughOutbox` machinery via `OutboxTable`, but is explicitly
+excluded from `reapExhaustedDeliveries`: a missed organizer FYI has no
+retry-forever obligation the way an invitee's actual invite does.
+
+**The sweep, `sweepOrganizerRsvpNotices`, fires off `recordRsvp`, not off a
+schedule.** It scans for RSVPs newer than the organizer's last notice for
+that (event, occurrence, responder) tuple and sends a short third-person
+line — "alice is in for Game night" / "alice can't make it" — naming who
+answered and what they said. The organizer's own RSVP on their own event
+never generates a notice to themselves.
+
+This is a straightforward feature, not a design decision the way 54 and 36
+were, which is why it wasn't its own roadmap line before now — captured
+directly as built rather than sitting open first.
