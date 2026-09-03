@@ -9,7 +9,7 @@
 export const CONTACT_EMAIL = 'JediParty@proton.me';
 
 export const SERVICE_NAME = 'Uncle Owen';
-export const LAST_UPDATED = '27 July 2026';
+export const LAST_UPDATED = '3 September 2026';
 
 // The released version of the app, and when that version was published.
 //

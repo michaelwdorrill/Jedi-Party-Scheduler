@@ -21,15 +21,23 @@
 // screen to explain which one moved. Splitting them later costs a migration,
 // which is cheap here and may never be needed.
 //
-// This has never moved from 1, and the day it does, everyone is signed out
-// and asked to agree again -- so it is the one constant in this codebase most
-// worth changing on purpose and nothing else (IDEAS.md item 43, which is
-// still open: nothing automatic guards it).
+// It sat at 1 through v0.5's interactions endpoint (specs/0010), which this
+// bump also covers: the Privacy Policy's "it only sends direct messages"
+// stopped being true the moment the bot could receive a button press and
+// edit its own DM, and nothing bumped this to say so at the time. Recorded
+// here rather than silently folded in, since it means this bump discloses
+// more than just what prompted it.
+//
+// Bumped to 2 for specs/0015 and 0016 (v0.7/v0.7.1): a new third-party
+// processor (Resend, for the one email idea 9 sends), a new stored request
+// record, and an account deletion trigger -- inactivity -- that "how long it
+// is kept" didn't previously describe.
 //
 // The "TEMPORARY, SANDBOX ONLY -- do not merge this commit to main" note that
-// used to sit here was itself the accident item 43 records. It was written
-// for a scratch commit that bumped this to 2, travelled to a release branch
-// on an uncommitted edit, and was reverted -- but the comment came along and
-// then sat on `main` for four releases telling every reader not to merge a
-// commit that had already been merged.
-export const CURRENT_POLICY_VERSION = 1;
+// used to sit here was the accident IDEAS item 43 records (still open --
+// nothing automatic guards this constant against changing by accident). It
+// was written for a scratch commit that bumped this to 2 for real testing,
+// travelled to a release branch on an uncommitted edit, and was reverted --
+// but the comment came along and then sat on `main` for four releases
+// telling every reader not to merge a commit that had already been merged.
+export const CURRENT_POLICY_VERSION = 2;

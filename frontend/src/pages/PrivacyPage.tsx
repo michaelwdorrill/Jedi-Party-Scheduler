@@ -38,10 +38,18 @@ export default function PrivacyPage() {
           <strong>Operational records.</strong> The ID of the direct-message channel between you and
           the bot (so it isn't re-created on every notification), and a log of which notifications
           have already been sent to you, which exists solely to stop the service from messaging you
-          twice about the same thing. Also a record of your active login sessions — creation time,
-          last-used time, and expiry — which is what lets a session be revoked immediately (by you
-          logging out, or by deleting your account) rather than staying valid until it naturally
-          expires.
+          twice about the same thing — including the two-week and one-week inactivity notices
+          described under "How long it is kept" below. Also a record of your active login sessions —
+          creation time, last-used time, and expiry — which is what lets a session be revoked
+          immediately (by you logging out, or by deleting your account) rather than staying valid
+          until it naturally expires.
+        </p>
+        <p>
+          <strong>If you ask to add the bot to a server.</strong> The server's ID and name, your
+          Discord user ID, and when the request was made and decided. Requesting also repeats the
+          Discord permission check above for that specific server, to confirm you actually administer
+          it — this uses the same <code>identify</code>/<code>guilds</code> scopes already described,
+          at a separate moment from login, and is discarded the same way once the check is made.
         </p>
       </Section>
 
@@ -54,7 +62,9 @@ export default function PrivacyPage() {
             </>,
             <>
               <strong>Your Discord messages.</strong> The bot has no message intents and does not read
-              any channel. It only sends direct messages.
+              any channel or the content of any message you send. It DMs you directly, and can update
+              those DMs afterward — for example, showing your RSVP once you press it. All it ever
+              receives back is which button you pressed, never free text.
             </>,
             <>
               <strong>Discord access or refresh tokens.</strong> These are used once, in memory,
@@ -92,6 +102,11 @@ export default function PrivacyPage() {
               <strong>Your Discord profile.</strong> Your username, display name, and avatar are shown
               to other logged-in members of servers you share, so people can identify who they're
               inviting.
+            </>,
+            <>
+              <strong>Requests to add the bot to a server.</strong> If you ask to add the bot
+              somewhere, the operator sees your Discord username and which server you asked for, since
+              that's what they need to approve or reject the request.
             </>,
           ]}
         />
@@ -143,6 +158,13 @@ export default function PrivacyPage() {
               <strong>Discord</strong> — provides login and delivers the notification messages you
               have opted into.
             </>,
+            <>
+              <strong>Resend</strong> — sends the one email this service generates: telling the
+              operator about a pending request to add the bot to a new server, including the
+              requester's Discord username. Nothing else triggers an email, and this service does not
+              otherwise hold or use your email address (see "What is deliberately not collected"
+              above).
+            </>,
           ]}
         />
         <p>
@@ -156,6 +178,14 @@ export default function PrivacyPage() {
           Your information is retained while your account exists and for as long as it remains
           necessary to run the service, and is deleted promptly when you ask, when the service shuts
           down, or when it is no longer needed for the functionality described above.
+        </p>
+        <p>
+          <strong>An account can also close itself.</strong> If you haven't logged in for close to a
+          year, you'll get a DM two weeks and then one week before it happens, and the account —
+          including everything listed on this page — is deleted the same way "Delete my account"
+          would delete it. This is paused for as long as you're organizing, or invited and haven't
+          declined, anything not yet in the past — deleting you shouldn't quietly change plans other
+          people are relying on.
         </p>
       </Section>
 
@@ -171,7 +201,8 @@ export default function PrivacyPage() {
               <strong>Erasure.</strong> "Delete my account" immediately and permanently removes your
               profile, personal time blocks, votes, invitations, group memberships, notification
               records, login sessions, and the events you organised. There is no soft-delete or grace
-              period, and nothing is retained for analytics.
+              period, and nothing is retained for analytics. The automatic year-of-inactivity deletion
+              described above removes exactly the same things.
             </>,
             <>
               <strong>Rectification.</strong> Edit your events, groups, and preferences at any time.

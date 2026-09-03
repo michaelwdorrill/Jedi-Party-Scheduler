@@ -15,7 +15,8 @@ export default function TermsPage() {
           {SERVICE_NAME} lets members of specific, allow-listed Discord servers create gaming
           sessions, invite each other individually or by group, vote on candidate times, record
           personal time blocks, and receive Discord direct messages about invitations and upcoming
-          sessions.
+          sessions. Anyone who administers a Discord server can ask for it to be added; the operator
+          reviews and approves or rejects that request before the server can use the service.
         </p>
       </Section>
 
@@ -43,7 +44,10 @@ export default function TermsPage() {
         <p>
           The service sends Discord direct messages about invitations, upcoming sessions, poll
           deadlines, and inactive groups. You can turn these off at any time in Settings, and Discord
-          itself lets you block the bot outright.
+          itself lets you block the bot outright. One exception: the warning that your account is
+          about to be deleted for inactivity (see "Suspension and termination" and the Privacy Policy)
+          is sent regardless of this setting, since it exists to stop that deletion, not to remind you
+          of something else.
         </p>
       </Section>
 
@@ -90,7 +94,8 @@ export default function TermsPage() {
           operator may suspend or remove access for anyone who breaks these terms, abuses other
           users, or puts the service at risk — and may remove a Discord server from the allow-list,
           or shut the service down entirely, at any time. Reasonable notice will be given before a
-          planned shutdown where practical.
+          planned shutdown where practical. An account that hasn't been used in close to a year is
+          also deleted automatically, after two DM warnings, as described in the Privacy Policy.
         </p>
       </Section>
 
