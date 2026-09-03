@@ -2263,14 +2263,35 @@ async function sweepStaleAccounts(env: Env, budget: TickBudget): Promise<void> {
     .all<StaleAccountRow>();
 
   let purged = 0;
+  let warned = 0;
   for (const user of results) {
-    if (budget.exhausted) return;
+    if (budget.exhausted) {
+      // Worth saying, because this sweep runs last: "no warnings went out"
+      // and "no warnings were due" look identical from outside, and only one
+      // of them is a reason to look closer.
+      console.log(`Stale-account sweep stopped early with ${results.length - warned - purged} row(s) unexamined; the allowance went to notifications.`);
+      return;
+    }
     const referenceAt = user.last_login_at ?? user.created_at;
     const age = now - referenceAt;
 
     if (age >= STALE_ACCOUNT_MS) {
       if (purged >= STALE_PURGE_MAX_PER_TICK) continue; // picked up again next tick
-      if (await hasUpcomingStake(env, user.id, now)) continue; // re-checked next time this row is scanned
+      if (await hasUpcomingStake(env, user.id, now)) {
+        // Not noise: this is the difference between "the purge is broken" and
+        // "the purge deliberately declined", which is otherwise unanswerable
+        // without reproducing the predicate by hand.
+        console.log(`Stale account ${user.id} not purged: still organizing or invited to an upcoming event.`);
+        continue;
+      }
+      // Logged *before* the delete, so the record survives a failure partway
+      // through -- and at warn level because this is the most consequential
+      // thing the cron does: the account and every event it organised, gone,
+      // with nothing to undo it from.
+      console.warn(
+        `Purging stale account ${user.id}: no login since ${new Date(referenceAt).toISOString()} ` +
+          `(${Math.floor(age / DAY_MS)} days).`,
+      );
       await deleteUserCompletely(env, user.id);
       purged++;
       continue;
@@ -2288,14 +2309,25 @@ async function sweepStaleAccounts(env: Env, budget: TickBudget): Promise<void> {
       dm_channel_id: user.dm_channel_id,
       timezone: user.timezone,
     };
-    await deliverThroughOutbox(
-      env,
-      'account_purge_warnings',
-      { user_id: user.id, last_login_at: referenceAt, warning_type: warningType },
-      recipient,
-      staleAccountWarningContent(env, warningType, referenceAt),
-      budget,
-    );
+    if (
+      await deliverThroughOutbox(
+        env,
+        'account_purge_warnings',
+        { user_id: user.id, last_login_at: referenceAt, warning_type: warningType },
+        recipient,
+        staleAccountWarningContent(env, warningType, referenceAt),
+        budget,
+      )
+    ) {
+      warned++;
+    }
+  }
+
+  // Only when something actually happened -- the overwhelmingly common tick
+  // has no stale accounts at all, and a line saying so every fifteen minutes
+  // is how a log stops being read.
+  if (warned > 0 || purged > 0) {
+    console.log(`Stale-account sweep: ${warned} warning(s) sent, ${purged} account(s) purged.`);
   }
 }
 
