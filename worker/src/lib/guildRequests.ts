@@ -92,8 +92,8 @@ export async function createGuildAddRequest(
       `A Discord server admin has asked to add the bot to "${guildName}" (guild id ${guildId}).\n\n` +
       `Approve: ${workerOrigin}/guild-requests/${approveToken}/decide\n` +
       `Reject: ${workerOrigin}/guild-requests/${rejectToken}/decide\n\n` +
-      `Either link works once; both expire in 7 days. You can also decide this from the admin page ` +
-      `(Settings > Admin > Guild requests) if these links have expired.`,
+      `Whichever link you click first decides it -- the other then does nothing. Both expire in ` +
+      `7 days, after which you can still decide from Settings > Owner > Guild requests.`,
   });
 
   return { outcome: 'created', id };
