@@ -131,6 +131,8 @@ adminRoutes.get('/guild-requests', async (c) => {
       guildId: r.guild_id,
       guildName: r.guild_name,
       requestedBy: r.requested_by,
+      requestedByUsername: r.username,
+      requestedByGlobalName: r.global_name,
       status: r.status,
       requestedAt: r.requested_at,
       decidedAt: r.decided_at,

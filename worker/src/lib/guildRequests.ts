@@ -86,10 +86,22 @@ export async function createGuildAddRequest(
     signToken(DECISION_TOKEN_PURPOSE, { requestId: id, action: 'reject' } satisfies DecisionTokenPayload, env.JWT_SIGNING_KEY, DECISION_TOKEN_TTL_SECONDS),
   ]);
 
+  // Who asked, in words. "346042183486537730 wants to add the bot to your
+  // app" is not a question anyone can answer -- the whole point of routing
+  // this past a person is that they can weigh who is asking, and an opaque
+  // snowflake gives them nothing to weigh. Same globalName-then-username
+  // shape the admin user list already renders.
+  const requester = await env.DB.prepare(`SELECT username, global_name FROM users WHERE id = ?`)
+    .bind(requestedBy)
+    .first<{ username: string; global_name: string | null }>();
+  const requesterLabel = requester
+    ? `${requester.global_name ?? requester.username} (@${requester.username}, id ${requestedBy})`
+    : `an account that no longer exists (id ${requestedBy})`;
+
   await sendOwnerEmail(env, {
     subject: `"${guildName}" wants to add the bot`,
     text:
-      `A Discord server admin has asked to add the bot to "${guildName}" (guild id ${guildId}).\n\n` +
+      `${requesterLabel} has asked to add the bot to "${guildName}" (guild id ${guildId}).\n\n` +
       `Approve: ${workerOrigin}/guild-requests/${approveToken}/decide\n` +
       `Reject: ${workerOrigin}/guild-requests/${rejectToken}/decide\n\n` +
       `Whichever link you click first decides it -- the other then does nothing. Both expire in ` +
@@ -149,6 +161,13 @@ export interface GuildAddRequestRow {
   guild_id: string;
   guild_name: string;
   requested_by: string;
+  // Resolved from users, for the same reason the email spells the requester
+  // out: the id alone tells the owner nothing about who is asking. Nullable
+  // because the LEFT JOIN below deliberately keeps a request visible even if
+  // its requester somehow isn't resolvable -- losing the row entirely would
+  // be a worse answer than showing it with a bare id.
+  username: string | null;
+  global_name: string | null;
   status: string;
   requested_at: number;
   decided_at: number | null;
@@ -156,8 +175,11 @@ export interface GuildAddRequestRow {
 
 export async function listGuildAddRequests(env: Env): Promise<GuildAddRequestRow[]> {
   const { results } = await env.DB.prepare(
-    `SELECT id, guild_id, guild_name, requested_by, status, requested_at, decided_at
-     FROM guild_add_requests ORDER BY requested_at DESC LIMIT 100`,
+    `SELECT r.id, r.guild_id, r.guild_name, r.requested_by, r.status, r.requested_at, r.decided_at,
+            u.username, u.global_name
+     FROM guild_add_requests r
+     LEFT JOIN users u ON u.id = r.requested_by
+     ORDER BY r.requested_at DESC LIMIT 100`,
   ).all<GuildAddRequestRow>();
   return results;
 }

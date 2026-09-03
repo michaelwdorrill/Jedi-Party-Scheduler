@@ -10,6 +10,10 @@ interface GuildRequest {
   guildId: string;
   guildName: string;
   requestedBy: string;
+  // Null only if the requester's account is somehow unresolvable; the row
+  // still lists, falling back to the bare id.
+  requestedByUsername: string | null;
+  requestedByGlobalName: string | null;
   status: 'pending' | 'approved' | 'rejected';
   requestedAt: number;
   decidedAt: number | null;
@@ -92,7 +96,16 @@ export default function AdminGuildRequestsPage() {
                     {r.guildName}
                     <span className="ml-1 text-xs text-faint">{r.guildId}</span>
                   </td>
-                  <td className="px-3 py-2 text-muted">{r.requestedBy}</td>
+                  <td className="px-3 py-2 text-muted">
+                    {r.requestedByUsername ? (
+                      <>
+                        {r.requestedByGlobalName ?? r.requestedByUsername}
+                        <span className="ml-1 text-xs text-faint">@{r.requestedByUsername}</span>
+                      </>
+                    ) : (
+                      <span className="text-xs text-faint">{r.requestedBy}</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-muted">{DateTime.fromMillis(r.requestedAt).toRelative()}</td>
                   <td className="px-3 py-2 text-muted">{r.status}</td>
                   <td className="px-3 py-2">

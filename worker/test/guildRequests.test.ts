@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
@@ -130,6 +130,24 @@ describe('POST /guild-requests', () => {
     // request (and therefore the owner's approval) is about. Sandbox testing
     // did exactly that by accident.
     expect(body.botInviteUrl).toContain('disable_guild_select=true');
+  });
+
+  // specs/0015's flow step 4 promises the owner is told who asked. The first
+  // build sent only the server name, leaving the owner to approve a request
+  // from an opaque snowflake -- found reading a real stubbed email during
+  // sandbox testing.
+  it('names the requester in the owner email, not just their id', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'requester');
+    const logged: string[] = [];
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((m: string) => void logged.push(m));
+
+    await call(env, '/guild-requests', { method: 'POST', body: JSON.stringify({ token: await verifyToken(env) }) });
+
+    logSpy.mockRestore();
+    const email = logged.find((l) => l.includes('[email:stub]')) ?? '';
+    expect(email).toContain('@user-requester');
+    expect(email).toContain('New Guild');
     expect(await countRows(db, 'guild_add_requests', "guild_id = 'new-guild' AND status = 'pending'")).toBe(1);
   });
 
