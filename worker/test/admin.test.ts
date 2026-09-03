@@ -1,9 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
-import { seedGuild, seedMembership, seedUser, setup } from './helpers';
+import { seedGuild, seedMembership, seedUser, setup, stubFetch, type FetchStub } from './helpers';
 import type { Env } from '../src/env';
+
+let fetchStub: FetchStub | null = null;
+afterEach(() => {
+  fetchStub?.restore();
+  fetchStub = null;
+});
 
 const app = buildApp();
 
@@ -140,5 +146,53 @@ describe('GET /admin/users', () => {
       'notificationsEnabled',
       'username',
     ]);
+  });
+});
+
+// IDEAS item 58: deactivating a server (DELETE /admin/guilds/:id) only makes
+// the app forget it -- this is the separate, deliberate action that makes the
+// bot actually leave.
+describe('POST /admin/guilds/:id/leave', () => {
+  it('rejects a non-owner with 403', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'not-owner');
+    const headers = await authFor(env, 'not-owner');
+    const res = await call(env, '/admin/guilds/some-guild/leave', { method: 'POST', headers });
+    expect(res.status).toBe(403);
+  });
+
+  it('calls Discord to remove the bot from the guild', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'owner');
+    await seedGuild(db, 'guild-1');
+    // Discord's real response here is a bodyless 204; the stub can't
+    // construct one (a Response with a null-body status can't carry a body
+    // string), so this uses 200 -- leaveGuild only branches on res.ok.
+    fetchStub = stubFetch([{ match: '/users/@me/guilds/guild-1', status: 200 }]);
+
+    const headers = await authFor(env, 'owner');
+    const res = await call(env, '/admin/guilds/guild-1/leave', { method: 'POST', headers });
+    expect(res.status).toBe(200);
+    expect(fetchStub.calls.some((u) => u.includes('/users/@me/guilds/guild-1'))).toBe(true);
+  });
+
+  it('treats a 404 from Discord (already not a member) as success', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'owner');
+    fetchStub = stubFetch([{ match: '/users/@me/guilds/', status: 404 }]);
+
+    const headers = await authFor(env, 'owner');
+    const res = await call(env, '/admin/guilds/never-joined/leave', { method: 'POST', headers });
+    expect(res.status).toBe(200);
+  });
+
+  it('surfaces a real Discord failure as a 500', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'owner');
+    fetchStub = stubFetch([{ match: '/users/@me/guilds/', status: 401 }]);
+
+    const headers = await authFor(env, 'owner');
+    const res = await call(env, '/admin/guilds/guild-1/leave', { method: 'POST', headers });
+    expect(res.status).toBe(500);
   });
 });

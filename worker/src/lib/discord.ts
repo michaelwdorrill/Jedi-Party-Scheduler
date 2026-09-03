@@ -73,6 +73,23 @@ export async function fetchGuildVoiceChannels(botToken: string, guildId: string)
   return channels.filter((c) => VOICE_CHANNEL_TYPES.has(c.type)).map((c) => ({ id: c.id, name: c.name }));
 }
 
+// IDEAS item 58: the self-service add flow (specs/0015) gives an admin a
+// one-click way to put the bot into their server; this is the other half.
+// DELETE /users/@me/guilds/{id} with the *bot's own* token makes the bot
+// remove itself -- no permission needed on anyone's Discord account, unlike
+// the "Kick" the bot would otherwise need someone to have on it. A 204 and a
+// 404 (bot already isn't in the guild -- e.g. a human already kicked it, or
+// this is called twice) are both success from the caller's point of view.
+export async function leaveGuild(botToken: string, guildId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/users/@me/guilds/${guildId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bot ${botToken}` },
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`Discord DELETE /users/@me/guilds/${guildId} failed: ${res.status}`);
+  }
+}
+
 // Deliberately more granular than "yes / no / dunno". Only `member` and
 // `not_member` are answers about the *user*; the other two are answers about
 // our own ability to ask the question, and they have very different
