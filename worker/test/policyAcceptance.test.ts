@@ -1,10 +1,13 @@
 // docs/specs/0012-policy-reacceptance.md.
 //
-// The feature ships dormant -- CURRENT_POLICY_VERSION is 1 and both migration
-// defaults are 1, so on the day it deploys nobody is logged out and nobody is
-// gated. That makes it a feature the rest of the suite cannot see, so these
-// tests drive the version by hand: they write a session or a user at an older
-// version, which is exactly what a real bump produces.
+// The feature shipped dormant -- both migration defaults are 1, and
+// CURRENT_POLICY_VERSION stayed there through v0.5-v0.6.2 before its first
+// real bump (specs/0015/0016, see that constant's own comment for what it
+// now covers). On the day it first deployed nobody was logged out or gated,
+// which made it a feature the rest of the suite couldn't see -- these tests
+// drive the version by hand instead: they write a session or a user at an
+// older version, which is exactly what a real bump produces, using
+// CURRENT_POLICY_VERSION - 1 so they keep working whatever that constant is.
 //
 // The most important test in here is the last one. `upsertUser` runs on every
 // login, not only on account creation, so putting accepted_policy_version in

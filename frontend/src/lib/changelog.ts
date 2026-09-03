@@ -21,6 +21,22 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.7.1',
+    date: '3 September 2026',
+    summary: 'Server admins can now ask to add the bot themselves, instead of asking the operator directly.',
+    added: [
+      'A server administrator can request the bot for their own server from Settings. If the server isn\'t already approved, the request goes to the operator to approve or reject before it can be used — the same review that used to happen over chat, now with a record of who asked and when.',
+    ],
+  },
+  {
+    version: '0.7',
+    date: '2 September 2026',
+    summary: 'An account that goes quiet for a year is warned, then removed.',
+    added: [
+      "If you haven't logged in for close to a year, you'll get a DM at two weeks and again at one week before your account and everything in it is deleted. Organizing or invited to something coming up? The deletion waits until that's no longer true, checked fresh each time.",
+    ],
+  },
+  {
     version: '0.6.2',
     date: '1 September 2026',
     summary: 'A confirmed poll night is a real event now, and a session that loses too many people can cancel itself.',
