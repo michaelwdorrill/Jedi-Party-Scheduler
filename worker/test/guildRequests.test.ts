@@ -125,6 +125,11 @@ describe('POST /guild-requests', () => {
     const body = await res.json<{ status: string; botInviteUrl: string }>();
     expect(body.status).toBe('created');
     expect(body.botInviteUrl).toContain('guild_id=new-guild');
+    // Not cosmetic: without this, guild_id is only a pre-selection and the
+    // person can install the bot into a different server than the one the
+    // request (and therefore the owner's approval) is about. Sandbox testing
+    // did exactly that by accident.
+    expect(body.botInviteUrl).toContain('disable_guild_select=true');
     expect(await countRows(db, 'guild_add_requests', "guild_id = 'new-guild' AND status = 'pending'")).toBe(1);
   });
 

@@ -156,7 +156,19 @@ guildRequestRoutes.post('/', async (c) => {
     // already notes bots read channels with none, and every other guild-side
     // action it takes needs none either -- DMs are a user-level Discord
     // feature, not a guild permission).
-    botInviteUrl: `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(c.env.DISCORD_CLIENT_ID)}&scope=bot&permissions=0&guild_id=${encodeURIComponent(payload.guildId)}`,
+    //
+    // disable_guild_select=true is load-bearing, not decoration. `guild_id`
+    // alone only *pre-selects* the server in Discord's dropdown -- the person
+    // can still change it, which sandbox testing did by accident: a request
+    // recorded for one server, the bot installed into another, and no part of
+    // this flow noticing the two had diverged. The allow-list still gated
+    // correctly (approval writes the *requested* guild id, never whatever
+    // Discord was handed), so this was never an access hole -- but it leaves
+    // an approved server with no bot in it and a bot sitting in a server
+    // nobody approved, which is its own kind of wrong.
+    botInviteUrl:
+      `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(c.env.DISCORD_CLIENT_ID)}` +
+      `&scope=bot&permissions=0&guild_id=${encodeURIComponent(payload.guildId)}&disable_guild_select=true`,
   }, 201);
 });
 

@@ -119,6 +119,21 @@ something a deploy can carry.
    technically joins it. A server the owner never approves ends up with the
    bot present but unable to do anything the allow-list gates (every route
    that reads `guilds.is_active` already refuses an inactive/absent guild).
+
+   **"Scoped to the specific guild" needs `disable_guild_select=true`, and
+   the first build shipped without it.** `guild_id` on its own only
+   *pre-selects* the server in Discord's dropdown; the person can change it,
+   which is precisely what sandbox testing did by accident — requested one
+   server, installed the bot into another, and nothing in the flow noticed
+   the two had diverged. Worth being exact about what that did and didn't
+   break, because the two are easy to conflate: the allow-list was never at
+   risk, since approval writes `guild_add_requests.guild_id` — the *requested*
+   server, recorded before Discord was ever involved — and never anything
+   Discord hands back afterwards. So no unapproved server could be
+   allow-listed by this. What it produced instead was an incoherent pair: an
+   approved server with no bot in it, and a bot sitting in a server nobody
+   reviewed. Neither is a security failure; both are the flow lying about
+   what it did.
 4. The owner gets an email: server name, requester's Discord username, a link
    to approve, a link to reject. Both links carry a short-lived signed token
    (see below) rather than requiring the owner to be logged into the site
