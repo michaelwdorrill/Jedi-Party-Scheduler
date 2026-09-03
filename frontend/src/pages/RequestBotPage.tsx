@@ -14,7 +14,8 @@ import { Button, Card, PageHeader } from '../components/ui';
 interface Candidate {
   guildId: string;
   guildName: string;
-  token: string;
+  token?: string;
+  alreadyAdded?: boolean;
 }
 
 // The Worker's /guild-requests/callback hands this page a base64'd JSON
@@ -101,8 +102,8 @@ export default function RequestBotPage() {
       ) : candidates.length === 0 ? (
         <Card>
           <p className="text-sm text-muted">
-            Every server Discord says you administer already has the bot. If you expected to see a
-            server here, make sure you're an owner or have the Manage Server permission on it.
+            Discord doesn't say you administer any servers. If you expected to see one here, make sure
+            you're an owner or have the Manage Server permission on it.
           </p>
         </Card>
       ) : (
@@ -110,10 +111,14 @@ export default function RequestBotPage() {
           <ul className="divide-y divide-edge">
             {candidates.map((c) => (
               <li key={c.guildId} className="flex items-center justify-between gap-3 py-3">
-                <span>{c.guildName}</span>
-                <Button size="sm" disabled={submitting === c.guildId} onClick={() => void submitRequest(c)}>
-                  {submitting === c.guildId ? 'Requesting…' : 'Request'}
-                </Button>
+                <span className={c.alreadyAdded ? 'text-faint' : undefined}>{c.guildName}</span>
+                {c.alreadyAdded ? (
+                  <span className="text-sm text-faint">Already added</span>
+                ) : (
+                  <Button size="sm" disabled={submitting === c.guildId} onClick={() => void submitRequest(c)}>
+                    {submitting === c.guildId ? 'Requesting…' : 'Request'}
+                  </Button>
+                )}
               </li>
             ))}
           </ul>
