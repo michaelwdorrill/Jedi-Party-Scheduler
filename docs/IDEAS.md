@@ -530,6 +530,29 @@ rework its own comment has been deferring. Wants a deliberate pass against
 that test, not a rushed fix — the same reasoning v0.4.6 gave for holding
 `specs/0013` back a release rather than rushing a migration.
 
+### 57. `/add-bot` silently omits servers you administer that are already allow-listed
+
+Found in the first real run of v0.7.1's flow: Michael owns a server, went to
+`/add-bot` expecting to see it, and it simply wasn't in the list — with no
+indication of why. The filter was doing exactly the right thing (the server
+was already allow-listed and active, so there is nothing to request), but
+"correct and invisible" cost a good ten minutes of hunting, including
+kicking the bot out of that server on the theory that its *Discord*
+membership was what the page keyed on. It isn't — eligibility reads the
+`guilds` allow-list, not whether the bot is a member.
+
+`routes/guildRequests.ts` drops those guilds server-side (`return null` on an
+active allow-list hit), so the page cannot say anything about them; it only
+has an all-or-nothing message for when *every* administered server is
+already added. The fix is to return them flagged rather than filtered —
+`{ guildId, guildName, alreadyAdded: true }` with no token — and render them
+greyed out with "already added" instead of omitting them. Same information
+the empty-list case already tries to convey, just available in the mixed
+case too, which is the common one for anyone who runs more than one server.
+
+Cheap, and it is the difference between a page that answers "where is my
+server?" and one that leaves the person to guess.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
