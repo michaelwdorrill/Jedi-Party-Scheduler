@@ -493,6 +493,43 @@ events — at which point "who is coming to this night" stops being a poll
 question at all and becomes an ordinary event's invitee list, which already
 works.
 
+### 56. `sweepPurgeTerminalHistory` can throw a FK error on a poll whose fan-out survived it
+
+Found by accident while diagnosing why `npm run clean:sandbox` failed with a
+bare "FOREIGN KEY constraint failed" — same failure shape as item 38, from a
+different column, and confirmed to reproduce identically against
+`worker/scripts/clean-sandbox.sql` (fixed; see
+`test/cleanSandboxScript.test.ts`) before checking whether the cron sweep
+that inspired that script's "explicit deletes, don't rely on cascade"
+philosophy had the same gap. It does.
+
+`specs/0014` stage 3 (migration 0027, v0.6.2) added
+`events.created_from_poll_id` / `created_from_option_id` — a fanned-out
+event's pointer back to the multi-winner poll and option it came from —
+neither with `ON DELETE CASCADE`. `sweepPurgeTerminalHistory`
+(`cron/reminders.ts`) deletes a purge chunk's `event_poll_options` before its
+`events`, same order the sandbox script had wrong. If a multi-winner poll
+event is ever cancelled (the only status branch this predicate can reach for
+a poll that fanned out, since a multi-winner poll never resolves as a whole —
+see `specs/0003`'s excerpt on that) and survives 90+ days with its fanned-out
+children still active, purging it deletes `event_poll_options` while a child
+event still points at one of those rows — a bare FK error, caught by
+`runIsolated` and logged, so the whole purge for that batch silently fails
+rather than crashing the tick. Easy to miss: nothing surfaces it to a person
+unless they're reading cron logs.
+
+The sandbox script's fix (null both columns on every row before deleting
+anything) doesn't transfer directly: the cron sweep is chunked and
+budget-charged (`PURGE_STATEMENTS_PER_CHUNK`), and that constant is already
+known to under-count by one (`event_attendance`, left uncorrected — see that
+constant's own comment in `cron/reminders.ts` — because fixing it cascades
+into `test/pass6.test.ts`'s zero-margin budget-fit test the same way IDEAS
+item 47 once did). Adding a proper per-chunk nulling statement means either
+widening that gap further or finally doing the `RESERVED_QUERIES`-and-budget
+rework its own comment has been deferring. Wants a deliberate pass against
+that test, not a rushed fix — the same reasoning v0.4.6 gave for holding
+`specs/0013` back a release rather than rushing a migration.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
