@@ -553,47 +553,6 @@ export default function EventFormPage() {
         <InlineError message={`Couldn't load who you can invite. ${inviteesError}`} />
       )}
 
-      <div className={cardClass()}>
-        <h2 className="mb-2 font-semibold">Invite</h2>
-        <InviteePicker
-          friends={friends}
-          groups={groups}
-          selectedUserIds={selectedUserIds}
-          selectedGroupIds={selectedGroupIds}
-          onToggleUser={toggleUser}
-          onToggleGroup={toggleGroup}
-        />
-      </div>
-
-      <div>
-        <label className="mb-1 block text-sm text-muted">Server</label>
-        {isEdit ? (
-          <div className="w-full rounded-md border border-edge bg-surface px-3 py-2 text-sm text-muted">
-            {guilds.find((g) => g.id === loadedGuildId)?.name ?? '—'}
-          </div>
-        ) : impossibleRoster ? (
-          <p className="rounded-md border border-danger/60 bg-danger-surface px-3 py-2 text-sm text-danger-text">
-            These invitees don't all share a single server — remove someone, or pick a different
-            group, before choosing a venue.
-          </p>
-        ) : (
-          <select
-            value={formGuildId}
-            onChange={(e) => handleGuildChange(e.target.value)}
-            className={controlClass('lg', 'w-full')}
-          >
-            <option value="" disabled>
-              {hasInvitees ? 'Choose a server…' : 'Choose a server, or invite someone first…'}
-            </option>
-            {candidateServers.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.name}
-              </option>
-            ))}
-          </select>
-        )}
-      </div>
-
       {!isEdit && (
         <div className="flex gap-1 rounded-md bg-surface p-1 w-fit">
           <button
@@ -936,6 +895,47 @@ export default function EventFormPage() {
           </div>
         </div>
       )}
+
+      <div className={cardClass()}>
+        <h2 className="mb-2 font-semibold">Invite</h2>
+        <InviteePicker
+          friends={friends}
+          groups={groups}
+          selectedUserIds={selectedUserIds}
+          selectedGroupIds={selectedGroupIds}
+          onToggleUser={toggleUser}
+          onToggleGroup={toggleGroup}
+        />
+      </div>
+
+      <div>
+        <label className="mb-1 block text-sm text-muted">Server</label>
+        {isEdit ? (
+          <div className="w-full rounded-md border border-edge bg-surface px-3 py-2 text-sm text-muted">
+            {guilds.find((g) => g.id === loadedGuildId)?.name ?? '—'}
+          </div>
+        ) : impossibleRoster ? (
+          <p className="rounded-md border border-danger/60 bg-danger-surface px-3 py-2 text-sm text-danger-text">
+            These invitees don't all share a single server — remove someone, or pick a different
+            group, before choosing a venue.
+          </p>
+        ) : (
+          <select
+            value={formGuildId}
+            onChange={(e) => handleGuildChange(e.target.value)}
+            className={controlClass('lg', 'w-full')}
+          >
+            <option value="" disabled>
+              {hasInvitees ? 'Choose a server…' : 'Choose a server, or invite someone first…'}
+            </option>
+            {candidateServers.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
 
       {effectiveGuildId && (
         <div className={cardClass()}>
