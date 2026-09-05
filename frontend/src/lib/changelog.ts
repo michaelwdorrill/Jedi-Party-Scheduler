@@ -21,6 +21,26 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.7.2',
+    date: '5 September 2026',
+    summary: 'Groups work across every server their members share, not just the one they were made on.',
+    added: [
+      'A group is no longer tied to the single server it happened to be created on — it now works on any server every one of its members is currently in. Creating one narrows the people you can add as you go, so you never end up with someone who doesn’t actually share a server with the rest.',
+      'An event with a minimum number of attendees can now be given a real deadline — a specific date and time for a one-off session, or a certain number of hours before each session for a recurring one — instead of only ever reacting the instant someone declines. You’ll get a heads-up a day before it decides, and for a recurring event, only the sessions that are actually short get cancelled — the rest of the series carries on.',
+      'As the organizer, you now hear about it every time someone answers one of your invitations, not just at reminder time.',
+      'A server you already administer now shows up on the “add the bot” page even if it’s already been added, instead of quietly disappearing from the list.',
+    ],
+    changed: [
+      'The calendar shows your own answer on an event you’ve responded to — a declined or “maybe’d” session used to look the same as one you’d never answered.',
+      'Creating an event now asks who you’re inviting before which server it’s on. The server narrows down on its own to wherever everyone you’ve picked actually overlaps, instead of you picking blind up front.',
+      'An event’s own page now says which server it’s on.',
+    ],
+    fixed: [
+      'Cancelling an event now tells the people invited to it. It used to just quietly change status with nothing said to anyone.',
+      'Editing an event no longer shows everyone invited to it as “busy” for the exact time you’re editing — that busy block was always just the event itself.',
+    ],
+  },
+  {
     version: '0.7.1',
     date: '3 September 2026',
     summary: 'Server admins can now ask to add the bot themselves, instead of asking the operator directly.',
