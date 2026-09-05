@@ -114,6 +114,17 @@ meRoutes.get('/export', async (c) => {
     groupsCreated: `SELECT * FROM groups WHERE created_by = ?`,
     groupMemberships: `SELECT * FROM group_members WHERE user_id = ?`,
     notificationsSent: `SELECT * FROM notification_log WHERE user_id = ?`,
+    // IDEAS item 2 / specs/0017. Columns are listed explicitly rather than
+    // `SELECT *`, and that is the whole point of the difference from every
+    // other line here: this table holds encrypted OAuth credentials, and a
+    // wildcard would put them in a file the user downloads and may well email
+    // to themselves. An export is a right of access to *your data*, not to the
+    // app's keys for acting on your behalf.
+    googleCalendar: `SELECT google_account_email, calendar_id, sync_enabled, status, last_synced_at,
+                       connected_at, updated_at
+                     FROM google_calendar_connections WHERE user_id = ?`,
+    googleCalendarLinks: `SELECT event_id, occurrence_date, synced_title, synced_start_at, synced_end_at, synced_at
+                          FROM google_event_links WHERE user_id = ?`,
   };
 
   const out: Record<string, unknown> = { exportedAt: new Date().toISOString() };

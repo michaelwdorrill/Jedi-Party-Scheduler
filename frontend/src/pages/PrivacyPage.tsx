@@ -51,6 +51,29 @@ export default function PrivacyPage() {
           it — this uses the same <code>identify</code>/<code>guilds</code> scopes already described,
           at a separate moment from login, and is discarded the same way once the check is made.
         </p>
+        <p>
+          <strong>If you connect a Google calendar.</strong> This is entirely optional, off unless you
+          switch it on, and can be disconnected at any time. Connecting asks Google for permission to
+          manage events (<code>calendar.events</code>) and to read your calendar list and free/busy
+          times (<code>calendar.readonly</code>), and stores: a long-lived Google credential (a
+          "refresh token"), the email address of the Google account you connected, which of your
+          calendars you chose, and a record of which sessions have been written to it so the same
+          entry isn't created twice.
+        </p>
+        <p>
+          The credential is <strong>encrypted before it is written to the database</strong>, using a
+          key held separately from the data, and it is never returned by any part of the app — not on
+          screen, and not in "Download my data". Disconnecting, or deleting your account, revokes it
+          with Google as well as deleting this service's copy.
+        </p>
+        <p>
+          <strong>What is written to your Google calendar</strong> is limited on purpose: the session
+          title, its start and end times, the name of the Discord server it belongs to, and a link
+          back to the event in this app. <strong>Event descriptions are never sent to Google.</strong>{' '}
+          Only sessions you are actually committed to are written — never a poll's proposed dates,
+          never an event you have declined, and never your personal time blocks. Nothing is read out
+          of your Google calendar and into this app.
+        </p>
       </Section>
 
       <Section heading="What is deliberately not collected">
@@ -69,7 +92,10 @@ export default function PrivacyPage() {
             <>
               <strong>Discord access or refresh tokens.</strong> These are used once, in memory,
               during login to read your profile and server list, then discarded. They are not written
-              to the database.
+              to the database. (The optional Google calendar connection described above is the one
+              exception to this pattern anywhere in the service, and only because a scheduled task
+              has to write to your calendar at times when you are not logged in. It is stored
+              encrypted, and only if you connect it.)
             </>,
             'Payment details, location data, device fingerprints, advertising identifiers, or analytics of any kind. There are no third-party trackers, cookies for tracking, or ad networks in this service.',
           ]}
@@ -165,6 +191,13 @@ export default function PrivacyPage() {
               otherwise hold or use your email address (see "What is deliberately not collected"
               above).
             </>,
+            <>
+              <strong>Google</strong> — <em>only if you connect a Google calendar</em>, which is off
+              by default. Google then receives the session titles, times, server name, and app links
+              described above, so that it can put them on the calendar you chose. Nothing is sent to
+              Google for anyone who has not connected an account, and disconnecting stops it. Google
+              processes that information under its own privacy policy and terms.
+            </>,
           ]}
         />
         <p>
@@ -208,8 +241,10 @@ export default function PrivacyPage() {
               <strong>Rectification.</strong> Edit your events, groups, and preferences at any time.
             </>,
             <>
-              <strong>Objection / restriction.</strong> Turn off Discord notifications, or hide your
-              free/busy availability, in Settings.
+              <strong>Objection / restriction.</strong> Turn off Discord notifications, hide your
+              free/busy availability, or disconnect a connected Google calendar — all in Settings.
+              Disconnecting also removes the upcoming entries this service added to that calendar,
+              and revokes its access with Google.
             </>,
           ]}
         />
@@ -226,9 +261,12 @@ export default function PrivacyPage() {
         <p>
           Traffic is served over HTTPS, the database is encrypted at rest by the hosting provider,
           credentials are held as secrets outside the source code, and session tokens are short-lived
-          and signed. Long-lived Discord credentials are not stored at all. No system is perfectly
-          secure, and this is a hobby project run by one person rather than a company with a security
-          team — please weigh that when deciding what to put in it.
+          and signed. Long-lived Discord credentials are not stored at all. The one long-lived
+          third-party credential that is stored — the Google calendar connection, only if you create
+          one — is encrypted before it reaches the database, under a key kept separately from the
+          service's other secrets, and no part of the app can read it back out. No system is
+          perfectly secure, and this is a hobby project run by one person rather than a company with
+          a security team — please weigh that when deciding what to put in it.
         </p>
       </Section>
 

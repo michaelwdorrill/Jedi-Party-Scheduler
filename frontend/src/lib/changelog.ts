@@ -21,6 +21,19 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.8',
+    date: '5 September 2026',
+    summary: 'Your sessions can now appear on your own Google calendar.',
+    added: [
+      'You can connect a Google account in Settings and have the sessions you’re committed to written onto a calendar of your choosing. Pick which calendar, turn it on and off, or disconnect whenever you like.',
+      'Only things you’re actually committed to get written: never a poll’s proposed dates, never a session you’ve declined, and never your personal time blocks. What Google is sent is the title, the time, which server it’s on, and a link back here — an event’s description is never sent.',
+      'Disconnecting removes the upcoming entries this app added to that calendar and revokes its access to your Google account. Sessions that already happened are left alone — they’re your record of them.',
+    ],
+    changed: [
+      'The Privacy Policy and Terms have been updated to cover the Google connection, so you’ll be asked to agree to them again the next time you visit. The short version: Google is a new processor, but only if you choose to connect it, and the credential that lets this app write to your calendar is encrypted before it’s stored.',
+    ],
+  },
+  {
     version: '0.7.2',
     date: '5 September 2026',
     summary: 'Groups work across every server their members share, not just the one they were made on.',

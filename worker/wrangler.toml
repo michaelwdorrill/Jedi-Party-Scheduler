@@ -39,6 +39,24 @@ EMAIL_MODE = "stub"
 # silently) if EMAIL_MODE is "live" but either is still empty.
 OWNER_EMAIL_ADDRESS = ""
 EMAIL_FROM_ADDRESS = ""
+# specs/0017 / IDEAS item 2: "live" turns Google Calendar sync on; anything
+# else leaves the /google routes answering 503 and the sweep returning
+# immediately. Ships "off" here for the same reason EMAIL_MODE ships "stub" --
+# the code is complete but the Google Cloud project, OAuth client and
+# GOOGLE_TOKEN_ENCRYPTION_KEY secret are a one-time manual provisioning step
+# (docs/SETUP.md section 7).
+#
+# Like EMAIL_MODE, this is a var check:env-parity is EXPECTED to eventually
+# report differently between the two environments: the sandbox should be
+# switched to "live" first, verified, and only then production -- which is the
+# sandbox-first rule applied to a config flag rather than to code.
+GOOGLE_SYNC_MODE = "off"
+# The Google OAuth client id. Not a secret (it appears in the authorize URL
+# every user's browser sees), same as DISCORD_CLIENT_ID above. The matching
+# GOOGLE_CLIENT_SECRET and GOOGLE_TOKEN_ENCRYPTION_KEY are set with
+# `wrangler secret put` and never committed. Blank until provisioned;
+# isGoogleConfigured() treats blank as "off" rather than erroring.
+GOOGLE_CLIENT_ID = ""
 # Which Cloudflare plan this Worker runs on: "free" or "paid". Free and Paid
 # differ by more than an order of magnitude in D1 queries and outbound
 # subrequests allowed per invocation, and the 15-minute cron sizes its own
@@ -107,6 +125,19 @@ WORKERS_PLAN = "free"
 EMAIL_MODE = "stub"
 OWNER_EMAIL_ADDRESS = ""
 EMAIL_FROM_ADDRESS = ""
+# specs/0017. Unlike EMAIL_MODE -- which is permanently "stub" here because its
+# only real recipient is Michael's own inbox -- this one is expected to go
+# "live" on the sandbox *first*, and stay ahead of production for as long as it
+# takes to verify a real Google round trip. That is the sandbox-first rule
+# doing its job: a second Google Cloud OAuth client, pointed at the sandbox
+# Worker's own /google/callback, with a throwaway Google account behind it.
+GOOGLE_SYNC_MODE = "off"
+# The *sandbox* Google OAuth client id -- deliberately not production's, for
+# the same reason DISCORD_PUBLIC_KEY above is per-application: the redirect URI
+# is registered per client, and production's would refuse to redirect back to
+# the sandbox Worker. check:env-parity only proves the key exists in both
+# blocks; that they hold different values is on whoever fills them in.
+GOOGLE_CLIENT_ID = ""
 
 [[env.sandbox.d1_databases]]
 binding = "DB"

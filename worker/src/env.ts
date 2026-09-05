@@ -34,6 +34,17 @@ export interface Env {
   // read (and only need to be set) when EMAIL_MODE is 'live'.
   OWNER_EMAIL_ADDRESS?: string;
   EMAIL_FROM_ADDRESS?: string;
+  // 'live' enables Google Calendar sync (IDEAS item 2 / specs/0017); anything
+  // else, including unset, leaves the routes answering 503 and the sweep
+  // returning immediately. Same dormant-on-day-one launch EMAIL_MODE uses, and
+  // for the same reason: the code ships complete, and an operator turns it on
+  // once the Google Cloud project, OAuth client and encryption secret actually
+  // exist (docs/SETUP.md section 7).
+  GOOGLE_SYNC_MODE?: string;
+  // The Google OAuth client id. Not a secret -- it is in the authorize URL
+  // every user's browser sees -- which is why it sits here rather than with
+  // the secrets below, exactly as DISCORD_CLIENT_ID does.
+  GOOGLE_CLIENT_ID?: string;
 
   // Secrets (`wrangler secret put ...`, see docs/SETUP.md)
   DISCORD_CLIENT_SECRET: string;
@@ -44,6 +55,20 @@ export interface Env {
   // genuinely unset until Michael provisions Resend, and lib/email.ts has to
   // answer that case (refuse to send, log loudly) rather than crash.
   RESEND_API_KEY?: string;
+  // The Google OAuth client secret (specs/0017). Optional in the type for the
+  // same reason RESEND_API_KEY is: genuinely unset until Michael provisions
+  // the Google Cloud project, and isGoogleConfigured() has to answer that case
+  // by leaving the feature switched off rather than crashing.
+  GOOGLE_CLIENT_SECRET?: string;
+  // Encrypts the stored Google refresh/access tokens at rest (lib/crypto.ts).
+  //
+  // Deliberately NOT JWT_SIGNING_KEY. That key already signs sessions and the
+  // guild-request capability tokens; one leaked value should not both forge a
+  // session and decrypt every user's Google credentials. Rotating this one
+  // invalidates every stored connection -- unseal() returns null, the sweep
+  // marks those connections unauthorized, and each user reconnects -- which is
+  // a recoverable outcome rather than a silent one.
+  GOOGLE_TOKEN_ENCRYPTION_KEY?: string;
 }
 
 export interface AuthedContext {

@@ -9,7 +9,7 @@
 export const CONTACT_EMAIL = 'JediParty@proton.me';
 
 export const SERVICE_NAME = 'Uncle Owen';
-export const LAST_UPDATED = '3 September 2026';
+export const LAST_UPDATED = '5 September 2026';
 
 // The released version of the app, and when that version was published.
 //
@@ -18,8 +18,8 @@ export const LAST_UPDATED = '3 September 2026';
 // rebuild, including rebuilds that ship no user-visible change at all, which
 // would make "published" mean "last redeployed" instead of "last released".
 // Bump both together when cutting a release.
-export const APP_VERSION = '0.7.2';
-export const PUBLISHED_AT = '5 September 2026, 06:35 UTC';
+export const APP_VERSION = '0.8';
+export const PUBLISHED_AT = '5 September 2026, 15:10 UTC';
 
 // The person or entity legally responsible for the data ("data controller"
 // under GDPR). For a personally-run project this is just your name.

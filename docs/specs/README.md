@@ -43,6 +43,7 @@ enough yet.
 | [0014-attendance-per-occurrence](0014-attendance-per-occurrence.md) | Ideas 47, 48 (absorbs 46) | TBD | TBD | Decisions locked |
 | [0015-self-service-bot-add](0015-self-service-bot-add.md) | Idea 9 | 4 | 0.7.1 | Built |
 | [0016-stale-account-purge](0016-stale-account-purge.md) | Idea 10 | 4 | 0.7 | Built |
+| [0017-google-calendar-sync](0017-google-calendar-sync.md) | Idea 2 | 5 | 0.8 (push) / 0.8.1 (pull) | Built (push half) |
 
 This index had drifted: it stopped at 0003 while 0004–0007 existed, and
 listed 0003 as Draft after it shipped. Keeping it current is cheap and it is

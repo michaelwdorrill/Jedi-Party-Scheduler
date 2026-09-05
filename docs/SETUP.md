@@ -765,6 +765,71 @@ address for no real benefit. `wrangler tail --env sandbox` shows the stubbed
 content just as well as an inbox would, which is the verification step this
 feature actually wants from the sandbox.
 
+## 7. Google Calendar sync — optional, for pushing sessions to a Google calendar
+
+`specs/0017-google-calendar-sync.md` (idea 2) lets a user connect one Google
+account and have the sessions they're committed to written onto a calendar of
+their choosing. Like section 6, **everything ships dormant**: `GOOGLE_SYNC_MODE`
+is `"off"` in both `[vars]` and `[env.sandbox.vars]`, which makes the `/google`
+routes answer 503, hides the Settings card entirely, and makes the cron sweep
+return immediately. Do this section only when you want the feature live.
+
+**Unlike section 6, do the sandbox first.** This is a new outbound OAuth
+provider with a redirect URI that has to match exactly, and getting that wrong
+in production means a broken Settings page for everyone. The sandbox is where
+that gets found.
+
+1. Create a project at https://console.cloud.google.com (or reuse one).
+2. **Enable the Google Calendar API** for it: APIs & Services → Library →
+   "Google Calendar API" → Enable. Skipping this is the most common cause of
+   a connection that authorises fine and then 403s on the first write.
+3. Configure the OAuth consent screen:
+   - User type **External**, unless you have a Workspace org.
+   - Add the two scopes this app uses:
+     `https://www.googleapis.com/auth/calendar.events` and
+     `https://www.googleapis.com/auth/calendar.readonly`.
+   - Leave it in **Testing** and add the Google accounts you'll test with as
+     test users. Publishing is what triggers Google's verification review; see
+     the ceiling note below before you do it.
+4. Create credentials → **OAuth client ID** → *Web application*. Add the
+   authorised redirect URI, which must match the Worker's own origin exactly:
+   - production: `https://<your-worker>.workers.dev/google/callback`
+   - sandbox: `https://jedi-party-scheduler-worker-sandbox.<subdomain>.workers.dev/google/callback`
+
+   **Make two separate OAuth clients, one per environment.** A redirect URI is
+   registered per client, so production's client will simply refuse to redirect
+   back to the sandbox Worker — the same reason the two Discord applications
+   are separate.
+5. Generate an encryption key for the stored tokens. Any high-entropy string;
+   32+ bytes of randomness is plenty:
+   ```
+   openssl rand -base64 48
+   ```
+6. Set the two secrets (per environment — `--env sandbox` for the sandbox):
+   ```
+   npx wrangler secret put GOOGLE_CLIENT_SECRET
+   npx wrangler secret put GOOGLE_TOKEN_ENCRYPTION_KEY
+   ```
+7. Edit the matching `[vars]` block in `worker/wrangler.toml`: set
+   `GOOGLE_CLIENT_ID` to that environment's client id, and `GOOGLE_SYNC_MODE`
+   to `"live"`.
+8. Deploy and migrate (`npm run db:migrate:remote:sandbox` then
+   `npm run deploy:sandbox`, or the production pair).
+
+**Two things worth knowing before you turn this on in production.**
+
+- **The 100-user ceiling is accepted, not a mistake.** Both scopes above are
+  "sensitive" in Google's terms, so an unverified app shows an "unverified"
+  warning screen and is capped at 100 users. `IDEAS.md` item 2 accepted that
+  deliberately — this app's whole design profile is a handful of friend
+  groups. Going through verification is possible later and changes nothing in
+  the code.
+- **Rotating `GOOGLE_TOKEN_ENCRYPTION_KEY` invalidates every existing
+  connection.** Stored tokens stop decrypting, the sweep marks those
+  connections as needing reconnection, and each user reconnects from Settings.
+  That's recoverable and visible rather than silent, but it is not a
+  zero-impact rotation — don't do it casually.
+
 ## Running the tests
 
 From `worker/`:

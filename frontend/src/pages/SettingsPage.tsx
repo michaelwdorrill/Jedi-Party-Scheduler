@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { API_BASE_URL, api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { clearToken, getToken } from '../auth/tokenStorage';
+import ConnectedCalendars from '../components/ConnectedCalendars';
 import TimezoneSelect from '../components/TimezoneSelect';
 import { buttonClass, cardClass } from '../components/ui';
 import { getScenery, setScenery, type Scenery } from '../lib/scenery';
@@ -157,6 +158,10 @@ export default function SettingsPage() {
             : 'Just the mark. Quieter, and kinder to a low-contrast screen.'}
         </p>
       </div>
+
+      {/* Renders nothing at all unless the deployment has Google configured
+          (specs/0017), so this is a no-op on an install that hasn't set it up. */}
+      <ConnectedCalendars />
 
       <div className={cardClass('md', 'space-y-3')}>
         <h2 className="font-semibold">Servers</h2>

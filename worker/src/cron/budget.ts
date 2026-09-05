@@ -192,6 +192,23 @@ export class TickBudget {
     return true;
   }
 
+  // One write to a user's Google calendar (IDEAS item 2 / specs/0017): a
+  // single outbound call plus the statement that records the resulting link
+  // row. Its own method rather than reusing tryMembershipCheck, whose cost
+  // happens to match today -- two unrelated things sharing an accessor is how
+  // one of them later gets repriced and silently changes the other.
+  //
+  // Note what this does NOT do: add a fixed per-tick cost. The calendar sweep
+  // draws only on what the notification sweeps ahead of it left behind, which
+  // is why it could be added without moving RESERVED_QUERIES -- the mistake
+  // this file already records three times over.
+  tryCalendarWrite(): boolean {
+    if (this.subrequests < 1 || this.queries < 1) return false;
+    this.subrequests -= 1;
+    this.queries -= 1;
+    return true;
+  }
+
   // An upper bound on how many more deliveries this tick could fund, used to
   // size the LIMIT on recipient queries. Deliberately optimistic (it assumes
   // the cheap, cached-channel case): the point is to stop a sweep asking the

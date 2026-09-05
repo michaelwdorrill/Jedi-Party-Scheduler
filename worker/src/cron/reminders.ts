@@ -32,6 +32,7 @@ import { cancelButton, cancelOccurrenceButton, linkButton, pollSelect, rsvpButto
 import { LIMITS } from '../lib/validate';
 import { chunkIds, placeholders } from '../lib/d1';
 import { planFrom, TickBudget } from './budget';
+import { sweepGoogleCalendar } from './googleSync';
 import {
   decodeEventKey,
   encodeEventKey,
@@ -218,7 +219,11 @@ const TERMINAL_HISTORY_PURGE_BATCH_SIZE = 100;
 // constant, full stop, independent of backlog size or how many child tables
 // this purge ever grows to cover -- so a future 12th statement is just
 // another safe bump here, not a second look at this same budget math.
-const PURGE_STATEMENTS_PER_CHUNK = 11;
+// 12 as of IDEAS item 2 / specs/0017: google_event_links references events(id)
+// with no ON DELETE action, so it joins the child-first list below -- and this
+// is the "future 12th statement is just another safe bump here" the paragraph
+// above anticipated, rather than a fresh look at the budget math.
+const PURGE_STATEMENTS_PER_CHUNK = 12;
 
 type NotificationType =
   | 'invite'
@@ -3001,6 +3006,14 @@ async function sweepPurgeTerminalHistory(env: Env, budget: TickBudget): Promise<
     env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id IN (${ph})`).bind(...chunk),
     env.DB.prepare(`DELETE FROM event_occurrence_overrides WHERE event_id IN (${ph})`).bind(...chunk),
     env.DB.prepare(`DELETE FROM notification_log WHERE event_id IN (${ph})`).bind(...chunk),
+    // IDEAS item 2 / specs/0017. Same shape as the two pointers above, and the
+    // same reason: google_event_links.event_id is a real FK with no ON DELETE
+    // action, and the rows can belong to *other* people -- an invitee who
+    // syncs their calendar holds a link to an event they did not organise. Left
+    // in place, purging a ninety-day-old cancelled event fails on a bare
+    // "FOREIGN KEY constraint failed", which is the failure shape items 38 and
+    // 56 both already cost this project once each.
+    env.DB.prepare(`DELETE FROM google_event_links WHERE event_id IN (${ph})`).bind(...chunk),
     env.DB.prepare(`DELETE FROM events WHERE id IN (${ph})`).bind(...chunk),
   ];
   await env.DB.batch(statements);
@@ -3090,6 +3103,13 @@ export async function runReminderSweep(env: Env): Promise<void> {
   // test/pass6.test.ts) is more time-sensitive than a warning DM or a purge
   // that would fire again next tick regardless.
   await runIsolated('staleAccounts', () => sweepStaleAccounts(env, budget));
+  // After staleAccounts, so it is genuinely last among the budget-charged
+  // sweeps (IDEAS item 2 / specs/0017). A session that shows up on someone's
+  // Google calendar twenty minutes later is fine; a reminder that never goes
+  // out is not, so every DM above it gets first call on the allowance. What
+  // this tick cannot afford is at the front of the next tick's page, by the
+  // sweep's own last_synced_at ordering.
+  await runIsolated('googleCalendar', () => sweepGoogleCalendar(env, budget));
   // Last, so it settles anything that used up its final attempt during this
   // tick rather than leaving it for the next one.
   await runIsolated('reapExhaustedDeliveries', () => reapExhaustedDeliveries(env));

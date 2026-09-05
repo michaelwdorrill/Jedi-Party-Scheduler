@@ -3,6 +3,7 @@ import { CURRENT_POLICY_VERSION } from './policy';
 import { chunkIds, chunkRows, placeholders } from './d1';
 import { checkGuildMembership } from './discord';
 import { revokeAllSessionsForUser } from './sessions';
+import { revokeGoogleAccess } from './googleCalendar';
 
 // How long a cached membership row is trusted before a request forces a live
 // Discord check. Bounds how long someone who left a guild can keep acting on
@@ -440,6 +441,13 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
   // still leaves the account locked out rather than usable.
   await revokeAllSessionsForUser(env, userId);
 
+  // Before the batch, because it needs to read the stored credential the batch
+  // is about to delete (IDEAS item 2 / specs/0017). Deleting our copy of a
+  // Google refresh token is not the same promise as Google no longer honouring
+  // it, and erasure should mean the stronger one. Best-effort inside: a Google
+  // outage must not be able to stop an account deletion, so this never throws.
+  await revokeGoogleAccess(env, userId);
+
   const organisedEvents = `SELECT id FROM events WHERE organizer_id = ?`;
   const ownedGroups = `SELECT id FROM groups WHERE created_by = ?`;
 
@@ -462,6 +470,14 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
     env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id IN (${organisedEvents})`).bind(userId),
     env.DB.prepare(`DELETE FROM event_occurrence_overrides WHERE event_id IN (${organisedEvents})`).bind(userId),
     env.DB.prepare(`DELETE FROM notification_log WHERE event_id IN (${organisedEvents})`).bind(userId),
+    // Every sync link to an event this user organised, including links owned
+    // by *other* people -- an invitee who syncs their own calendar holds one
+    // for an event they did not organise, and google_event_links.event_id is a
+    // real FK with no ON DELETE action, so the events delete below fails
+    // without this. Their Google entries are orphaned rather than removed,
+    // which is the unavoidable cost of the organiser erasing the event itself;
+    // the owning user's own sweep has no occurrence to match them to any more.
+    env.DB.prepare(`DELETE FROM google_event_links WHERE event_id IN (${organisedEvents})`).bind(userId),
     env.DB.prepare(`DELETE FROM events WHERE organizer_id = ?`).bind(userId),
 
     // Groups this user created. event_invites.source_group_id references
@@ -495,6 +511,14 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
     // being reassigned or left dangling.
     env.DB.prepare(`DELETE FROM guild_add_requests WHERE requested_by = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM notification_log WHERE user_id = ?`).bind(userId),
+    // IDEAS item 2 / specs/0017. Links before the connection, children before
+    // parents like everything else in this batch. The entries already written
+    // to the person's Google calendar are deliberately left where they are:
+    // they are in an account this app no longer has any authorisation to touch
+    // (revoked just above), and they are that person's own record of sessions
+    // they actually played.
+    env.DB.prepare(`DELETE FROM google_event_links WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM google_calendar_connections WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM user_guild_membership WHERE user_id = ?`).bind(userId),
     // revokeAllSessionsForUser() above only sets revoked_at, so the rows (and
     // their FK to users) are still here -- delete them for real, or the final

@@ -20,6 +20,31 @@ export interface Guild {
   name: string;
 }
 
+// IDEAS item 2 / docs/specs/0017. `configured` is about the deployment, not
+// the person: it is false when the operator hasn't provisioned Google yet, and
+// the Settings card hides itself entirely rather than offering a button that
+// can only 503.
+export interface GoogleCalendarStatus {
+  configured: boolean;
+  connected: boolean;
+  accountEmail?: string | null;
+  calendarId?: string;
+  syncEnabled?: boolean;
+  // 'disconnecting' while the cron removes the entries already written, before
+  // the credential is revoked and the connection dropped.
+  status?: 'active' | 'disconnecting';
+  lastSyncedAt?: number | null;
+  // Why sync stopped, shown to the user because "it silently stopped working"
+  // is this feature's most likely failure.
+  lastError?: string | null;
+}
+
+export interface GoogleCalendarOption {
+  id: string;
+  summary: string;
+  primary: boolean;
+}
+
 export interface CommonServer {
   id: string;
   name: string;

@@ -599,7 +599,9 @@ relative to v0.5 itself: specced completely, held back by exactly one call
 that "wants someone looking at" something outside the code, then built once
 that call was made.
 
-### Phase 5 — Google Calendar sync (idea 2) → **v0.8**
+### Phase 5 — Google Calendar sync (idea 2) → **v0.8** ✅ push half shipped
+
+**Spec:** `specs/0017-google-calendar-sync.md` (Built — push half).
 
 The biggest lift, and deliberately last. It wants a second OAuth provider,
 a second set of refreshable tokens to store securely (note that we currently
@@ -617,6 +619,45 @@ Scoped down in Aug 2026 (see idea 2 in `IDEAS.md`): **push first, pull
 second**, pull via `freebusy.query` rather than full event read, event titles
 explicitly out of scope for the first build, and the 100-user unverified-app
 ceiling accepted rather than designed around.
+
+**Shipped 5 Sept 2026 as the push half, and the split is a real release
+boundary rather than a convenient stopping point.** `specs/0017` records why:
+the pull half's cost is not `freebusy.query` — that is one POST — but that its
+answer belongs inside `computeBusyBlocksForUsers`, which runs *synchronously in
+a request* for up to 25 users. One Google call each is up to 25 subrequests in
+one invocation against a Free-plan ceiling of 50, in the one function whose own
+design note is that its cost is a product and every factor has to be small. So
+pulling needs a cron-refreshed busy cache, a staleness rule, and an answer for
+the cold-cache case. That is **v0.8.1**, and this is the v0.4.6 lesson
+(`specs/0013` held back from v0.4.5) applied before the fact rather than after.
+
+Four things this release turned up that the phase entry above did not plan for:
+
+- **Rule 1 reappeared as a scope rule, not a sequencing one.** The scopes
+  requested are the ones *v0.8.1* needs, not the ones v0.8 needs, because
+  narrowing now would mean sending everyone who connected back through a Google
+  consent screen later. The cheaper ask today buys a worse moment later.
+- **`ARCHITECTURE.md` held a claim that was broader than its evidence.** "Discord's
+  access and refresh tokens are used once and then discarded — nothing in the
+  app acts on Discord's behalf later" reads as a statement about the app's
+  posture, and every summary of this project has treated it as one. It was
+  always a statement about *Discord*. A cron sweep writing to a calendar with
+  nobody logged in is the case it never covered, and the fix was to scope the
+  sentence rather than to weaken it.
+- **The FK trap that items 38 and 56 each cost a session, a third time.**
+  `google_event_links.event_id` is a real foreign key with no `ON DELETE`
+  action, and its rows can belong to someone *other* than the organiser — an
+  invitee syncing an event they did not create. Both delete paths (account
+  erasure and the ninety-day terminal purge) needed it cleared first. The purge
+  one is the nastier of the two: `runIsolated` catches the error, so the only
+  symptom would have been a table that quietly stopped shrinking. Caught by
+  writing the test and then deleting the fix to check the test could fail —
+  which is item 31's lesson (a guardrail that cannot fail usefully is worse
+  than none) applied to a test rather than to a CI step.
+- **Policy version 3.** The first bump whose trigger is a change in what the
+  app *is* rather than which vendors it uses: the previous policy's "Discord
+  access or refresh tokens are not written to the database" was offered as a
+  general statement, and a stored Google refresh token makes it incomplete.
 
 ## Versions
 
@@ -656,7 +697,8 @@ shifts.
 | **0.7** | Phase 4 — stale-account purge (10), per `specs/0016` | **Shipped** |
 | **0.7.1** | Phase 4 — self-service bot add + email (9), per `specs/0015` | **Shipped** |
 | **0.7.2** | What v0.7.1 and the standing backlog turned up — already-allow-listed servers shown, not hidden, on `/add-bot` (57); the bot can leave a server on deactivation (58); the calendar chip shows your own declined/tentative answer (52); a guarded `CURRENT_POLICY_VERSION` (43); the terminal-history purge's budget under-count and FK error fixed together (53, 56); a plain organizer cancel now notifies invitees (55); idea 49 found already shipped in v0.6.2 and documented as such. A second pass, after Michael settled the open design questions directly, shipped both items originally assessed and left open: groups without servers, per `specs/0011` plus the resolved access-control gap it didn't cover (36), and the minimum-attendees cascade extended to recurring events with configurable per-event/per-occurrence deadlines (54) — plus two new ideas captured and built in the same motion: the organizer notified on every invitee RSVP for every event (59), an owner-only tool for checking whether a hypothetical group of people has a common server before committing to one, found useful while manually verifying 36 on the sandbox (60), the New Event form's field order inverted to match: invite first, then let the server narrow from who's invited (61), the event detail page now names which server an event actually landed on, also found while testing 36 (62), and editing an event no longer shows its own invitees as busy during the very slot being edited (63) | **Shipped** |
-| 0.8 | Phase 5 — Google Calendar sync (2) | Planned |
+| **0.8** | Phase 5 — Google Calendar sync (2), push half: connect one Google account, pick a calendar, and have the sessions you're committed to written to it. Policy version 3, and the first long-lived third-party credential this app stores | **Shipped 5 September 2026** |
+| 0.8.1 | Phase 5's pull half (2) — availability read back via `freebusy.query`, which needs a cron-refreshed busy cache rather than a live call inside the request. Plus the standing backlog: the sandbox frontend gap (23), the server noticeboard (5) | Planned |
 | 1.0 | `IDEAS.md`'s **Still open** section empty — leave Beta | When the list clears |
 
 ## Summary
@@ -682,7 +724,8 @@ shifts.
 | 19 | Interactive bot (RSVP, slash, sync) | L | 3.75 | 0.5 | 8 | TBD |
 | 9 | Self-service bot add + email | L | 4 | 0.7.1 | — | 0015 |
 | 10 | Stale-account auto-delete | M | 4 | 0.7 | — | 0016 |
-| 2 | Google Calendar sync | XL | 5 | 0.7 | 1, 5, 10 | TBD |
+| 2 | Google Calendar sync (push) | XL | 5 | 0.8 | 1, 5, 10 | 0017 |
+| 2 | Google Calendar sync (pull, `freebusy`) | M | 5 | 0.8.1 | 2's push half | 0017 |
 | 21 | Calendar chip click opens New Event | S | 3.5 | 0.4 | — | 0009 — done |
 | 22 | Calendar can only show 2 months | M | 3.75 | 0.5 | — | rode along in 19 |
 | 24 | A failed API call renders as "nothing scheduled" | M | 3.6 | 0.4.1 | — | none needed |

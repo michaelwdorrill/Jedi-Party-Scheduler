@@ -34,7 +34,7 @@ identity, not a position — it never changes and is never reused.
 
 ## Still open
 
-### 2. Google Calendar sync
+### 2. Google Calendar sync — push half shipped in v0.8, pull half still open
 
 Pull a single chosen Google calendar (not all of them — e.g. just "D&D
 Scheduling", not "Family" or "Fulham FC") in as read-only availability on
@@ -64,6 +64,42 @@ goal. Three further calls made at the same time:
   100-user ceiling and an "unverified app" warning screen. That's fine at
   this app's scale, and the Privacy Policy revision is accepted as part
   of the cost.
+
+**The push half shipped in v0.8** (`specs/0017-google-calendar-sync.md`), and
+the two-halves decision above turned out to be load-bearing for a reason this
+capture did not anticipate. The obstacle to pulling is not `freebusy.query`
+itself — that is one POST — it is *where its answer belongs*.
+`computeBusyBlocksForUsers` (`worker/src/lib/freeBusy.ts:46`) runs
+**synchronously inside a request**, for up to 25 users at once. One Google call
+per connected user is up to 25 outbound subrequests in a single invocation,
+against a Free-plan ceiling of 50, in the one function whose own design note is
+about how its cost is a product and every factor has to be small. So the pull
+half needs a cached busy table refreshed by the cron, a staleness rule, and an
+answer for what the scheduling assistant shows while that cache is cold. That
+is a second design, not a second endpoint — **v0.8.1**.
+
+Three things about what did ship, worth keeping:
+
+- **`calendar.readonly` was requested in v0.8 even though only v0.8.1 needs
+  it.** Narrower would have been `calendar.calendarlist.readonly` (enough for
+  the calendar picker), but `freebusy.query` needs the broader one, and asking
+  later means sending everyone who already connected back through a Google
+  consent screen. A slightly larger ask now beats a worse moment later, and the
+  account is inside the read/write `calendar.events` grant either way.
+- **Occurrences are pushed individually rather than as an RRULE series.**
+  Fewer API calls and fewer rows would have argued for the series, but it needs
+  a faithful translation of `event_recurrence_rules` — including the
+  `0=Mon..6=Sun` `by_weekday` encoding `specs/0001` already records as the trap
+  in this area — plus overrides as EXDATE/RECURRENCE-ID exceptions. A
+  translation bug writes *wrong dates into someone's real calendar*, which is
+  the least recoverable failure this feature can have. Per-occurrence also
+  matches `specs/0014`: a per-occurrence decline is exactly the case a
+  series-level push gets wrong.
+- **The one long-lived third-party credential this app has ever stored**, which
+  scoped a sentence in `ARCHITECTURE.md` that had been written as a claim about
+  the whole app rather than about Discord. It is encrypted at rest under its
+  own secret, never returned by any route, and revoked at Google on disconnect
+  and on deletion. This is also what took the Privacy Policy to version 3.
 
 ### 5. Calendar-first, not server-first — partly shipped in v0.3
 

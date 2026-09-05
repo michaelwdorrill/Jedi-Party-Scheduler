@@ -13,6 +13,7 @@ import { personalRoutes } from './routes/personal';
 import { adminRoutes } from './routes/admin';
 import { discordInteractionRoutes } from './routes/discordInteractions';
 import { guildRequestRoutes } from './routes/guildRequests';
+import { googleRoutes } from './routes/google';
 import { MembershipUnavailableError } from './lib/db';
 import { BodyTooLargeError, ConflictError, FreeBusyTooLargeError, MAX_BODY_BYTES, ValidationError } from './lib/validate';
 
@@ -108,6 +109,12 @@ export function buildApp() {
   // site session -- see routes/guildRequests.ts's header comment for why
   // reusing requireAuth/the policy gate doesn't fit here.
   app.route('/guild-requests', guildRequestRoutes);
+
+  // Gated per-route inside the file rather than here, because /google/callback
+  // is a redirect back from Google and structurally cannot carry an
+  // Authorization header -- so the prefix can't be gated as a group. See
+  // routes/google.ts's header comment.
+  app.route('/google', googleRoutes);
 
   return app;
 }
