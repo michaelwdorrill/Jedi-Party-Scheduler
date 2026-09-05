@@ -14,6 +14,7 @@ import ChangelogPage from './pages/ChangelogPage';
 import SettingsPage from './pages/SettingsPage';
 import AdminUsersPage from './pages/AdminUsersPage';
 import AdminGuildRequestsPage from './pages/AdminGuildRequestsPage';
+import AdminVenueOverlapPage from './pages/AdminVenueOverlapPage';
 import RequestBotPage from './pages/RequestBotPage';
 
 export default function App() {
@@ -41,6 +42,7 @@ export default function App() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/admin/users" element={<AdminUsersPage />} />
           <Route path="/admin/guild-requests" element={<AdminGuildRequestsPage />} />
+          <Route path="/admin/venue-overlap" element={<AdminVenueOverlapPage />} />
           <Route path="/events/new" element={<EventFormPage />} />
           <Route path="/events/:eventId" element={<EventDetailPage />} />
           <Route path="/events/:eventId/edit" element={<EventFormPage />} />

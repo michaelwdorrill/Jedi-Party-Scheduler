@@ -195,6 +195,9 @@ export default function SettingsPage() {
           <Link to="/admin/guild-requests" className="block text-sm text-accent-text underline">
             Guild requests
           </Link>
+          <Link to="/admin/venue-overlap" className="block text-sm text-accent-text underline">
+            Venue overlap
+          </Link>
         </div>
       )}
 
