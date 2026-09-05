@@ -2608,3 +2608,18 @@ type already carried a `guildName` field (`EventDetail` extends the calendar's o
 never populated for this one response, and never rendered on this one page. Both now do,
 right under "Organized by," reusing the exact reasoning `EventChip`'s own tooltip already
 documents for the same information.
+
+### 63. Editing an event shows its own invitees as busy during it — shipped in v0.7.2
+
+Found live while testing item 06's minimum-attendees deadline on the sandbox: opening the
+Availability strip on an event's own edit page showed every invitee busy across the exact slot
+being edited. Not a bug in the free/busy math -- every invitee genuinely does hold a
+non-declined invite to the event whose own time is being looked at, so of course it collides
+with itself. It's just never useful information: the one thing edited on this page can't be a
+conflict with the thing being edited.
+
+`computeBusyBlocksForUsers` (`lib/freeBusy.ts`) takes an optional `excludeEventId`, dropped from
+its event-relevance map right before the per-event lookup runs. `GET /guilds/:guildId/free-busy`
+passes an `exclude_event_id` query param through to it, and `SchedulingAssistant` sends the
+event's own id there whenever `EventFormPage` is in edit mode (never on create, since there's
+nothing yet to exclude). Everyone else's real commitments still show up exactly as before.
