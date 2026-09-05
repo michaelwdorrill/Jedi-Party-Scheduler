@@ -88,7 +88,8 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
   }
 
   const visibleIds = members.filter((m) => !!m.free_busy_visible || m.id === userId).map((m) => m.id);
-  const busyByUser = await computeBusyBlocksForUsers(c.env, visibleIds, from, to);
+  const excludeEventId = c.req.query('exclude_event_id') || undefined;
+  const busyByUser = await computeBusyBlocksForUsers(c.env, visibleIds, from, to, excludeEventId);
 
   const out = [];
   for (const member of members) {

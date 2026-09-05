@@ -976,6 +976,7 @@ export default function EventFormPage() {
             userIds={inviteeIds}
             slots={assistantSlots}
             zone={timezone}
+            excludeEventId={isEdit ? eventId : undefined}
           />
         </div>
       )}

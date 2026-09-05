@@ -34,11 +34,16 @@ export default function SchedulingAssistant({
   userIds,
   slots,
   zone,
+  excludeEventId,
 }: {
   guildId: string;
   userIds: string[];
   slots: AssistantSlot[];
   zone: string;
+  // The event being edited, if any -- every invitee holds a non-declined
+  // invite to it, so without this its own slot always shows everyone busy
+  // during it, indistinguishable from a real conflict.
+  excludeEventId?: string;
 }) {
   const [entries, setEntries] = useState<FreeBusyEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -72,7 +77,8 @@ export default function SchedulingAssistant({
     setError(null);
     api
       .get<FreeBusyEntry[]>(
-        `/guilds/${guildId}/free-busy?from=${range.from}&to=${range.to}&user_ids=${userIds.join(',')}`,
+        `/guilds/${guildId}/free-busy?from=${range.from}&to=${range.to}&user_ids=${userIds.join(',')}` +
+          (excludeEventId ? `&exclude_event_id=${excludeEventId}` : ''),
       )
       .then((next) => {
         setEntries(next);
@@ -87,7 +93,7 @@ export default function SchedulingAssistant({
       })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [guildId, userIds.join(','), rangeKey]);
+  }, [guildId, userIds.join(','), rangeKey, excludeEventId]);
 
   if (userIds.length === 0) {
     return <p className="text-sm text-faint">Pick some people above to see when they're already busy.</p>;
