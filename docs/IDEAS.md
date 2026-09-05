@@ -2593,3 +2593,18 @@ common server at all surfaces a clear blocking message on the Server field itsel
 letting the picker imply a server that doesn't actually exist for that group.
 
 Editing an existing event is unaffected — its server is fixed and shown read-only, as before.
+
+### 62. The event detail page never says which server an event is actually on — shipped in v0.7.2
+
+Found live while testing item 36 on the sandbox: with a group now valid on any of several
+servers, which one a given event actually landed on stopped being something the viewer could
+just infer from context the way it could when a group belonged to exactly one guild. The event
+detail page showed the voice channel name, but never the server itself.
+
+`GET /events/:eventId` now looks up and returns the guild's name alongside its id — one more
+single-row lookup, the same shape the existing organizer-name lookup already uses. The frontend
+type already carried a `guildName` field (`EventDetail` extends the calendar's own
+`EventOccurrence`, which idea 34's cross-server calendar already needed it for) — it just was
+never populated for this one response, and never rendered on this one page. Both now do,
+right under "Organized by," reusing the exact reasoning `EventChip`'s own tooltip already
+documents for the same information.
