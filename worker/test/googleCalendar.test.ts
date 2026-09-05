@@ -194,8 +194,31 @@ describe('the feature is dormant until configured', () => {
   });
 });
 
+// Walks the two hops the way a browser does: an authenticated XHR for the
+// start URL, then a top-level navigation to it. Returns the cookie and the
+// OAuth state the second hop produced.
+async function beginConnect(env: Env, userId: string): Promise<{ cookie: string; state: string }> {
+  const auth = await authFor(env, userId);
+  const urlRes = await call(env, '/google/connect-url', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${auth}` },
+  });
+  const { startUrl } = await urlRes.json<{ startUrl: string }>();
+  const startRes = await call(env, `/google/start${new URL(startUrl).search}`, { redirect: 'manual' });
+  return {
+    cookie: setCookieValue(startRes),
+    state: new URL(startRes.headers.get('location')!).searchParams.get('state')!,
+  };
+}
+
 describe('the connect round trip', () => {
-  it('returns an authorize URL and sets the nonce cookie', async () => {
+  // The bug this pins down: the nonce cookie CANNOT be set on /connect-url's
+  // response. That is a cross-origin XHR, and browsers discard Set-Cookie from
+  // one unless it was sent with credentials -- which this app's API client
+  // never does. Setting it there means the callback's nonce check fails every
+  // time, for everyone, and looks like a verification bug rather than a
+  // missing cookie. It has to come from the top-level navigation instead.
+  it('hands back a Worker URL and sets no cookie on the XHR response', async () => {
     const { db, env: base } = setup();
     const env = googleEnv(base);
     await seedMember(db, 'u1');
@@ -206,13 +229,41 @@ describe('the connect round trip', () => {
       headers: { Authorization: `Bearer ${auth}` },
     });
     expect(res.status).toBe(200);
-    const { authorizeUrl } = await res.json<{ authorizeUrl: string }>();
-    expect(authorizeUrl).toContain('accounts.google.com');
+    const { startUrl } = await res.json<{ startUrl: string }>();
+    // On the Worker, not on Google -- the indirection is the fix.
+    expect(startUrl).toContain('worker.test/google/start?t=');
+    expect(startUrl).not.toContain('accounts.google.com');
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('sets the nonce cookie on the top-level navigation and redirects to Google', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedMember(db, 'u1');
+    const auth = await authFor(env, 'u1');
+
+    const urlRes = await call(env, '/google/connect-url', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${auth}` },
+    });
+    const { startUrl } = await urlRes.json<{ startUrl: string }>();
+    const res = await call(env, `/google/start${new URL(startUrl).search}`, { redirect: 'manual' });
+
+    expect(res.status).toBe(302);
+    const location = res.headers.get('location')!;
+    expect(location).toContain('accounts.google.com');
     // Both are load-bearing: without them Google issues no refresh token on a
     // reconnect, and the connection dies an hour later.
-    expect(authorizeUrl).toContain('access_type=offline');
-    expect(authorizeUrl).toContain('prompt=consent');
-    expect(res.headers.get('set-cookie')).toContain('google_connect_nonce=');
+    expect(location).toContain('access_type=offline');
+    expect(location).toContain('prompt=consent');
+
+    const setCookie = res.headers.get('set-cookie')!;
+    expect(setCookie).toContain('google_connect_nonce=');
+    expect(setCookie).toContain('HttpOnly');
+    // Lax rather than Strict: the callback is a top-level GET navigation from
+    // accounts.google.com, and Strict would withhold the cookie on exactly
+    // that hop.
+    expect(setCookie).toContain('SameSite=Lax');
   });
 
   it('requires authentication to start', async () => {
@@ -221,18 +272,23 @@ describe('the connect round trip', () => {
     expect(res.status).toBe(401);
   });
 
+  it('refuses a /start with a missing or forged token', async () => {
+    const { env: base } = setup();
+    const env = googleEnv(base);
+
+    const missing = await call(env, '/google/start', { redirect: 'manual' });
+    expect(missing.headers.get('location')).toContain('google=unverified');
+
+    const forged = await call(env, '/google/start?t=garbage', { redirect: 'manual' });
+    expect(forged.headers.get('location')).toContain('google=unverified');
+    expect(forged.headers.get('set-cookie')).toBeNull();
+  });
+
   it('stores the connection when the callback checks out', async () => {
     const { db, env: base } = setup();
     const env = googleEnv(base);
     await seedMember(db, 'u1');
-    const auth = await authFor(env, 'u1');
-
-    const start = await call(env, '/google/connect-url', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${auth}` },
-    });
-    const cookie = setCookieValue(start);
-    const state = new URL((await start.json<{ authorizeUrl: string }>()).authorizeUrl).searchParams.get('state')!;
+    const { cookie, state } = await beginConnect(env, 'u1');
 
     fetchStub = stubFetch([TOKEN_RULE, CALENDAR_LIST_RULE]);
     const res = await call(env, `/google/callback?code=abc&state=${encodeURIComponent(state)}`, {
@@ -319,14 +375,7 @@ describe('the connect round trip', () => {
     const { db, env: base } = setup();
     const env = googleEnv(base);
     await seedMember(db, 'u1');
-    const auth = await authFor(env, 'u1');
-
-    const start = await call(env, '/google/connect-url', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${auth}` },
-    });
-    const cookie = setCookieValue(start);
-    const state = new URL((await start.json<{ authorizeUrl: string }>()).authorizeUrl).searchParams.get('state')!;
+    const { cookie, state } = await beginConnect(env, 'u1');
 
     fetchStub = stubFetch([
       { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', expires_in: 3600 } },

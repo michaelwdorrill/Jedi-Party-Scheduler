@@ -83,10 +83,14 @@ export default function ConnectedCalendars() {
   // button -- it advertises a feature and then blames the person who pressed it.
   if (status.loading || !connection?.configured) return null;
 
+  // Two hops on purpose. This returns a URL on the *Worker*, not on Google, and
+  // navigating to it top-level is what lets the Worker set the nonce cookie the
+  // callback checks -- a cookie it cannot set on this XHR's own response, since
+  // the Worker is a different origin and the API client sends no credentials.
   const connect = () =>
     action.run(async () => {
-      const { authorizeUrl } = await api.post<{ authorizeUrl: string }>('/google/connect-url');
-      window.location.href = authorizeUrl;
+      const { startUrl } = await api.post<{ startUrl: string }>('/google/connect-url');
+      window.location.href = startUrl;
     });
 
   const disconnect = async () => {

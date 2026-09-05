@@ -21,6 +21,8 @@ import {
   exchangeCodeForTokens,
   GOOGLE_CONNECT_PURPOSE,
   type GoogleConnectTokenPayload,
+  GOOGLE_START_PURPOSE,
+  type GoogleStartTokenPayload,
   googleRedirectUri,
   isGoogleConfigured,
   listWritableCalendars,
@@ -35,6 +37,10 @@ export const googleRoutes = new Hono<AppEnv>();
 const STATE_COOKIE = 'google_connect_nonce';
 const NO_STORE = 'no-store, private';
 const CONNECT_TOKEN_TTL_SECONDS = 600;
+// Shorter than the state's: this one only has to survive the browser following
+// a redirect it was handed milliseconds ago, where the state has to outlast
+// however long someone spends on Google's account-picker and consent screens.
+const START_TOKEN_TTL_SECONDS = 300;
 
 function randomNonce(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -53,25 +59,71 @@ function notConfigured(c: Context<AppEnv>) {
   return c.text('Google Calendar sync is not configured on this deployment yet.', 503);
 }
 
-// Starts the round trip. Authenticated, because this is the only step that
-// knows who is asking -- the callback learns it from the signed state this
-// mints rather than from a session it cannot have.
+// Hop 1 of the connect flow. Authenticated, because this is the only step that
+// knows who is asking -- everything after it is a redirect chain with no
+// Authorization header available to it.
+//
+// Returns a URL on *this Worker* rather than Google's authorize URL, and that
+// indirection is load-bearing rather than tidiness: the nonce cookie the
+// callback checks cannot be set on this response at all. This is a cross-origin
+// XHR (the frontend is a different origin from the Worker), and a browser
+// discards Set-Cookie from one unless it was sent with credentials and the
+// response allows them -- which this app's API client deliberately never does.
+// So the cookie is set by the top-level navigation to /start below, on the
+// Worker's own origin, where it is an ordinary first-party cookie.
 googleRoutes.post('/connect-url', requireAuth, requirePolicyAcceptance, async (c) => {
   if (!isGoogleConfigured(c.env)) return notConfigured(c);
   c.header('Cache-Control', NO_STORE);
+
+  const payload: GoogleStartTokenPayload = { userId: c.get('userId') };
+  const token = await signToken(GOOGLE_START_PURPOSE, payload, c.env.JWT_SIGNING_KEY, START_TOKEN_TTL_SECONDS);
+  const origin = new URL(c.req.url).origin;
+  return c.json({ startUrl: `${origin}/google/start?t=${encodeURIComponent(token)}` });
+});
+
+// Hop 2: the top-level navigation. Unauthenticated for the same structural
+// reason the callback is -- a browser following a redirect chain carries no
+// bearer token -- and it stands on the start token minted above instead, which
+// is single-purpose, short-lived, and says who this is.
+//
+// This is where the nonce is created, written as a first-party cookie, and
+// bound into the OAuth state. Both halves are minted here so they cannot
+// disagree.
+googleRoutes.get('/start', async (c) => {
+  c.header('Cache-Control', NO_STORE);
+  if (!isGoogleConfigured(c.env)) return notConfigured(c);
+
+  const settingsUrl = `${c.env.FRONTEND_URL}/#/settings`;
+  const raw = c.req.query('t');
+  const payload = raw
+    ? await verifyToken<GoogleStartTokenPayload>(raw, GOOGLE_START_PURPOSE, c.env.JWT_SIGNING_KEY)
+    : null;
+  // Expired is the likely case here, not forged: the token lasts five minutes
+  // and someone can sit on the Settings page for longer than that before
+  // pressing the button. Sending them back to start again is the right answer
+  // to both.
+  if (!payload) return c.redirect(`${settingsUrl}?google=unverified`);
 
   const nonce = randomNonce();
   setCookie(c, STATE_COOKIE, nonce, {
     httpOnly: true,
     secure: true,
+    // Lax, not Strict: the callback arrives as a top-level GET navigation from
+    // accounts.google.com, and Strict would withhold the cookie on exactly
+    // that hop -- making the flow fail closed every time, for everyone.
     sameSite: 'Lax',
     path: '/google',
     maxAge: CONNECT_TOKEN_TTL_SECONDS,
   });
 
-  const payload: GoogleConnectTokenPayload = { userId: c.get('userId'), nonce };
-  const state = await signToken(GOOGLE_CONNECT_PURPOSE, payload, c.env.JWT_SIGNING_KEY, CONNECT_TOKEN_TTL_SECONDS);
-  return c.json({ authorizeUrl: buildAuthorizeUrl(c.env, googleRedirectUri(c.req.url), state) });
+  const statePayload: GoogleConnectTokenPayload = { userId: payload.userId, nonce };
+  const state = await signToken(
+    GOOGLE_CONNECT_PURPOSE,
+    statePayload,
+    c.env.JWT_SIGNING_KEY,
+    CONNECT_TOKEN_TTL_SECONDS,
+  );
+  return c.redirect(buildAuthorizeUrl(c.env, googleRedirectUri(c.req.url), state));
 });
 
 // Unauthenticated by construction -- see this file's header comment. What

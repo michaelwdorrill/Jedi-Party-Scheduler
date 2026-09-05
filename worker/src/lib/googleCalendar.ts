@@ -29,13 +29,38 @@ export const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/calendar.readonly',
 ].join(' ');
 
+// Two purposes, for the two hops of the connect flow, and the split exists for
+// a browser reason rather than a cryptographic one.
+//
+// The nonce cookie has to be set by a *top-level navigation* to this Worker's
+// own origin. It cannot be set by the authenticated XHR that starts the flow:
+// the frontend is a different origin from the Worker (localhost:5173 or
+// uncleowen.space vs workers.dev), and a browser discards Set-Cookie from a
+// cross-origin fetch unless the request was made with credentials AND the
+// response allows them -- which this app's API client deliberately does not do,
+// since it authenticates with a bearer token and wants no ambient cookie
+// authority at all.
+//
+// routes/guildRequests.ts avoids this only because its /connect *is* a
+// top-level navigation; it never has to know who is asking. This flow does, so
+// it splits into: an authenticated XHR that mints a start token (below), and a
+// top-level navigation carrying that token, which is what actually sets the
+// cookie and bounces to Google.
+export const GOOGLE_START_PURPOSE = 'google_connect_start';
 export const GOOGLE_CONNECT_PURPOSE = 'google_connect';
 
+// Hop 1: proves who asked, minted behind requireAuth. Short-lived because it
+// only has to survive one immediate redirect.
+export interface GoogleStartTokenPayload {
+  userId: string;
+}
+
+// Hop 2: the OAuth `state`. Carries the same user plus the nonce that is
+// simultaneously written to an HttpOnly cookie, so the state alone -- which
+// travels through Google in a URL and is therefore not a secret -- is not
+// enough to complete a link. See specs/0017's "why both".
 export interface GoogleConnectTokenPayload {
   userId: string;
-  // Mirrored into an HttpOnly cookie so the signed state alone -- which
-  // travels through Google in a URL and is therefore not a secret -- is not
-  // enough to complete a link. See specs/0017's "why both".
   nonce: string;
 }
 

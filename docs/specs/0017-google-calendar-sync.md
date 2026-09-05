@@ -117,14 +117,41 @@ is a top-level browser navigation and cannot carry an `Authorization` header,
 so the flow has to prove who it is some other way.
 
 1. `POST /google/connect-url` — authenticated, policy-gated. Mints a
-   `signToken` (`lib/signedToken.ts`) with purpose `google_connect`, payload
-   `{ userId, nonce }`, 10-minute TTL. Sets the nonce in an HttpOnly cookie
-   scoped to `/google`. Returns Google's authorize URL with that signed token
-   as `state`.
-2. Google → `GET /google/callback?code&state`. Verifies the signature, the
+   short-lived `google_connect_start` token naming the caller and returns a URL
+   **on this Worker**: `/google/start?t=…`.
+2. The browser navigates top-level to `/google/start`. That verifies the start
+   token, generates a nonce, sets it as an HttpOnly cookie scoped to `/google`,
+   mints the `google_connect` state token `{ userId, nonce }`, and redirects to
+   Google.
+3. Google → `GET /google/callback?code&state`. Verifies the signature, the
    purpose, the expiry, **and** that the payload's nonce matches the cookie.
-3. Exchanges the code, stores the encrypted refresh token, redirects to
+4. Exchanges the code, stores the encrypted refresh token, redirects to
    `#/settings?google=connected`.
+
+**Why the extra hop, which looks like indirection and is not.** The obvious
+shape is for step 1 to set the cookie and hand back Google's authorize URL
+directly. It cannot: step 1 is a cross-origin XHR (the frontend is
+`localhost:5173` or `uncleowen.space`; the Worker is `workers.dev`), and a
+browser **discards `Set-Cookie` from a cross-origin fetch** unless the request
+carries `credentials: 'include'` and the response sends
+`Access-Control-Allow-Credentials`. This app's API client deliberately does
+neither — it authenticates with a bearer token and wants no ambient cookie
+authority anywhere. So the cookie would silently never be stored, and every
+callback would fail the nonce check.
+
+The alternatives were considered and rejected. Turning on CORS credentials
+globally widens every route's surface to serve one feature. Dropping the cookie
+and trusting the signed state alone reintroduces exactly the account-linking
+attack the cookie exists to stop. A top-level navigation to the Worker's own
+origin makes the cookie plainly first-party, which is what
+`routes/guildRequests.ts` already gets for free by never needing to know who is
+asking.
+
+**Worth recording as the general trap:** the double-submit-cookie pattern
+`routes/auth.ts` documents so carefully is only free when the endpoint that
+sets the cookie is reached by navigation. Copying it into a flow that starts
+with an authenticated XHR silently loses the cookie half — and it fails
+*closed*, so it looks like a verification bug rather than a missing cookie.
 
 **Why both a signed token and a cookie.** The signed token alone identifies the
 user, which is what the callback needs — but it travels through Google in a URL
