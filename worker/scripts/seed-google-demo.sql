@@ -32,6 +32,7 @@
 -- the events they point at -- the same FK ordering deleteUserCompletely and the
 -- terminal-history purge both spell out.
 DELETE FROM google_event_links WHERE event_id LIKE 'gdemo-%';
+DELETE FROM notification_log WHERE event_id LIKE 'gdemo-%';
 DELETE FROM event_attendance WHERE event_id LIKE 'gdemo-%';
 DELETE FROM event_poll_votes WHERE option_id LIKE 'gdemo-%';
 DELETE FROM event_poll_options WHERE event_id LIKE 'gdemo-%';
@@ -212,4 +213,40 @@ INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order)
 SELECT 'gdemo-opt-3', 'gdemo-poll',
        (CAST(strftime('%s', date('now','+10 day') || ' 17:00:00') AS INTEGER) * 1000),
        (CAST(strftime('%s', date('now','+10 day') || ' 23:00:00') AS INTEGER) * 1000), 2
+ WHERE EXISTS (SELECT 1 FROM events WHERE id = 'gdemo-poll');
+
+-- ---------------------------------------------------------------------------
+-- Suppress the invite DMs this fixture would otherwise trigger.
+--
+-- sweepNewInvites DMs any event_invites row with no settled notification_log
+-- entry, so the two invites above would each produce a real Discord message on
+-- the next tick -- including one saying "You've been invited to Session You
+-- Declined", complete with RSVP buttons, for an event this seed has already
+-- marked declined.
+--
+-- That is the fixture's fault rather than the app's, and the distinction is
+-- worth stating because it looks like a bug: in the real app the invite DM is
+-- sent *before* anyone can decline, and the log row it writes then dedupes it
+-- forever. This seed manufactures a state the app never produces on its own --
+-- a declined invite that was never notified.
+--
+-- Written settled (delivered_at set, one attempt) and BEFORE nothing at all,
+-- since the whole file is one import -- but the ordering intent is the same as
+-- migration 0019's, which had to write its own suppressing rows ahead of the
+-- invites it backfilled for exactly this reason (IDEAS item 26). Deleting a
+-- fixture is not a reason to page someone on Discord.
+INSERT INTO notification_log (id, user_id, event_id, notification_type, occurrence_date,
+  sent_at, delivered_at, attempt_count, content)
+SELECT 'gdemo-nl-declined', '346042183486537730', 'gdemo-declined', 'invite', '',
+       (CAST(strftime('%s','now') AS INTEGER) * 1000),
+       (CAST(strftime('%s','now') AS INTEGER) * 1000), 1,
+       'suppressed by scripts/seed-google-demo.sql'
+ WHERE EXISTS (SELECT 1 FROM events WHERE id = 'gdemo-declined');
+
+INSERT INTO notification_log (id, user_id, event_id, notification_type, occurrence_date,
+  sent_at, delivered_at, attempt_count, content)
+SELECT 'gdemo-nl-poll', '346042183486537730', 'gdemo-poll', 'invite', '',
+       (CAST(strftime('%s','now') AS INTEGER) * 1000),
+       (CAST(strftime('%s','now') AS INTEGER) * 1000), 1,
+       'suppressed by scripts/seed-google-demo.sql'
  WHERE EXISTS (SELECT 1 FROM events WHERE id = 'gdemo-poll');

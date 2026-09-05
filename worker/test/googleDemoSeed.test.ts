@@ -14,7 +14,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createTestDb, type ShimDatabase } from './d1shim';
 import { desiredOccurrencesFor, SYNC_WINDOW_MS } from '../src/cron/googleSync';
-import { makeEnv } from './helpers';
+import { runReminderSweep } from '../src/cron/reminders';
+import { DM_CHANNEL_RULE, dmSendRule, makeEnv, membershipRule, stubFetch } from './helpers';
 
 const SEED_SQL = readFileSync(join(__dirname, '..', 'scripts', 'seed-google-demo.sql'), 'utf8');
 
@@ -103,6 +104,27 @@ describe('seed-google-demo.sql', () => {
     // entry that gets rewritten every tick.
     expect(new Set(weekly.map((o) => o.occurrenceDate)).size).toBe(weekly.length);
     expect(weekly.every((o) => o.occurrenceDate !== '')).toBe(true);
+  });
+
+  // The fixture invites a real person to two events, and sweepNewInvites DMs
+  // any invite row with no settled notification_log entry. Without suppression
+  // that is two real Discord messages per seed run -- one of them saying
+  // "You've been invited to Session You Declined", with RSVP buttons, about an
+  // event this seed has already marked declined. Happened on the first live
+  // run of this fixture.
+  it('does not DM the operator about the invites it plants', async () => {
+    const db = createTestDb();
+    seedOperatorMembership(db);
+    db.raw.exec(SEED_SQL);
+
+    const fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    try {
+      await runReminderSweep(makeEnv(db));
+      const dms = fetchStub.calls.filter((u) => u.includes('/messages'));
+      expect(dms).toHaveLength(0);
+    } finally {
+      fetchStub.restore();
+    }
   });
 
   it('carries the description trap that proves descriptions are never sent', () => {
