@@ -50,13 +50,13 @@ EMAIL_FROM_ADDRESS = ""
 # report differently between the two environments: the sandbox should be
 # switched to "live" first, verified, and only then production -- which is the
 # sandbox-first rule applied to a config flag rather than to code.
-GOOGLE_SYNC_MODE = "off"
+GOOGLE_SYNC_MODE = "live"
 # The Google OAuth client id. Not a secret (it appears in the authorize URL
 # every user's browser sees), same as DISCORD_CLIENT_ID above. The matching
 # GOOGLE_CLIENT_SECRET and GOOGLE_TOKEN_ENCRYPTION_KEY are set with
 # `wrangler secret put` and never committed. Blank until provisioned;
 # isGoogleConfigured() treats blank as "off" rather than erroring.
-GOOGLE_CLIENT_ID = ""
+GOOGLE_CLIENT_ID = "975267822402-hunqti72352i6u1e7hn2cpp88lv9n25a.apps.googleusercontent.com"
 # Which Cloudflare plan this Worker runs on: "free" or "paid". Free and Paid
 # differ by more than an order of magnitude in D1 queries and outbound
 # subrequests allowed per invocation, and the 15-minute cron sizes its own
