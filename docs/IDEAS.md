@@ -2552,3 +2552,24 @@ never generates a notice to themselves.
 This is a straightforward feature, not a design decision the way 54 and 36
 were, which is why it wasn't its own roadmap line before now — captured
 directly as built rather than sitting open first.
+
+### 60. An owner has no way to check whether a hypothetical group of people has anywhere to meet — shipped in v0.7.2
+
+Captured and built in one motion, the same way 59 was: while manually verifying item 36's
+intersection rule on the sandbox (specifically, whether a specific combination of real people
+and seed accounts had a common server before actually saving a group or creating an event
+around it), the fastest way to check turned out to be a one-off exploratory tool built outside
+the app entirely -- which is exactly the kind of question `commonServerSet()` already answers
+server-side, just with no owner-facing surface to ask it interactively without committing to a
+real group or event first.
+
+**Shipped as a new owner-only admin page, `/admin/venue-overlap`.** It reuses `GET
+/admin/users` rather than adding a new endpoint -- that route already returns every registered
+user and which servers each is or was a member of, which is the entire input the question
+needs. The page lets the owner check off a hypothetical set of people and live-computes which
+server(s), if any, every one of them currently shares, with a clear "no common server -- this
+group is impossible" state when the intersection is empty. Every membership cell in the matrix
+is also directly toggleable, as a client-side what-if that is never written back -- exploring
+"what if this person left this server" without touching anyone's actual membership, which is
+useful for reasoning about item 36's drift scenario ahead of time, not just the group-creation
+one.
