@@ -599,7 +599,7 @@ export default function EventFormPage() {
       {eventType === 'single' ? (
         <div className={cardClass('md', 'space-y-3')}>
           <div className="flex flex-wrap gap-3">
-            <div className="flex-1 min-w-[8rem]">
+            <div className="flex-1 min-w-[7rem]">
               <label className="mb-1 block text-sm text-muted">Starts</label>
               <input
                 type="date"
@@ -608,7 +608,7 @@ export default function EventFormPage() {
                 className={controlClass('lg', 'w-full')}
               />
             </div>
-            <div className="w-28">
+            <div className="w-36">
               <label className="mb-1 block text-sm text-muted">at</label>
               <input
                 type="time"
@@ -617,7 +617,7 @@ export default function EventFormPage() {
                 className={controlClass('lg', 'w-full')}
               />
             </div>
-            <div className="flex-1 min-w-[8rem]">
+            <div className="flex-1 min-w-[7rem]">
               <label className="mb-1 block text-sm text-muted">Ends</label>
               <input
                 type="date"
@@ -627,7 +627,7 @@ export default function EventFormPage() {
                 className={controlClass('lg', 'w-full')}
               />
             </div>
-            <div className="w-28">
+            <div className="w-36">
               <label className="mb-1 block text-sm text-muted">at</label>
               <input
                 type="time"
