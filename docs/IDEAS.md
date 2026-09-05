@@ -13,11 +13,34 @@ roadmap gets revisited between phases.
 
 ## How this file is kept
 
-Two sections: **Still open**, and **Already built** below it. When something
-ships, its entry is annotated with the version and moved down. It is not
-deleted, because for several of these the most valuable part is the record of
-a decision and *why the alternative was rejected* — which is worth more after
-shipping than before.
+Three sections: **Still open**, **Parked until after 1.0**, and **Already
+built**. When something ships, its entry is annotated with the version and
+moved to the bottom section. It is not deleted, because for several of these
+the most valuable part is the record of a decision and *why the alternative was
+rejected* — which is worth more after shipping than before.
+
+**The middle section is new, and it is the one that can do damage, so its rule
+is narrow.** `ROADMAP.md` defines 1.0 as "when `IDEAS.md`'s *Still open*
+section is empty", so anything sitting in *Still open* pushes 1.0 further away
+— which is the intended behaviour for work we actually intend to do, and the
+wrong behaviour for work we have deliberately decided comes *after* 1.0. Before
+this section existed there was nowhere to put the second kind, and the only
+options were to let it hold 1.0 hostage or to not write it down at all.
+
+An entry qualifies for **Parked** only if all three are true:
+
+1. There is a **recorded decision** that it belongs after 1.0, not merely an
+   absence of enthusiasm for doing it now.
+2. Nothing already scheduled depends on it.
+3. It is written up to the same standard as anything else here, so that
+   whoever picks it up later inherits the reasoning rather than a stub.
+
+**Parked is not a synonym for avoided**, and the failure mode is obvious: a
+section the 1.0 test does not read is a place inconvenient items can be filed
+to make a number go green. Item 29's whole lesson was that a list which stops
+saying where things stand stops being worth keeping. If this section starts
+growing faster than *Still open* shrinks, that is the signal it is being
+misused.
 
 That matters more than housekeeping usually does, because `ROADMAP.md`
 defines 1.0 as "when `IDEAS.md` is empty, we leave Beta". For the first four
@@ -219,6 +242,59 @@ is still no branch you can push a frontend change to and have anything
 happen, and the choice between a sandbox Pages project and a CI preview
 bundle is still unmade.
 
+
+## Parked until after 1.0
+
+Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
+**Nothing in this section counts against the 1.0 test** — that is the entire
+reason it exists, and the reason its entry bar is set where it is.
+
+### 64. Get the Google OAuth app verified, so users stop seeing the unverified warning
+
+Anyone connecting a Google calendar meets a Google interstitial first. Which
+one depends on the app's publishing status, and neither of the two available
+without verification is friendly:
+
+| Publishing status | What the user sees | Refresh tokens | Cap |
+|---|---|---|---|
+| Testing | "an app that's currently being tested — only continue if you know the developer that invited you" | **expire after 7 days** | 100 test users |
+| In production, unverified | "Google hasn't verified this app", behind an **Advanced → (unsafe)** link | don't expire | 100 users |
+| In production, verified | nothing | don't expire | none |
+
+**Verification is the only thing that removes the warning.** Publishing does
+not — it swaps the wording, arguably for the worse, since the production
+variant is the one that says "unsafe". Time and usage do nothing at all.
+
+**The encouraging part, confirmed against the real console rather than
+assumed:** both scopes this app requests (`calendar.events`,
+`calendar.readonly`) appear under *"Your sensitive scopes"*, with *"Your
+restricted scopes"* empty. Sensitive-scope verification is the ordinary review
+— it does **not** require the third-party CASA security assessment that Gmail
+and Drive scopes trigger, which is the expensive, months-long one. So this is a
+process cost, not a money cost.
+
+What it typically wants: domain ownership verified in Search Console, a
+homepage and privacy policy on that domain, a written justification per scope,
+and a demo video of the consent flow. Most of that already exists —
+uncleowen.space is real and the Privacy Policy is thorough. One wrinkle to
+check first: the policy lives at a HashRouter URL (`/#/privacy`), and reviewers
+sometimes want a plain path, so confirm it loads cleanly for someone arriving
+cold with no session.
+
+**Why this is parked rather than open (decided Sept 2026, Michael).** Every
+user of this app personally knows the person who built it — that is the whole
+premise of a private friend-group scheduler — so "only continue if you know the
+developer" is a warning whose condition is actually satisfied. The 100-user
+ceiling is far above the supported profile, which `validate.ts` already pegs at
+about a guild's active population. Verification is a meaningful amount of
+process for a benefit measured in one slightly alarming screen, seen once per
+person, and it can be started at any time without changing a line of code.
+
+**The one thing that is NOT parked**, and must not be confused with this:
+production has to run at publishing status **"In production"**, not Testing.
+That is the middle row above, warning and all. Shipping production in Testing
+mode would silently break every user's sync a week after they connect, and
+that is a correctness issue rather than a cosmetic one.
 
 ## Already built
 

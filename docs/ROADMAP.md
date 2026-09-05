@@ -673,6 +673,24 @@ intended behaviour, not a flaw in the definition: shipping 1.0 should mean
 "there is nothing captured that we still intend to build", and the honest way
 to reach it is to keep clearing the list rather than to freeze it.
 
+**One deliberate exception, added Sept 2026: `IDEAS.md`'s "Parked until after
+1.0" section.** The definition above is right for work we intend to do, and
+wrong for work we have explicitly decided comes *after* 1.0 — that kind would
+otherwise hold 1.0 hostage forever, or, worse, not get written down at all so
+that it stops holding it hostage. The parked section is where the second kind
+goes, it does not count against the test, and its entry bar is written out in
+`IDEAS.md`'s own "How this file is kept": a recorded decision that it belongs
+after 1.0, nothing scheduled depending on it, and written up to the same
+standard as everything else.
+
+The obvious risk is that it becomes the drawer inconvenient items get swept
+into so a number goes green, which would recreate item 29's failure — a list
+that has stopped saying where things stand. The tell is simple enough to
+watch for: if parked grows faster than *Still open* shrinks, it is being
+misused. Its first entry is 64 (Google OAuth verification), parked because
+every user of this app personally knows its author, which is precisely the
+condition the warning it removes asks about.
+
 The version numbers below are therefore a *plan*, not a promise. If a new
 idea lands in the middle, it gets a phase like everything else and the tail
 shifts.

@@ -44,6 +44,39 @@ The scopes are chosen so the second half needs no re-consent — see **Scopes**
 below. That is deliberate: making someone re-authorise in 0.8.1 would be the
 avoidable cost of splitting the work.
 
+### A constraint on the pull half, decided before it is built
+
+**Only one Google calendar, explicitly chosen, may be read into Uncle Owen**
+(Michael, Sept 2026). Not "all calendars this account can see", and not
+implicitly the same calendar we write to.
+
+This restates item 2's original capture — *"a single chosen Google calendar,
+not all of them — e.g. just 'D&D Scheduling', not 'Family' or 'Fulham FC'"* —
+and it survives contact with the design: `freebusy.query` takes an explicit
+list of calendar ids, so scoping it to exactly one is the natural shape rather
+than a restriction bolted on afterwards.
+
+Three things follow, and the third is the one that matters for the security
+review:
+
+- **It is a second setting, not the existing one.** `calendar_id` is the
+  *write* target; the pull half needs its own `read_calendar_id`. They are
+  genuinely different choices — writing sessions into a dedicated "Games"
+  calendar while reading busy time from a personal one is the obvious setup,
+  and collapsing them would force one to be wrong.
+- **It defaults to nothing.** Null means the pull half is off for that user,
+  so nobody starts having a calendar read because they connected for pushing.
+  Reading is opt-in on top of an opt-in.
+- **Google cannot enforce this; only our code can.** Calendar OAuth scopes are
+  account-wide — there is no per-calendar scope — so `calendar.readonly`
+  grants read access to *every* calendar the account can see, and the promise
+  that we touch only one is kept by the query we choose to send, not by the
+  grant. That is an honest limitation to state plainly in the Privacy Policy
+  rather than imply otherwise, and it is exactly the kind of claim a security
+  reviewer should push on. It also raises the value of `freebusy.query` over a
+  full event read: busy/free times carry no titles, so even the calendar we do
+  read gives up far less than the grant would allow.
+
 ## What the user sees
 
 A **Connected calendars** card in Settings, between Scenery and Servers:
