@@ -47,7 +47,7 @@ export default function InviteePicker({
         <div className="mb-1 text-xs uppercase tracking-wide text-faint">Friends</div>
         {friends.length === 0 ? (
           <p className="text-sm text-faint">
-            No friends yet — friends are people who share this server and have also logged in.
+            No friends yet — friends are people who share a server with you and have also logged in.
           </p>
         ) : (
           <div className="flex flex-wrap gap-2">

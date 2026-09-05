@@ -160,28 +160,21 @@ export default function EventFormPage() {
     return pollSlots.map((slot) => range(slot.key, slot.date, slot.startTime, slot.endDate, slot.endTime)).filter(keep);
   }, [timezone, eventType, date, startTime, endDate, endTime, pollSlots]);
 
+  // Guild-agnostic and unconditional, for both create and edit: who you might
+  // invite is no longer scoped to a server picked first (that's the whole
+  // point of this ordering -- the server comes *from* who you invite now,
+  // not the other way around). GET /me/friends with no guild_id is the same
+  // cross-guild shape GroupEditor already uses, each friend carrying their
+  // own guildIds so candidateServerIds below can narrow the same way a
+  // group's roster does. Groups arrive unfiltered too, including ones with
+  // no common server right now -- picking one of those is what surfaces the
+  // "these invitees share no server" state below, rather than the group
+  // silently never appearing.
   useEffect(() => {
-    // Keyed on effectiveGuildId, not the raw ?guild= param, so this also runs
-    // on edit -- it previously didn't (the edit route carries no ?guild=),
-    // which meant InviteePicker had nothing to show when editing an event.
-    if (!effectiveGuildId) return;
-    Promise.all([
-      api.get<Friend[]>(`/me/friends?guild_id=${effectiveGuildId}`),
-      // The groups you are in, not every group on this server (IDEAS item
-      // 34) -- the per-guild listing is gone. Filtering client-side is safe
-      // rather than merely convenient: the server re-checks every group
-      // against the event's guild when it resolves the invite list
-      // (resolveInvitees), so a group id from the wrong server invites
-      // nobody however it got into the request. specs/0011 / IDEAS item 36:
-      // a group can now offer *several* servers, not one -- filtered to
-      // those whose common-server set includes this event's guild. A group
-      // with no common server at all (someone drifted apart from the rest)
-      // never appears here, for any guild, until it's repaired.
-      api.get<Group[]>('/me/groups'),
-    ]).then(
+    Promise.all([api.get<Friend[]>('/me/friends'), api.get<Group[]>('/me/groups')]).then(
       ([f, g]) => {
         setFriends(f);
-        setGroups(g.filter((group) => group.commonServers.some((s) => s.id === effectiveGuildId)));
+        setGroups(g);
         setInviteesError(null);
       },
       (e: unknown) => {
@@ -193,7 +186,7 @@ export default function EventFormPage() {
         setInviteesError(describeError(e));
       },
     );
-  }, [effectiveGuildId]);
+  }, []);
 
   useEffect(() => {
     if (!effectiveGuildId) return;
@@ -319,6 +312,51 @@ export default function EventFormPage() {
     }
   };
 
+  // The server field is now derived from who's invited, not the other way
+  // around: start from every server you belong to, and narrow it by
+  // intersecting with each selected friend's own guildIds and each selected
+  // group's commonServers -- the same rule commonServerSet() runs
+  // server-side (specs/0011 / IDEAS item 36), just recomputed here as the
+  // roster changes rather than only checked on save. A friend fetched
+  // without guildIds (shouldn't happen for this call shape, but matches
+  // GroupEditor's own fail-open reasoning) is skipped rather than treated as
+  // sharing nothing, so a data gap here can't wrongly zero out the set --
+  // the server's own check is still what actually enforces this on submit.
+  const candidateServerIds = useMemo(() => {
+    let ids = new Set(guilds.map((g) => g.id));
+    for (const uid of selectedUserIds) {
+      const friend = friends.find((f) => f.id === uid);
+      if (!friend?.guildIds) continue;
+      const shared = new Set(friend.guildIds);
+      ids = new Set([...ids].filter((id) => shared.has(id)));
+    }
+    for (const gid of selectedGroupIds) {
+      const group = groups.find((g) => g.id === gid);
+      if (!group) continue;
+      const shared = new Set(group.commonServers.map((s) => s.id));
+      ids = new Set([...ids].filter((id) => shared.has(id)));
+    }
+    return ids;
+  }, [guilds, selectedUserIds, selectedGroupIds, friends, groups]);
+
+  const candidateServers = useMemo(
+    () => guilds.filter((g) => candidateServerIds.has(g.id)),
+    [guilds, candidateServerIds],
+  );
+  const hasInvitees = selectedUserIds.length > 0 || selectedGroupIds.length > 0;
+  const impossibleRoster = hasInvitees && candidateServerIds.size === 0;
+
+  // A server chosen before the roster narrowed it away has to be let go --
+  // otherwise the select would keep showing (and could still submit) a
+  // value that's no longer one of its own options.
+  useEffect(() => {
+    if (isEdit) return;
+    if (formGuildId && !candidateServerIds.has(formGuildId)) {
+      setFormGuildId('');
+      setVoiceChannelId('');
+    }
+  }, [candidateServerIds, formGuildId, isEdit]);
+
   const toUtcMillis = (d: string, t: string) => DateTime.fromISO(`${d}T${t}`, { zone: timezone }).toMillis();
 
   // Resolve the full invitee set (individuals + everyone in the chosen groups)
@@ -330,14 +368,12 @@ export default function EventFormPage() {
     ]),
   );
 
-  // Friends, groups and voice channels are all scoped to a guild, so
-  // switching servers mid-form invalidates whatever was already picked from
-  // the old one -- carrying those ids across would submit references the
-  // server will reject as not belonging to the new guild.
+  // Invitees no longer need clearing on a server change -- they're upstream
+  // of it now, and the select only ever offers servers the current roster
+  // actually has in common. Voice channels are still guild-scoped, so a
+  // stale pick from a previous server still has to go.
   const handleGuildChange = (next: string) => {
     setFormGuildId(next);
-    setSelectedUserIds([]);
-    setSelectedGroupIds([]);
     setVoiceChannelId('');
   };
 
@@ -517,12 +553,29 @@ export default function EventFormPage() {
         <InlineError message={`Couldn't load who you can invite. ${inviteesError}`} />
       )}
 
+      <div className={cardClass()}>
+        <h2 className="mb-2 font-semibold">Invite</h2>
+        <InviteePicker
+          friends={friends}
+          groups={groups}
+          selectedUserIds={selectedUserIds}
+          selectedGroupIds={selectedGroupIds}
+          onToggleUser={toggleUser}
+          onToggleGroup={toggleGroup}
+        />
+      </div>
+
       <div>
         <label className="mb-1 block text-sm text-muted">Server</label>
         {isEdit ? (
           <div className="w-full rounded-md border border-edge bg-surface px-3 py-2 text-sm text-muted">
             {guilds.find((g) => g.id === loadedGuildId)?.name ?? '—'}
           </div>
+        ) : impossibleRoster ? (
+          <p className="rounded-md border border-danger/60 bg-danger-surface px-3 py-2 text-sm text-danger-text">
+            These invitees don't all share a single server — remove someone, or pick a different
+            group, before choosing a venue.
+          </p>
         ) : (
           <select
             value={formGuildId}
@@ -530,9 +583,9 @@ export default function EventFormPage() {
             className={controlClass('lg', 'w-full')}
           >
             <option value="" disabled>
-              Choose a server…
+              {hasInvitees ? 'Choose a server…' : 'Choose a server, or invite someone first…'}
             </option>
-            {guilds.map((g) => (
+            {candidateServers.map((g) => (
               <option key={g.id} value={g.id}>
                 {g.name}
               </option>
@@ -911,18 +964,6 @@ export default function EventFormPage() {
           )}
         </div>
       )}
-
-      <div className={cardClass()}>
-        <h2 className="mb-2 font-semibold">Invite</h2>
-        <InviteePicker
-          friends={friends}
-          groups={groups}
-          selectedUserIds={selectedUserIds}
-          selectedGroupIds={selectedGroupIds}
-          onToggleUser={toggleUser}
-          onToggleGroup={toggleGroup}
-        />
-      </div>
 
       {effectiveGuildId && (
         <div className={cardClass()}>
