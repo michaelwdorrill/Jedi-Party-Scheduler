@@ -104,6 +104,32 @@ if (String(prodVars.WORKERS_PLAN) !== String(sandboxVars.WORKERS_PLAN)) {
   );
 }
 
+// Same shape as the database_id check below, and added for the same reason:
+// a value that is *supposed* to differ per environment, where sharing it is
+// silently wrong rather than loudly broken.
+//
+// A Google OAuth client registers its redirect URIs per client, so production
+// carrying the sandbox's client id means production's connect flow bounces
+// users back to the sandbox Worker -- or, once both are real, that a
+// production user's consent is granted against the sandbox's app identity.
+// Neither fails at deploy time; both fail in front of a user.
+//
+// Found the hard way (v0.8 verification): the sandbox's client id and
+// GOOGLE_SYNC_MODE = "live" were pasted into the [vars] block instead of
+// [env.sandbox.vars] and committed. Nothing caught it, because the key-set
+// check above passes -- both blocks had the key -- and the values were free to
+// differ. Blank on both sides is fine and is the shipped state; only a shared
+// *non-empty* id is the mistake.
+const prodGoogleId = String(prodVars.GOOGLE_CLIENT_ID ?? '');
+const sandboxGoogleId = String(sandboxVars.GOOGLE_CLIENT_ID ?? '');
+if (prodGoogleId !== '' && prodGoogleId === sandboxGoogleId) {
+  errors.push(
+    `[vars] and [env.sandbox.vars] share the same GOOGLE_CLIENT_ID ("${prodGoogleId}"). ` +
+      `Each environment needs its own Google OAuth client, because redirect URIs are registered ` +
+      `per client -- one of the two Workers would be unable to complete a connection.`,
+  );
+}
+
 const prodD1 = (config['d1_databases'] ?? [])[0];
 const sandboxD1 = (config['env.sandbox.d1_databases'] ?? [])[0];
 if (!prodD1 || !sandboxD1) {
