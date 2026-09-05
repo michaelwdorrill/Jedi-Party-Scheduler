@@ -2573,3 +2573,23 @@ is also directly toggleable, as a client-side what-if that is never written back
 "what if this person left this server" without touching anyone's actual membership, which is
 useful for reasoning about item 36's drift scenario ahead of time, not just the group-creation
 one.
+
+### 61. The New Event form still made you pick a server before it could tell you who you could invite — shipped in v0.7.2
+
+Captured and built in one motion while clicking through item 36 on the sandbox: with groups no
+longer scoped to a single server, picking a server *first* on the New Event form had become
+backwards — it's who you invite that determines which servers are even possible now, not the
+other way around, and the form's field order hadn't caught up to that.
+
+**The dependency direction is now inverted.** The Invite section moved above Server. Friends and
+groups load once, unscoped to any guild (the same cross-guild shape GroupEditor already uses for
+each friend's own `guildIds`, plus every group's precomputed `commonServers`), so the picker has
+something to show before a server is chosen at all. As invitees are added — an individual friend
+or a whole group, treated identically — the Server field narrows to the live intersection of
+everyone currently selected, computed client-side with the same rule `commonServerSet()` runs on
+the write path. With nobody invited yet it shows every server the organizer themself belongs to
+(the organizer counts as always being in the hypothetical roster); picking a combination with no
+common server at all surfaces a clear blocking message on the Server field itself, rather than
+letting the picker imply a server that doesn't actually exist for that group.
+
+Editing an existing event is unaffected — its server is fixed and shown read-only, as before.
