@@ -140,15 +140,7 @@ guildRequestRoutes.post('/', async (c) => {
   const rawToken = assertString(body.token, 'token', 2000);
 
   const payload = await verifyToken<GuildVerifyTokenPayload>(rawToken, GUILD_VERIFY_TOKEN_PURPOSE, c.env.JWT_SIGNING_KEY);
-  // JSON, not c.text: RequestBotPage.tsx always does `await res.json()` before
-  // checking res.ok, on every response shape this route returns (created,
-  // already_active, already_pending) except this one -- a plain-text body
-  // here made that parse throw, which the page's outer catch then reported
-  // as "Could not reach the server", masking the real, more useful message
-  // (found live during v0.7.2 sandbox testing: a >10-minute gap between
-  // loading /add-bot and requesting a later candidate in the list expires
-  // exactly this token).
-  if (!payload) return c.json({ status: 'error', message: 'This request link has expired. Please start over.' }, 400);
+  if (!payload) return c.text('This request link has expired. Please start over.', 400);
 
   const workerOrigin = new URL(c.req.url).origin;
   const result = await createGuildAddRequest(c.env, payload, workerOrigin);

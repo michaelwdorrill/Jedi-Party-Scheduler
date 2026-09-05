@@ -60,11 +60,20 @@ export default function RequestBotPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: candidate.token }),
       });
-      const body = (await res.json()) as { status: string; message?: string; botInviteUrl?: string };
+      // Every error path this route (and its neighbours in guildRequests.ts)
+      // returns is plain text, not JSON -- the same convention the shared
+      // `api` client (api/client.ts's `request()`) already follows for every
+      // other endpoint in the app. Parsing as JSON unconditionally, before
+      // checking res.ok, meant any of those plain-text errors threw here and
+      // fell into the catch below as a misleading "Could not reach the
+      // server" -- found live on the sandbox both for an expired token and
+      // for a request sent with no token at all.
       if (!res.ok) {
-        setOutcome({ kind: 'error', message: body.message ?? 'This request link has expired. Please start over.' });
+        const message = await res.text();
+        setOutcome({ kind: 'error', message: message || 'This request link has expired. Please start over.' });
         return;
       }
+      const body = (await res.json()) as { status: string; message?: string; botInviteUrl?: string };
       if (body.status === 'created' && body.botInviteUrl) {
         // Discord's own consent screen is what actually adds the bot --
         // approval governs whether the app treats the server as
