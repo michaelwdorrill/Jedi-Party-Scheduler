@@ -213,8 +213,8 @@ describe('overlapping maximum groups resolve without one query per group', () =>
     const groupIds = ids('group', LIMITS.MAX_GROUP_IDS);
     for (const groupId of groupIds) {
       await db.prepare(
-        `INSERT INTO groups (id, guild_id, name, created_by, created_at)
-         VALUES (?, 'guild-1', ?, 'organizer', ?)`,
+        `INSERT INTO groups (id, name, created_by, created_at)
+         VALUES (?, ?, 'organizer', ?)`,
       )
         .bind(groupId, `Group ${groupId}`, Date.now())
         .run();
@@ -253,8 +253,8 @@ describe('overlapping maximum groups resolve without one query per group', () =>
     }
     for (const [i, groupId] of ['g1', 'g2'].entries()) {
       await db.prepare(
-        `INSERT INTO groups (id, guild_id, name, created_by, created_at)
-         VALUES (?, 'guild-1', ?, 'organizer', ?)`,
+        `INSERT INTO groups (id, name, created_by, created_at)
+         VALUES (?, ?, 'organizer', ?)`,
       )
         .bind(groupId, groupId, Date.now())
         .run();

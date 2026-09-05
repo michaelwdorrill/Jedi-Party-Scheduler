@@ -1,5 +1,6 @@
 import type { Env } from '../env';
 import { boundContent } from './discord';
+import { newId } from './ids';
 import { recordRsvp, type RsvpStatus } from './attendance';
 import { recordPollSelection } from './polls';
 import { rsvpButtons } from './dmComponents';
@@ -159,6 +160,12 @@ export type ParsedCustomId =
   // later for a recurring occurrence is a new kind, not a reinterpretation
   // of this one, the same discipline v1->v2 already established.
   | { kind: 'cancel'; eventId: string }
+  // IDEAS item 54: that "later" -- a recurring event's own minimum-attendees
+  // cascade cancels one occurrence (an event_occurrence_overrides row), not
+  // the whole series, so its button needs to say which one. A new kind
+  // rather than a reinterpretation of `cancel`, exactly as that kind's own
+  // comment anticipated.
+  | { kind: 'cancel_occurrence'; eventId: string; occurrenceDate: string }
   // Ours, but from a format this build no longer speaks.
   | { kind: 'stale' }
   | null;
@@ -173,6 +180,10 @@ export function voteCustomId(eventId: string): string {
 
 export function cancelCustomId(eventId: string): string {
   return `${CUSTOM_ID_PREFIX}:${CUSTOM_ID_VERSION}:cancel:${eventId}`;
+}
+
+export function cancelOccurrenceCustomId(eventId: string, occurrenceDate: string): string {
+  return `${CUSTOM_ID_PREFIX}:${CUSTOM_ID_VERSION}:cancelocc:${eventId}:${occurrenceDate}`;
 }
 
 export function parseCustomId(customId: string | undefined): ParsedCustomId {
@@ -194,6 +205,12 @@ export function parseCustomId(customId: string | undefined): ParsedCustomId {
   }
   if (parts[2] === 'cancel' && parts.length === 4) {
     return parts[3] ? { kind: 'cancel', eventId: parts[3] } : { kind: 'stale' };
+  }
+  if (parts[2] === 'cancelocc' && parts.length === 5) {
+    // Unlike rsvp's trailing date, '' here is not a valid case -- this kind
+    // only ever exists *because* the event is recurring, so an empty
+    // occurrence date means a corrupted id, not a non-recurring event.
+    return parts[3] && parts[4] ? { kind: 'cancel_occurrence', eventId: parts[3], occurrenceDate: parts[4] } : { kind: 'stale' };
   }
   return { kind: 'stale' };
 }
@@ -417,6 +434,31 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
     // No components after -- a fired cancel button must not be pressable
     // twice. Everyone still marked as coming is told through the outbox
     // (sweepCancelledEventNotices), same as an auto-cancel.
+    return updateMessage(original, 'this session is cancelled.', []);
+  }
+
+  if (parsed.kind === 'cancel_occurrence') {
+    const event = await env.DB.prepare(`SELECT organizer_id, status, is_recurring FROM events WHERE id = ?`)
+      .bind(parsed.eventId)
+      .first<{ organizer_id: string; status: string; is_recurring: number }>();
+    if (!event) return ephemeral(`That event no longer exists. ${siteLink(env)}`);
+    if (event.organizer_id !== userId) {
+      return ephemeral(`Only the organizer can cancel this one. ${siteLink(env)}`);
+    }
+    // The series itself has to still be active; an individual occurrence's
+    // own cancelled-ness lives in event_occurrence_overrides; see below.
+    if (event.status !== 'active' || !event.is_recurring) {
+      return ephemeral(`That session isn't active any more. ${siteLink(env)}`);
+    }
+    // Same primitive POST /events/:eventId/occurrences/:date/cancel already
+    // uses -- one occurrence, not the whole series.
+    await env.DB.prepare(
+      `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled)
+       VALUES (?, ?, ?, 1)
+       ON CONFLICT(event_id, occurrence_date) DO UPDATE SET is_cancelled = 1`,
+    )
+      .bind(newId(), parsed.eventId, parsed.occurrenceDate)
+      .run();
     return updateMessage(original, 'this session is cancelled.', []);
   }
 

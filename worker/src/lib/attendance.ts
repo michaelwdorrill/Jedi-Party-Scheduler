@@ -385,7 +385,8 @@ export async function recordRsvp(
   status: RsvpStatus,
 ): Promise<RsvpOutcome> {
   const event = await env.DB.prepare(
-    `SELECT guild_id, organizer_id, is_recurring, status, event_type, minimum_attendees, auto_cancel_below_minimum
+    `SELECT guild_id, organizer_id, is_recurring, status, event_type, minimum_attendees, auto_cancel_below_minimum,
+            minimum_attendees_deadline_at, minimum_attendees_deadline_hours_before
      FROM events WHERE id = ?`,
   )
     .bind(eventId)
@@ -397,6 +398,8 @@ export async function recordRsvp(
       event_type: 'single' | 'poll';
       minimum_attendees: number | null;
       auto_cancel_below_minimum: number;
+      minimum_attendees_deadline_at: number | null;
+      minimum_attendees_deadline_hours_before: number | null;
     }>();
   if (!event) return 'no_such_event';
 
@@ -442,11 +445,19 @@ export async function recordRsvp(
   // (sweepCancelledEventNotices / sweepOrganizerCancelPrompts) -- what
   // happens here is only ever the synchronous half decision 4 asks for:
   // "record the decline and mark the event."
+  //
+  // IDEAS item 54: only when *no* deadline is set. A deadline (either kind)
+  // opts an event out of this real-time reactive path entirely -- it's
+  // sweepMinimumAttendeesDeadlines' job now, resolving once at the deadline
+  // rather than on every decline. This keeps every pre-item-54 event (no
+  // deadline column populated) on exactly the behaviour it already had.
   if (
     status === 'declined' &&
     event.event_type === 'single' &&
     !event.is_recurring &&
-    event.minimum_attendees != null
+    event.minimum_attendees != null &&
+    event.minimum_attendees_deadline_at == null &&
+    event.minimum_attendees_deadline_hours_before == null
   ) {
     const confirmed = await countConfirmedAttendees(
       env,

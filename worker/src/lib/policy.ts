@@ -34,10 +34,16 @@
 // is kept" didn't previously describe.
 //
 // The "TEMPORARY, SANDBOX ONLY -- do not merge this commit to main" note that
-// used to sit here was the accident IDEAS item 43 records (still open --
-// nothing automatic guards this constant against changing by accident). It
-// was written for a scratch commit that bumped this to 2 for real testing,
-// travelled to a release branch on an uncommitted edit, and was reverted --
-// but the comment came along and then sat on `main` for four releases
-// telling every reader not to merge a commit that had already been merged.
+// used to sit here was the accident IDEAS item 43 records. It was written for
+// a scratch commit that bumped this to 2 for real testing, travelled to a
+// release branch on an uncommitted edit, and was reverted -- but the comment
+// came along and then sat on `main` for four releases telling every reader
+// not to merge a commit that had already been merged.
+//
+// It is guarded now: `../../policy-version.txt` has to carry the same number,
+// and `npm run check:policy-version` (wired into CI) fails the build if they
+// disagree, the same shape check-env-parity.mjs already used for
+// wrangler.toml. Bumping this for real means updating both files in the same
+// commit, on purpose -- an accidental edit surviving a `git checkout` or a
+// stray `git add -A` now fails the build instead of shipping silently.
 export const CURRENT_POLICY_VERSION = 2;

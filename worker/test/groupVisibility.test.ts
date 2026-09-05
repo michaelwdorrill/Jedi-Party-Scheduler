@@ -9,11 +9,20 @@
 // The whole suite passed after the fix went in, which is the reason this file
 // exists. Nothing pinned the old behaviour, so nothing would have noticed it
 // coming back.
+//
+// specs/0011 / IDEAS item 36 (Sept 2026): a group no longer belongs to one
+// guild, and the second gate this file used to pin -- "still hides a group
+// from a member who has left the server" -- was a deliberate call to drop,
+// not an oversight to preserve. Decided: group membership alone is enough.
+// The boundary that guild check used to protect now lives at the event
+// level (a group with no common server can't be used to create a new one;
+// see eventWrites.test.ts / stage3-ish coverage for that half), not at the
+// roster's own visibility.
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
-import { DAY_MS, seedGuild, seedMembership, seedUser, setup, stubFetch, type FetchStub } from './helpers';
+import { seedGuild, seedMembership, seedUser, setup, stubFetch, type FetchStub } from './helpers';
 import type { Env } from '../src/env';
 import type { ShimDatabase } from './d1shim';
 
@@ -31,13 +40,13 @@ async function authHeaders(env: Env, userId: string): Promise<Record<string, str
   return { Authorization: `Bearer ${token}` };
 }
 
-async function seedGroup(db: ShimDatabase, id: string, guildId: string, ownerId: string, memberIds: string[]) {
+async function seedGroup(db: ShimDatabase, id: string, ownerId: string, memberIds: string[]) {
   await db
     .prepare(
-      `INSERT INTO groups (id, guild_id, name, game, idle_reminder_days, created_by, created_at)
-       VALUES (?, ?, ?, NULL, 2, ?, ?)`,
+      `INSERT INTO groups (id, name, game, idle_reminder_days, created_by, created_at)
+       VALUES (?, ?, NULL, 2, ?, ?)`,
     )
-    .bind(id, guildId, `Group ${id}`, ownerId, Date.now())
+    .bind(id, `Group ${id}`, ownerId, Date.now())
     .run();
   for (const memberId of memberIds) {
     await db
@@ -62,7 +71,7 @@ describe('a group is visible to its members, not to everyone in its server', () 
       await seedUser(db, id);
       await seedMembership(db, id, 'guild-1');
     }
-    await seedGroup(db, 'g1', 'guild-1', 'owner', ['owner', 'member']);
+    await seedGroup(db, 'g1', 'owner', ['owner', 'member']);
 
     expect((await myGroups(env, 'owner')).map((g) => g.id)).toEqual(['g1']);
     expect((await myGroups(env, 'member')).map((g) => g.id)).toEqual(['g1']);
@@ -78,7 +87,7 @@ describe('a group is visible to its members, not to everyone in its server', () 
       await seedUser(db, id);
       await seedMembership(db, id, 'guild-1');
     }
-    await seedGroup(db, 'g1', 'guild-1', 'owner', ['owner']);
+    await seedGroup(db, 'g1', 'owner', ['owner']);
 
     fetchStub = stubFetch([]);
     const res = await app.request(
@@ -90,30 +99,21 @@ describe('a group is visible to its members, not to everyone in its server', () 
     expect(res.status).toBe(404);
   });
 
-  it('still hides a group from a member who has left the server', async () => {
-    // The `group_members` predicate does not make the guild predicate
-    // redundant -- roster rows survive someone leaving a server, so
-    // membership of the group alone would keep the group on their list
-    // forever. Both have to hold.
+  // Decided (Michael, Sept 2026): membership of the group alone is enough.
+  // A departed member keeps seeing their own group -- the roster is just a
+  // list of people, and there is no second server-membership gate on it any
+  // more. The real boundary now lives at the event level (a group with an
+  // unreachable member can't be used to create a new event), not here.
+  it('still lists a group for a member with no active server membership at all', async () => {
     const { db, env } = setup();
     await seedGuild(db);
     await seedUser(db, 'owner');
     await seedMembership(db, 'owner', 'guild-1');
     await seedUser(db, 'departed');
     await seedMembership(db, 'departed', 'guild-1', { isMember: 0 });
-    await seedGroup(db, 'g1', 'guild-1', 'owner', ['owner', 'departed']);
+    await seedGroup(db, 'g1', 'owner', ['owner', 'departed']);
 
-    expect(await myGroups(env, 'departed')).toEqual([]);
-  });
-
-  it('hides a group whose membership row has gone stale past the grace window', async () => {
-    const { db, env } = setup();
-    await seedGuild(db);
-    await seedUser(db, 'owner');
-    await seedMembership(db, 'owner', 'guild-1', { verifiedAgoMs: 3 * DAY_MS });
-    await seedGroup(db, 'g1', 'guild-1', 'owner', ['owner']);
-
-    expect(await myGroups(env, 'owner')).toEqual([]);
+    expect((await myGroups(env, 'departed')).map((g) => g.id)).toEqual(['g1']);
   });
 
   it('has no per-guild group listing at all', async () => {
@@ -124,7 +124,7 @@ describe('a group is visible to its members, not to everyone in its server', () 
     await seedGuild(db);
     await seedUser(db, 'owner');
     await seedMembership(db, 'owner', 'guild-1');
-    await seedGroup(db, 'g1', 'guild-1', 'owner', ['owner']);
+    await seedGroup(db, 'g1', 'owner', ['owner']);
 
     fetchStub = stubFetch([]);
     const res = await app.request(

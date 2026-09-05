@@ -105,8 +105,8 @@ ON CONFLICT(user_id, guild_id) DO UPDATE SET
 -- past event ends, rather than waiting out the real default (2 days) --
 -- this is a sandbox group, not a template for what a real group's setting
 -- should be.
-INSERT INTO groups (id, guild_id, name, created_by, created_at, idle_reminder_days)
-VALUES ('seed-group-raid', 'seed-guild', 'Sandbox Raid Team', 'seed-user-organizer',
+INSERT INTO groups (id, name, created_by, created_at, idle_reminder_days)
+VALUES ('seed-group-raid', 'Sandbox Raid Team', 'seed-user-organizer',
         (CAST(strftime('%s','now') AS INTEGER) * 1000), 0);
 
 INSERT INTO group_members (group_id, user_id, added_at)

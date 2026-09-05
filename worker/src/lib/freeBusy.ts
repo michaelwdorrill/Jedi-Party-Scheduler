@@ -48,6 +48,11 @@ export async function computeBusyBlocksForUsers(
   userIds: string[],
   fromMs: number,
   toMs: number,
+  // The event being edited, if any. Every invitee holds a non-declined
+  // invite to it by construction, so without this its own slot always shows
+  // everyone as busy during it -- indistinguishable from a real conflict,
+  // even though it's the one commitment editing it is about to change.
+  excludeEventId?: string,
 ): Promise<Map<string, BusyBlock[]>> {
   const out = new Map<string, BusyBlock[]>();
   if (userIds.length === 0) return out;
@@ -152,6 +157,8 @@ export async function computeBusyBlocksForUsers(
   // the only thing standing between "valid in each of fourteen servers" and
   // an unaffordable request.
   if (overflowed || usersByEvent.size > LIMITS.MAX_FREE_BUSY_SOURCE_EVENTS) throw new FreeBusyTooLargeError();
+
+  if (excludeEventId) usersByEvent.delete(excludeEventId);
 
   const eventsById = new Map<string, EventRow>();
   for (const chunk of chunkIds([...usersByEvent.keys()])) {

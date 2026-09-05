@@ -146,6 +146,14 @@ eventRoutes.get('/:eventId', async (c) => {
     .bind(event.organizer_id)
     .first<{ username: string; global_name: string | null }>();
 
+  // specs/0011 / IDEAS item 36: a group can now be offered across several
+  // servers, so which one a given event actually landed on is no longer
+  // something the viewer can just assume from context the way it was when
+  // groups belonged to exactly one guild.
+  const guild = await c.env.DB.prepare(`SELECT name FROM guilds WHERE id = ?`)
+    .bind(event.guild_id)
+    .first<{ name: string }>();
+
   // Every poll has candidates now, windowed or not (specs/0013), so this no
   // longer branches on poll_mode -- a migrated window poll has exactly one.
   let pollOptions = null;
@@ -292,6 +300,7 @@ eventRoutes.get('/:eventId', async (c) => {
     eventId: event.id,
     id: event.id,
     guildId: event.guild_id,
+    guildName: guild?.name ?? null,
     title: event.title,
     description: event.description,
     game: event.game,
@@ -336,6 +345,9 @@ eventRoutes.get('/:eventId', async (c) => {
     // specs/0014 stage 3, decision 4.
     minimumAttendees: event.minimum_attendees ?? null,
     autoCancelBelowMinimum: !!event.auto_cancel_below_minimum,
+    // IDEAS item 54.
+    minimumAttendeesDeadlineAt: event.minimum_attendees_deadline_at ?? null,
+    minimumAttendeesDeadlineHoursBefore: event.minimum_attendees_deadline_hours_before ?? null,
     recurrence: recurrence
       ? {
           freq: recurrence.freq,

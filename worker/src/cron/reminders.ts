@@ -16,6 +16,7 @@ import { inviteStatements, type ResolvedInvitee } from '../lib/eventWrites';
 import { newId } from '../lib/ids';
 import { pruneStaleSessions } from '../lib/sessions';
 import { deleteUserCompletely, MEMBERSHIP_GRACE_MS, revalidateStaleMemberships } from '../lib/db';
+import { commonServerSet } from '../lib/groups';
 import {
   deliverThroughOutbox,
   MAX_DELIVERY_ATTEMPTS,
@@ -27,7 +28,7 @@ import {
   type DmRecipient,
 } from '../lib/outbox';
 import { editBotDm } from '../lib/discord';
-import { cancelButton, linkButton, pollSelect, rsvpButtons } from '../lib/dmComponents';
+import { cancelButton, cancelOccurrenceButton, linkButton, pollSelect, rsvpButtons } from '../lib/dmComponents';
 import { LIMITS } from '../lib/validate';
 import { chunkIds, placeholders } from '../lib/d1';
 import { planFrom, TickBudget } from './budget';
@@ -195,25 +196,29 @@ const TERMINAL_HISTORY_RETENTION_MS = 90 * DAY_MS;
 // batch.
 const TERMINAL_HISTORY_PURGE_BATCH_SIZE = 100;
 
-// Delete statements issued per chunk of purged event ids -- one per child
-// table plus the parent. Kept next to the batch below so the two stay in
-// step.
+// Statements issued for the one chunk a tick processes -- one per
+// non-cascading child table, two to break the fan-out pointer (below), and
+// one for the parent. Kept next to the statement list below so the two stay
+// in step.
 //
-// This is actually 8 going on 9: specs/0014 stage 1 added an
-// event_attendance delete to the statement list below without updating this
-// constant, so the purge has under-reserved by one statement per chunk
-// since v0.6. Left at 8 here rather than corrected, because the honest fix
-// isn't just this number -- pass6.test.ts's "backlog and a purge queue"
-// budget-fit test is tuned with zero margin against the *current* (buggy)
-// figure, and correcting to 9 alone pushes that test past what a steady
-// tick actually has left over (measured: 16 available, 18 needed for this
-// test's 2 chunks), which no number of ticks closes -- the same "not at 40,
-// not at 200" failure mode that test's own comment already warns about for
-// exactly this shape of change. Fixing it properly means finding where that
-// test's other 8 queries of headroom went missing too, which is out of
-// scope for the reminder ladder this constant was touched alongside.
-// Logged as IDEAS item -- see docs/IDEAS.md.
-const PURGE_STATEMENTS_PER_CHUNK = 8;
+// This used to read 8, undercounting by one (specs/0014 stage 1 added an
+// event_attendance delete without updating it -- IDEAS item 53) *and* the
+// purge used to spend `chunks.length * this` in one tick, trying to clear an
+// entire backlog at once. Simply correcting the count to 9 broke
+// pass6.test.ts's "backlog and a purge queue" budget-fit test: at zero
+// margin against the old (buggy) figure, 9 x 2 chunks needed 18 on a tick
+// measured to have only 16 left over, which no number of ticks closes -- the
+// same "not at 40, not at 200" starvation IDEAS item 47 hit for the same
+// reason. Item 56 then wanted an 11th statement here (two more, actually --
+// see below) to fix a real FK error, which only made that arithmetic worse.
+//
+// The fix that closes both: a tick now buys and runs exactly one chunk, not
+// "however many chunks this backlog's SELECT happened to return" (see
+// sweepPurgeTerminalHistory below). That makes the per-tick cost this
+// constant, full stop, independent of backlog size or how many child tables
+// this purge ever grows to cover -- so a future 12th statement is just
+// another safe bump here, not a second look at this same budget math.
+const PURGE_STATEMENTS_PER_CHUNK = 11;
 
 type NotificationType =
   | 'invite'
@@ -230,7 +235,10 @@ type NotificationType =
   | 'ladder_accepted_1h'
   | 'ladder_window_outside_hours'
   | 'organizer_cancel_prompt'
-  | 'event_cancelled_below_minimum';
+  | 'event_cancelled_below_minimum'
+  | 'event_cancelled'
+  | 'group_venue_drift'
+  | 'minimum_attendees_deadline_warning';
 
 // Event-scoped notifications go through the shared leased outbox (see
 // lib/outbox.ts), keyed on the same four columns as notification_log's UNIQUE
@@ -1734,14 +1742,23 @@ async function sweepConfirmedMultiWinnerOptions(
 // candidate set is exactly the events that opted into this feature, not
 // every event in the install.
 //
-// **The notice half** (`kind = 'notice'`): an event the cascade already
-// cancelled -- automatically (recordRsvp's guarded UPDATE) or by the
-// organizer's own press (interactions.ts) -- owes a notice to everyone who
-// was still marked as coming. Scoped to `minimum_attendees IS NOT NULL`
-// rather than to `auto_cancel_below_minimum = 1` alone, since both paths
-// this release adds only ever apply to an event with a minimum set in the
-// first place; an event cancelled the ordinary way (DELETE /:eventId)
-// never does, so this does not reach into that older, separate gap.
+// **The notice half** (`kind = 'notice'`): any cancelled, non-recurring
+// event owes a notice to everyone who was still marked as coming (IDEAS
+// item 55) -- not just the minimum-attendees cascade's own cancellations
+// (automatic, via recordRsvp's guarded UPDATE, or the organizer's own press
+// in interactions.ts) but also a plain organizer cancel through
+// DELETE /:eventId, which had never told anyone anything since v0.1.
+// sendCancelledEventNotice below picks the wording (and notification_type)
+// based on whether minimum_attendees is set, so the two don't get the same
+// message for different reasons.
+//
+// Still `is_recurring = 0`: DELETE /:eventId cancels a whole recurring
+// series the same way it cancels a one-off, but this app has no settled
+// answer yet for what a per-occurrence notice should mean for a series (the
+// same "per-occurrence state, not per-occurrence nagging" question
+// specs/0014 had to answer for the reminder ladder) -- see IDEAS item 54.
+// Recurring cancellations are left exactly as silent as they already were
+// rather than guessed at here.
 // Its own discovery read is deliberately uncharged against the ledger, the
 // same as sweepPurgeTerminalHistory's candidate SELECT just below it: a
 // *charged* fixed query here would come out of the same near-zero-margin
@@ -1784,19 +1801,21 @@ async function sweepCancellationCascade(env: Env, budget: TickBudget): Promise<v
 
      SELECT * FROM (
        SELECT *, 'notice' AS kind FROM events
-       WHERE status = 'cancelled' AND minimum_attendees IS NOT NULL AND is_recurring = 0
+       WHERE status = 'cancelled' AND is_recurring = 0
          AND updated_at >= ?
        LIMIT ?
      )`,
   )
     .bind(GLOBAL_SCAN_LIMIT, terminalHistoryHotCutoff(), GLOBAL_SCAN_LIMIT)
-    .all<EventRow & { kind: 'prompt' | 'notice'; minimum_attendees: number }>();
+    .all<EventRow & { kind: 'prompt' | 'notice'; minimum_attendees: number | null }>();
 
   for (const row of results) {
     if (budget.exhausted) return;
     try {
       if (row.kind === 'prompt') {
-        await maybeSendOrganizerCancelPrompt(env, budget, row);
+        // Guaranteed non-null by this arm's own WHERE clause above, unlike
+        // the notice arm's rows (a plain cancel has no minimum at all).
+        await maybeSendOrganizerCancelPrompt(env, budget, row as EventRow & { minimum_attendees: number });
       } else {
         await sendCancelledEventNotice(env, budget, row);
       }
@@ -1850,15 +1869,21 @@ async function maybeSendOrganizerCancelPrompt(
 async function sendCancelledEventNotice(
   env: Env,
   budget: TickBudget,
-  event: EventRow,
+  event: EventRow & { minimum_attendees: number | null },
 ): Promise<void> {
   const limit = budget.deliveriesAffordable;
   if (limit <= 0) return;
+  // IDEAS item 55: a plain organizer cancel (DELETE /:eventId) gets its own
+  // type and wording rather than reusing 'event_cancelled_below_minimum' --
+  // that message states a reason ("attendance dropped below the minimum")
+  // that isn't true for it, and the two need separate notification_log rows
+  // anyway since dedupe is keyed on notification_type.
+  const notificationType = event.minimum_attendees != null ? 'event_cancelled_below_minimum' : 'event_cancelled';
   // Deliberately not getConfirmedAttendeeIds' `PendingFor` shape -- that
   // dedupes against a *different* notification's history, which is exactly
   // wrong for "did we already tell you this one is cancelled."
   const pending = await getConfirmedAttendeeIds(env, event, null, '', {
-    notificationType: 'event_cancelled_below_minimum',
+    notificationType,
     occurrenceDate: '',
     limit,
   });
@@ -1867,9 +1892,268 @@ async function sendCancelledEventNotice(
     budget,
     pending,
     event.id,
-    'event_cancelled_below_minimum',
+    notificationType,
     '',
-    () => `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`,
+    () =>
+      event.minimum_attendees != null
+        ? `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`
+        : `"${event.title}" has been cancelled by the organizer.\n${eventLink(env, event.id)}`,
+  );
+}
+
+// IDEAS item 54: the deadline-based half of the minimum-attendees cascade,
+// covering both shapes a deadline can take -- see migration 0033's comment.
+// Deliberately separate from sweepCancellationCascade above rather than
+// folded into it: that sweep's two arms are the *reactive* model (evaluate
+// continuously, on every decline), and this one is a genuinely different
+// resolution rule (evaluate once, at a deadline) that both event shapes can
+// now opt into. An event with neither deadline column set never reaches
+// here at all -- it stays on the original reactive path in
+// lib/attendance.ts's recordRsvp exactly as before.
+//
+// No cursor, uncharged discovery reads, same reasoning as
+// sweepCancellationCascade and sweepGroupDrift's own comments -- see
+// RESERVED_QUERIES in cron/budget.ts.
+async function sweepMinimumAttendeesDeadlines(env: Env, budget: TickBudget): Promise<void> {
+  const now = Date.now();
+
+  const { results: dueNonRecurring } = await env.DB.prepare(
+    `SELECT * FROM events
+     WHERE status = 'active' AND event_type = 'single' AND is_recurring = 0
+       AND minimum_attendees IS NOT NULL AND minimum_attendees_deadline_at IS NOT NULL
+       AND minimum_attendees_deadline_at <= ?
+     LIMIT ?`,
+  )
+    .bind(now, GLOBAL_SCAN_LIMIT)
+    .all<EventRow & { minimum_attendees: number }>();
+
+  for (const event of dueNonRecurring) {
+    if (budget.exhausted) return;
+    try {
+      await resolveMinimumAttendeesDeadline(env, budget, event, '');
+    } catch (err) {
+      console.error(`sweepMinimumAttendeesDeadlines failed for event ${event.id}:`, err);
+    }
+  }
+
+  const { results: recurringCandidates } = await env.DB.prepare(
+    `SELECT * FROM events
+     WHERE status = 'active' AND event_type = 'single' AND is_recurring = 1
+       AND minimum_attendees IS NOT NULL AND minimum_attendees_deadline_hours_before IS NOT NULL
+     LIMIT ?`,
+  )
+    .bind(GLOBAL_SCAN_LIMIT)
+    .all<EventRow & { minimum_attendees: number; minimum_attendees_deadline_hours_before: number }>();
+
+  for (const event of recurringCandidates) {
+    if (budget.exhausted) return;
+    try {
+      const hoursBeforeMs = event.minimum_attendees_deadline_hours_before * HOUR_MS;
+      const overrides = (await loadOverridesForEvents(env, [event.id])).get(event.id) ?? [];
+      // Occurrences starting soon enough that their own deadline
+      // (start - hoursBefore) has already arrived, but that haven't started
+      // yet -- nothing to resolve for one already underway or past.
+      const occurrences = await expandOccurrencesForEvent(env, event, now, now + hoursBeforeMs, overrides);
+      for (const occ of occurrences) {
+        if (budget.exhausted) return;
+        if (occ.startAt - hoursBeforeMs > now) continue; // this occurrence's own deadline isn't due yet
+        await resolveMinimumAttendeesDeadline(env, budget, event, occ.date);
+      }
+    } catch (err) {
+      console.error(`sweepMinimumAttendeesDeadlines failed for recurring event ${event.id}:`, err);
+    }
+  }
+}
+
+// One occurrence (or the whole event, for the non-recurring case --
+// occurrenceDate '') past its deadline, still below minimum. Cancels it
+// (auto_cancel_below_minimum) or prompts the organizer, exactly once each,
+// the same two outcomes decision 4 already established -- just resolved at
+// a deadline instead of reactively.
+async function resolveMinimumAttendeesDeadline(
+  env: Env,
+  budget: TickBudget,
+  event: EventRow & { minimum_attendees: number },
+  occurrenceDate: string,
+): Promise<void> {
+  if (!budget.trySpend(1)) return;
+  const confirmed = await countConfirmedAttendees(env, event, occurrenceDate);
+  if (confirmed >= event.minimum_attendees) return;
+
+  if (event.auto_cancel_below_minimum) {
+    let changed: number;
+    if (occurrenceDate) {
+      // One occurrence, not the series -- same primitive
+      // POST /events/:eventId/occurrences/:date/cancel already uses. The
+      // WHERE on the DO UPDATE branch is this sweep's own dedupe: a second
+      // tick finding the same already-cancelled occurrence changes nothing
+      // and sends no second notice.
+      const res = await env.DB.prepare(
+        `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled)
+         VALUES (?, ?, ?, 1)
+         ON CONFLICT(event_id, occurrence_date) DO UPDATE SET is_cancelled = 1
+         WHERE event_occurrence_overrides.is_cancelled = 0`,
+      )
+        .bind(newId(), event.id, occurrenceDate)
+        .run();
+      changed = res.meta.changes;
+    } else {
+      const res = await env.DB.prepare(
+        `UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'active'`,
+      )
+        .bind(Date.now(), event.id)
+        .run();
+      changed = res.meta.changes;
+    }
+    if (changed === 0) return; // already cancelled by an earlier tick
+
+    const limit = budget.deliveriesAffordable;
+    if (limit <= 0) return;
+    const pending = await getConfirmedAttendeeIds(env, event, null, occurrenceDate, {
+      notificationType: 'event_cancelled_below_minimum',
+      occurrenceDate,
+      limit,
+    });
+    await notifyPending(
+      env,
+      budget,
+      pending,
+      event.id,
+      'event_cancelled_below_minimum',
+      occurrenceDate,
+      () => `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`,
+    );
+    return;
+  }
+
+  const now = Date.now();
+  const recipient = await env.DB.prepare(
+    `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
+     FROM users u
+     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
+     ${PENDING_NOTIFICATION_JOIN}
+     WHERE u.id = ?
+       AND ${PENDING_NOTIFICATION_WHERE}`,
+  )
+    .bind(
+      event.guild_id,
+      membershipCutoff(),
+      ...pendingNotificationJoinBinds(event.id, 'organizer_cancel_prompt', occurrenceDate),
+      event.organizer_id,
+      ...pendingNotificationWhereBinds(now),
+    )
+    .first<ParticipantRow>();
+  if (!recipient) return;
+
+  await notifyPending(
+    env,
+    budget,
+    [recipient],
+    event.id,
+    'organizer_cancel_prompt',
+    occurrenceDate,
+    () => `"${event.title}" has dropped below its minimum of ${event.minimum_attendees}. Cancel it?\n${eventLink(env, event.id)}`,
+    () => (occurrenceDate ? cancelOccurrenceButton(event.id, occurrenceDate) : cancelButton(event.id)),
+  );
+}
+
+// T-24h-before-deadline heads-up, so the organizer isn't caught off guard
+// the moment the deadline resolves. Purely informational -- no button, and
+// it fires whether or not auto-cancel is on, since a below-minimum session
+// is worth knowing about either way. Scoped to the same deadline-opted-in
+// events sweepMinimumAttendeesDeadlines covers, and shares its shape for the
+// same reason: no cursor, uncharged discovery, per RESERVED_QUERIES.
+async function sweepMinimumAttendeesDeadlineWarnings(env: Env, budget: TickBudget): Promise<void> {
+  const now = Date.now();
+  const warningWindowEnd = now + DAY_MS;
+
+  const { results: dueNonRecurring } = await env.DB.prepare(
+    `SELECT * FROM events
+     WHERE status = 'active' AND event_type = 'single' AND is_recurring = 0
+       AND minimum_attendees IS NOT NULL AND minimum_attendees_deadline_at IS NOT NULL
+       AND minimum_attendees_deadline_at > ? AND minimum_attendees_deadline_at <= ?
+     LIMIT ?`,
+  )
+    .bind(now, warningWindowEnd, GLOBAL_SCAN_LIMIT)
+    .all<EventRow & { minimum_attendees: number }>();
+
+  for (const event of dueNonRecurring) {
+    if (budget.exhausted) return;
+    try {
+      await sendMinimumAttendeesDeadlineWarning(env, budget, event, '');
+    } catch (err) {
+      console.error(`sweepMinimumAttendeesDeadlineWarnings failed for event ${event.id}:`, err);
+    }
+  }
+
+  const { results: recurringCandidates } = await env.DB.prepare(
+    `SELECT * FROM events
+     WHERE status = 'active' AND event_type = 'single' AND is_recurring = 1
+       AND minimum_attendees IS NOT NULL AND minimum_attendees_deadline_hours_before IS NOT NULL
+     LIMIT ?`,
+  )
+    .bind(GLOBAL_SCAN_LIMIT)
+    .all<EventRow & { minimum_attendees: number; minimum_attendees_deadline_hours_before: number }>();
+
+  for (const event of recurringCandidates) {
+    if (budget.exhausted) return;
+    try {
+      const hoursBeforeMs = event.minimum_attendees_deadline_hours_before * HOUR_MS;
+      const overrides = (await loadOverridesForEvents(env, [event.id])).get(event.id) ?? [];
+      const occurrences = await expandOccurrencesForEvent(env, event, now, now + hoursBeforeMs + DAY_MS, overrides);
+      for (const occ of occurrences) {
+        if (budget.exhausted) return;
+        const deadline = occ.startAt - hoursBeforeMs;
+        if (deadline <= now || deadline > warningWindowEnd) continue;
+        await sendMinimumAttendeesDeadlineWarning(env, budget, event, occ.date);
+      }
+    } catch (err) {
+      console.error(`sweepMinimumAttendeesDeadlineWarnings failed for recurring event ${event.id}:`, err);
+    }
+  }
+}
+
+async function sendMinimumAttendeesDeadlineWarning(
+  env: Env,
+  budget: TickBudget,
+  event: EventRow & { minimum_attendees: number },
+  occurrenceDate: string,
+): Promise<void> {
+  if (!budget.trySpend(1)) return;
+  const confirmed = await countConfirmedAttendees(env, event, occurrenceDate);
+  if (confirmed >= event.minimum_attendees) return;
+
+  const now = Date.now();
+  const recipient = await env.DB.prepare(
+    `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
+     FROM users u
+     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
+     ${PENDING_NOTIFICATION_JOIN}
+     WHERE u.id = ?
+       AND ${PENDING_NOTIFICATION_WHERE}`,
+  )
+    .bind(
+      event.guild_id,
+      membershipCutoff(),
+      ...pendingNotificationJoinBinds(event.id, 'minimum_attendees_deadline_warning', occurrenceDate),
+      event.organizer_id,
+      ...pendingNotificationWhereBinds(now),
+    )
+    .first<ParticipantRow>();
+  if (!recipient) return;
+
+  await notifyPending(
+    env,
+    budget,
+    [recipient],
+    event.id,
+    'minimum_attendees_deadline_warning',
+    occurrenceDate,
+    () =>
+      `"${event.title}"${occurrenceDate ? ` (${occurrenceDate})` : ''} is currently below its minimum of ` +
+      `${event.minimum_attendees} with a day left before that decides it. ${confirmed} confirmed so far.\n${eventLink(env, event.id)}`,
   );
 }
 
@@ -2104,16 +2388,19 @@ async function sweepIdleGroups(env: Env, budget: TickBudget, cursors: CursorStor
       const idleMs = group.idle_reminder_days * 24 * HOUR_MS;
       if (now - lastEventAt < idleMs) return;
 
+      // specs/0011 / IDEAS item 36: a group no longer belongs to one guild,
+      // so there is no single `user_guild_membership` row left to join on
+      // here -- and per the decided access model, there doesn't need to be
+      // one. Group membership alone is who's "in" the group for every
+      // purpose, nudges included.
       const { results: members } = await env.DB.prepare(
         `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone, g.name as group_name
          FROM group_members gm
          JOIN users u ON u.id = gm.user_id
          JOIN groups g ON g.id = gm.group_id
-         JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = g.guild_id AND m.is_member = 1 AND m.verified_at >= ?
-         JOIN guilds gu ON gu.id = m.guild_id AND gu.is_active = 1
          WHERE gm.group_id = ?`,
       )
-        .bind(membershipCutoff(), group.id)
+        .bind(group.id)
         .all<ParticipantRow & { group_name: string }>();
 
       // Nudges now go through the same leased outbox as every other DM,
@@ -2165,6 +2452,163 @@ async function sweepIdleGroups(env: Env, budget: TickBudget, cursors: CursorStor
       if (budget.exhausted) return 'incomplete';
     },
   );
+}
+
+// specs/0011 / IDEAS item 36: an event invited people through a group whose
+// common-server set no longer includes the event's own venue -- someone
+// left a server such that the group can no longer vouch for a shared venue.
+// The event still happens as scheduled (decided: never auto-cancel or
+// re-anchor it), but the people still invited to it are told, once, so it
+// doesn't come as a surprise later.
+//
+// Only upcoming events: a drift on something that already happened has
+// nothing left to warn anyone about.
+//
+// No cursor, deliberately -- same shape as sweepCancellationCascade and
+// sweepStaleAccounts, and for the same reason their own comments give (see
+// RESERVED_QUERIES in cron/budget.ts): this is a new, genuinely new fixed
+// scan, and both "give it a cursor via forEachGlobalRow" and "bump
+// RESERVED_QUERIES to match" were tried and measured to starve
+// sweepPurgeTerminalHistory, which has no margin left to give. The discovery
+// read here runs uncharged against the ledger, capped at GLOBAL_SCAN_LIMIT
+// rather than paged -- a group-sourced-invite population large enough for
+// that cap to matter is not this app's scale, the same judgement call
+// sweepCancellationCascade's own comment already made.
+async function sweepGroupDrift(env: Env, budget: TickBudget): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `SELECT DISTINCT e.id, e.guild_id, e.organizer_id, ei.source_group_id
+     FROM events e
+     JOIN event_invites ei ON ei.event_id = e.id
+     WHERE e.status = 'active' AND (e.start_at IS NULL OR e.start_at > ?) AND ei.source_group_id IS NOT NULL
+     LIMIT ?`,
+  )
+    .bind(Date.now(), GLOBAL_SCAN_LIMIT)
+    .all<{ id: string; guild_id: string; organizer_id: string; source_group_id: string }>();
+  if (results.length === 0) return;
+
+  const commonServerIdsCache = new Map<string, Set<string>>();
+  async function groupServerIds(groupId: string): Promise<Set<string>> {
+    const cached = commonServerIdsCache.get(groupId);
+    if (cached) return cached;
+    const { results: memberRows } = await env.DB.prepare(`SELECT user_id FROM group_members WHERE group_id = ?`)
+      .bind(groupId)
+      .all<{ user_id: string }>();
+    const servers = new Set((await commonServerSet(env, memberRows.map((r) => r.user_id))).map((s) => s.id));
+    commonServerIdsCache.set(groupId, servers);
+    return servers;
+  }
+
+  for (const row of results) {
+    if (budget.exhausted) return;
+    try {
+      const servers = await groupServerIds(row.source_group_id);
+      if (servers.has(row.guild_id)) continue; // still shares this event's venue -- nothing drifted
+
+      const recipients = await pendingRecipients(env, row, 'group_venue_drift', '', budget.deliveriesAffordable);
+      if (recipients.length === 0) continue;
+      await notifyPending(
+        env,
+        budget,
+        recipients,
+        row.id,
+        'group_venue_drift',
+        '',
+        () =>
+          "One of the group members invited to this event no longer shares a server with the rest of the group " +
+          `it came from -- the session is still happening as scheduled, just worth knowing.\n${eventLink(env, row.id)}`,
+      );
+    } catch (err) {
+      console.error(`sweepGroupDrift failed for event ${row.id}:`, err);
+    }
+  }
+}
+
+// New idea captured alongside IDEAS item 54 (Sept 2026): the organizer hears
+// about every invitee's RSVP, for every event they organize -- not just
+// minimum-attendees ones. Its own outbox table (organizer_rsvp_notice_log,
+// migration 0035) rather than notification_log: that table's dedupe key has
+// no room for *which invitee* answered, so a second invitee's answer to the
+// same event/occurrence would collide with the first and be silently
+// dropped as "already notified". responded_at is part of this table's own
+// key for the same reason group_nudge_log's last_event_at is: a person's
+// second, different answer is a new notification, not a no-op against an
+// already-delivered row.
+//
+// No cursor, uncharged discovery read, same shape and same reasoning as
+// every other sweep added tonight -- see RESERVED_QUERIES in cron/budget.ts.
+// Unlike those, this one scales with genuine user activity (every RSVP)
+// rather than rare event configuration, so it is capped at GLOBAL_SCAN_LIMIT
+// the same way a large backlog anywhere else in this cron is: a quiet tick
+// works through more of it, not all of it at once.
+const RSVP_ANSWER_THIRD_PERSON: Record<RsvpStatus, string> = {
+  accepted: 'is in',
+  tentative: 'might be able to make it',
+  declined: "can't make it",
+};
+
+async function sweepOrganizerRsvpNotices(env: Env, budget: TickBudget): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `SELECT ea.event_id, ea.occurrence_date, ea.user_id AS responder_id, ea.rsvp_status, ea.responded_at,
+            e.title, e.organizer_id,
+            ou.notifications_enabled AS organizer_notifications_enabled,
+            ou.dm_channel_id AS organizer_dm_channel_id, ou.timezone AS organizer_timezone,
+            ru.username AS responder_username, ru.global_name AS responder_global_name
+     FROM event_attendance ea
+     JOIN events e ON e.id = ea.event_id
+     JOIN users ou ON ou.id = e.organizer_id
+     JOIN users ru ON ru.id = ea.user_id
+     LEFT JOIN organizer_rsvp_notice_log l
+       ON l.organizer_id = e.organizer_id AND l.event_id = ea.event_id AND l.occurrence_date = ea.occurrence_date
+          AND l.responder_id = ea.user_id AND l.responded_at = ea.responded_at
+     WHERE l.id IS NULL AND e.status = 'active' AND ea.user_id != e.organizer_id
+     LIMIT ?`,
+  )
+    .bind(GLOBAL_SCAN_LIMIT)
+    .all<{
+      event_id: string;
+      occurrence_date: string;
+      responder_id: string;
+      rsvp_status: RsvpStatus;
+      responded_at: number;
+      title: string;
+      organizer_id: string;
+      organizer_notifications_enabled: number;
+      organizer_dm_channel_id: string | null;
+      organizer_timezone: string;
+      responder_username: string;
+      responder_global_name: string | null;
+    }>();
+
+  for (const row of results) {
+    if (budget.exhausted) return;
+    try {
+      const responderName = row.responder_global_name ?? row.responder_username;
+      const content =
+        `${responderName} ${RSVP_ANSWER_THIRD_PERSON[row.rsvp_status]} for "${row.title}"` +
+        `${row.occurrence_date ? ` (${row.occurrence_date})` : ''}.\n${eventLink(env, row.event_id)}`;
+      await deliverThroughOutbox(
+        env,
+        'organizer_rsvp_notice_log',
+        {
+          organizer_id: row.organizer_id,
+          event_id: row.event_id,
+          occurrence_date: row.occurrence_date,
+          responder_id: row.responder_id,
+          responded_at: row.responded_at,
+        },
+        {
+          id: row.organizer_id,
+          notifications_enabled: row.organizer_notifications_enabled,
+          dm_channel_id: row.organizer_dm_channel_id,
+          timezone: row.organizer_timezone,
+        },
+        content,
+        budget,
+      );
+    } catch (err) {
+      console.error(`sweepOrganizerRsvpNotices failed for event ${row.event_id}/${row.responder_id}:`, err);
+    }
+  }
 }
 
 // IDEAS item 10 / docs/specs/0016: warn, then purge, an account that has gone
@@ -2446,18 +2890,19 @@ async function sweepDueNudgeRetries(env: Env, budget: TickBudget, cursors: Curso
     budget,
     cursors,
     'due_nudge_retries',
+    // specs/0011 / IDEAS item 36: no single guild left to join on -- see
+    // sweepIdleGroups' comment just above for why group membership alone is
+    // enough here too.
     `SELECT gnl.id, gnl.user_id AS id, gnl.group_id, gnl.last_event_at, gnl.content,
             u.notifications_enabled, u.dm_channel_id, u.timezone, g.name AS group_name
      FROM group_nudge_log gnl
      JOIN groups g ON g.id = gnl.group_id
      JOIN users u ON u.id = gnl.user_id
-     JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = g.guild_id AND m.is_member = 1 AND m.verified_at >= ?
-     JOIN guilds gu ON gu.id = g.guild_id AND gu.is_active = 1
      WHERE gnl.delivered_at IS NULL AND gnl.failed_at IS NULL
        AND gnl.next_attempt_at IS NOT NULL AND gnl.next_attempt_at <= ?
        AND (gnl.claimed_until IS NULL OR gnl.claimed_until < ?)
        AND gnl.content IS NOT NULL`,
-    [membershipCutoff(), Date.now(), Date.now()],
+    [Date.now(), Date.now()],
     async (row) => {
       if (budget.exhausted) return 'incomplete';
       await deliverThroughOutbox(
@@ -2496,51 +2941,71 @@ async function sweepPurgeTerminalHistory(env: Env, budget: TickBudget): Promise<
     .all<{ id: string }>();
   if (candidates.length === 0) return;
 
-  // Charged, not reserved for. This sweep's cost scales with how much
-  // terminal history is waiting -- eight delete statements per chunk of ids,
-  // so a full batch is another sixteen statements on top of an already-spent
-  // tick. Reserving that permanently would take it away from notifications on
-  // every tick, including the overwhelming majority where there is nothing to
-  // purge at all.
+  // Charged, not reserved for. Reserving PURGE_STATEMENTS_PER_CHUNK
+  // permanently would take it away from notifications on every tick,
+  // including the overwhelming majority where there is nothing to purge at
+  // all. Charging it means a tick that has spent its allowance sending DMs
+  // simply doesn't purge this time. Deleting ninety-day-old cancelled events
+  // is the least urgent thing the cron does; it can wait for a quieter tick.
   //
-  // Charging it means a tick that has spent its allowance sending DMs simply
-  // doesn't purge this time. Deleting ninety-day-old cancelled events is the
-  // least urgent thing the cron does; it can wait for a quieter tick.
-  const chunks = chunkIds(candidates.map((c) => c.id));
-  if (!budget.trySpend(chunks.length * PURGE_STATEMENTS_PER_CHUNK)) {
+  // Only the first chunk, not every chunk this batch's SELECT happened to
+  // return (IDEAS items 53/56 -- see PURGE_STATEMENTS_PER_CHUNK's comment).
+  // `candidates.length > 0` above guarantees chunkIds returns at least one
+  // chunk here. The SELECT re-runs every tick and naturally picks up
+  // wherever the last tick left off, since a purged row simply stops
+  // matching it -- an already-large backlog drains a chunk at a time across
+  // ticks rather than needing its entire size to fit in one.
+  const [chunk] = chunkIds(candidates.map((c) => c.id));
+  if (!budget.trySpend(PURGE_STATEMENTS_PER_CHUNK)) {
     console.log('Skipping terminal-history purge this tick; the allowance went to notifications.');
     return;
   }
 
-  // Deletes are scoped to these specific, already-selected ids (chunked
-  // below D1's parameter ceiling) rather than repeating the SELECT above as
-  // a subquery in each statement -- plain DELETE doesn't support ORDER
-  // BY/LIMIT directly, and re-running an unordered version of the same
-  // predicate per statement would risk each one matching a slightly
-  // different set if a row's state changed between them.
-  // Same child-first, id-scoped shape as deleteUserCompletely: D1 doesn't
-  // enforce these foreign keys, so the children are deleted explicitly
-  // rather than relied on to cascade.
-  const statements: D1PreparedStatement[] = [];
-  for (const chunk of chunks) {
-    const ph = placeholders(chunk.length);
-    statements.push(
-      env.DB.prepare(
-        `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id IN (${ph}))`,
-      ).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_invites WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_attendance WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM event_occurrence_overrides WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM notification_log WHERE event_id IN (${ph})`).bind(...chunk),
-      env.DB.prepare(`DELETE FROM events WHERE id IN (${ph})`).bind(...chunk),
-    );
-  }
+  // Deletes are scoped to these specific, already-selected ids rather than
+  // repeating the SELECT above as a subquery in each statement -- plain
+  // DELETE doesn't support ORDER BY/LIMIT directly, and re-running an
+  // unordered version of the same predicate per statement would risk each
+  // one matching a slightly different set if a row's state changed between
+  // them.
+  // Same child-first, id-scoped shape as deleteUserCompletely: not every
+  // table below cascades from `events` (see migration comments), so the
+  // ones that don't are deleted explicitly rather than relied on to cascade.
+  const ph = placeholders(chunk.length);
+  const statements: D1PreparedStatement[] = [
+    // IDEAS item 56: migration 0027's created_from_poll_id/created_from_option_id
+    // are a fanned-out event's pointer back to the multi-winner poll and
+    // option it came from, and neither carries ON DELETE CASCADE. A
+    // still-live fanned-out event (not terminal, so never itself in this
+    // chunk) can hold one of these pointing at a poll or option this chunk
+    // is about to delete -- left set, that's a bare "FOREIGN KEY constraint
+    // failed" naming nothing, the same shape item 38 hit from a different
+    // column, and clean-sandbox.sql already works around it the same way:
+    // break the pointer before anything it points at is removed. Two
+    // statements, not one `OR` -- binding `chunk` on both sides of one
+    // statement would double its parameter count, and a full-size chunk
+    // already sits at D1's per-statement ceiling with one use of it.
+    env.DB.prepare(`UPDATE events SET created_from_poll_id = NULL WHERE created_from_poll_id IN (${ph})`).bind(
+      ...chunk,
+    ),
+    env.DB.prepare(
+      `UPDATE events SET created_from_option_id = NULL
+       WHERE created_from_option_id IN (SELECT id FROM event_poll_options WHERE event_id IN (${ph}))`,
+    ).bind(...chunk),
+    env.DB.prepare(
+      `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id IN (${ph}))`,
+    ).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_invites WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_attendance WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM event_occurrence_overrides WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM notification_log WHERE event_id IN (${ph})`).bind(...chunk),
+    env.DB.prepare(`DELETE FROM events WHERE id IN (${ph})`).bind(...chunk),
+  ];
   await env.DB.batch(statements);
 
-  console.log(`Purged ${candidates.length} terminal event(s) older than ${TERMINAL_HISTORY_RETENTION_MS / DAY_MS} days.`);
+  console.log(`Purged ${chunk.length} terminal event(s) older than ${TERMINAL_HISTORY_RETENTION_MS / DAY_MS} days.`);
 }
 
 // Keeps the membership cache fresh enough for every recipient query above to
@@ -2598,12 +3063,16 @@ export async function runReminderSweep(env: Env): Promise<void> {
   );
   await runIsolated('confirmedMultiWinnerOptions', () => sweepConfirmedMultiWinnerOptions(env, budget, cursors));
   await runIsolated('cancellationCascade', () => sweepCancellationCascade(env, budget));
+  await runIsolated('minimumAttendeesDeadlines', () => sweepMinimumAttendeesDeadlines(env, budget));
+  await runIsolated('minimumAttendeesDeadlineWarnings', () => sweepMinimumAttendeesDeadlineWarnings(env, budget));
   await runIsolated('newInvites', () => sweepNewInvites(env, budget));
   await runIsolated('changeRequestNotifications', () => sweepChangeRequestNotifications(env, budget));
   await runIsolated('reminders', () => sweepReminders(env, budget, cursors));
   await runIsolated('pollDeadlineReminders', () => sweepPollDeadlineReminders(env, budget, cursors));
   await runIsolated('voiceChannelInvites', () => sweepVoiceChannelInvites(env, budget, cursors));
   await runIsolated('idleGroups', () => sweepIdleGroups(env, budget, cursors));
+  await runIsolated('groupDrift', () => sweepGroupDrift(env, budget));
+  await runIsolated('organizerRsvpNotices', () => sweepOrganizerRsvpNotices(env, budget));
   await runIsolated('pruneStaleSessions', () => pruneStaleSessions(env));
   await runIsolated('purgeTerminalHistory', () => sweepPurgeTerminalHistory(env, budget));
   // Source-independent retry consumers (F-04-H2): a row whose source

@@ -14,7 +14,8 @@ import { Button, Card, PageHeader } from '../components/ui';
 interface Candidate {
   guildId: string;
   guildName: string;
-  token: string;
+  token?: string;
+  alreadyAdded?: boolean;
 }
 
 // The Worker's /guild-requests/callback hands this page a base64'd JSON
@@ -59,11 +60,20 @@ export default function RequestBotPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: candidate.token }),
       });
-      const body = (await res.json()) as { status: string; message?: string; botInviteUrl?: string };
+      // Every error path this route (and its neighbours in guildRequests.ts)
+      // returns is plain text, not JSON -- the same convention the shared
+      // `api` client (api/client.ts's `request()`) already follows for every
+      // other endpoint in the app. Parsing as JSON unconditionally, before
+      // checking res.ok, meant any of those plain-text errors threw here and
+      // fell into the catch below as a misleading "Could not reach the
+      // server" -- found live on the sandbox both for an expired token and
+      // for a request sent with no token at all.
       if (!res.ok) {
-        setOutcome({ kind: 'error', message: body.message ?? 'This request link has expired. Please start over.' });
+        const message = await res.text();
+        setOutcome({ kind: 'error', message: message || 'This request link has expired. Please start over.' });
         return;
       }
+      const body = (await res.json()) as { status: string; message?: string; botInviteUrl?: string };
       if (body.status === 'created' && body.botInviteUrl) {
         // Discord's own consent screen is what actually adds the bot --
         // approval governs whether the app treats the server as
@@ -101,8 +111,8 @@ export default function RequestBotPage() {
       ) : candidates.length === 0 ? (
         <Card>
           <p className="text-sm text-muted">
-            Every server Discord says you administer already has the bot. If you expected to see a
-            server here, make sure you're an owner or have the Manage Server permission on it.
+            Discord doesn't say you administer any servers. If you expected to see one here, make sure
+            you're an owner or have the Manage Server permission on it.
           </p>
         </Card>
       ) : (
@@ -110,10 +120,14 @@ export default function RequestBotPage() {
           <ul className="divide-y divide-edge">
             {candidates.map((c) => (
               <li key={c.guildId} className="flex items-center justify-between gap-3 py-3">
-                <span>{c.guildName}</span>
-                <Button size="sm" disabled={submitting === c.guildId} onClick={() => void submitRequest(c)}>
-                  {submitting === c.guildId ? 'Requesting…' : 'Request'}
-                </Button>
+                <span className={c.alreadyAdded ? 'text-faint' : undefined}>{c.guildName}</span>
+                {c.alreadyAdded ? (
+                  <span className="text-sm text-faint">Already added</span>
+                ) : (
+                  <Button size="sm" disabled={submitting === c.guildId} onClick={() => void submitRequest(c)}>
+                    {submitting === c.guildId ? 'Requesting…' : 'Request'}
+                  </Button>
+                )}
               </li>
             ))}
           </ul>

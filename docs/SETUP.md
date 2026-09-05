@@ -206,6 +206,14 @@ needs: editing Workers scripts and editing D1 databases.
     Log out and back in afterward so your membership cache picks up the
     newly allow-listed server (guild membership is re-synced on every login).
 
+    Removing a server is two separate steps, deliberately (IDEAS item 58):
+    `DELETE /admin/guilds/<id>` only makes the app forget it (`is_active =
+    0`) — the bot stays a member on Discord. To make the bot actually leave,
+    call `POST /admin/guilds/<id>/leave` (same auth header as above). Kept
+    separate so deactivating a server temporarily — while debugging it, say
+    — doesn't force re-inviting the bot through the owner-approval flow the
+    moment it's reactivated.
+
 ### Working with more than one Cloudflare account
 
 Wrangler reads exactly one set of credentials: `CLOUDFLARE_API_TOKEN` and

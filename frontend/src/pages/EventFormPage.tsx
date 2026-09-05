@@ -65,11 +65,23 @@ export default function EventFormPage() {
   const [startTime, setStartTime] = useState('13:00');
   const [endTime, setEndTime] = useState('17:00');
   const [isRecurring, setIsRecurring] = useState(false);
-  // specs/0014 stage 3, decision 4. Only meaningful for a non-recurring
-  // single event -- see the checkbox's own gating below. '' means "no
-  // minimum set", distinct from 0 (which the server rejects anyway).
+  // specs/0014 stage 3, decision 4 / IDEAS item 54. '' means "no minimum
+  // set", distinct from 0 (which the server rejects anyway). Available on
+  // both event shapes now -- which of the two deadline fields below applies
+  // is decided by isRecurring, mirroring the server's own
+  // assertMinimumAttendeesDeadlineShape.
   const [minimumAttendees, setMinimumAttendees] = useState('');
   const [autoCancelBelowMinimum, setAutoCancelBelowMinimum] = useState(false);
+  // Non-recurring: an absolute point, entered the same way the event's own
+  // start is (separate date/time fields combined via toUtcMillis below).
+  // '' means "no deadline set", which keeps the original v0.6.2 real-time
+  // reactive cascade rather than opting into the deadline-based one.
+  const [minimumAttendeesDeadlineDate, setMinimumAttendeesDeadlineDate] = useState('');
+  const [minimumAttendeesDeadlineTime, setMinimumAttendeesDeadlineTime] = useState('12:00');
+  // Recurring: no single date to anchor to, so a relative offset applied
+  // fresh to each occurrence instead. Required whenever minimumAttendees is
+  // set on a recurring event -- there is no reactive fallback for it.
+  const [minimumAttendeesDeadlineHoursBefore, setMinimumAttendeesDeadlineHoursBefore] = useState('24');
   const [recurrence, setRecurrence] = useState<RecurrenceFormValue>({
     freq: 'WEEKLY',
     interval: 1,
@@ -148,24 +160,21 @@ export default function EventFormPage() {
     return pollSlots.map((slot) => range(slot.key, slot.date, slot.startTime, slot.endDate, slot.endTime)).filter(keep);
   }, [timezone, eventType, date, startTime, endDate, endTime, pollSlots]);
 
+  // Guild-agnostic and unconditional, for both create and edit: who you might
+  // invite is no longer scoped to a server picked first (that's the whole
+  // point of this ordering -- the server comes *from* who you invite now,
+  // not the other way around). GET /me/friends with no guild_id is the same
+  // cross-guild shape GroupEditor already uses, each friend carrying their
+  // own guildIds so candidateServerIds below can narrow the same way a
+  // group's roster does. Groups arrive unfiltered too, including ones with
+  // no common server right now -- picking one of those is what surfaces the
+  // "these invitees share no server" state below, rather than the group
+  // silently never appearing.
   useEffect(() => {
-    // Keyed on effectiveGuildId, not the raw ?guild= param, so this also runs
-    // on edit -- it previously didn't (the edit route carries no ?guild=),
-    // which meant InviteePicker had nothing to show when editing an event.
-    if (!effectiveGuildId) return;
-    Promise.all([
-      api.get<Friend[]>(`/me/friends?guild_id=${effectiveGuildId}`),
-      // The groups you are in, not every group on this server (IDEAS item
-      // 34) -- the per-guild listing is gone. Filtering client-side is safe
-      // rather than merely convenient: the server re-checks every group
-      // against the event's guild when it resolves the invite list
-      // (resolveInvitees), so a group id from the wrong server invites
-      // nobody however it got into the request.
-      api.get<Group[]>('/me/groups'),
-    ]).then(
+    Promise.all([api.get<Friend[]>('/me/friends'), api.get<Group[]>('/me/groups')]).then(
       ([f, g]) => {
         setFriends(f);
-        setGroups(g.filter((group) => group.guildId === effectiveGuildId));
+        setGroups(g);
         setInviteesError(null);
       },
       (e: unknown) => {
@@ -177,7 +186,7 @@ export default function EventFormPage() {
         setInviteesError(describeError(e));
       },
     );
-  }, [effectiveGuildId]);
+  }, []);
 
   useEffect(() => {
     if (!effectiveGuildId) return;
@@ -220,8 +229,18 @@ export default function EventFormPage() {
         setEndDate(e.toISODate()!);
         setStartTime(s.toFormat('HH:mm'));
         setEndTime(e.toFormat('HH:mm'));
+      }
+      if (ev.eventType === 'single') {
         setMinimumAttendees(ev.minimumAttendees != null ? String(ev.minimumAttendees) : '');
         setAutoCancelBelowMinimum(ev.autoCancelBelowMinimum);
+        if (ev.minimumAttendeesDeadlineAt != null) {
+          const d = DateTime.fromMillis(ev.minimumAttendeesDeadlineAt).setZone(ev.timezone);
+          setMinimumAttendeesDeadlineDate(d.toISODate()!);
+          setMinimumAttendeesDeadlineTime(d.toFormat('HH:mm'));
+        }
+        if (ev.minimumAttendeesDeadlineHoursBefore != null) {
+          setMinimumAttendeesDeadlineHoursBefore(String(ev.minimumAttendeesDeadlineHoursBefore));
+        }
       }
       if (ev.recurrence) {
         setIsRecurring(true);
@@ -293,6 +312,51 @@ export default function EventFormPage() {
     }
   };
 
+  // The server field is now derived from who's invited, not the other way
+  // around: start from every server you belong to, and narrow it by
+  // intersecting with each selected friend's own guildIds and each selected
+  // group's commonServers -- the same rule commonServerSet() runs
+  // server-side (specs/0011 / IDEAS item 36), just recomputed here as the
+  // roster changes rather than only checked on save. A friend fetched
+  // without guildIds (shouldn't happen for this call shape, but matches
+  // GroupEditor's own fail-open reasoning) is skipped rather than treated as
+  // sharing nothing, so a data gap here can't wrongly zero out the set --
+  // the server's own check is still what actually enforces this on submit.
+  const candidateServerIds = useMemo(() => {
+    let ids = new Set(guilds.map((g) => g.id));
+    for (const uid of selectedUserIds) {
+      const friend = friends.find((f) => f.id === uid);
+      if (!friend?.guildIds) continue;
+      const shared = new Set(friend.guildIds);
+      ids = new Set([...ids].filter((id) => shared.has(id)));
+    }
+    for (const gid of selectedGroupIds) {
+      const group = groups.find((g) => g.id === gid);
+      if (!group) continue;
+      const shared = new Set(group.commonServers.map((s) => s.id));
+      ids = new Set([...ids].filter((id) => shared.has(id)));
+    }
+    return ids;
+  }, [guilds, selectedUserIds, selectedGroupIds, friends, groups]);
+
+  const candidateServers = useMemo(
+    () => guilds.filter((g) => candidateServerIds.has(g.id)),
+    [guilds, candidateServerIds],
+  );
+  const hasInvitees = selectedUserIds.length > 0 || selectedGroupIds.length > 0;
+  const impossibleRoster = hasInvitees && candidateServerIds.size === 0;
+
+  // A server chosen before the roster narrowed it away has to be let go --
+  // otherwise the select would keep showing (and could still submit) a
+  // value that's no longer one of its own options.
+  useEffect(() => {
+    if (isEdit) return;
+    if (formGuildId && !candidateServerIds.has(formGuildId)) {
+      setFormGuildId('');
+      setVoiceChannelId('');
+    }
+  }, [candidateServerIds, formGuildId, isEdit]);
+
   const toUtcMillis = (d: string, t: string) => DateTime.fromISO(`${d}T${t}`, { zone: timezone }).toMillis();
 
   // Resolve the full invitee set (individuals + everyone in the chosen groups)
@@ -304,14 +368,12 @@ export default function EventFormPage() {
     ]),
   );
 
-  // Friends, groups and voice channels are all scoped to a guild, so
-  // switching servers mid-form invalidates whatever was already picked from
-  // the old one -- carrying those ids across would submit references the
-  // server will reject as not belonging to the new guild.
+  // Invitees no longer need clearing on a server change -- they're upstream
+  // of it now, and the select only ever offers servers the current roster
+  // actually has in common. Voice channels are still guild-scoped, so a
+  // stale pick from a previous server still has to go.
   const handleGuildChange = (next: string) => {
     setFormGuildId(next);
-    setSelectedUserIds([]);
-    setSelectedGroupIds([]);
     setVoiceChannelId('');
   };
 
@@ -415,12 +477,26 @@ export default function EventFormPage() {
         // Sent explicitly either way (including null), same reasoning as
         // pollOptions' windowBlockMinutes below: absent would mean "leave
         // whatever is stored alone", which on an edit that clears the field
-        // would silently keep the old minimum. Omitted entirely while
-        // repeating -- the server rejects it outright on a recurring event,
-        // and the checkbox is hidden for the same reason.
-        if (!isRecurring) {
-          body.minimumAttendees = minimumAttendees.trim() ? Number(minimumAttendees) : null;
-          body.autoCancelBelowMinimum = autoCancelBelowMinimum;
+        // would silently keep the old minimum. IDEAS item 54: available on
+        // both shapes now: exactly one of the two deadline fields is sent,
+        // matching assertMinimumAttendeesDeadlineShape's own rule.
+        body.minimumAttendees = minimumAttendees.trim() ? Number(minimumAttendees) : null;
+        body.autoCancelBelowMinimum = autoCancelBelowMinimum;
+        if (minimumAttendees.trim()) {
+          if (isRecurring) {
+            body.minimumAttendeesDeadlineHoursBefore = minimumAttendeesDeadlineHoursBefore.trim()
+              ? Number(minimumAttendeesDeadlineHoursBefore)
+              : null;
+            body.minimumAttendeesDeadlineAt = null;
+          } else {
+            body.minimumAttendeesDeadlineAt = minimumAttendeesDeadlineDate.trim()
+              ? toUtcMillis(minimumAttendeesDeadlineDate, minimumAttendeesDeadlineTime)
+              : null;
+            body.minimumAttendeesDeadlineHoursBefore = null;
+          }
+        } else {
+          body.minimumAttendeesDeadlineAt = null;
+          body.minimumAttendeesDeadlineHoursBefore = null;
         }
       } else {
         body.pollStrategy = pollStrategy;
@@ -477,30 +553,6 @@ export default function EventFormPage() {
         <InlineError message={`Couldn't load who you can invite. ${inviteesError}`} />
       )}
 
-      <div>
-        <label className="mb-1 block text-sm text-muted">Server</label>
-        {isEdit ? (
-          <div className="w-full rounded-md border border-edge bg-surface px-3 py-2 text-sm text-muted">
-            {guilds.find((g) => g.id === loadedGuildId)?.name ?? '—'}
-          </div>
-        ) : (
-          <select
-            value={formGuildId}
-            onChange={(e) => handleGuildChange(e.target.value)}
-            className={controlClass('lg', 'w-full')}
-          >
-            <option value="" disabled>
-              Choose a server…
-            </option>
-            {guilds.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.name}
-              </option>
-            ))}
-          </select>
-        )}
-      </div>
-
       {!isEdit && (
         <div className="flex gap-1 rounded-md bg-surface p-1 w-fit">
           <button
@@ -547,7 +599,7 @@ export default function EventFormPage() {
       {eventType === 'single' ? (
         <div className={cardClass('md', 'space-y-3')}>
           <div className="flex flex-wrap gap-3">
-            <div className="flex-1 min-w-[8rem]">
+            <div className="flex-1 min-w-[7rem]">
               <label className="mb-1 block text-sm text-muted">Starts</label>
               <input
                 type="date"
@@ -556,7 +608,7 @@ export default function EventFormPage() {
                 className={controlClass('lg', 'w-full')}
               />
             </div>
-            <div className="w-28">
+            <div className="w-36">
               <label className="mb-1 block text-sm text-muted">at</label>
               <input
                 type="time"
@@ -565,7 +617,7 @@ export default function EventFormPage() {
                 className={controlClass('lg', 'w-full')}
               />
             </div>
-            <div className="flex-1 min-w-[8rem]">
+            <div className="flex-1 min-w-[7rem]">
               <label className="mb-1 block text-sm text-muted">Ends</label>
               <input
                 type="date"
@@ -575,7 +627,7 @@ export default function EventFormPage() {
                 className={controlClass('lg', 'w-full')}
               />
             </div>
-            <div className="w-28">
+            <div className="w-36">
               <label className="mb-1 block text-sm text-muted">at</label>
               <input
                 type="time"
@@ -609,24 +661,25 @@ export default function EventFormPage() {
           </label>
           {isRecurring && <RecurrenceForm value={recurrence} onChange={setRecurrence} />}
 
-          {/* specs/0014 stage 3, decision 4. Hidden while repeating: the
-              cascade only applies to a single, non-recurring session -- see
-              docs/IDEAS.md for the recurring case as a captured follow-up. */}
-          {!isRecurring && (
-            <div className="space-y-2 border-t border-edge pt-3">
-              <label className="flex items-center gap-2 text-sm text-ink-dim">
-                <span>Minimum attendees</span>
-                <input
-                  type="number"
-                  min={1}
-                  placeholder="none"
-                  value={minimumAttendees}
-                  onChange={(e) => setMinimumAttendees(e.target.value)}
-                  className={controlClass('sm')}
-                  style={{ width: '5rem' }}
-                />
-              </label>
-              {minimumAttendees.trim() && (
+          {/* specs/0014 stage 3, decision 4 / IDEAS item 54. Available while
+              repeating now -- a deadline is what makes a recurring
+              minimum coherent (per-occurrence, not reactive to every
+              decline the moment it happens). */}
+          <div className="space-y-2 border-t border-edge pt-3">
+            <label className="flex items-center gap-2 text-sm text-ink-dim">
+              <span>Minimum attendees</span>
+              <input
+                type="number"
+                min={1}
+                placeholder="none"
+                value={minimumAttendees}
+                onChange={(e) => setMinimumAttendees(e.target.value)}
+                className={controlClass('sm')}
+                style={{ width: '5rem' }}
+              />
+            </label>
+            {minimumAttendees.trim() && (
+              <>
                 <label className="flex items-start gap-2 text-sm text-ink-dim">
                   <input
                     type="checkbox"
@@ -634,13 +687,44 @@ export default function EventFormPage() {
                     onChange={(e) => setAutoCancelBelowMinimum(e.target.checked)}
                   />
                   <span>
-                    Cancel automatically if attendance drops below this. Otherwise you'll get a DM to decide when it
-                    does.
+                    Cancel automatically if attendance is still below this at the deadline. Otherwise you'll get a
+                    DM to decide when it happens.
                   </span>
                 </label>
-              )}
-            </div>
-          )}
+                {isRecurring ? (
+                  <label className="flex items-center gap-2 text-sm text-ink-dim">
+                    <span>Check attendance</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={minimumAttendeesDeadlineHoursBefore}
+                      onChange={(e) => setMinimumAttendeesDeadlineHoursBefore(e.target.value)}
+                      className={controlClass('sm')}
+                      style={{ width: '5rem' }}
+                    />
+                    <span>hours before each session</span>
+                  </label>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2 text-sm text-ink-dim">
+                    <span>Check attendance by</span>
+                    <input
+                      type="date"
+                      value={minimumAttendeesDeadlineDate}
+                      onChange={(e) => setMinimumAttendeesDeadlineDate(e.target.value)}
+                      className={controlClass('sm')}
+                    />
+                    <input
+                      type="time"
+                      value={minimumAttendeesDeadlineTime}
+                      onChange={(e) => setMinimumAttendeesDeadlineTime(e.target.value)}
+                      className={controlClass('sm')}
+                    />
+                    <span className="text-xs text-faint">(leave blank to decide as soon as someone declines)</span>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
       ) : (
         <div className={cardClass('md', 'space-y-3')}>
@@ -812,6 +896,47 @@ export default function EventFormPage() {
         </div>
       )}
 
+      <div className={cardClass()}>
+        <h2 className="mb-2 font-semibold">Invite</h2>
+        <InviteePicker
+          friends={friends}
+          groups={groups}
+          selectedUserIds={selectedUserIds}
+          selectedGroupIds={selectedGroupIds}
+          onToggleUser={toggleUser}
+          onToggleGroup={toggleGroup}
+        />
+      </div>
+
+      <div>
+        <label className="mb-1 block text-sm text-muted">Server</label>
+        {isEdit ? (
+          <div className="w-full rounded-md border border-edge bg-surface px-3 py-2 text-sm text-muted">
+            {guilds.find((g) => g.id === loadedGuildId)?.name ?? '—'}
+          </div>
+        ) : impossibleRoster ? (
+          <p className="rounded-md border border-danger/60 bg-danger-surface px-3 py-2 text-sm text-danger-text">
+            These invitees don't all share a single server — remove someone, or pick a different
+            group, before choosing a venue.
+          </p>
+        ) : (
+          <select
+            value={formGuildId}
+            onChange={(e) => handleGuildChange(e.target.value)}
+            className={controlClass('lg', 'w-full')}
+          >
+            <option value="" disabled>
+              {hasInvitees ? 'Choose a server…' : 'Choose a server, or invite someone first…'}
+            </option>
+            {candidateServers.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
       {effectiveGuildId && (
         <div className={cardClass()}>
           <h2 className="mb-1 font-semibold">Voice channel (optional)</h2>
@@ -840,18 +965,6 @@ export default function EventFormPage() {
         </div>
       )}
 
-      <div className={cardClass()}>
-        <h2 className="mb-2 font-semibold">Invite</h2>
-        <InviteePicker
-          friends={friends}
-          groups={groups}
-          selectedUserIds={selectedUserIds}
-          selectedGroupIds={selectedGroupIds}
-          onToggleUser={toggleUser}
-          onToggleGroup={toggleGroup}
-        />
-      </div>
-
       {effectiveGuildId && (
         <div className={cardClass()}>
           <h2 className="mb-1 font-semibold">Availability</h2>
@@ -863,6 +976,7 @@ export default function EventFormPage() {
             userIds={inviteeIds}
             slots={assistantSlots}
             zone={timezone}
+            excludeEventId={isEdit ? eventId : undefined}
           />
         </div>
       )}

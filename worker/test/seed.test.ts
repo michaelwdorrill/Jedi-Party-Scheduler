@@ -63,8 +63,8 @@ describe('seed-sandbox.sql', () => {
       VALUES ('real-user', 'real', 'America/New_York', 1, 1, 1);
       INSERT INTO user_guild_membership (user_id, guild_id, is_member, verified_at)
       VALUES ('real-user', 'seed-guild', 1, 1);
-      INSERT INTO groups (id, guild_id, name, created_by, created_at, idle_reminder_days)
-      VALUES ('real-group', 'seed-guild', 'My Crew', 'real-user', 1, 2);
+      INSERT INTO groups (id, name, created_by, created_at, idle_reminder_days)
+      VALUES ('real-group', 'My Crew', 'real-user', 1, 2);
       INSERT INTO group_members (group_id, user_id, added_at)
       VALUES ('real-group', 'real-user', 1), ('real-group', 'seed-user-alice', 1);
       INSERT INTO events (id, guild_id, organizer_id, title, event_type, timezone, start_at, end_at, status, is_recurring, created_at, updated_at)

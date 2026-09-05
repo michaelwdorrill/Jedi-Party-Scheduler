@@ -371,7 +371,7 @@ describe('idle group nudges', () => {
     await seedMembership(ctx.db, 'organizer', 'guild-1');
     const now = Date.now();
     await ctx.db.prepare(
-      `INSERT INTO groups (id, guild_id, name, idle_reminder_days, created_by, created_at) VALUES ('grp', 'guild-1', 'Squad', 2, 'organizer', ?)`,
+      `INSERT INTO groups (id, name, idle_reminder_days, created_by, created_at) VALUES ('grp', 'Squad', 2, 'organizer', ?)`,
     )
       .bind(now)
       .run();

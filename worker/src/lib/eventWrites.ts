@@ -3,6 +3,7 @@ import type { Env } from '../env';
 import { chunkIds, chunkRows, conditionalRowsSql, placeholders } from './d1';
 import { filterActiveGuildMembers } from './db';
 import type { EventRow } from './events';
+import { commonServerSet } from './groups';
 import { newId } from './ids';
 import {
   assertBoolean,
@@ -48,6 +49,13 @@ export interface EventWriteInput {
   // other shapes are rejected outright rather than silently ignored.
   minimumAttendees?: number | null;
   autoCancelBelowMinimum?: boolean;
+  // IDEAS item 54. Exactly one applies, decided by isRecurring: a
+  // non-recurring event may set deadlineAt (an absolute point -- optional,
+  // its absence keeps the original v0.6.2 real-time reactive cascade); a
+  // recurring event must set deadlineHoursBefore (evaluated fresh per
+  // occurrence, since there is no single date to anchor an absolute one to).
+  minimumAttendeesDeadlineAt?: number | null;
+  minimumAttendeesDeadlineHoursBefore?: number | null;
 
   // single
   isRecurring?: boolean;
@@ -153,21 +161,49 @@ async function resolveInviteeUserIds(
   for (const userId of userIds) source.set(userId, null);
 
   if (groupIds.length > 0) {
-    // One roster query per chunk of groups, not one per group. The old shape
-    // cost (1 roster + ceil(members/80) membership chunks) per group. At the
-    // configured maxima -- 50 groups of 200 members -- that is 200 D1
-    // statements for a single request, four times the Free plan's whole
-    // per-invocation allowance.
+    // One roster query per chunk of groups, not one per group. specs/0011 /
+    // IDEAS item 36: a group no longer belongs to one guild, so there is no
+    // `g.guild_id = ?` left to filter on here -- every member of a selected
+    // group is a candidate, and the guild-membership filter below (checking
+    // against *this event's* guild specifically) is what narrows that down,
+    // same as it already did for a member who'd simply left the venue guild
+    // before this release.
     const rosters: { user_id: string; group_id: string }[] = [];
     for (const chunk of chunkIds(groupIds, 1)) {
       const { results } = await env.DB.prepare(
         `SELECT gm.user_id, gm.group_id FROM group_members gm
-         JOIN groups g ON g.id = gm.group_id
-         WHERE gm.group_id IN (${placeholders(chunk.length)}) AND g.guild_id = ?`,
+         WHERE gm.group_id IN (${placeholders(chunk.length)})`,
       )
-        .bind(...chunk, guildId)
+        .bind(...chunk)
         .all<{ user_id: string; group_id: string }>();
       rosters.push(...results);
+    }
+
+    // A group whose own intersection has gone empty (some member shares no
+    // server at all with the rest, per specs/0011) cannot be used to create
+    // a new event -- decided (Michael, Sept 2026): this is a hard error at
+    // creation time, not a silent drop the way a member missing from *this
+    // event's specific* guild is (handled below, unchanged). Checked per
+    // group, not over the whole resolved roster, so the error names the
+    // group actually at fault.
+    const rostersByGroup = new Map<string, string[]>();
+    for (const row of rosters) {
+      if (!rostersByGroup.has(row.group_id)) rostersByGroup.set(row.group_id, []);
+      rostersByGroup.get(row.group_id)!.push(row.user_id);
+    }
+    const { results: groupNames } = await env.DB.prepare(
+      `SELECT id, name FROM groups WHERE id IN (${placeholders(groupIds.length)})`,
+    )
+      .bind(...groupIds)
+      .all<{ id: string; name: string }>();
+    const nameById = new Map(groupNames.map((g) => [g.id, g.name]));
+    for (const [groupId, memberIds] of rostersByGroup) {
+      if ((await commonServerSet(env, memberIds)).length === 0) {
+        throw new ValidationError(
+          `The group "${nameById.get(groupId) ?? groupId}" no longer shares a server across all its members, ` +
+            'so it can\'t be used to invite anyone to a new event until that\'s fixed.',
+        );
+      }
     }
 
     // First group that named a user wins as the attribution source, matching
@@ -338,6 +374,14 @@ function validateEventWriteInput(input: Partial<EventWriteInput>, requireComplet
   if (input.autoCancelBelowMinimum !== undefined) {
     assertBoolean(input.autoCancelBelowMinimum, 'autoCancelBelowMinimum');
   }
+  if (input.minimumAttendeesDeadlineAt != null) {
+    const deadline = assertSafeInt(input.minimumAttendeesDeadlineAt, 'minimumAttendeesDeadlineAt');
+    if (deadline <= 0) throw new ValidationError('minimumAttendeesDeadlineAt must be a positive timestamp');
+  }
+  if (input.minimumAttendeesDeadlineHoursBefore != null) {
+    const hours = assertSafeInt(input.minimumAttendeesDeadlineHoursBefore, 'minimumAttendeesDeadlineHoursBefore');
+    if (hours < 1 || hours > 24 * 365) throw new ValidationError('minimumAttendeesDeadlineHoursBefore out of range');
+  }
 
   // `windowBlockMinutes` is no longer part of a separate mode -- it is the
   // one field that decides whether a poll's candidates are fixed slots or
@@ -419,6 +463,36 @@ function assertCompleteScheduleShape(input: Partial<EventWriteInput>): void {
   }
 }
 
+// IDEAS item 54: exactly which of the two deadline fields applies is decided
+// by whether the merged event is recurring, the same way minimumAttendees
+// itself already went from "forbidden on a recurring event" to "requires a
+// deadline shaped for one". Shared between the create path
+// (assertCompleteEventShape) and the PATCH path (assertCoherentMergedEvent)
+// so the two can't drift into accepting different shapes for the same data.
+function assertMinimumAttendeesDeadlineShape(
+  minimumAttendees: number | null | undefined,
+  deadlineAt: number | null | undefined,
+  deadlineHoursBefore: number | null | undefined,
+  isRecurring: boolean,
+): void {
+  if (minimumAttendees == null) {
+    if (deadlineAt != null || deadlineHoursBefore != null) {
+      throw new ValidationError('a minimum-attendees deadline requires minimumAttendees to be set');
+    }
+    return;
+  }
+  if (isRecurring) {
+    if (deadlineHoursBefore == null) {
+      throw new ValidationError('a recurring event with minimumAttendees requires minimumAttendeesDeadlineHoursBefore');
+    }
+    if (deadlineAt != null) {
+      throw new ValidationError('minimumAttendeesDeadlineAt cannot be set on a recurring event');
+    }
+  } else if (deadlineHoursBefore != null) {
+    throw new ValidationError('minimumAttendeesDeadlineHoursBefore can only be set on a recurring event');
+  }
+}
+
 // Validates the event a PATCH would *leave behind*, not the delta it carries.
 //
 // Field-by-field validation of a delta is necessary but not sufficient, and
@@ -458,17 +532,26 @@ function assertCoherentMergedEvent(stored: EventRow, input: Partial<EventWriteIn
     throw new ValidationError('Poll settings cannot be set on an event that is not a poll');
   }
 
-  // specs/0014 stage 3: the merged event's shape, not just this delta --
-  // `{minimumAttendees: 3}` alone is a valid delta on an event a PATCH
-  // elsewhere in the same request just made recurring, or on a poll, and
-  // neither shape has anywhere for the cascade to act (a poll has no
-  // occurrence to cancel; a recurring event's minimum is decision 4's
-  // explicitly out-of-scope case for this release -- see IDEAS.md).
-  if (input.minimumAttendees != null) {
+  // specs/0014 stage 3 / IDEAS item 54: the merged event's shape, not just
+  // this delta -- `{minimumAttendees: 3}` alone is a valid delta on an event
+  // a PATCH elsewhere in the same request just made recurring, or on a
+  // poll, and a poll still has no occurrence for the cascade to act on (a
+  // poll resolves to a slot, not a session with its own attendance yet).
+  // Recurring is no longer rejected outright -- see
+  // assertMinimumAttendeesDeadlineShape for what it requires instead.
+  if (input.minimumAttendees != null && isPoll) {
+    throw new ValidationError('minimumAttendees can only be set on a non-poll event');
+  }
+  if (input.minimumAttendees !== undefined || input.minimumAttendeesDeadlineAt !== undefined || input.minimumAttendeesDeadlineHoursBefore !== undefined) {
     const mergedIsRecurring = input.isRecurring !== undefined ? input.isRecurring : !!stored.is_recurring;
-    if (isPoll || mergedIsRecurring) {
-      throw new ValidationError('minimumAttendees can only be set on a non-recurring event');
-    }
+    const mergedMinimum = input.minimumAttendees !== undefined ? input.minimumAttendees : stored.minimum_attendees;
+    const mergedDeadlineAt =
+      input.minimumAttendeesDeadlineAt !== undefined ? input.minimumAttendeesDeadlineAt : stored.minimum_attendees_deadline_at;
+    const mergedDeadlineHoursBefore =
+      input.minimumAttendeesDeadlineHoursBefore !== undefined
+        ? input.minimumAttendeesDeadlineHoursBefore
+        : stored.minimum_attendees_deadline_hours_before;
+    assertMinimumAttendeesDeadlineShape(mergedMinimum, mergedDeadlineAt, mergedDeadlineHoursBefore, mergedIsRecurring);
   }
 
   // Recurrence belongs to single events. A recurring poll has no meaning
@@ -491,16 +574,21 @@ function assertCompleteEventShape(input: Partial<EventWriteInput>): void {
 
   if (eventType === 'single') {
     assertCompleteScheduleShape(input);
-    // specs/0014 stage 3: mirrors assertCoherentMergedEvent's PATCH-side
-    // check, for the create path -- see that check's comment for why.
-    if (input.minimumAttendees != null && input.isRecurring) {
-      throw new ValidationError('minimumAttendees can only be set on a non-recurring event');
-    }
+    // specs/0014 stage 3 / IDEAS item 54: mirrors assertCoherentMergedEvent's
+    // PATCH-side check, for the create path -- see that check's comment and
+    // assertMinimumAttendeesDeadlineShape for what a recurring event with a
+    // minimum now requires instead of being rejected outright.
+    assertMinimumAttendeesDeadlineShape(
+      input.minimumAttendees,
+      input.minimumAttendeesDeadlineAt,
+      input.minimumAttendeesDeadlineHoursBefore,
+      !!input.isRecurring,
+    );
     return;
   }
 
   if (input.minimumAttendees != null) {
-    throw new ValidationError('minimumAttendees can only be set on a non-recurring event');
+    throw new ValidationError('minimumAttendees can only be set on a non-poll event');
   }
   if (input.pollDeadlineAt == null) throw new ValidationError('pollDeadlineAt is required for a poll');
   // One rule for both shapes, because there is only one shape: a poll is its
@@ -823,8 +911,9 @@ export async function createEventWithInvites(
          start_at, end_at, status, poll_strategy, poll_threshold_count, poll_deadline_at,
          poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
          is_recurring, voice_channel_id, voice_channel_name, minimum_attendees, auto_cancel_below_minimum,
+         minimum_attendees_deadline_at, minimum_attendees_deadline_hours_before,
          created_at, updated_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE ${eventQuotaGuardSql(isRecurring)}`,
     ).bind(
       eventId,
@@ -854,12 +943,14 @@ export async function createEventWithInvites(
       isRecurring ? 1 : 0,
       input.voiceChannelId ?? null,
       input.voiceChannelName ?? null,
-      // Validated above to be settable only on a non-recurring single
-      // event, so no eventType/isRecurring gate is needed here the way
-      // poll fields and start_at/end_at have one -- an invalid combination
-      // never reaches this INSERT at all.
+      // Validated above (assertMinimumAttendeesDeadlineShape) to already be
+      // a coherent combination -- deadlineAt only when non-recurring,
+      // deadlineHoursBefore only when recurring -- so no further gate is
+      // needed here the way poll fields and start_at/end_at have one.
       input.minimumAttendees ?? null,
       input.autoCancelBelowMinimum ? 1 : 0,
+      input.minimumAttendeesDeadlineAt ?? null,
+      input.minimumAttendeesDeadlineHoursBefore ?? null,
       now,
       now,
       ...eventQuotaGuardParams(guildId, organizerId, isRecurring),
@@ -1026,6 +1117,14 @@ export async function updateEvent(
   if (input.autoCancelBelowMinimum !== undefined) {
     setClauses.push('auto_cancel_below_minimum = ?');
     values.push(input.autoCancelBelowMinimum ? 1 : 0);
+  }
+  if (input.minimumAttendeesDeadlineAt !== undefined) {
+    setClauses.push('minimum_attendees_deadline_at = ?');
+    values.push(input.minimumAttendeesDeadlineAt);
+  }
+  if (input.minimumAttendeesDeadlineHoursBefore !== undefined) {
+    setClauses.push('minimum_attendees_deadline_hours_before = ?');
+    values.push(input.minimumAttendeesDeadlineHoursBefore);
   }
 
   // isRecurring is the signal that this request is a full single-event

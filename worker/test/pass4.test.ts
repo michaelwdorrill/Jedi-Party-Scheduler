@@ -214,6 +214,55 @@ describe('terminal poll history (R5)', () => {
 
     expect(await db.prepare(`SELECT id FROM events WHERE id = 'recent'`).first()).not.toBeNull();
   });
+
+  // IDEAS item 56: migration 0027's created_from_poll_id/created_from_option_id
+  // don't cascade. A cancelled/resolved multi-winner poll purges once it's old
+  // enough even while one of its fanned-out nights is still a live, upcoming
+  // event that points back at it -- that used to throw a bare "FOREIGN KEY
+  // constraint failed" and silently fail the whole purge (caught by
+  // runIsolated and logged, never surfaced to a person).
+  it('purges an old multi-winner poll whose fanned-out event still points at it, without throwing', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+
+    const old = Date.now() - 200 * DAY_MS;
+    await seedEvent(db, { id: 'poll-1', organizerId: 'organizer', eventType: 'poll', status: 'resolved', startAt: null, endAt: null });
+    await db
+      .prepare(`UPDATE events SET updated_at = ?, poll_resolution_mode = 'multi_winner' WHERE id = 'poll-1'`)
+      .bind(old)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order, confirmed_at)
+         VALUES ('opt-1', 'poll-1', ?, ?, 0, ?)`,
+      )
+      .bind(old, old + HOUR_MS, old)
+      .run();
+
+    // The fanned-out event: still active/upcoming, so never itself a purge
+    // candidate, and still carrying the pointer back to the poll and option
+    // being purged.
+    const upcoming = Date.now() + 24 * HOUR_MS;
+    await seedEvent(db, { id: 'fanned-1', organizerId: 'organizer', title: 'Night 1', startAt: upcoming, endAt: upcoming + HOUR_MS });
+    await db
+      .prepare(`UPDATE events SET created_from_poll_id = 'poll-1', created_from_option_id = 'opt-1' WHERE id = 'fanned-1'`)
+      .run();
+
+    fetchStub = stubFetch([]);
+    await runReminderSweep(env);
+
+    expect(await db.prepare(`SELECT id FROM events WHERE id = 'poll-1'`).first()).toBeNull();
+    expect(await db.prepare(`SELECT id FROM event_poll_options WHERE id = 'opt-1'`).first()).toBeNull();
+
+    const fanned = await db
+      .prepare(`SELECT created_from_poll_id, created_from_option_id FROM events WHERE id = 'fanned-1'`)
+      .first<{ created_from_poll_id: string | null; created_from_option_id: string | null }>();
+    expect(fanned).not.toBeNull();
+    expect(fanned!.created_from_poll_id).toBeNull();
+    expect(fanned!.created_from_option_id).toBeNull();
+  });
 });
 
 // R6: the guild's recurring-event cap was only checked on create; PATCH

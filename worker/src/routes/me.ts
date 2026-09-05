@@ -4,7 +4,8 @@ import { requirePolicyAcceptance } from '../lib/authMiddleware';
 import { CURRENT_POLICY_VERSION } from '../lib/policy';
 import { buildCalendarOccurrences } from '../lib/calendar';
 import { chunkIds, placeholders } from '../lib/d1';
-import { deleteUserCompletely, isGuildMember, isOwner, listFriends, mapUser, MEMBERSHIP_GRACE_MS, type UserRow } from '../lib/db';
+import { deleteUserCompletely, isGuildMember, isOwner, listFriends, listFriendsAcrossGuilds, mapUser, type UserRow } from '../lib/db';
+import { commonServerSet } from '../lib/groups';
 import { assertBoolean, assertTimezone, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
 
 export const meRoutes = new Hono<AppEnv>();
@@ -145,49 +146,39 @@ meRoutes.get('/events', requirePolicyAcceptance, async (c) => {
   return c.json(await buildCalendarOccurrences(c.env, userId, from, to));
 });
 
-// Every group the caller is a member of, across every server they are still
-// an active member of. The only group-listing endpoint there is: the
-// per-guild GET /guilds/:id/groups was removed in v0.4.3 (IDEAS item 34),
-// which is why the event form's invitee picker now reads this one too.
+// Every group the caller is a member of. The only group-listing endpoint
+// there is: the per-guild GET /guilds/:id/groups was removed in v0.4.3
+// (IDEAS item 34), which is why the event form's invitee picker reads this
+// one too.
+//
+// specs/0011 / IDEAS item 36: a group is no longer scoped to one server, so
+// this no longer joins `user_guild_membership` to filter which groups show
+// up -- `group_members` alone is the visibility rule now (decided: group
+// membership is enough on its own; the boundary that second join used to
+// enforce now lives at the event level, where a group with an unreachable
+// member can't be used to create one). Each group carries its current
+// common-server set instead of a single guild, computed the same way
+// GET /groups/:id does.
 meRoutes.get('/groups', requirePolicyAcceptance, async (c) => {
   const userId = c.get('userId');
 
-  // Two predicates doing two different jobs, and both are load-bearing.
-  //
-  // `group_members` is the visibility rule (item 34): a group's roster is a
-  // list of people, and being in the same server as those people is not a
-  // reason to be handed it. Before this, any member of a server received
-  // every group in it *and* every one of those groups' full member lists --
-  // not through a leak, but because the query only ever joined on guild
-  // membership.
-  //
-  // The `user_guild_membership` join stays anyway, and is not made redundant
-  // by the first: `group_members` rows are not deleted when someone leaves a
-  // server, so without it a departed member would keep seeing that server's
-  // groups forever. Same freshness bound the calendar and the cron's
-  // recipient queries use, rather than trusting a row of unbounded age.
   const { results: groups } = await c.env.DB.prepare(
-    `SELECT gr.id, gr.guild_id, gr.name, gr.game, gr.idle_reminder_days, gr.created_by, g.name AS guild_name
+    `SELECT gr.id, gr.name, gr.game, gr.idle_reminder_days, gr.created_by
      FROM groups gr
      JOIN group_members mine ON mine.group_id = gr.id AND mine.user_id = ?
-     JOIN user_guild_membership m
-       ON m.guild_id = gr.guild_id AND m.user_id = ? AND m.is_member = 1 AND m.verified_at >= ?
-     JOIN guilds g ON g.id = gr.guild_id AND g.is_active = 1
-     ORDER BY g.name, gr.name`,
+     ORDER BY gr.name`,
   )
-    .bind(userId, userId, Date.now() - MEMBERSHIP_GRACE_MS)
+    .bind(userId)
     .all<{
       id: string;
-      guild_id: string;
       name: string;
       game: string | null;
       idle_reminder_days: number;
       created_by: string;
-      guild_name: string;
     }>();
 
   // One chunked query for every group's members rather than one per group --
-  // same reason the per-guild route does it that way.
+  // same reason the per-guild route did it that way.
   const membersByGroup = new Map<string, { id: string; username: string; global_name: string | null; avatar_hash: string | null }[]>();
   for (const chunk of chunkIds(groups.map((g) => g.id))) {
     const { results } = await c.env.DB.prepare(
@@ -203,15 +194,23 @@ meRoutes.get('/groups', requirePolicyAcceptance, async (c) => {
     }
   }
 
+  // One common-server-set computation per group, not one query per group --
+  // MAX_GROUP_MEMBERS bounds each roster, and a person is realistically in a
+  // handful of groups, so this is cheap without needing a bulk variant.
+  const commonServersByGroup = new Map<string, { id: string; name: string }[]>();
+  for (const g of groups) {
+    const memberIds = (membersByGroup.get(g.id) ?? []).map((m) => m.id);
+    commonServersByGroup.set(g.id, await commonServerSet(c.env, memberIds));
+  }
+
   return c.json(
     groups.map((g) => ({
       id: g.id,
-      guildId: g.guild_id,
-      guildName: g.guild_name,
       name: g.name,
       game: g.game,
       idleReminderDays: g.idle_reminder_days,
       createdBy: g.created_by,
+      commonServers: commonServersByGroup.get(g.id) ?? [],
       members: (membersByGroup.get(g.id) ?? []).map((m) => ({
         id: m.id,
         username: m.username,
@@ -222,10 +221,15 @@ meRoutes.get('/groups', requirePolicyAcceptance, async (c) => {
   );
 });
 
+// guild_id is optional now (specs/0011 / IDEAS item 36): the New Event
+// form's invitee picker still passes it, since an invitee is always scoped
+// to one event's one server. The group picker omits it and gets everyone
+// the caller shares any active server with, each tagged with which of the
+// caller's own servers -- see listFriendsAcrossGuilds.
 meRoutes.get('/friends', requirePolicyAcceptance, async (c) => {
   const userId = c.get('userId');
   const guildId = c.req.query('guild_id');
-  if (!guildId) return c.text('guild_id is required', 400);
+  if (!guildId) return c.json(await listFriendsAcrossGuilds(c.env, userId));
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
   return c.json(await listFriends(c.env, userId, guildId));

@@ -105,15 +105,20 @@ guildRequestRoutes.get('/callback', async (c) => {
     }
 
     const administered = discordGuilds.filter(canAdministerGuild);
-    const candidates = await Promise.all(
+    // IDEAS item 57: an administered guild that's already allow-listed and
+    // active used to be dropped from this list with no explanation -- the
+    // page's own "you administer nothing eligible" copy then read as wrong
+    // to someone looking straight at a server they run. Returning it flagged
+    // rather than filtering it out lets the frontend say why it's not
+    // requestable instead of just not showing it.
+    const eligible = await Promise.all(
       administered.map(async (g) => {
         const active = await c.env.DB.prepare(`SELECT 1 FROM guilds WHERE id = ? AND is_active = 1`).bind(g.id).first();
-        if (active) return null;
+        if (active) return { guildId: g.id, guildName: g.name, alreadyAdded: true as const };
         const payload: GuildVerifyTokenPayload = { guildId: g.id, guildName: g.name, requestedBy: discordUser.id };
         return { guildId: g.id, guildName: g.name, token: await signGuildVerifyToken(c.env, payload) };
       }),
     );
-    const eligible = candidates.filter((x): x is NonNullable<typeof x> => x !== null);
 
     // Base64 output can contain '+' and '/', both meaningful in a query
     // string ('+' decodes to a space under application/x-www-form-urlencoded

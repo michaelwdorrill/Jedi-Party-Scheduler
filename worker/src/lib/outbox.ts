@@ -107,7 +107,19 @@ export type OutboxKey = Record<string, string | number>;
 // MAX_DELIVERY_ATTEMPTS regardless of failed_at, so an exhausted warning
 // simply stops being retried -- it just never gets failed_at stamped to say
 // so, on a table nothing else reads.
-export type OutboxTable = 'notification_log' | 'group_nudge_log' | 'change_request_log' | 'account_purge_warnings';
+//
+// organizer_rsvp_notice_log takes the identical treatment, for the identical
+// reason -- one more table in reapExhaustedDeliveries' loop is one more real
+// query every tick, and this app has already spent that margin several times
+// over tonight (sweepGroupDrift, sweepMinimumAttendeesDeadlines and its
+// warning sweep). Same gap, same cost: an exhausted row just stops being
+// retried, quietly, on a table nothing else reads either.
+export type OutboxTable =
+  | 'notification_log'
+  | 'group_nudge_log'
+  | 'change_request_log'
+  | 'account_purge_warnings'
+  | 'organizer_rsvp_notice_log';
 
 // The outbox tables that carry a message's components and the id of the
 // message they were sent on (migrations 0022 and 0023). Deliberately one

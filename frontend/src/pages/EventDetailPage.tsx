@@ -227,6 +227,7 @@ export default function EventDetailPage() {
           <p className="text-sm text-faint">
             Organized by {isOrganizer ? 'you' : event.organizerGlobalName ?? event.organizerUsername ?? 'someone no longer in this server'}
           </p>
+          {event.guildName && <p className="text-sm text-faint">On {event.guildName}</p>}
         </div>
         {isOrganizer && event.status !== 'cancelled' && (
           <div className="flex gap-2">

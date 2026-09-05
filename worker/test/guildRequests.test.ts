@@ -71,7 +71,7 @@ describe('GET /guild-requests/callback', () => {
     expect(res.status).toBe(403);
   });
 
-  it('filters to administered guilds not already on the allow-list, and redirects with a signed token per guild', async () => {
+  it('filters out guilds you do not administer, and redirects with a signed token per requestable guild', async () => {
     const { db, env } = setup();
     await seedGuild(db, 'already-active');
     await seedUser(db, 'requester');
@@ -104,9 +104,44 @@ describe('GET /guild-requests/callback', () => {
     expect(location).toContain('/#/add-bot');
     const hashQuery = new URLSearchParams(location.split('?')[1] ?? '');
     const data = JSON.parse(decodeURIComponent(escape(atob(hashQuery.get('data')!))));
+    expect(data).toHaveLength(2);
+    const requestable = data.find((d: { guildId: string }) => d.guildId === 'my-new-server');
+    expect(typeof requestable.token).toBe('string');
+    const already = data.find((d: { guildId: string }) => d.guildId === 'already-active');
+    expect(already.alreadyAdded).toBe(true);
+    expect(already.token).toBeUndefined();
+  });
+
+  // IDEAS item 57: an administered guild that's already allow-listed used to
+  // be dropped from this list entirely, with nothing explaining why -- Michael
+  // hit exactly this on the first real run of the flow.
+  it('flags an already-allow-listed administered guild instead of omitting it', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'already-active');
+    await seedUser(db, 'requester');
+
+    const connectRes = await call(env, '/guild-requests/connect', { redirect: 'manual' });
+    const connectLocation = new URL(connectRes.headers.get('location')!);
+    const state = connectLocation.searchParams.get('state')!;
+    const cookie = setCookieValue(connectRes);
+
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      guildsRule([{ id: 'already-active', name: 'Already Active', owner: true }]),
+      userRule('requester'),
+    ]);
+
+    const res = await call(env, `/guild-requests/callback?code=abc&state=${state}`, {
+      headers: { Cookie: cookie },
+      redirect: 'manual',
+    });
+    const location = res.headers.get('location')!;
+    const hashQuery = new URLSearchParams(location.split('?')[1] ?? '');
+    const data = JSON.parse(decodeURIComponent(escape(atob(hashQuery.get('data')!))));
     expect(data).toHaveLength(1);
-    expect(data[0].guildId).toBe('my-new-server');
-    expect(typeof data[0].token).toBe('string');
+    expect(data[0].guildId).toBe('already-active');
+    expect(data[0].alreadyAdded).toBe(true);
+    expect(data[0].token).toBeUndefined();
   });
 });
 

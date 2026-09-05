@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import { placeholders } from '../lib/d1';
 import { isOwner } from '../lib/db';
+import { leaveGuild } from '../lib/discord';
 import { decideGuildAddRequest, listGuildAddRequests } from '../lib/guildRequests';
 import { assertString, readJsonBody } from '../lib/validate';
 
@@ -116,6 +117,21 @@ adminRoutes.post('/guilds', async (c) => {
 
 adminRoutes.delete('/guilds/:id', async (c) => {
   await c.env.DB.prepare(`UPDATE guilds SET is_active = 0 WHERE id = ?`).bind(c.req.param('id')).run();
+  return c.json({ ok: true });
+});
+
+// IDEAS item 58: deactivating a server (above) only makes the app forget it
+// -- the bot itself stays put on Discord, and the app has no other way to
+// remove it (revoking the bot token breaks the whole running deployment).
+// Deliberately its own action rather than folded into the DELETE above: a
+// temporary deactivation (say, while debugging one server) shouldn't force
+// re-inviting the bot through the whole owner-approval flow the moment it's
+// reactivated, so leaving is opt-in, not automatic. Works regardless of
+// is_active, since a server can be left without ever having been on the
+// allow-list (added by hand, then never allow-listed) or after having
+// already been deactivated some other way.
+adminRoutes.post('/guilds/:id/leave', async (c) => {
+  await leaveGuild(c.env.DISCORD_BOT_TOKEN, c.req.param('id'));
   return c.json({ ok: true });
 });
 

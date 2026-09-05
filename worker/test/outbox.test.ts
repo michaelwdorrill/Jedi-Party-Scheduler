@@ -322,9 +322,9 @@ describe('group nudges through the outbox', () => {
     await seedGuild(ctx.db);
     await seedUser(ctx.db, 'u1');
     await ctx.db.prepare(
-      `INSERT INTO groups (id, guild_id, name, idle_reminder_days, created_by, created_at) VALUES (?, ?, ?, 2, ?, ?)`,
+      `INSERT INTO groups (id, name, idle_reminder_days, created_by, created_at) VALUES (?, ?, 2, ?, ?)`,
     )
-      .bind('grp-1', 'guild-1', 'Group', 'u1', Date.now())
+      .bind('grp-1', 'Group', 'u1', Date.now())
       .run();
     return ctx;
   }
@@ -418,8 +418,8 @@ describe('the sent message id', () => {
     const { db, env } = await seedOutboxFixture();
     await db
       .prepare(
-        `INSERT INTO groups (id, guild_id, name, idle_reminder_days, created_by, created_at)
-         VALUES ('g1', 'guild-1', 'Squad', 2, 'u1', ?)`,
+        `INSERT INTO groups (id, name, idle_reminder_days, created_by, created_at)
+         VALUES ('g1', 'Squad', 2, 'u1', ?)`,
       )
       .bind(Date.now())
       .run();

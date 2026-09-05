@@ -43,8 +43,8 @@ async function seedGroup(db: ShimDatabase, id: string, createdBy: string, member
   const now = Date.now();
   await db
     .prepare(
-      `INSERT INTO groups (id, guild_id, name, created_by, created_at, idle_reminder_days)
-       VALUES (?, 'guild-1', ?, ?, ?, 2)`,
+      `INSERT INTO groups (id, name, created_by, created_at, idle_reminder_days)
+       VALUES (?, ?, ?, ?, 2)`,
     )
     .bind(id, `Group ${id}`, createdBy, now)
     .run();
@@ -86,7 +86,7 @@ describe('a group creator is a member of their own group', () => {
     const headers = await authHeaders(env, 'owner');
 
     const res = await app.request(
-      'https://worker.test/guilds/guild-1/groups',
+      'https://worker.test/groups',
       {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
@@ -102,7 +102,7 @@ describe('a group creator is a member of their own group', () => {
 
     // Ticking yourself in the picker must not produce a duplicate row.
     const res2 = await app.request(
-      'https://worker.test/guilds/guild-1/groups',
+      'https://worker.test/groups',
       {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },

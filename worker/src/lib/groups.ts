@@ -1,5 +1,57 @@
 import type { Env } from '../env';
+import { MEMBERSHIP_GRACE_MS } from './db';
 import { ValidationError } from './validate';
+
+export interface CommonServer {
+  id: string;
+  name: string;
+}
+
+// specs/0011 / IDEAS item 36: a group is a list of people, valid while there
+// exists at least one server every member is currently in. This is the
+// whole mechanism -- one GROUP BY, not the O(n^2) pairwise check that would
+// otherwise be needed, and it degrades gracefully: an empty roster or a
+// roster with no shared server both just return no servers, rather than
+// throwing, so callers decide what "no venue" means for them (a validation
+// error on write, a "no common server" state on read).
+//
+// verified_at >= the same MEMBERSHIP_GRACE_MS bound the calendar and the
+// cron's recipient queries use, rather than a live Discord call per
+// candidate server -- consistent with every other read-side membership
+// check in this codebase (listFriends, /me/groups). The spec notes that
+// staleness is actually *cheaper* to tolerate here than for a single fixed
+// guild (a candidate venue can be answered from whichever rows are fresh),
+// but this does not chase that optimization: it is a nice property of the
+// query, not a requirement to implement live revalidation for.
+export async function commonServerSet(env: Env, userIds: readonly string[]): Promise<CommonServer[]> {
+  if (userIds.length === 0) return [];
+  const placeholders = userIds.map(() => '?').join(', ');
+  const { results } = await env.DB.prepare(
+    `SELECT m.guild_id AS id, g.name AS name
+       FROM user_guild_membership m
+       JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
+      WHERE m.user_id IN (${placeholders}) AND m.is_member = 1 AND m.verified_at >= ?
+      GROUP BY m.guild_id
+     HAVING COUNT(DISTINCT m.user_id) = ?
+      ORDER BY g.name`,
+  )
+    .bind(...userIds, Date.now() - MEMBERSHIP_GRACE_MS, userIds.length)
+    .all<CommonServer>();
+  return results;
+}
+
+// Throws with a message fit to show the person who submitted the roster,
+// rather than returning a boolean and making every call site write its own
+// wording -- every caller (group create, whole-roster PATCH, add-member)
+// wants the same refusal.
+export async function assertValidRoster(env: Env, userIds: readonly string[]): Promise<void> {
+  const servers = await commonServerSet(env, userIds);
+  if (servers.length === 0) {
+    throw new ValidationError(
+      "These people don't all share a server -- a group needs at least one server every member is currently in.",
+    );
+  }
+}
 
 // Group ownership (IDEAS.md item 16).
 //
@@ -11,7 +63,6 @@ import { ValidationError } from './validate';
 
 export interface GroupOwnershipRow {
   id: string;
-  guild_id: string;
   created_by: string;
 }
 

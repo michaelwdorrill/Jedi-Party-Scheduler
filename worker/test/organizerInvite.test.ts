@@ -137,7 +137,7 @@ describe('the organizer of an event is on its invite list', () => {
     fetchStub = stubFetch([]);
     const now = Date.now();
     await db
-      .prepare(`INSERT INTO groups (id, guild_id, name, created_by, created_at) VALUES ('grp', 'guild-1', 'Crew', 'organizer', ?)`)
+      .prepare(`INSERT INTO groups (id, name, created_by, created_at) VALUES ('grp', 'Crew', 'organizer', ?)`)
       .bind(now)
       .run();
     for (const userId of ['organizer', 'friend']) {

@@ -1,7 +1,7 @@
 import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/router';
-import { keepSelection, parseCustomId, rsvpCustomId, voteCustomId, withAnswer } from '../src/lib/interactions';
+import { cancelCustomId, cancelOccurrenceCustomId, keepSelection, parseCustomId, rsvpCustomId, voteCustomId, withAnswer } from '../src/lib/interactions';
 import { pollSelect, rsvpButtons } from '../src/lib/dmComponents';
 import { countRows, seedEvent, seedGuild, seedInvite, seedMembership, seedUser, setup } from './helpers';
 import type { Env } from '../src/env';
@@ -490,6 +490,18 @@ describe('custom_id', () => {
     // occurrence date.
     expect(parseCustomId('uo:v1:rsvp:accepted:e1')).toEqual({ kind: 'stale' });
     expect(parseCustomId('uo:v1:vote:e1')).toEqual({ kind: 'stale' });
+  });
+
+  it('round-trips the occurrence-scoped cancel button (IDEAS item 54), a new kind rather than a reinterpretation of `cancel`', () => {
+    const eventId = crypto.randomUUID();
+    const id = cancelOccurrenceCustomId(eventId, '2026-10-14');
+    expect(id.length).toBeLessThanOrEqual(100);
+    expect(parseCustomId(id)).toEqual({ kind: 'cancel_occurrence', eventId, occurrenceDate: '2026-10-14' });
+    // Unlike rsvp's trailing date, an empty one here is not valid -- this
+    // kind only ever exists because the event is recurring.
+    expect(parseCustomId(cancelOccurrenceCustomId(eventId, ''))).toEqual({ kind: 'stale' });
+    // The pre-existing series-wide cancel id is untouched and still its own kind.
+    expect(parseCustomId(cancelCustomId(eventId))).toEqual({ kind: 'cancel', eventId });
   });
 
   it('keeps the answer line replaceable and the content bounded', () => {

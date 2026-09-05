@@ -44,6 +44,11 @@ export interface EventRow {
   auto_cancel_below_minimum?: number;
   created_from_poll_id?: string | null;
   created_from_option_id?: string | null;
+  // IDEAS item 54. Optional for the same reason as the pair above: rows
+  // selected before migration 0033 and narrower test fixtures won't carry
+  // them.
+  minimum_attendees_deadline_at?: number | null;
+  minimum_attendees_deadline_hours_before?: number | null;
 }
 
 export interface OverrideRow {
