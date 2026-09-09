@@ -242,6 +242,16 @@ async function syncOneConnection(
   const links = await loadLinks(env, row.user_id);
   const linkByKey = new Map(links.map((l) => [`${l.event_id}::${l.occurrence_date}`, l]));
 
+  // Counted so a tick that did something says so, once, at the end.
+  //
+  // Without this the sweep is completely silent on its happy path -- and
+  // because it is idempotent, the steady state is silence too, which makes
+  // `wrangler tail` useless for the one question an operator actually asks
+  // ("is it working?"). sweepPurgeTerminalHistory already set the precedent
+  // by logging what it purged. A console line costs nothing against
+  // cron/budget.ts's ledger, which counts D1 statements and subrequests.
+  const counts = { inserted: 0, patched: 0, deleted: 0, relinked: 0 };
+
   for (const occ of desired) {
     const key = `${occ.eventId}::${occ.occurrenceDate}`;
     const existing = linkByKey.get(key);
@@ -275,11 +285,13 @@ async function syncOneConnection(
         )
           .bind(occ.title, occ.startAt, occ.endAt, now, existing.id)
           .run();
+        counts.patched += 1;
       } else if (result.kind === 'missing') {
         // Someone deleted our copy from inside Google, which is an entirely
         // reasonable thing to do. Drop the stale link so the next tick treats
         // this as a fresh insert rather than patching an id that is gone.
         await env.DB.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(existing.id).run();
+        counts.relinked += 1;
       } else if (result.kind === 'unauthorized') {
         await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
         return;
@@ -303,6 +315,7 @@ async function syncOneConnection(
       )
         .bind(newId(), row.user_id, occ.eventId, occ.occurrenceDate, result.value.id, occ.title, occ.startAt, occ.endAt, now)
         .run();
+      counts.inserted += 1;
     } else if (result.kind === 'unauthorized') {
       await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
       return;
@@ -323,10 +336,22 @@ async function syncOneConnection(
     const result = await deleteCalendarEvent(accessToken, row.calendar_id, orphan.google_event_id);
     if (result.ok) {
       await env.DB.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(orphan.id).run();
+      counts.deleted += 1;
     } else if (result.kind === 'unauthorized') {
       await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
       return;
     }
+  }
+
+  // Only when something actually changed. A healthy connection with a settled
+  // calendar does nothing on most ticks, and saying so every fifteen minutes
+  // would bury the ticks that matter -- the same reason the purge sweep logs
+  // only when it purges.
+  if (counts.inserted || counts.patched || counts.deleted || counts.relinked) {
+    console.log(
+      `Google sync for ${row.user_id}: ${counts.inserted} added, ${counts.patched} updated, ` +
+        `${counts.deleted} removed, ${counts.relinked} re-linked (${desired.length} occurrence(s) in window).`,
+    );
   }
 
   await env.DB.prepare(

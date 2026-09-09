@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
@@ -446,6 +446,34 @@ describe('the sync sweep', () => {
     await sweepGoogleCalendar(env, new TickBudget('paid'));
 
     expect(fetchStub.bodies.join('\n')).not.toContain('thermal exhaust port');
+  });
+
+  // Without this the sweep is silent on success, and because it is idempotent
+  // the steady state is silent too -- so `wrangler tail` answers "is it
+  // working?" with nothing at all, which is the question an operator actually
+  // has. Found while verifying v0.8 on the sandbox with a tail open.
+  it('reports what it did, and stays quiet on a tick that changed nothing', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedSyncable(db);
+
+    fetchStub = stubFetch([TOKEN_RULE, INSERT_RULE]);
+    const logged: string[] = [];
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((m: string) => void logged.push(m));
+    try {
+      await sweepGoogleCalendar(env, new TickBudget('paid'));
+      const summary = logged.find((l) => l.includes('Google sync for u1'));
+      expect(summary).toContain('1 added');
+      expect(summary).toContain('0 removed');
+
+      // Second tick: nothing changed, so nothing is said. A line every fifteen
+      // minutes would bury the ticks that matter.
+      logged.length = 0;
+      await sweepGoogleCalendar(env, new TickBudget('paid'));
+      expect(logged.filter((l) => l.includes('Google sync for'))).toHaveLength(0);
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 
   it('is idempotent -- a second tick with nothing changed writes nothing', async () => {
