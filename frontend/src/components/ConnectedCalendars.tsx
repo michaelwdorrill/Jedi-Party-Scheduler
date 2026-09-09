@@ -104,7 +104,11 @@ export default function ConnectedCalendars() {
     if (await action.run(() => api.delete('/google'))) status.reload();
   };
 
-  const update = async (patch: { calendarId?: string; syncEnabled?: boolean }) => {
+  const update = async (patch: {
+    calendarId?: string;
+    syncEnabled?: boolean;
+    readCalendarId?: string | null;
+  }) => {
     if (await action.run(() => api.patch('/google', patch))) status.reload();
   };
 
@@ -197,6 +201,33 @@ export default function ConnectedCalendars() {
               </span>
             </span>
           </label>
+
+          <div className="border-t border-line/60 pt-3">
+            <label className="mb-1 block text-sm text-muted" htmlFor="google-read-select">
+              Read my busy times from
+            </label>
+            <Select
+              id="google-read-select"
+              value={connection.readCalendarId ?? ''}
+              onChange={(e) => update({ readCalendarId: e.target.value === '' ? null : e.target.value })}
+              disabled={action.pending || !calendars}
+            >
+              {/* Off is the default and the first option, so nobody switches
+                  reading on without meaning to. */}
+              <option value="">Don't read any of my calendars</option>
+              {(calendars ?? []).map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.summary}
+                  {c.primary ? ' (default)' : ''}
+                </option>
+              ))}
+            </Select>
+            <p className="mt-1 text-xs text-faint">
+              Optional, and separate from the calendar above. When set, people you're scheduling with
+              see you as busy at those times — as blank blocks only, never the titles. Uncle Owen
+              reads that one calendar and no others.
+            </p>
+          </div>
 
           <button
             disabled={action.pending}

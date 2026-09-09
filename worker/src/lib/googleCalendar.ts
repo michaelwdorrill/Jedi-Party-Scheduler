@@ -73,6 +73,13 @@ export interface GoogleConnectionRow {
   access_token_expires_at: number | null;
   google_account_email: string | null;
   calendar_id: string;
+  // The pull half (migration 0037). NULL means reading is off for this user,
+  // which is the default for everyone -- connecting to push never starts a
+  // pull. Deliberately not the same column as calendar_id above.
+  read_calendar_id: string | null;
+  busy_blocks: string | null;
+  busy_cached_at: number | null;
+  busy_window_end_at: number | null;
   sync_enabled: number;
   status: 'active' | 'disconnecting';
   last_synced_at: number | null;
@@ -417,6 +424,65 @@ export async function listWritableCalendars(accessToken: string): Promise<ApiOut
 // going to fetch anyway.
 export function accountEmailFrom(calendars: GoogleCalendarSummary[]): string | null {
   return calendars.find((c) => c.primary)?.id ?? null;
+}
+
+export interface BusyPeriod {
+  startAt: number;
+  endAt: number;
+}
+
+// freebusy.query against exactly one calendar.
+//
+// This is the whole of the pull half's contact with Google, and the narrowness
+// is the point: it returns busy/free *intervals* and nothing else -- no
+// titles, no attendees, no event ids, not even how many events make up a
+// block. That matches lib/freeBusy.ts's own BusyBlock contract exactly ("no
+// title, no game, no guild, no attendees, no event id"), so busy time pulled
+// from Google is indistinguishable in shape from busy time computed here.
+//
+// Reading full events would have been the alternative, and item 2 ruled it out
+// before any of this was built: scheduling needs busy/free, and asking for
+// less is both a smaller privacy surface and less to get wrong.
+export async function queryFreeBusy(
+  accessToken: string,
+  calendarId: string,
+  fromMs: number,
+  toMs: number,
+): Promise<ApiOutcome<BusyPeriod[]>> {
+  const result = await callGoogle<{
+    calendars?: Record<string, { busy?: { start: string; end: string }[]; errors?: { reason: string }[] }>;
+  }>(accessToken, `${CALENDAR_API}/freeBusy`, {
+    method: 'POST',
+    body: JSON.stringify({
+      timeMin: new Date(fromMs).toISOString(),
+      timeMax: new Date(toMs).toISOString(),
+      items: [{ id: calendarId }],
+    }),
+  });
+  if (!result.ok) return result;
+
+  const entry = result.value.calendars?.[calendarId];
+  // Google reports per-calendar problems inside a 200 rather than as an HTTP
+  // error -- notFound when the calendar was deleted, notACalendar, and so on.
+  // Treated as 'missing' so the caller can switch reading off and say why,
+  // instead of caching an empty array that would read as "this person is
+  // completely free" -- the one wrong answer this feature must never give.
+  if (entry?.errors?.length) {
+    return {
+      ok: false,
+      kind: 'missing',
+      status: 200,
+      message: `Google could not read that calendar: ${entry.errors.map((e) => e.reason).join(', ')}`,
+    };
+  }
+
+  return {
+    ok: true,
+    value: (entry?.busy ?? []).map((b) => ({
+      startAt: Date.parse(b.start),
+      endAt: Date.parse(b.end),
+    })).filter((b) => Number.isFinite(b.startAt) && Number.isFinite(b.endAt)),
+  };
 }
 
 export interface CalendarEventPayload {

@@ -29,6 +29,11 @@ export interface GoogleCalendarStatus {
   connected: boolean;
   accountEmail?: string | null;
   calendarId?: string;
+  // The single calendar we may READ, distinct from calendarId (where we
+  // write). null means reading is off, which is the default for everyone —
+  // connecting to push never starts a pull.
+  readCalendarId?: string | null;
+  busyCachedAt?: number | null;
   syncEnabled?: boolean;
   // 'disconnecting' while the cron removes the entries already written, before
   // the credential is revoked and the connection dropped.

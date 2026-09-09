@@ -199,6 +199,11 @@ googleRoutes.get('/status', requireAuth, requirePolicyAcceptance, async (c) => {
     connected: true,
     accountEmail: row.google_account_email,
     calendarId: row.calendar_id,
+    // null means reading is off, which is the default. Deliberately a
+    // different field from calendarId -- one is where we write, the other is
+    // the single calendar we may read (specs/0017).
+    readCalendarId: row.read_calendar_id,
+    busyCachedAt: row.busy_cached_at,
     syncEnabled: !!row.sync_enabled,
     status: row.status,
     lastSyncedAt: row.last_synced_at,
@@ -241,22 +246,64 @@ googleRoutes.patch('/', requireAuth, requirePolicyAcceptance, async (c) => {
   const row = await loadConnection(c.env, userId);
   if (!row) return c.text('No Google account connected', 404);
 
-  const body = await readJsonBody<{ calendarId?: string; syncEnabled?: boolean }>(c);
+  const body = await readJsonBody<{
+    calendarId?: string;
+    syncEnabled?: boolean;
+    readCalendarId?: string | null;
+  }>(c);
   const calendarId = body.calendarId === undefined ? null : assertString(body.calendarId, 'calendarId', 512);
   const syncEnabled = body.syncEnabled === undefined ? null : assertBoolean(body.syncEnabled, 'syncEnabled');
+
+  // Three states, not two, which is why this is not assertOptionalString:
+  // absent means "leave it alone", an explicit null means "stop reading my
+  // calendar", and a string means "read this one". Collapsing null into absent
+  // would leave no way to turn reading back off.
+  const clearsRead = body.readCalendarId === null;
+  const readCalendarId =
+    body.readCalendarId === undefined || body.readCalendarId === null
+      ? null
+      : assertString(body.readCalendarId, 'readCalendarId', 512);
+
+  // Switching which calendar is read, or switching reading off, drops the
+  // cache immediately rather than waiting for the next sweep. Otherwise the
+  // scheduling assistant would keep answering from the calendar the person
+  // just stopped sharing -- for up to an hour, and up to a week if the sweep
+  // could not run. Turning a disclosure off has to take effect at the moment
+  // it is asked for.
+  const dropsCache = clearsRead || readCalendarId !== null;
+
+  // The read setting is resolved in TypeScript rather than in SQL. Expressing
+  // "absent means leave alone, null means clear, a string means set" as CASE
+  // expressions needs the same flag bound several times over, which is exactly
+  // the kind of statement that goes wrong silently when someone later edits
+  // one branch of it. `nextRead` is computed once, here, where it is readable.
+  const nextRead = clearsRead ? null : readCalendarId !== null ? readCalendarId : row.read_calendar_id;
 
   await c.env.DB.prepare(
     `UPDATE google_calendar_connections
      SET calendar_id = COALESCE(?, calendar_id),
          sync_enabled = COALESCE(?, sync_enabled),
-         -- Changing either setting is the user telling us to try again, so a
-         -- stale failure message must not outlive the fix. The sweep writes a
-         -- fresh one if the problem is still there.
+         read_calendar_id = ?,
+         busy_blocks = CASE WHEN ? = 1 THEN NULL ELSE busy_blocks END,
+         busy_cached_at = CASE WHEN ? = 1 THEN NULL ELSE busy_cached_at END,
+         busy_window_end_at = CASE WHEN ? = 1 THEN NULL ELSE busy_window_end_at END,
+         -- Changing any of these settings is the user telling us to try again,
+         -- so a stale failure message must not outlive the fix. The sweep
+         -- writes a fresh one if the problem is still there.
          last_error = NULL,
          updated_at = ?
      WHERE user_id = ?`,
   )
-    .bind(calendarId, syncEnabled === null ? null : syncEnabled ? 1 : 0, Date.now(), userId)
+    .bind(
+      calendarId,
+      syncEnabled === null ? null : syncEnabled ? 1 : 0,
+      nextRead,
+      dropsCache ? 1 : 0,
+      dropsCache ? 1 : 0,
+      dropsCache ? 1 : 0,
+      Date.now(),
+      userId,
+    )
     .run();
 
   return c.json({ ok: true });

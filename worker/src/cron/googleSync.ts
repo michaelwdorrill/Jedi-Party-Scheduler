@@ -28,6 +28,7 @@ import {
   insertCalendarEvent,
   isGoogleConfigured,
   patchCalendarEvent,
+  queryFreeBusy,
   readRefreshToken,
   revokeToken,
 } from '../lib/googleCalendar';
@@ -82,6 +83,24 @@ const PER_CONNECTION_READ_QUERIES = 10;
 // 55 minutes, not 60, so it stays anchored to whichever quarter-hour tick it
 // first ran on rather than drifting an extra tick later each hour.
 export const SYNC_INTERVAL_MS = 55 * 60 * 1000;
+
+// How far ahead the busy cache reaches (the pull half, migration 0037).
+//
+// Matched to LIMITS.MAX_FREE_BUSY_RANGE_MS rather than to SYNC_WINDOW_MS,
+// because this cache answers a different question from the push half: it feeds
+// the scheduling assistant, whose own request range is capped at the same ~2
+// months. Caching further would be work nobody can ask about; caching less
+// would leave a gap inside a range they can.
+export const BUSY_CACHE_WINDOW_MS = 62 * 24 * 60 * 60 * 1000;
+
+// A ceiling on how many busy intervals are stored for one person.
+//
+// freebusy.query merges overlapping events itself, so a normal calendar yields
+// tens of intervals across two months, not thousands. This exists so a
+// pathological calendar cannot put an unbounded blob in a column that
+// lib/freeBusy.ts parses inside a request. Exceeding it keeps the EARLIEST
+// blocks, since the assistant is overwhelmingly used for the near term.
+const MAX_CACHED_BUSY_BLOCKS = 400;
 
 // A safety valve on the disconnect path. If cleanup cannot succeed -- the
 // grant is already revoked at Google's end, the calendar was deleted -- the
@@ -421,11 +440,93 @@ async function syncOneConnection(
     );
   }
 
+  // Stamped BEFORE the pull half runs, and the order is load-bearing.
+  //
+  // This statement clears last_error, which is correct for the push half it
+  // reports on -- that half just succeeded. But refreshBusyCache can record an
+  // error of its own (a chosen calendar that no longer exists), and running
+  // this afterwards erased it immediately: reading would switch itself off and
+  // the user would never learn why. Found by a test asserting the message
+  // survives, which it did not.
   await env.DB.prepare(
     `UPDATE google_calendar_connections SET last_synced_at = ?, last_error = NULL, updated_at = ? WHERE user_id = ?`,
   )
     .bind(now, now, row.user_id)
     .run();
+
+  await refreshBusyCache(env, row, accessToken, budget, now);
+}
+
+// The pull half: one freebusy.query against the ONE calendar this person
+// chose, cached for lib/freeBusy.ts to merge into the scheduling assistant.
+//
+// Runs inside the same hourly slot as the push, deliberately -- it is the same
+// connection, the same access token, and the same "a mirror within the hour is
+// fine" latency argument. A separate schedule would double the fixed cost for
+// no benefit.
+//
+// Does nothing at all unless read_calendar_id is set, which it is not for
+// anyone by default. Connecting to push never starts a pull.
+async function refreshBusyCache(
+  env: Env,
+  row: GoogleConnectionRow,
+  accessToken: string,
+  budget: TickBudget,
+  now: number,
+): Promise<void> {
+  if (!row.read_calendar_id) return;
+  // One subrequest plus the single UPDATE below -- exactly the shape
+  // tryCalendarWrite prices.
+  if (!budget.tryCalendarWrite()) return;
+
+  const result = await queryFreeBusy(accessToken, row.read_calendar_id, now, now + BUSY_CACHE_WINDOW_MS);
+
+  if (!result.ok) {
+    if (result.kind === 'unauthorized') {
+      await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
+      return;
+    }
+    if (result.kind === 'missing') {
+      // The calendar is gone, or was never readable. Switch reading off and
+      // say why, rather than leaving a stale cache to answer for a calendar
+      // that no longer exists. Note this clears read_calendar_id: the person
+      // has to pick again, which is the honest outcome of "the thing you
+      // chose isn't there".
+      await env.DB.prepare(
+        `UPDATE google_calendar_connections
+         SET read_calendar_id = NULL, busy_blocks = NULL, busy_cached_at = NULL,
+             busy_window_end_at = NULL, last_error = ?, updated_at = ?
+         WHERE user_id = ?`,
+      )
+        .bind(result.message, now, row.user_id)
+        .run();
+      console.warn(`Google busy cache disabled for ${row.user_id}: ${result.message}`);
+      return;
+    }
+    // Transient. The existing cache is deliberately left in place: stale busy
+    // time is the safe direction to be wrong in, and dropping it would report
+    // someone as free when we simply could not ask.
+    console.warn(`Google busy refresh deferred for ${row.user_id}: ${result.message}`);
+    return;
+  }
+
+  const blocks = result.value
+    .filter((b) => b.endAt > b.startAt)
+    .sort((a, b) => a.startAt - b.startAt)
+    .slice(0, MAX_CACHED_BUSY_BLOCKS)
+    .map((b) => [b.startAt, b.endAt]);
+
+  await env.DB.prepare(
+    `UPDATE google_calendar_connections
+     SET busy_blocks = ?, busy_cached_at = ?, busy_window_end_at = ?, updated_at = ?
+     WHERE user_id = ?`,
+  )
+    .bind(JSON.stringify(blocks), now, now + BUSY_CACHE_WINDOW_MS, now, row.user_id)
+    .run();
+
+  if (blocks.length > 0) {
+    console.log(`Google busy cache for ${row.user_id}: ${blocks.length} interval(s) over the next 62 days.`);
+  }
 }
 
 // Whether any connection is due this tick, answered before the tick's budget
