@@ -175,6 +175,22 @@ export async function buildNoticeboard(
 
   const out: NoticeboardOccurrence[] = [];
 
+  // Decision 1 / attendance.ts's ORGANIZER_UNLESS_DECLINED, which every other
+  // read of an occurrence already applies: an organiser who has not answered is
+  // running the session, so they are there. Only an explicit decline overturns
+  // it -- hence the `??` rather than an unconditional 'accepted'.
+  //
+  // Without this the board was the one view in the app that called an organiser
+  // "no answer" on their own session, while GET /events/:id, myRsvpStatus and
+  // the reminder path all called the same person attending. On a board whose
+  // entire purpose is "who is going", the disagreement reads as a session
+  // nobody has committed to.
+  const organiserAnswer = (
+    event: EventRow,
+    answers: Map<string, AttendanceRow['rsvp_status']> | undefined,
+  ): AttendanceRow['rsvp_status'] | null =>
+    answers?.get(event.organizer_id) ?? 'accepted';
+
   const attendeesFor = (event: EventRow, occurrenceDate: string): NoticeboardAttendee[] => {
     const answers = attendanceByKey.get(`${event.id}::${occurrenceDate}`);
     const rows = invitesByEvent.get(event.id) ?? [];
@@ -183,7 +199,10 @@ export async function buildNoticeboard(
       username: r.username,
       globalName: r.global_name,
       avatarHash: r.avatar_hash,
-      rsvpStatus: answers?.get(r.user_id) ?? null,
+      rsvpStatus:
+        r.user_id === event.organizer_id
+          ? organiserAnswer(event, answers)
+          : (answers?.get(r.user_id) ?? null),
     }));
     // The organiser belongs on the list whether or not they hold an invite
     // row. Since v0.4.1 they usually do (IDEAS item 26), but an event created
@@ -197,7 +216,7 @@ export async function buildNoticeboard(
           username: org.username,
           globalName: org.global_name,
           avatarHash: org.avatar_hash,
-          rsvpStatus: answers?.get(event.organizer_id) ?? null,
+          rsvpStatus: organiserAnswer(event, answers),
         });
       }
     }

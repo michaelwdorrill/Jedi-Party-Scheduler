@@ -112,6 +112,31 @@ shortened noticeboard is indistinguishable from a quiet server.
 personal block's title never appears in the response, checked against the raw
 serialised body rather than the parsed object.
 
+## The organiser's own answer
+
+Found in sandbox verification, not by a test: the board reported the organiser
+as "no answer" on their own session while the event page, `myRsvpStatus` and
+the reminder path all reported the same person as attending.
+
+`lib/attendance.ts` has a rule for this, `ORGANIZER_UNLESS_DECLINED`, and it
+predates this feature by several releases: someone running a session is there
+unless they have explicitly declined, because a poll's organiser has no vote to
+read and a single event's organiser may simply never have pressed anything.
+`routes/events.ts` applies it twice. The noticeboard applied it nowhere, which
+made it the one view in the app that disagreed with the others about the same
+row.
+
+That disagreement matters more here than it would elsewhere. The board exists
+to answer "who is going", so an organiser shown as undecided reads as a session
+nobody has committed to — the precise opposite of what the data says.
+
+The rule is the organiser's alone. An invitee who has not answered is genuinely
+undecided, and inflating them the same way would invent commitments; there is a
+test asserting the invitee beside the organiser stays null. And "unless
+declined" is load-bearing rather than decorative — an unconditional `'accepted'`
+would overwrite the one answer an organiser had actually gone to the trouble of
+giving, so there is a test for that too.
+
 ## One thing the decisions did not cover
 
 Polls. An unresolved poll has no time yet and its candidate days are maybes, so

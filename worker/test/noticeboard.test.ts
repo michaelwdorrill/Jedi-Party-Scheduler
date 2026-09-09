@@ -240,6 +240,49 @@ describe('the server noticeboard', () => {
     expect(await fetchBoard(env, 'bystander')).toEqual([]);
   });
 
+  it('treats an organiser who has not answered as attending, like every other view', async () => {
+    const { db, env } = setup();
+    await seedServer(db);
+    await seedEvent(db, {
+      id: 'evt-org',
+      organizerId: 'organizer',
+      title: 'Nobody has pressed anything',
+      startAt: Date.now() + DAY_MS,
+      endAt: Date.now() + DAY_MS + 2 * HOUR_MS,
+    });
+    await seedInvite(db, 'evt-org', 'invitee');
+
+    const [item] = await fetchBoard(env, 'bystander');
+    const organiser = item.attendees.find((a) => a.userId === 'organizer')!;
+    const invitee = item.attendees.find((a) => a.userId === 'invitee')!;
+
+    // attendance.ts's ORGANIZER_UNLESS_DECLINED, which GET /events/:id and the
+    // reminder path both already apply. A board that says "no answer" about the
+    // person running the session contradicts every other view of it.
+    expect(organiser.rsvpStatus).toBe('accepted');
+    // The rule is the organiser's alone -- an invitee who has not answered is
+    // genuinely undecided and must not be inflated the same way.
+    expect(invitee.rsvpStatus).toBeNull();
+  });
+
+  it('lets an organiser who explicitly declined stay declined', async () => {
+    const { db, env } = setup();
+    await seedServer(db);
+    await seedEvent(db, {
+      id: 'evt-org-out',
+      organizerId: 'organizer',
+      title: 'Called out of my own game',
+      startAt: Date.now() + DAY_MS,
+      endAt: Date.now() + DAY_MS + 2 * HOUR_MS,
+    });
+    await seedAttendance(db, 'evt-org-out', 'organizer', 'declined');
+
+    const [item] = await fetchBoard(env, 'bystander');
+    // "Unless declined" is the whole rule -- an unconditional 'accepted' here
+    // would overwrite the one answer the organiser actually gave.
+    expect(item.attendees.find((a) => a.userId === 'organizer')!.rsvpStatus).toBe('declined');
+  });
+
   it('does advertise a poll once it has resolved', async () => {
     const { db, env } = setup();
     await seedServer(db);
