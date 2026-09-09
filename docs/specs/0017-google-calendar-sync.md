@@ -142,6 +142,24 @@ account is already inside the read/write `calendar.events` grant regardless.
 Both are Google "sensitive" scopes, so the unverified-app 100-user ceiling and
 its warning screen apply, exactly as item 2 accepted.
 
+**One consequence of that which is not cosmetic, and which this spec missed
+on first writing.** The ceiling and the warning are properties of being
+*unverified*; the **publishing status** is a separate axis, and getting it
+wrong breaks the feature outright. Google expires every refresh token issued
+by an app whose status is **Testing** after 7 days — and a stored refresh
+token presented by a cron sweep with nobody logged in is this entire design.
+So production must run at **"In production", unverified**: warning screen,
+100-user cap, and refresh tokens that survive. "We accept the unverified cap"
+and "we stay in Testing" are not the same configuration, and only the first
+was ever the decision. `docs/SETUP.md` section 7 carries the operational
+version.
+
+The sandbox stays in Testing deliberately, and therefore needs reconnecting
+about weekly. That is worth knowing rather than fixing: it exercises the
+`invalid_grant` path — `accessTokenFor` classifying it as permanent,
+`sync_enabled` going to 0, and Settings saying *"Google access was revoked or
+expired. Reconnect to resume syncing."* — on a real schedule, for free.
+
 ## The OAuth round trip
 
 Modelled on `routes/guildRequests.ts`'s second Discord round trip

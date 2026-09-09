@@ -840,19 +840,54 @@ that gets found.
 8. Deploy and migrate (`npm run db:migrate:remote:sandbox` then
    `npm run deploy:sandbox`, or the production pair).
 
-**Two things worth knowing before you turn this on in production.**
+**Three things worth knowing before you turn this on in production, and the
+first one will break the feature if you get it wrong.**
 
-- **The 100-user ceiling is accepted, not a mistake.** Both scopes above are
-  "sensitive" in Google's terms, so an unverified app shows an "unverified"
-  warning screen and is capped at 100 users. `IDEAS.md` item 2 accepted that
-  deliberately — this app's whole design profile is a handful of friend
-  groups. Going through verification is possible later and changes nothing in
-  the code.
+- **Production must be set to publishing status "In production", NOT
+  "Testing".** These are not two ways of saying the same thing, and an earlier
+  version of this section conflated them.
+
+  For an app whose publishing status is **Testing**, Google expires every
+  refresh token it issues after **7 days**. This app's entire mechanism is a
+  cron sweep presenting a stored refresh token with nobody logged in — so in
+  Testing mode, every user's sync silently stops working a week after they
+  connect. That is a correctness failure, not a cosmetic one.
+
+  Setting the app to **In production** removes that expiry. It does *not*
+  remove the "Google hasn't verified this app" warning, and it does not lift
+  the user cap for unverified sensitive scopes — see below. So the correct
+  production configuration is: **In production, unverified**, warning screen
+  and all.
+
+  **Your sandbox will stay in Testing**, which is fine and is what you want
+  while iterating — just expect to reconnect it roughly weekly. That is the
+  7-day clock, not a bug, and the app reports it honestly: the sweep marks the
+  connection as needing reconnection and Settings says so.
+
+- **The 100-user cap is accepted, and it is stricter than it sounds.** Both
+  scopes above are "sensitive" in Google's terms, so an unverified app is
+  capped at 100 users — and that cap is **cumulative over the project's
+  lifetime and cannot be reset**, not a limit on concurrent users. `IDEAS.md`
+  item 2 accepted it deliberately; this app's design profile is a handful of
+  friend groups, and `validate.ts` already pegs the supported population at
+  roughly a guild's active membership.
+
+  If it ever needs lifting, the good news is that these scopes are *sensitive*
+  rather than *restricted*: verification means a consent-screen review, scope
+  justifications and a demo of the app — **not** the annual third-party
+  security assessment that restricted scopes (Gmail, Drive) require. That is
+  process, not money. Parked as `IDEAS.md` item 64.
+
 - **Rotating `GOOGLE_TOKEN_ENCRYPTION_KEY` invalidates every existing
   connection.** Stored tokens stop decrypting, the sweep marks those
   connections as needing reconnection, and each user reconnects from Settings.
   That's recoverable and visible rather than silent, but it is not a
   zero-impact rotation — don't do it casually.
+
+*(Publishing-status behaviour, the cap's lifetime scope, and the
+sensitive-vs-restricted assessment split were all re-checked against Google's
+current documentation in Sept 2026 rather than carried from memory. Google
+revises these rules; re-check before relying on them.)*
 
 ## Running the tests
 

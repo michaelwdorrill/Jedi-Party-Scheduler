@@ -206,13 +206,20 @@ without verification is friendly:
 not — it swaps the wording, arguably for the worse, since the production
 variant is the one that says "unsafe". Time and usage do nothing at all.
 
-**The encouraging part, confirmed against the real console rather than
-assumed:** both scopes this app requests (`calendar.events`,
-`calendar.readonly`) appear under *"Your sensitive scopes"*, with *"Your
-restricted scopes"* empty. Sensitive-scope verification is the ordinary review
-— it does **not** require the third-party CASA security assessment that Gmail
-and Drive scopes trigger, which is the expensive, months-long one. So this is a
-process cost, not a money cost.
+**The encouraging part, confirmed against the real console and then re-checked
+against Google's current documentation (Sept 2026):** both scopes this app
+requests (`calendar.events`, `calendar.readonly`) appear under *"Your sensitive
+scopes"*, with *"Your restricted scopes"* empty. Sensitive-scope verification
+is the ordinary review — consent screen, scope justifications, a demo of the
+app. It does **not** require the annual third-party security assessment that
+*restricted* scopes (Gmail, Drive) trigger. So this is a process cost, not a
+money cost.
+
+**The cap is stricter than "100 users" suggests, though, and that is worth
+knowing before parking this forever:** it is cumulative over the project's
+entire lifetime and cannot be reset — 100 people who *ever* connect, not 100
+at once. Still comfortably above this app's supported profile, but it is a
+one-way budget rather than a ceiling that empties.
 
 What it typically wants: domain ownership verified in Search Console, a
 homepage and privacy policy on that domain, a written justification per scope,
