@@ -37,20 +37,47 @@ import type { TickBudget } from './budget';
 // series is infinite.
 export const SYNC_WINDOW_MS = 60 * 24 * 60 * 60 * 1000;
 
-// Deliberately small. Each connection costs a calendar read (see
-// PER_CONNECTION_READ_QUERIES) before it writes anything, and this sweep runs
-// after every notification sweep -- so on a busy tick it should do nothing at
-// all rather than crowd out a reminder. Connections it does not reach are the
-// ones it reaches first next tick, by the last_synced_at ordering below.
-const MAX_CONNECTIONS_PER_TICK = 2;
+// One per tick. At PER_CONNECTION_READ_QUERIES + a write apiece, two would
+// take almost the whole Free-plan allowance on the tick this runs, and the
+// notification sweeps it borrows from are the more urgent half. A second
+// connection waits for the next hour, ordered first by last_synced_at.
+const MAX_CONNECTIONS_PER_TICK = 1;
 
 // What buildCalendarOccurrences costs for one user: the event select, plus
 // overrides, attendance, primary group, guild names, recurrence rules,
-// confirmed options, pending options and personal events. Charged as one lump
-// before the read runs, so a tick that cannot afford the read does not start
-// it -- the same reserve-before-spend rule lib/outbox.ts's deliverThroughOutbox
-// arrived at after the mirror-image bug.
+// confirmed options, pending options and personal events.
 const PER_CONNECTION_READ_QUERIES = 10;
+
+// How long a connection waits between syncs.
+//
+// This is the fix for the bug that made this feature not work at all, and the
+// reasoning is worth keeping because the naive version looked obviously right.
+//
+// Originally this sweep ran on every tick, last, taking whatever the
+// notification sweeps left. Measured against a real sandbox, what they leave
+// is **11 queries** -- stable, every tick. The sweep asked for 10 for the
+// calendar read, got them, then could not afford the two a single write costs.
+// So it spent eleven queries doing reads it then threw away, returned before
+// stamping last_synced_at, and did that ~380 times over four days: no entries
+// written, no error recorded, nothing in the logs. A feature that never ran
+// and never said so.
+//
+// "Run last and take the leftovers" is the wrong shape for work that comes in
+// an indivisible lump. It works for deliveries, which are one cheap unit each,
+// and fails for this, which needs a fixed ten before the first unit of useful
+// work. So the sweep now runs **hourly instead of every tick, and goes first
+// on the tick it runs**, where the full allowance is still intact.
+//
+// Hourly is the honest cadence for a mirror rather than a compromise: a
+// session appearing on someone's Google calendar within the hour is fine,
+// where a reminder that misses its window is not. And on the other ~three
+// ticks in four the sweep now costs *nothing at all* rather than burning
+// eleven queries for no result -- so the notification sweeps are better off
+// than they were before this feature existed.
+//
+// 55 minutes, not 60, so it stays anchored to whichever quarter-hour tick it
+// first ran on rather than drifting an extra tick later each hour.
+export const SYNC_INTERVAL_MS = 55 * 60 * 1000;
 
 // A safety valve on the disconnect path. If cleanup cannot succeed -- the
 // grant is already revoked at Google's end, the calendar was deleted -- the
@@ -235,10 +262,34 @@ async function syncOneConnection(
 ): Promise<void> {
   const now = Date.now();
 
-  if (!budget.trySpend(PER_CONNECTION_READ_QUERIES)) return;
-  const desired = await desiredOccurrencesFor(env, row.user_id, now);
+  // Reserve the reads AND the link load AND at least one write before doing
+  // any of them. Reserving only the read is what made this sweep useless: it
+  // could afford ten queries of reading and then not the two a single write
+  // costs, so it read the whole calendar, wrote nothing, and returned without
+  // even recording that it had tried.
+  //
+  // This is lib/outbox.ts's rule applied properly -- "reserving first means a
+  // delivery this tick cannot afford costs nothing at all". The unit of work
+  // here is not one write, it is read-then-write, so that is what has to be
+  // affordable before anything starts.
+  if (!budget.trySpend(PER_CONNECTION_READ_QUERIES + 1)) {
+    console.warn(
+      `Google sync skipped for ${row.user_id}: this tick could not afford the calendar read ` +
+        `(${PER_CONNECTION_READ_QUERIES + 1} queries needed). Retrying next hour.`,
+    );
+    return;
+  }
+  if (budget.exhausted) {
+    // Affordable to read, but with nothing left to write with. Refunding is
+    // not possible through TickBudget's interface, so the check goes here --
+    // before the reads run, which is the part that matters.
+    console.warn(
+      `Google sync skipped for ${row.user_id}: enough allowance to read but not to write. Retrying next hour.`,
+    );
+    return;
+  }
 
-  if (!budget.trySpend(1)) return;
+  const desired = await desiredOccurrencesFor(env, row.user_id, now);
   const links = await loadLinks(env, row.user_id);
   const linkByKey = new Map(links.map((l) => [`${l.event_id}::${l.occurrence_date}`, l]));
 
@@ -361,6 +412,31 @@ async function syncOneConnection(
     .run();
 }
 
+// Whether any connection is due this tick, answered before the tick's budget
+// is spent on anything else.
+//
+// This exists so runReminderSweep can put the calendar sweep FIRST on the one
+// tick an hour it actually has work, and skip it entirely on the other three
+// — rather than running it last every tick, where the notification sweeps have
+// always already spent everything it needs (see SYNC_INTERVAL_MS).
+//
+// Uncharged, like every other discovery read in this codebase, and it costs
+// literally nothing on a deployment with Google switched off: isGoogleConfigured
+// short-circuits before the query.
+export async function googleSyncDue(env: Env): Promise<boolean> {
+  if (!isGoogleConfigured(env)) return false;
+  const row = await env.DB.prepare(
+    `SELECT 1 FROM google_calendar_connections
+     WHERE status = 'disconnecting'
+        OR (sync_enabled = 1 AND status = 'active'
+            AND (last_synced_at IS NULL OR last_synced_at < ?))
+     LIMIT 1`,
+  )
+    .bind(Date.now() - SYNC_INTERVAL_MS)
+    .first();
+  return row != null;
+}
+
 export async function sweepGoogleCalendar(env: Env, budget: TickBudget): Promise<void> {
   if (!isGoogleConfigured(env)) return;
 
@@ -374,11 +450,13 @@ export async function sweepGoogleCalendar(env: Env, budget: TickBudget): Promise
   // cursor's whole job, without a CursorStore slot or the statement it costs.
   const { results: connections } = await env.DB.prepare(
     `SELECT * FROM google_calendar_connections
-     WHERE status = 'disconnecting' OR (sync_enabled = 1 AND status = 'active')
+     WHERE status = 'disconnecting'
+        OR (sync_enabled = 1 AND status = 'active'
+            AND (last_synced_at IS NULL OR last_synced_at < ?))
      ORDER BY status DESC, last_synced_at ASC
      LIMIT ?`,
   )
-    .bind(MAX_CONNECTIONS_PER_TICK)
+    .bind(Date.now() - SYNC_INTERVAL_MS, MAX_CONNECTIONS_PER_TICK)
     .all<GoogleConnectionRow>();
 
   for (const row of connections) {

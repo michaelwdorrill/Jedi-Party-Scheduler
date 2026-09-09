@@ -294,11 +294,48 @@ converged on rather than the naive one:
   pushes and DMs draw on one allowance rather than two that are each
   "reasonable".
 
-**A calendar push is less urgent than every DM above it**, which is what makes
-going last correct: a session that appears on Google twenty minutes later is
-fine; a reminder that does not go out is not. The sweep resumes from where the
-allowance ran out on the next tick, because `last_synced_at` ordering means the
-connections it did not reach are the ones it reaches first next time.
+**Corrected after the first sandbox verification, and the correction is the
+more useful half of this section.** The design above — run last on every tick,
+take whatever the notification sweeps leave — is wrong, and it failed in the
+worst available way: silently, completely, and while looking idle rather than
+broken.
+
+Measured against the real sandbox, what the notification sweeps leave is
+**eleven queries**, stable, every tick. This sweep needs ten for the calendar
+read and two more for a single write. So it reserved the ten, read the whole
+calendar, could not afford one write, and returned *before* stamping
+`last_synced_at` — no entries, no `last_error`, nothing in the logs. It did
+that roughly 380 times across four days and the operator's only evidence was a
+Settings card that had said "Last synced: not yet" since the moment it
+connected.
+
+Two things were wrong, and both are worth naming separately:
+
+- **Reserve-before-spend was applied to half the unit of work.** `lib/outbox.ts`
+  states the rule — "reserving first means a delivery this tick cannot afford
+  costs nothing at all" — and this sweep cited it while reserving only the
+  read. Its actual unit is read-*then*-write, so that is what has to be
+  affordable before anything begins. It now reserves both, and says so in the
+  log when it cannot.
+- **"Last, on the leftovers" is the wrong shape for indivisible work.** It is
+  right for deliveries, which are cheap divisible units — one DM at a time,
+  stop when the money runs out. It cannot work for a task with a fixed
+  ten-query cost before its first useful unit, because the leftovers are
+  reliably smaller than that fixed cost. Being last did not make this sweep
+  low-priority; it made it never run.
+
+**So it runs hourly, and goes first on the tick it runs** (`SYNC_INTERVAL_MS`,
+55 minutes; `googleSyncDue` answers the question uncharged before the tick
+spends anything). Hourly is the honest cadence for a mirror rather than a
+concession: a session reaching someone's Google calendar within the hour is
+fine, where a reminder that misses its window is not.
+
+The trade is explicit. On the one tick in four that it runs, the notification
+sweeps have less to spend — which the outbox is built to absorb, since an
+undelivered row simply waits for the next tick fifteen minutes later. On the
+other three they get *more* than before this feature existed, because the sweep
+no longer burns eleven queries per tick achieving nothing. `MAX_CONNECTIONS_PER_TICK`
+drops to 1 to bound what that one tick costs.
 
 A refresh-token exchange is one subrequest, and only when the cached access
 token is inside its expiry skew — so a steady-state tick spends zero on auth.

@@ -86,6 +86,16 @@ const CALENDAR_LIST_RULE = {
 const INSERT_RULE = { match: '/calendar/v3/calendars/', status: 200, body: { id: 'google-event-1' } };
 const REVOKE_RULE = { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} };
 
+// The sweep runs about hourly (SYNC_INTERVAL_MS), so a test that wants a
+// second sync has to do what the passage of an hour does: make the connection
+// due again. Calling the sweep twice in a row is now a no-op by design.
+async function makeDue(db: ShimDatabase, userId = 'u1'): Promise<void> {
+  await db
+    .prepare(`UPDATE google_calendar_connections SET last_synced_at = NULL WHERE user_id = ?`)
+    .bind(userId)
+    .run();
+}
+
 async function seedConnection(
   db: ShimDatabase,
   userId: string,
@@ -486,6 +496,7 @@ describe('the sync sweep', () => {
     const afterFirst = fetchStub.calls.filter((u) => u.includes('/calendar/v3/calendars/')).length;
     expect(afterFirst).toBe(1);
 
+    await makeDue(db);
     await sweepGoogleCalendar(env, new TickBudget('paid'));
     const afterSecond = fetchStub.calls.filter((u) => u.includes('/calendar/v3/calendars/')).length;
     // The steady state, and the one that decides whether this feature is
@@ -506,6 +517,7 @@ describe('the sync sweep', () => {
       .prepare(`UPDATE events SET start_at = ?, title = 'Session One, Moved' WHERE id = 'evt-1'`)
       .bind(Date.now() + 5 * DAY_MS)
       .run();
+    await makeDue(db);
     await sweepGoogleCalendar(env, new TickBudget('paid'));
 
     const patched = fetchStub.calls.filter((u) => u.includes('/calendar/v3/calendars/'));
@@ -526,6 +538,7 @@ describe('the sync sweep', () => {
     expect(await countRows(db, 'google_event_links')).toBe(1);
 
     await db.prepare(`UPDATE events SET status = 'cancelled' WHERE id = 'evt-1'`).run();
+    await makeDue(db);
     await sweepGoogleCalendar(env, new TickBudget('paid'));
 
     expect(await countRows(db, 'google_event_links')).toBe(0);
@@ -572,6 +585,7 @@ describe('the sync sweep', () => {
     expect(await countRows(db, 'google_event_links')).toBe(1);
 
     await seedAttendance(db, 'evt-1', 'invitee', 'declined');
+    await makeDue(db, 'invitee');
     await sweepGoogleCalendar(env, new TickBudget('paid'));
     expect(await countRows(db, 'google_event_links')).toBe(0);
   });
@@ -627,6 +641,83 @@ describe('the sync sweep', () => {
     // last_synced_at deliberately untouched, which is what keeps this
     // connection at the front of the next tick's queue.
     expect(row!.last_synced_at).toBeNull();
+  });
+
+  // The regression that made this feature not work at all on the sandbox.
+  //
+  // The sweep used to run last on every tick, taking whatever the notification
+  // sweeps left -- eleven queries, measured, stable. It needs twelve. So it
+  // read the calendar, could not afford a single write, and returned without
+  // stamping last_synced_at: ~380 ticks over four days, nothing written, no
+  // error recorded anywhere. This runs a full free-plan tick, which is what
+  // the sandbox actually runs, and asserts it syncs.
+  it('syncs on a full FREE-plan tick, which is what the deployed cron runs', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedSyncable(db);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200), TOKEN_RULE, INSERT_RULE]);
+    await runReminderSweep(env);
+
+    expect(await countRows(db, 'google_event_links')).toBe(1);
+    const row = await db
+      .prepare(`SELECT last_synced_at FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ last_synced_at: number | null }>();
+    expect(row!.last_synced_at).not.toBeNull();
+  });
+
+  it('runs about hourly, not every tick', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedSyncable(db);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200), TOKEN_RULE, INSERT_RULE]);
+    await runReminderSweep(env);
+    const syncedAt = async () =>
+      (await db
+        .prepare(`SELECT last_synced_at AS t FROM google_calendar_connections WHERE user_id = 'u1'`)
+        .first<{ t: number | null }>())!.t;
+    const first = await syncedAt();
+    expect(first).not.toBeNull();
+
+    // A second tick fifteen minutes later has nothing due, so the sweep is
+    // skipped entirely -- it costs that tick nothing, rather than burning the
+    // calendar read for no result, which is what the old version did.
+    await runReminderSweep(env);
+    expect(await syncedAt()).toBe(first);
+
+    // An hour on, it is due again and syncs.
+    await db
+      .prepare(`UPDATE google_calendar_connections SET last_synced_at = ? WHERE user_id = 'u1'`)
+      .bind(Date.now() - 60 * 60 * 1000)
+      .run();
+    await runReminderSweep(env);
+    expect(await syncedAt()).toBeGreaterThan(first!);
+  });
+
+  it('says so, rather than failing silently, when it cannot afford a tick', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedSyncable(db);
+
+    fetchStub = stubFetch([TOKEN_RULE, INSERT_RULE]);
+    const warns: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((m: string) => void warns.push(m));
+    try {
+      // Enough allowance to look, not enough to act -- the exact shape that
+      // produced four days of silence.
+      const budget = new TickBudget('free');
+      while (budget.trySpend(1) && budget.remaining().queries > 11) {
+        /* drain to just above the read cost */
+      }
+      await sweepGoogleCalendar(env, budget);
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    expect(await countRows(db, 'google_event_links')).toBe(0);
+    // The point of the fix: a skipped tick leaves evidence.
+    expect(warns.some((w) => w.includes('Google sync skipped for u1'))).toBe(true);
   });
 
   it('stops cleanly when the tick runs out of allowance', async () => {

@@ -32,7 +32,7 @@ import { cancelButton, cancelOccurrenceButton, linkButton, pollSelect, rsvpButto
 import { LIMITS } from '../lib/validate';
 import { chunkIds, placeholders } from '../lib/d1';
 import { planFrom, TickBudget } from './budget';
-import { sweepGoogleCalendar } from './googleSync';
+import { googleSyncDue, sweepGoogleCalendar } from './googleSync';
 import {
   decodeEventKey,
   encodeEventKey,
@@ -3067,6 +3067,30 @@ export async function runReminderSweep(env: Env): Promise<void> {
   // allowance of fifty.
   const cursors = await CursorStore.load(env);
 
+  // Calendar sync goes FIRST, on the roughly one tick an hour it has work.
+  //
+  // It used to go last, on every tick, taking whatever the notification sweeps
+  // left behind — which measured against a real sandbox is eleven queries,
+  // stable, and it needs twelve. So it read the calendar, could not afford a
+  // single write, and returned having achieved nothing, every fifteen minutes
+  // for four days, without recording an error anywhere. See SYNC_INTERVAL_MS
+  // in cron/googleSync.ts for the full account.
+  //
+  // "Last, on the leftovers" is right for work that arrives in cheap divisible
+  // units — a DM at a time — and wrong for work with a fixed ten-query cost
+  // before the first useful unit. So it now runs hourly and takes priority on
+  // the tick it runs. The trade is explicit: on that one tick the notification
+  // sweeps have less to spend, which the outbox is built to absorb (an
+  // undelivered row simply waits for the next tick), and on the other three
+  // ticks they get *more* than before, because the sweep no longer burns
+  // eleven queries for nothing.
+  //
+  // googleSyncDue is uncharged and returns false immediately when Google is
+  // not configured, so a deployment with the feature off pays nothing for this.
+  if (await googleSyncDue(env)) {
+    await runIsolated('googleCalendar', () => sweepGoogleCalendar(env, budget));
+  }
+
   await runIsolated('membershipRevalidation', () => sweepMembershipRevalidation(env, budget));
   await runIsolated('pollDeadlines', () => sweepPollDeadlines(env, budget));
   await runIsolated('changeRequestDeadlines', () => sweepChangeRequestDeadlines(env, budget));
@@ -3103,13 +3127,6 @@ export async function runReminderSweep(env: Env): Promise<void> {
   // test/pass6.test.ts) is more time-sensitive than a warning DM or a purge
   // that would fire again next tick regardless.
   await runIsolated('staleAccounts', () => sweepStaleAccounts(env, budget));
-  // After staleAccounts, so it is genuinely last among the budget-charged
-  // sweeps (IDEAS item 2 / specs/0017). A session that shows up on someone's
-  // Google calendar twenty minutes later is fine; a reminder that never goes
-  // out is not, so every DM above it gets first call on the allowance. What
-  // this tick cannot afford is at the front of the next tick's page, by the
-  // sweep's own last_synced_at ordering.
-  await runIsolated('googleCalendar', () => sweepGoogleCalendar(env, budget));
   // Last, so it settles anything that used up its final attempt during this
   // tick rather than leaving it for the next one.
   await runIsolated('reapExhaustedDeliveries', () => reapExhaustedDeliveries(env));
