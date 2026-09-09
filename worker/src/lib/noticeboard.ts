@@ -87,11 +87,18 @@ export async function buildNoticeboard(
   // noticeboard would advertise something that may never happen. A poll that
   // has resolved has a real start_at and is picked up by the range test like
   // any other event.
+  //
+  // Hence `status IN ('active','resolved')` rather than `= 'active'`, which is
+  // the form freeBusy.ts already uses. A resolved poll's status *is*
+  // 'resolved', so the narrower test silently swallowed every poll that had
+  // reached a decision -- and made the poll clause below dead code, since
+  // nothing could reach it that 'active' had not already excluded. The
+  // unresolved-poll test still passed, for the wrong reason.
   const { results: events } = await env.DB.prepare(
     `SELECT * FROM events
      WHERE guild_id = ?
        AND is_private = 0
-       AND status = 'active'
+       AND status IN ('active','resolved')
        AND (
          is_recurring = 1
          OR (start_at IS NOT NULL AND start_at <= ? AND COALESCE(end_at, start_at) >= ?)

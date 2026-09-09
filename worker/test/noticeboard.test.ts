@@ -169,6 +169,27 @@ describe('the server noticeboard', () => {
     expect(await fetchBoard(env, 'bystander')).toEqual([]);
   });
 
+  it('does advertise a poll once it has resolved', async () => {
+    const { db, env } = setup();
+    await seedServer(db);
+    await seedEvent(db, {
+      id: 'evt-poll-done',
+      organizerId: 'organizer',
+      title: 'Which night? (decided)',
+      eventType: 'poll',
+      startAt: Date.now() + 3 * DAY_MS,
+      endAt: Date.now() + 3 * DAY_MS + 2 * HOUR_MS,
+    });
+    await db.prepare(`UPDATE events SET status = 'resolved' WHERE id = 'evt-poll-done'`).run();
+
+    // The other half of the rule above, and the half that was broken: a
+    // resolved poll has a real time and is an ordinary event from here on, so
+    // it belongs on the board. Its status is 'resolved' rather than 'active',
+    // which is exactly what the old `status = 'active'` filter threw away.
+    const board = await fetchBoard(env, 'bystander');
+    expect(board.map((i) => i.eventId)).toEqual(['evt-poll-done']);
+  });
+
   it('expands a recurring series, with per-occurrence answers', async () => {
     const { db, env } = setup();
     await seedServer(db);

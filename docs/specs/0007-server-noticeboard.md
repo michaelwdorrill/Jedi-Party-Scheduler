@@ -119,3 +119,19 @@ listing either would advertise a session that may never happen — the same
 reasoning `lib/freeBusy.ts` applies to what counts as busy. Unresolved polls
 are excluded outright; a resolved one has a real `start_at` and appears like
 any other event.
+
+**The second half of that was wrong in the first build, and the test suite
+agreed with it.** A resolved poll's `status` is `'resolved'`, not `'active'`,
+so the query's `status = 'active'` threw every decided poll off the board —
+and in doing so made the poll clause after it unreachable, since nothing could
+survive to be tested by it. What hid this is that the only poll test asserted
+an *absence*: the unresolved poll was correctly missing from the board, but for
+the wrong reason, and a test that passes for the wrong reason cannot fail when
+the reason changes. The fix is `status IN ('active','resolved')`, the form
+`freeBusy.ts` was already using, plus the test asserting the resolved poll is
+*present* — which fails against the old query, checked rather than assumed.
+
+The general lesson is idea 31's again, from the other side: a filter tested
+only by what it excludes is half-tested. Every "must not appear" assertion here
+now has a paired "must appear" one, because absence is the answer a broken
+query gives too.
