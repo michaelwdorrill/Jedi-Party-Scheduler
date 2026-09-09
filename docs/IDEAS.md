@@ -184,65 +184,6 @@ promises the exact opposite) are in
 `specs/0007-server-noticeboard.md`. Still open.
 
 
-### 23. The sandbox has no frontend, so the sandbox-first rule has a blind spot for frontend-only changes — partly shipped in v0.4.1
-
-`deploy-sandbox.yml` is worker-only — every step runs with
-`working-directory: worker` — and `deploy-pages.yml` publishes the frontend
-from `main` and nowhere else. So pushing a frontend-only branch to `sandbox`
-deploys a Worker that didn't change and puts the actual diff nowhere anyone
-can click.
-
-`SETUP.md` and CLAUDE.md already say the intended route is
-`VITE_API_BASE_URL=<sandbox worker url> npm run dev` locally, and for a
-worker change that's clearly right — a second Pages deployment would be
-cost for no benefit. But v0.4 is three branches of almost entirely
-frontend work (`specs/0009`), which is the first time the gap really
-bites: "verify it on the sandbox" turns into "run it on your own machine",
-which only Michael can do, and which leaves no artifact anyone else can
-look at.
-
-Sharper than first written: `deploy-sandbox.yml`'s push trigger also
-carries `paths: ['worker/**', '.github/workflows/deploy-sandbox.yml']`, so
-a frontend-only push to `sandbox` is not merely unhelpful — it is a
-complete no-op, and the Actions tab shows no run at all. That path filter
-is *correct* (deploying an unchanged Worker achieves nothing), which is
-what makes this a design gap rather than a bug: there is simply no branch
-you can push a frontend change to and have anything happen.
-
-Worth knowing alongside it: `ci.yml` runs on `push: branches: [main]` and
-on `pull_request`, so a feature branch with no PR open gets no CI either.
-A frontend branch therefore has *zero* automated verification until a PR
-exists — which is fine if you know it, and misleading if you assume
-pushing a branch ran something.
-
-Found while pushing v0.4 branch 1. Worth deciding between:
-- **A sandbox Pages project.** Cleanest, and makes "go look at it" a link
-  rather than a local build. Cost is a second Pages deployment plus the
-  env-parity surface that `check:env-parity` would want extending to.
-- **A preview build artifact on CI.** Cheaper — upload `frontend/dist`
-  from the existing CI run so any branch has something downloadable — but
-  it's a static bundle with no API base URL baked in, so it needs one
-  configured at build time to be useful.
-- **Leave it, and make the rule explicit.** Say plainly in CLAUDE.md that
-  frontend-only changes are verified locally, so nobody reads
-  "sandbox-first" as promising something it can't do for them.
-
-The third is free and should happen regardless of whether the first two do.
-
-**Partially done** — the third option shipped in v0.4.1: CLAUDE.md now
-says plainly that the sandbox is the Worker only, that a frontend-only
-push to `sandbox` produces no workflow run at all, and that frontend
-changes are verified locally against the deployed sandbox Worker. It also
-records the two adjacent traps (no CI on a branch without a PR; a mixed
-branch deploys its worker half only, which is the more confusing of the
-two because something *does* run).
-
-**This stays open.** Writing the rule down is not closing the gap — there
-is still no branch you can push a frontend change to and have anything
-happen, and the choice between a sandbox Pages project and a CI preview
-bundle is still unmade.
-
-
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
@@ -301,6 +242,66 @@ that is a correctness issue rather than a cosmetic one.
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
 1.0 test above: where an entry argues its way to a decision and rejects an
 alternative, that argument is why the entry is still here at all.
+
+### 23. The sandbox has no frontend, so the sandbox-first rule has a blind spot for frontend-only changes — closed in v0.8.1
+
+`deploy-sandbox.yml` is worker-only — every step runs with
+`working-directory: worker`, and its push trigger carries
+`paths: ['worker/**', '.github/workflows/deploy-sandbox.yml']` — and
+`deploy-pages.yml` publishes the frontend from `main` and nowhere else. So a
+frontend-only push to `sandbox` is not merely unhelpful, it is a complete
+no-op: the Actions tab shows no run at all. That path filter is *correct*
+(deploying an unchanged Worker achieves nothing), which is what made this a
+design gap rather than a bug.
+
+Worth knowing alongside it: `ci.yml` runs on `push: branches: [main]` and on
+`pull_request`, so a feature branch with no PR open gets no CI either. A
+frontend branch therefore has *zero* automated verification until a PR
+exists — fine if you know it, misleading if you assume pushing a branch ran
+something.
+
+Found while pushing v0.4 branch 1. Three options were on the table: a sandbox
+Pages project, a downloadable preview bundle from CI, or leaving it and
+making the rule explicit. The third shipped in v0.4.1 and the item stayed
+open on the grounds that writing a rule down is not closing a gap.
+
+**Closed in v0.8.1, and the reason it took two years to close is that the gap
+was smaller than this entry claimed.** Verifying a frontend change against
+the sandbox was never actually impossible — `VITE_API_BASE_URL=<sandbox>
+npm run dev` does it, and every frontend release since v0.4 was verified that
+way. What that misses is only two things:
+
+- **It is a dev build, not the bundle users get.** React `StrictMode`
+  double-invokes effects, nothing is minified, modules load differently.
+  This is the real gap, and it is a *correctness* one rather than a
+  convenience one. v0.8's own verification is the worked example: the tail
+  showed every API request firing twice, which looked like a polling bug and
+  was StrictMode — behaviour that does not exist in production at all.
+- **Nobody but Michael can look.** No link, no artifact.
+
+The first needs no infrastructure whatsoever. `npm run build` followed by
+`npx vite preview --port 5173` serves the real bundle on the same origin the
+dev server uses, so CORS and the OAuth redirects keep working untouched. That
+is now written into CLAUDE.md and `docs/SETUP.md` as the second half of the
+local route, and it closes the only part of this item that could produce a
+wrong answer.
+
+**A sandbox Pages project was considered and rejected, and the reason is
+worth keeping** because it is not the one this entry originally assumed
+(cost). `FRONTEND_URL` in `[env.sandbox.vars]` is a *single* origin doing
+double duty: `router.ts` derives the CORS origin from it, and both the
+Discord and Google OAuth callbacks redirect back to it. A hosted sandbox
+frontend cannot simply be added alongside `npm run dev` — one of them would
+have to lose, or CORS and the OAuth redirect handling would have to accept a
+*list* of origins. That is widening auth-adjacent code to buy convenience,
+and the decision landed immediately before a security review, which made it
+an easy call.
+
+The second gap — letting someone other than Michael look at a frontend
+change — is real and remains unaddressed. A CI preview bundle (upload
+`frontend/dist` from the existing run) is the cheap answer if it ever bites.
+In two years it has not, and an unbuilt option is cheaper than an unused
+feature.
 
 ### 36. Should a group be server-agnostic, requiring only that people share a server? — shipped in v0.7.2
 

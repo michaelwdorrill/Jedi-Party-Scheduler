@@ -130,11 +130,35 @@ achieves nothing), which is what makes this a gap in the route rather than
 a bug to fix.
 
 So, plainly: **frontend-only changes are verified locally, not on the
-sandbox.** The route is `VITE_API_BASE_URL=<sandbox worker url> npm run dev`
-in `frontend/`, run by Michael, against the deployed sandbox Worker. A
-remote session cannot do that step and should say so specifically —
-"this is frontend-only, so it needs a local run against the sandbox
-Worker" — rather than reporting a sandbox deploy that never happened.
+sandbox**, run by Michael against the deployed sandbox Worker. A remote
+session cannot do that step and should say so specifically — "this is
+frontend-only, so it needs a local run against the sandbox Worker" — rather
+than reporting a sandbox deploy that never happened.
+
+**That local run has two steps, and doing only the first is the trap.**
+
+```
+cd frontend
+$env:VITE_API_BASE_URL = "<sandbox worker url>"
+
+npm run dev                              # 1. iterate
+npm run build; npx vite preview --port 5173   # 2. the bundle users actually get
+```
+
+Step 2 is not ceremony. `npm run dev` serves a *dev* build: React
+`StrictMode` double-invokes every effect, nothing is minified, and modules
+load differently. Behaviour you observe there is not always behaviour a user
+gets — v0.8's verification watched the frontend fire every request twice and
+that was StrictMode, invisible in production. Idea 17's own write-up records
+checking dev *and* `vite preview` for the same reason, after a Vite major
+upgrade.
+
+**`--port 5173` is load-bearing, not a default.** The sandbox Worker's
+`FRONTEND_URL` is `http://localhost:5173`, and that one value drives both the
+CORS origin (`router.ts`) and where the Discord and Google OAuth callbacks
+redirect back to. Serve the built output anywhere else — `vite preview`
+defaults to 4173 — and login and the calendar connect flow both break in ways
+that look like app bugs.
 
 Two related traps worth knowing before assuming a push ran something:
 `ci.yml` triggers on `push` to `main` and on `pull_request`, so a feature
@@ -143,8 +167,13 @@ automated verification until a PR exists. And a *mixed* branch (worker and
 frontend) pushed to `sandbox` deploys the worker half only, which is the
 more confusing case of the two, because something does run.
 
-Whether to close this properly — a second Pages project for the sandbox, or
-a downloadable preview bundle from CI — is IDEAS.md item 23, still open.
+**This is now the settled answer, not an interim one** (IDEAS item 23,
+closed Sept 2026). A second Pages project was considered and rejected: the
+sandbox Worker's `FRONTEND_URL` is a single origin doing double duty for CORS
+and OAuth redirects, so adding a hosted sandbox frontend would mean teaching
+both to accept a *list* of origins — widening auth-adjacent code for a
+convenience. A CI preview bundle stays available if "let someone else look"
+ever becomes a real need; in two years it has not.
 
 Three automated guardrails exist so sandbox/production drift is caught by
 CI rather than by hand later — don't route around them:

@@ -670,6 +670,30 @@ environments). What's actually separate is the *data* and the *bot*.
    the OAuth redirect target and redirects back to whatever `FRONTEND_URL`
    says (ARCHITECTURE.md's auth section), so login lands back on your local
    dev server automatically.
+
+   **Before merging a frontend change, run the production bundle too**, with
+   the same env var still set:
+   ```powershell
+   npm run build
+   npx vite preview --port 5173
+   ```
+   `npm run dev` is a *dev* build: React `StrictMode` double-invokes every
+   effect, nothing is minified, and modules load differently — so it is not
+   what a user gets. v0.8's sandbox verification watched every API request
+   fire twice and that was StrictMode, absent from production entirely. The
+   frontend dependency upgrade in idea 17 records the same discipline, after
+   a Vite major that worked in dev and needed the built output checked too.
+
+   **`--port 5173` is required, not cosmetic.** `vite preview` defaults to
+   4173, and `FRONTEND_URL` is a single origin serving as both the CORS
+   origin and the OAuth redirect target — so on any other port, login and the
+   Google connect flow break in ways that look like application bugs.
+
+   This two-step local run is the *settled* route for frontend verification,
+   not a stopgap (IDEAS item 23, closed Sept 2026). A hosted sandbox frontend
+   was considered and rejected: it would require `FRONTEND_URL` to become a
+   list of origins, changing CORS and OAuth redirect handling to buy
+   convenience.
 8. **Seed some synthetic data** to exercise the cron sweep (an event ~1h
    out, one ~24h out, a past-deadline poll, an idle group) instead of
    starting from an empty database:
