@@ -388,6 +388,20 @@ export default function EventFormPage() {
     ]),
   );
 
+  // Found in 0.8.1 sandbox verification: nothing stopped "Confirm once N
+  // people say yes" from being set above the number of people actually
+  // invited, which asks for a threshold the poll can never reach. The +1 is
+  // the organizer -- resolveInviteeUserIds always folds them in server-side
+  // (they get a real invite row even without being added here explicitly),
+  // so the true ceiling is one more than inviteeIds ever shows.
+  //
+  // This is a UI hint, not the enforcement. It clamps the field so the common
+  // mistake can't be typed in the first place, but eventWrites.ts's own
+  // assertThresholdReachable is what actually rejects a request that still
+  // gets here too high -- through a race with a concurrent invite removal, or
+  // a client that skips this page entirely.
+  const maxPollThreshold = inviteeIds.length + 1;
+
   // Invitees no longer need clearing on a server change -- they're upstream
   // of it now, and the select only ever offers servers the current roster
   // actually has in common. Voice channels are still guild-scoped, so a
@@ -867,9 +881,10 @@ export default function EventFormPage() {
               <input
                 type="number"
                 min={1}
+                max={maxPollThreshold}
                 disabled={pollStrategy !== 'threshold'}
                 value={pollThreshold}
-                onChange={(e) => setPollThreshold(Math.max(1, Number(e.target.value)))}
+                onChange={(e) => setPollThreshold(Math.min(maxPollThreshold, Math.max(1, Number(e.target.value))))}
                 className={controlClass('xs', 'w-14')}
               />
               {windowed ? 'people can make the same block' : 'people say yes'}
@@ -886,6 +901,12 @@ export default function EventFormPage() {
               {windowed ? 'Pick the best overlap at the deadline' : 'Pick the most popular slot at the deadline'}
             </label>
           </div>
+
+          {pollStrategy === 'threshold' && (
+            <p className="text-xs text-faint">
+              Capped at {maxPollThreshold} — everyone invited, organizer included.
+            </p>
+          )}
 
           {pollStrategy === 'threshold' && (
             <label className="flex items-start gap-2 text-sm text-ink-dim">

@@ -65,7 +65,13 @@ describe('a maximum-size option poll fits inside one Free-plan invocation', () =
       pollMode: 'options',
       pollResolutionMode: 'single_winner',
       pollStrategy: 'threshold',
-      pollThresholdCount: 3,
+      // 1, not the earlier 3: this fixture invites nobody, so the organizer
+      // (idea 26's automatic fold-in) is the only person who could ever vote,
+      // and assertThresholdReachable now (correctly) rejects a threshold this
+      // event could never reach. Nothing in this describe block cares what
+      // the actual number is -- these tests are about query-budget and
+      // capacity at MAX_POLL_OPTIONS, not about resolution behaviour.
+      pollThresholdCount: 1,
       pollDeadlineAt: Date.now() + 24 * HOUR_MS,
       pollOptions: maxOptions(),
       invites: { userIds: [], groupIds: [] },

@@ -105,6 +105,15 @@ describe('a pollOptions-only PATCH preserves the poll fields it did not mention 
     await seedGuild(db);
     await seedUser(db, 'organizer');
     await seedMembership(db, 'organizer', 'guild-1');
+    // Three real invitees, matching poll_threshold_count below -- this
+    // fixture seeds the row directly rather than through
+    // createEventWithInvites, so without these assertThresholdReachable's
+    // stored-count fallback would (correctly) see 0 people invited to a
+    // threshold-of-3 poll and reject the PATCH this test is actually about.
+    await seedUser(db, 'invitee-1');
+    await seedMembership(db, 'invitee-1', 'guild-1');
+    await seedUser(db, 'invitee-2');
+    await seedMembership(db, 'invitee-2', 'guild-1');
 
     const deadline = Date.now() + 24 * HOUR_MS;
     const now = Date.now();
@@ -117,6 +126,9 @@ describe('a pollOptions-only PATCH preserves the poll fields it did not mention 
     )
       .bind(deadline, now, now)
       .run();
+    await seedInvite(db, 'poll-1', 'organizer');
+    await seedInvite(db, 'poll-1', 'invitee-1');
+    await seedInvite(db, 'poll-1', 'invitee-2');
     await db.prepare(
       `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order)
        VALUES ('poll-1-opt0', 'poll-1', ?, ?, 0)`,

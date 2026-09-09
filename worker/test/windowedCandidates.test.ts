@@ -452,7 +452,10 @@ describe('creating a windowed poll', () => {
       eventType: 'poll',
       pollMode: 'window',
       pollStrategy: 'threshold',
-      pollThresholdCount: 2,
+      // 1, not 2: nobody but the organizer is invited here, and this test is
+      // about the legacy window-shape translation, not about how many votes
+      // a threshold needs.
+      pollThresholdCount: 1,
       pollDeadlineAt: Date.now() + DAY_MS,
       windowStartAt: base,
       windowEndAt: base + 8 * HOUR_MS,

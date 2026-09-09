@@ -34,6 +34,8 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
     fixed: [
       'Google Calendar sync could stop working without saying anything: a session that had already happened, a connection whose access expired, or simply a busy moment could leave it silently doing nothing. It now runs on a reliable schedule and reports what it did.',
+      'A poll’s “Confirm once N people say yes” could be set higher than the number of people actually invited, which meant it could never be reached.',
+      'A new event now defaults to 7pm–11pm instead of 1pm–5pm.',
     ],
   },
   {

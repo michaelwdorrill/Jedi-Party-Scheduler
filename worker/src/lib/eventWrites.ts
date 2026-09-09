@@ -578,6 +578,32 @@ function assertCoherentMergedEvent(stored: EventRow, input: Partial<EventWriteIn
   if (input.isRecurring !== undefined) assertCompleteScheduleShape(input);
 }
 
+// Found in 0.8.1 sandbox verification: the form lets "Confirm once N people
+// say yes" be typed freely, with nothing stopping N from exceeding the
+// number of people actually invited. A threshold that high can never be
+// reached -- the poll can only ever hit its deadline -- and the range check
+// in validateEventWriteInput doesn't catch it, because it only bounds N
+// against the app-wide MAX_RESOLVED_INVITEES ceiling, not against *this
+// event's* invite list, which validateEventWriteInput has no DB access to
+// read. So this runs later, once the invitee count is actually known --
+// after resolveInviteeUserIds on create, and after either that or a stored-
+// count read on update (see updateEvent below).
+//
+// inviteeCount includes the organizer, who resolveInviteeUserIds always folds
+// in: they are one of the people whose "yes" the threshold is counting.
+function assertThresholdReachable(
+  pollStrategy: string | null | undefined,
+  pollThresholdCount: number | null | undefined,
+  inviteeCount: number,
+): void {
+  if (pollStrategy !== 'threshold' || pollThresholdCount == null) return;
+  if (pollThresholdCount > inviteeCount) {
+    throw new ValidationError(
+      `pollThresholdCount (${pollThresholdCount}) cannot exceed the number of people invited (${inviteeCount})`,
+    );
+  }
+}
+
 function assertCompleteEventShape(input: Partial<EventWriteInput>): void {
   assertString(input.title, 'title', LIMITS.TITLE);
   assertTimezone(input.timezone, 'timezone');
@@ -897,6 +923,7 @@ export async function createEventWithInvites(
     input.invites?.groupIds ?? [],
     organizerId,
   );
+  assertThresholdReachable(input.pollStrategy, input.pollThresholdCount, invitees.length);
 
   // Everything below is one D1 batch -- a failure partway through (a full
   // event with no recurrence rule, or no invites) is exactly the partial-
@@ -1220,6 +1247,23 @@ export async function updateEvent(
         stored.organizer_id,
       )
     : null;
+
+  // assertThresholdReachable needs the invitee count either way, but this
+  // PATCH doesn't necessarily touch invites -- "raise the threshold" is a
+  // perfectly normal edit on its own. `invitees` above is only populated when
+  // the request also carries a new invite list; otherwise the count has to
+  // come from what's already stored, one extra read paid only on the PATCHes
+  // that actually need it (a poll, changing or already carrying a threshold).
+  const mergedPollStrategy = input.pollStrategy !== undefined ? input.pollStrategy : stored.poll_strategy;
+  const mergedThresholdCount =
+    input.pollThresholdCount !== undefined ? input.pollThresholdCount : stored.poll_threshold_count;
+  if (mergedPollStrategy === 'threshold' && mergedThresholdCount != null) {
+    const inviteeCount =
+      invitees !== null
+        ? invitees.length
+        : (await env.DB.prepare('SELECT COUNT(*) AS n FROM event_invites WHERE event_id = ?').bind(eventId).first<{ n: number }>())!.n;
+    assertThresholdReachable(mergedPollStrategy, mergedThresholdCount, inviteeCount);
+  }
 
   // Every conditional block below queues its statements instead of running
   // them immediately; one env.DB.batch() at the end makes the whole PATCH
