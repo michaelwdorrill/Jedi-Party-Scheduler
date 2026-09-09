@@ -71,8 +71,30 @@ export default function PrivacyPage() {
           title, its start and end times, the name of the Discord server it belongs to, and a link
           back to the event in this app. <strong>Event descriptions are never sent to Google.</strong>{' '}
           Only sessions you are actually committed to are written — never a poll's proposed dates,
-          never an event you have declined, and never your personal time blocks. Nothing is read out
-          of your Google calendar and into this app.
+          never an event you have declined, and never your personal time blocks.
+        </p>
+        <p>
+          <strong>Reading a calendar is separate, and off unless you switch it on.</strong> You can
+          additionally nominate <em>one</em> of your Google calendars to be read, so that people
+          scheduling with you can see when you are already busy. Connecting for the writing above
+          never starts this; it is a second choice, and it defaults to none.
+        </p>
+        <p>
+          When it is on, this service asks Google only for <strong>busy and free times</strong> on
+          that one calendar — not the events themselves. What comes back is blocks of time with no
+          titles, no attendees and no detail of any kind, and that is also all anyone else ever sees:
+          the same opaque blocks described under "Free/busy availability" below. Turning off
+          "Let people I share a server with see when I'm busy" hides them, as it hides everything
+          else.
+        </p>
+        <p>
+          <strong>An honest limitation worth stating plainly:</strong> Google's permissions are
+          granted per account, not per calendar. There is no way to give this service access to one
+          calendar alone, so the permission you grant technically covers all of them. That only one
+          is ever read is enforced by this service's own code — it asks about the single calendar you
+          picked and no others — rather than by a restriction Google imposes on it. If that
+          distinction matters to you, the answer is to leave reading switched off, which is the
+          default.
         </p>
       </Section>
 
@@ -110,8 +132,24 @@ export default function PrivacyPage() {
         <Bullets
           items={[
             <>
-              <strong>Events.</strong> Only the organiser and the people invited to an event can see
-              its details. Sharing a Discord server with someone does not let you see their events.
+              <strong>Events you were invited to.</strong> The full details of an event &mdash;
+              including its description &mdash; are visible only to the organiser and the people
+              invited to it.
+            </>,
+            <>
+              <strong>The server noticeboard.</strong> Members of a server can see a{' '}
+              <em>limited</em> view of events on that server even when they were not invited: the
+              title, when it is, and who is invited along with their answer. Descriptions are never
+              shown there, and neither is anything on a server you are not a member of.
+              <span className="block pt-1">
+                Two things about this are deliberate. An organiser can keep any event off the
+                noticeboard when they create or edit it, and{' '}
+                <strong>
+                  every event created before this feature existed stays private permanently
+                </strong>{' '}
+                &mdash; nothing that was made under the previous policy changed visibility when this
+                one took effect.
+              </span>
             </>,
             <>
               <strong>Personal time blocks.</strong> Visible only to you. Nobody else can retrieve

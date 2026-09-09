@@ -21,6 +21,22 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.8.1',
+    date: '9 September 2026',
+    summary: 'A noticeboard for each server, and Google availability read back in.',
+    added: [
+      'Each server now has a “What’s on” board: the sessions happening there, whether or not you were invited, with who’s going and what they’ve answered. Descriptions are never shown on it. When you create or edit an event you can keep it off the board entirely.',
+      'Every event that existed before this update stays private permanently. Nothing you made under the old rules became visible to anyone.',
+      'If you’ve connected Google Calendar, you can now also nominate one calendar to be read back, so people scheduling with you can see when you’re already busy. It’s off unless you turn it on, it’s separate from the calendar sessions are written to, and others only ever see blank blocks of time — never what’s in them.',
+    ],
+    changed: [
+      'The Privacy Policy and Terms have been updated for both of the above, so you’ll be asked to agree again. The short version: a server can see a limited view of what’s on unless the organiser hides it, and Google reads nothing unless you ask it to.',
+    ],
+    fixed: [
+      'Google Calendar sync could stop working without saying anything: a session that had already happened, a connection whose access expired, or simply a busy moment could leave it silently doing nothing. It now runs on a reliable schedule and reports what it did.',
+    ],
+  },
+  {
     version: '0.8',
     date: '5 September 2026',
     summary: 'Your sessions can now appear on your own Google calendar.',

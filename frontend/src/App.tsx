@@ -7,6 +7,7 @@ import HomePage from './pages/HomePage';
 import EventDetailPage from './pages/EventDetailPage';
 import EventFormPage from './pages/EventFormPage';
 import GroupsPage from './pages/GroupsPage';
+import NoticeboardPage from './pages/NoticeboardPage';
 import PersonalEventPage from './pages/PersonalEventPage';
 import PrivacyPage from './pages/PrivacyPage';
 import TermsPage from './pages/TermsPage';
@@ -39,6 +40,7 @@ export default function App() {
               the old Dashboard's empty state linked to it. */}
           <Route path="/calendar" element={<Navigate to="/" replace />} />
           <Route path="/groups" element={<GroupsPage />} />
+          <Route path="/noticeboard" element={<NoticeboardPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/admin/users" element={<AdminUsersPage />} />
           <Route path="/admin/guild-requests" element={<AdminGuildRequestsPage />} />

@@ -1,7 +1,7 @@
 # 0007 — The server noticeboard
 
-**Status:** Decisions locked, not yet designed
-**Covers:** `IDEAS.md` item 5 (second half) · **Phase:** TBD · **Ships in:** TBD
+**Status:** Built — v0.8.1
+**Covers:** `IDEAS.md` item 5 (second half) · **Phase:** 5 · **Ships in:** 0.8.1
 
 ## What this is
 
@@ -79,3 +79,43 @@ budget, not a widened `buildCalendarOccurrences`.
 **4. Interaction with personal time blocks.** Personal blocks are private by
 design and are not events on a server. They are out of scope here and must
 stay invisible on the noticeboard. Worth an explicit test.
+
+
+## How the blockers were resolved
+
+**1. The Privacy Policy** was rewritten in the same release, and the policy
+version bumped 3 → 4 so everyone re-accepts. The "Events" bullet split in two:
+full detail still goes only to the organiser and invitees, and a second bullet
+describes the limited view a server gets. Shipped alongside the Google pull
+half so both changes cost one re-acceptance rather than two.
+
+**2. `is_private` and the backfill** landed as migration 0038, taking the
+spec's own recommendation over the timestamp alternative. `ADD COLUMN ...
+DEFAULT 0` followed by `UPDATE events SET is_private = 1`: new rows visible,
+every existing row explicitly private. That single UPDATE is what makes this a
+new rule for new events rather than a retroactive change of terms, and there is
+a test asserting it is still present in the migration — its absence would be
+invisible in review and catastrophic in production.
+
+**3. Query shape** got `lib/noticeboard.ts` rather than a widened
+`buildCalendarOccurrences`, exactly as this spec predicted. The reasoning held
+up on contact: that function is bounded by what the *caller* is personally
+attached to, and 0006's whole cost argument rests on that bound; scoping by
+guild membership removes it. So this query has its own ~2-month range cap, its
+own 100-event limit ordered by start time, and its own shared occurrence
+ceiling for recurring expansion — the technique `lib/freeBusy.ts` uses, for the
+same reason. It refuses with a 422 rather than truncating, because a silently
+shortened noticeboard is indistinguishable from a quiet server.
+
+**4. Personal time blocks** never had to be filtered: they live in
+`personal_events`, which this query does not touch. There is a test asserting a
+personal block's title never appears in the response, checked against the raw
+serialised body rather than the parsed object.
+
+## One thing the decisions did not cover
+
+Polls. An unresolved poll has no time yet and its candidate days are maybes, so
+listing either would advertise a session that may never happen — the same
+reasoning `lib/freeBusy.ts` applies to what counts as busy. Unresolved polls
+are excluded outright; a resolved one has a real `start_at` and appears like
+any other event.

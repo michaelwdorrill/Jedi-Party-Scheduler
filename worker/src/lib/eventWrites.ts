@@ -43,6 +43,13 @@ export interface EventWriteInput {
   voiceChannelId?: string | null;
   voiceChannelName?: string | null;
 
+  // specs/0007's decision 1: an event on a server appears on that server's
+  // noticeboard unless the organiser marks it private. Absent means visible,
+  // which is the schema default for new rows -- and deliberately NOT what
+  // existing rows got, since migration 0038 backfilled every one of them to
+  // private rather than changing their visibility retroactively.
+  isPrivate?: boolean;
+
   // specs/0014 stage 3, decision 4. Optional; `null`/absent means no
   // minimum. Only settable on a non-recurring, non-poll event -- see
   // assertCoherentMergedEvent and assertCompleteEventShape for why the
@@ -310,6 +317,10 @@ function validateEventWriteInput(input: Partial<EventWriteInput>, requireComplet
   if (input.timezone !== undefined) assertTimezone(input.timezone, 'timezone');
   if (input.voiceChannelId !== undefined) assertOptionalString(input.voiceChannelId, 'voiceChannelId', 64);
   if (input.voiceChannelName !== undefined) assertOptionalString(input.voiceChannelName, 'voiceChannelName', LIMITS.CHANNEL_NAME);
+  // specs/0007. Checked at runtime like every other client-supplied field:
+  // TypeScript's generic on readJsonBody is a compile-time annotation only, and
+  // a truthy string here would silently flip an event's visibility.
+  if (input.isPrivate !== undefined) assertBoolean(input.isPrivate, 'isPrivate');
   if (input.eventType !== undefined) assertOneOf(input.eventType, 'eventType', ['single', 'poll'] as const);
   // Typed as boolean but never checked at runtime until now: a string or a
   // number here silently reached the `input.eventType === 'single' &&
@@ -912,8 +923,8 @@ export async function createEventWithInvites(
          poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
          is_recurring, voice_channel_id, voice_channel_name, minimum_attendees, auto_cancel_below_minimum,
          minimum_attendees_deadline_at, minimum_attendees_deadline_hours_before,
-         created_at, updated_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         is_private, created_at, updated_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE ${eventQuotaGuardSql(isRecurring)}`,
     ).bind(
       eventId,
@@ -951,6 +962,10 @@ export async function createEventWithInvites(
       input.autoCancelBelowMinimum ? 1 : 0,
       input.minimumAttendeesDeadlineAt ?? null,
       input.minimumAttendeesDeadlineHoursBefore ?? null,
+      // specs/0007: visible on the server's noticeboard unless the organiser
+      // said otherwise. Written explicitly rather than left to the column
+      // default so the value is decided in one readable place.
+      input.isPrivate ? 1 : 0,
       now,
       now,
       ...eventQuotaGuardParams(guildId, organizerId, isRecurring),
@@ -1106,6 +1121,14 @@ export async function updateEvent(
   if (input.voiceChannelId !== undefined) {
     setClauses.push('voice_channel_id = ?', 'voice_channel_name = ?');
     values.push(input.voiceChannelId, input.voiceChannelName ?? null);
+  }
+  // specs/0007. Changeable after creation in both directions: an organiser who
+  // realises a session is more private than they thought must be able to take
+  // it off the noticeboard, and hiding something is exactly the direction that
+  // should never require deleting and recreating it.
+  if (input.isPrivate !== undefined) {
+    setClauses.push('is_private = ?');
+    values.push(input.isPrivate ? 1 : 0);
   }
   // specs/0014 stage 3. Coherence (non-recurring, non-poll) already checked
   // by assertCoherentMergedEvent against the merged shape, not just this

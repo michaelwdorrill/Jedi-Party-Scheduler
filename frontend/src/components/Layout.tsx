@@ -60,6 +60,9 @@ export default function Layout() {
               <NavLink to="/" end className={navLinkClass}>
                 Calendar
               </NavLink>
+              <NavLink to="/noticeboard" className={navLinkClass}>
+                What's on
+              </NavLink>
               <NavLink to="/groups" className={navLinkClass}>
                 Groups
               </NavLink>

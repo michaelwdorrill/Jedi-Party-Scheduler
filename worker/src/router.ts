@@ -15,7 +15,7 @@ import { discordInteractionRoutes } from './routes/discordInteractions';
 import { guildRequestRoutes } from './routes/guildRequests';
 import { googleRoutes } from './routes/google';
 import { MembershipUnavailableError } from './lib/db';
-import { BodyTooLargeError, ConflictError, FreeBusyTooLargeError, MAX_BODY_BYTES, ValidationError } from './lib/validate';
+import { BodyTooLargeError, ConflictError, FreeBusyTooLargeError, MAX_BODY_BYTES, NoticeboardTooLargeError, ValidationError } from './lib/validate';
 
 export function buildApp() {
   const app = new Hono<AppEnv>();
@@ -55,6 +55,10 @@ export function buildApp() {
     // failed is that answering it accurately would cost more work than one
     // invocation is allowed -- so it is refused rather than answered wrongly.
     if (err instanceof FreeBusyTooLargeError) return c.text(err.message, 422);
+    // Same 422, same reasoning (specs/0007): the request is valid and
+    // authorized, and answering it accurately costs more than one invocation
+    // may spend -- so it is refused rather than answered incompletely.
+    if (err instanceof NoticeboardTooLargeError) return c.text(err.message, 422);
     // Membership couldn't be confirmed with Discord and the cached answer is
     // too old to keep honouring. Deliberately a 503, not a 403: nothing about
     // the caller's authorization has been established, so telling them

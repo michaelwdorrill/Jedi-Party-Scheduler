@@ -33,7 +33,7 @@ enough yet.
 | [0004-poll-datetime-consistency](0004-poll-datetime-consistency.md) | Idea 6 | 2 | 0.2 | Built |
 | [0005-event-invite-links](0005-event-invite-links.md) | Idea 3 | 2 | 0.2 | Built |
 | [0006-calendar-first](0006-calendar-first.md) | Idea 5 | 3 | 0.3 | Built |
-| [0007-server-noticeboard](0007-server-noticeboard.md) | Idea 5 (second half) | TBD | TBD | Decisions locked |
+| [0007-server-noticeboard](0007-server-noticeboard.md) | Idea 5 (second half) | 5 | 0.8.1 | Built |
 | [0008-visual-design-pass](0008-visual-design-pass.md) | Ideas 8, 20 | 3.5 | 0.4 | Superseded by 0009 |
 | [0009-binary-sunset](0009-binary-sunset.md) | Ideas 8, 20 | 3.5 | 0.4 | Built |
 | [0010-interactive-bot](0010-interactive-bot.md) | Idea 19 (and 32) | 3.75 | 0.5 | Built |
@@ -43,7 +43,7 @@ enough yet.
 | [0014-attendance-per-occurrence](0014-attendance-per-occurrence.md) | Ideas 47, 48 (absorbs 46) | 3.8x | 0.6 / 0.6.1 / 0.6.2 | Built |
 | [0015-self-service-bot-add](0015-self-service-bot-add.md) | Idea 9 | 4 | 0.7.1 | Built |
 | [0016-stale-account-purge](0016-stale-account-purge.md) | Idea 10 | 4 | 0.7 | Built |
-| [0017-google-calendar-sync](0017-google-calendar-sync.md) | Idea 2 | 5 | 0.8 (push) / 0.8.1 (pull) | Built (push half) |
+| [0017-google-calendar-sync](0017-google-calendar-sync.md) | Idea 2 | 5 | 0.8 (push) / 0.8.1 (pull) | Built |
 
 This index had drifted: it stopped at 0003 while 0004–0007 existed, and
 listed 0003 as Draft after it shipped. Keeping it current is cheap and it is

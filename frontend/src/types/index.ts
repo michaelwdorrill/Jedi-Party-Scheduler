@@ -176,6 +176,29 @@ export interface EventInvite {
 }
 
 // A single occurrence as returned by GET /guilds/:guildId/events?from=&to=
+// specs/0007: whether this event is kept off its server's noticeboard.
+// Absent/false means visible to the server, which is the default for events
+// created after v0.8.1 — every event that predates it was backfilled private.
+export interface NoticeboardAttendee {
+  userId: string;
+  username: string;
+  globalName: string | null;
+  avatarHash: string | null;
+  rsvpStatus: RsvpStatus | null;
+}
+
+export interface NoticeboardOccurrence {
+  occurrenceId: string;
+  eventId: string;
+  title: string;
+  game: string | null;
+  startAt: number;
+  endAt: number;
+  isRecurring: boolean;
+  organizerId: string;
+  attendees: NoticeboardAttendee[];
+}
+
 export interface EventOccurrence {
   occurrenceId: string; // `${eventId}::${date}` for recurring, eventId otherwise
   eventId: string;
@@ -259,6 +282,10 @@ export interface EventDetail extends EventOccurrence {
   windowBlockMinutes: number | null;
   voiceChannelId: string | null;
   voiceChannelName: string | null;
+  // specs/0007: kept off the server's noticeboard. False means visible to the
+  // whole server, which is the default for events created from v0.8.1 onward;
+  // every event predating it was backfilled private by migration 0038.
+  isPrivate: boolean;
   // specs/0014 stage 3, decision 4 / IDEAS item 54. Available on both
   // recurring and non-recurring single events now -- which of the two
   // deadline fields below applies is decided by isRecurring.

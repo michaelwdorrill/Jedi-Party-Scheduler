@@ -29,6 +29,9 @@ export interface EventRow {
   window_end_at: number | null;
   window_block_minutes: number | null;
   is_recurring: number;
+  // specs/0007. Optional because narrower SELECTs and older test fixtures
+  // don't carry it; absent is read as visible, matching the column default.
+  is_private?: number;
   voice_channel_id: string | null;
   voice_channel_name: string | null;
   created_at: number;

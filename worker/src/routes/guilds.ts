@@ -5,6 +5,7 @@ import { isGuildMember, listUserGuilds, MEMBERSHIP_GRACE_MS } from '../lib/db';
 import { createEventWithInvites, type EventWriteInput } from '../lib/eventWrites';
 import { buildCalendarOccurrences } from '../lib/calendar';
 import { computeBusyBlocksForUsers } from '../lib/freeBusy';
+import { buildNoticeboard } from '../lib/noticeboard';
 import { fetchGuildVoiceChannels } from '../lib/discord';
 import { assertStringArray, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
 
@@ -103,6 +104,29 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
     });
   }
   return c.json(out);
+});
+
+// IDEAS item 5 (second half) / docs/specs/0007: what is on in this server.
+//
+// The one endpoint in this app that returns event details the caller was not
+// invited to, which is why every word of its filter matters:
+//
+//   - isGuildMember gates it, so a non-member sees nothing at all. That check
+//     also revalidates a stale membership against Discord, so someone who left
+//     the server stops seeing its noticeboard rather than keeping a cached
+//     view of it.
+//   - is_private = 0 and migration 0038's backfill together mean nothing
+//     created under the previous Privacy Policy can appear here.
+//   - descriptions are never selected, per the spec's decision 3.
+//   - personal time blocks live in a different table entirely and cannot
+//     surface through this query at all (blocker 4).
+guildRoutes.get('/:guildId/noticeboard', async (c) => {
+  const userId = c.get('userId');
+  const guildId = c.req.param('guildId');
+  if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
+
+  const { from, to } = parseRangeQuery(c, LIMITS.MAX_NOTICEBOARD_RANGE_MS);
+  return c.json(await buildNoticeboard(c.env, guildId, from, to));
 });
 
 guildRoutes.get('/:guildId/voice-channels', async (c) => {

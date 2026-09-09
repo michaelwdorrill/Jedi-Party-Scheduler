@@ -55,10 +55,28 @@
 // was still "stub". The capability is in the deployed code, and the policy
 // should describe the code rather than the config.
 //
+// Bumped to 4 for v0.8.1, and this one changes what other people can see
+// about you rather than which vendors are involved — which makes it the most
+// substantive of the four.
+//
+// Two changes, both needing consent that the previous version cannot stand in
+// for. The server noticeboard (specs/0007) makes a limited view of an event —
+// title, time, who is invited and their answer — visible to members of its
+// server who were not invited, where the old policy said in as many words that
+// "sharing a Discord server with someone does not let you see their events".
+// And the Google pull half (specs/0017) reads busy/free times from one
+// nominated calendar, which is a new direction of data flow entirely.
+//
+// What makes the noticeboard defensible rather than a retroactive change of
+// terms is migration 0038: every event that already existed was backfilled
+// private, so nothing created under version 3 changed visibility under it.
+// People consent to the new rule for new events, which is the only honest way
+// to ship this.
+//
 // It is guarded now: `../../policy-version.txt` has to carry the same number,
 // and `npm run check:policy-version` (wired into CI) fails the build if they
 // disagree, the same shape check-env-parity.mjs already used for
 // wrangler.toml. Bumping this for real means updating both files in the same
 // commit, on purpose -- an accidental edit surviving a `git checkout` or a
 // stray `git add -A` now fails the build instead of shipping silently.
-export const CURRENT_POLICY_VERSION = 3;
+export const CURRENT_POLICY_VERSION = 4;

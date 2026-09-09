@@ -57,132 +57,13 @@ identity, not a position — it never changes and is never reused.
 
 ## Still open
 
-### 2. Google Calendar sync — push half shipped in v0.8, pull half still open
+*Nothing.*
 
-Pull a single chosen Google calendar (not all of them — e.g. just "D&D
-Scheduling", not "Family" or "Fulham FC") in as read-only availability on
-the Uncle Owen calendar, and push events the user is part of back out to
-Google. Flagged as the biggest lift: real OAuth-with-Google plumbing, a
-second set of tokens to store/refresh securely, a sync/conflict model, and a
-new privacy surface (which calendar, which direction, what Google sees) that
-the Privacy Policy would need to cover.
-
-**Decided (Aug 2026), after considering and rejecting an .ics/webcal feed
-as a cheaper substitute:** a subscription feed is read-only by
-construction, so it cannot do the two-way sync that is the whole point
-here — and Google refreshes external ICS feeds on its own schedule,
-typically 12–24 hours, which is useless for a scheduling app where a
-moved session has to propagate now. OAuth is the only route to the stated
-goal. Three further calls made at the same time:
-- **Build it in two halves.** Push first (Uncle Owen → Google): needs
-  OAuth, but no incremental sync, no webhook channel renewal, no conflict
-  model, and it delivers most of the felt value. Pull second.
-- **Pull via `freebusy.query`, not full event read.** Scheduling only
-  needs busy/free times, never titles — which is a narrower scope, a
-  smaller privacy surface, and exactly the language `lib/freeBusy.ts`
-  already speaks. Pulling event *titles* is wanted eventually but is
-  explicitly out of scope for the first build.
-- **The 100-user unverified-app cap is accepted.** Google requires app
-  verification for the read/write `calendar` scope; unverified means a
-  100-user ceiling and an "unverified app" warning screen. That's fine at
-  this app's scale, and the Privacy Policy revision is accepted as part
-  of the cost.
-
-**The push half shipped in v0.8** (`specs/0017-google-calendar-sync.md`), and
-the two-halves decision above turned out to be load-bearing for a reason this
-capture did not anticipate. The obstacle to pulling is not `freebusy.query`
-itself — that is one POST — it is *where its answer belongs*.
-`computeBusyBlocksForUsers` (`worker/src/lib/freeBusy.ts:46`) runs
-**synchronously inside a request**, for up to 25 users at once. One Google call
-per connected user is up to 25 outbound subrequests in a single invocation,
-against a Free-plan ceiling of 50, in the one function whose own design note is
-about how its cost is a product and every factor has to be small. So the pull
-half needs a cached busy table refreshed by the cron, a staleness rule, and an
-answer for what the scheduling assistant shows while that cache is cold. That
-is a second design, not a second endpoint — **v0.8.1**.
-
-Three things about what did ship, worth keeping:
-
-- **`calendar.readonly` was requested in v0.8 even though only v0.8.1 needs
-  it.** Narrower would have been `calendar.calendarlist.readonly` (enough for
-  the calendar picker), but `freebusy.query` needs the broader one, and asking
-  later means sending everyone who already connected back through a Google
-  consent screen. A slightly larger ask now beats a worse moment later, and the
-  account is inside the read/write `calendar.events` grant either way.
-- **Occurrences are pushed individually rather than as an RRULE series.**
-  Fewer API calls and fewer rows would have argued for the series, but it needs
-  a faithful translation of `event_recurrence_rules` — including the
-  `0=Mon..6=Sun` `by_weekday` encoding `specs/0001` already records as the trap
-  in this area — plus overrides as EXDATE/RECURRENCE-ID exceptions. A
-  translation bug writes *wrong dates into someone's real calendar*, which is
-  the least recoverable failure this feature can have. Per-occurrence also
-  matches `specs/0014`: a per-occurrence decline is exactly the case a
-  series-level push gets wrong.
-- **The one long-lived third-party credential this app has ever stored**, which
-  scoped a sentence in `ARCHITECTURE.md` that had been written as a claim about
-  the whole app rather than about Discord. It is encrypted at rest under its
-  own secret, never returned by any route, and revoked at Google on disconnect
-  and on deletion. This is also what took the Privacy Policy to version 3.
-
-### 5. Calendar-first, not server-first — partly shipped in v0.3
-
-(was: "calendar landing view"). Land on "just your calendar" with no
-guild-switcher tab up front. Then offer views for: a specific server's
-calendar (showing blocked/busy time even for events you're not invited to —
-i.e. free/busy, not full detail), your personal events only, your Uncle Owen
-game events only, and personal+game combined.
-
-**Rescoped (Aug 2026) from a view change to an organizing-principle
-change.** The stated pain is that the app is "too server heavy — people
-shouldn't be thinking of this a server at a time." A landing view alone
-doesn't fix that, because the server-scoping is structural: the *only*
-event-listing endpoint is `GET /guilds/:guildId/events`, and
-`CalendarPage` early-returns when no guild is selected. There is no
-cross-guild "my events" query anywhere in the app.
-
-The counterintuitive part, and the reason this is more tractable than it
-sounds: **the cross-guild personal calendar is a cheaper query than the
-per-guild one it replaces.** Today's asks for every event in a guild
-(up to `MAX_ACTIVE_EVENTS_PER_GUILD`, whether or not you're involved);
-the replacement asks for events you organize or are invited to, which is
-bounded by your own invite rows. The expensive shape — "every event in
-every guild I'm in" — is the *server browse* view, which stays opt-in and
-keeps its existing per-guild bounds. (See `validate.ts`'s own warning
-that per-guild quotas multiply: "'300 events' becomes 4,200 the moment
-someone is in fourteen of them.")
-
-What it takes: a new `GET /me/events?from=&to=` returning events across
-every guild where you're still an active member, each carrying
-`guildId`/`guildName`; the guild switcher demoted from global nav to a
-contextual control; server becoming a label/filter rather than a mode.
-The recurrence, override and RSVP loaders already take arbitrary event-id
-lists rather than a guild, so they need no change.
-
-**The boundary that must not move:** server stays load-bearing for
-*invitation*. `filterActiveGuildMembers` is what stops an event on one
-server pulling in someone you only share a different server with, and
-relaxing that would be a real privacy regression. Servers stop mattering
-for *viewing*; they keep mattering for *who you can add*.
-
-**Built in v0.3** (`specs/0006-calendar-first.md`) — `GET /me/events` and
-`GET /me/groups`, the calendar and dashboard spanning every server, server
-demoted to a filter/label, and the top-bar switcher removed. **One piece
-deliberately deferred:** the free/busy-only *server browse* ("see what
-else is on in a server, without event detail"). It's a genuinely different
-query with a privacy dimension -- it shows blocks for events you are not
-invited to -- and belongs designed against `lib/freeBusy.ts`'s guarantees
-rather than bolted onto the personal calendar. Still open.
-
-**Rescoped again (Aug 2026), upward: not free/busy, a noticeboard.**
-"If you're in a server, that's more public noticeboard type thing than
-anything" -- so the browse view shows event *titles* and *who's going*,
-not anonymous busy blocks. Four calls locked: visible by default with a
-per-event private toggle; new events only, never retroactive;
-descriptions stay hidden; invitees cannot hide themselves from the
-attendee list. Design and the blockers (the Privacy Policy currently
-promises the exact opposite) are in
-`specs/0007-server-noticeboard.md`. Still open.
-
+This section being empty is the test `ROADMAP.md` defines 1.0 by, and it
+emptied for the first time in v0.8.1. It is not a finish line so much as a
+checkpoint: anything captured from here on lands here and pushes 1.0 back out
+again, which is the definition working as intended rather than a problem with
+it.
 
 ## Parked until after 1.0
 
@@ -249,6 +130,180 @@ that is a correctness issue rather than a cosmetic one.
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
 1.0 test above: where an entry argues its way to a decision and rejects an
 alternative, that argument is why the entry is still here at all.
+
+### 2. Google Calendar sync — shipped in full (push v0.8, pull v0.8.1)
+
+Pull a single chosen Google calendar (not all of them — e.g. just "D&D
+Scheduling", not "Family" or "Fulham FC") in as read-only availability on
+the Uncle Owen calendar, and push events the user is part of back out to
+Google. Flagged as the biggest lift: real OAuth-with-Google plumbing, a
+second set of tokens to store/refresh securely, a sync/conflict model, and a
+new privacy surface (which calendar, which direction, what Google sees) that
+the Privacy Policy would need to cover.
+
+**Decided (Aug 2026), after considering and rejecting an .ics/webcal feed
+as a cheaper substitute:** a subscription feed is read-only by
+construction, so it cannot do the two-way sync that is the whole point
+here — and Google refreshes external ICS feeds on its own schedule,
+typically 12–24 hours, which is useless for a scheduling app where a
+moved session has to propagate now. OAuth is the only route to the stated
+goal. Three further calls made at the same time:
+- **Build it in two halves.** Push first (Uncle Owen → Google): needs
+  OAuth, but no incremental sync, no webhook channel renewal, no conflict
+  model, and it delivers most of the felt value. Pull second.
+- **Pull via `freebusy.query`, not full event read.** Scheduling only
+  needs busy/free times, never titles — which is a narrower scope, a
+  smaller privacy surface, and exactly the language `lib/freeBusy.ts`
+  already speaks. Pulling event *titles* is wanted eventually but is
+  explicitly out of scope for the first build.
+- **The 100-user unverified-app cap is accepted.** Google requires app
+  verification for the read/write `calendar` scope; unverified means a
+  100-user ceiling and an "unverified app" warning screen. That's fine at
+  this app's scale, and the Privacy Policy revision is accepted as part
+  of the cost.
+
+**The push half shipped in v0.8** (`specs/0017-google-calendar-sync.md`), and
+the two-halves decision above turned out to be load-bearing for a reason this
+capture did not anticipate. The obstacle to pulling is not `freebusy.query`
+itself — that is one POST — it is *where its answer belongs*.
+`computeBusyBlocksForUsers` (`worker/src/lib/freeBusy.ts:46`) runs
+**synchronously inside a request**, for up to 25 users at once. One Google call
+per connected user is up to 25 outbound subrequests in a single invocation,
+against a Free-plan ceiling of 50, in the one function whose own design note is
+about how its cost is a product and every factor has to be small. So the pull
+half needs a cached busy table refreshed by the cron, a staleness rule, and an
+answer for what the scheduling assistant shows while that cache is cold. That
+is a second design, not a second endpoint — **v0.8.1**.
+
+Three things about what did ship, worth keeping:
+
+- **`calendar.readonly` was requested in v0.8 even though only v0.8.1 needs
+  it.** Narrower would have been `calendar.calendarlist.readonly` (enough for
+  the calendar picker), but `freebusy.query` needs the broader one, and asking
+  later means sending everyone who already connected back through a Google
+  consent screen. A slightly larger ask now beats a worse moment later, and the
+  account is inside the read/write `calendar.events` grant either way.
+- **Occurrences are pushed individually rather than as an RRULE series.**
+  Fewer API calls and fewer rows would have argued for the series, but it needs
+  a faithful translation of `event_recurrence_rules` — including the
+  `0=Mon..6=Sun` `by_weekday` encoding `specs/0001` already records as the trap
+  in this area — plus overrides as EXDATE/RECURRENCE-ID exceptions. A
+  translation bug writes *wrong dates into someone's real calendar*, which is
+  the least recoverable failure this feature can have. Per-occurrence also
+  matches `specs/0014`: a per-occurrence decline is exactly the case a
+  series-level push gets wrong.
+- **The one long-lived third-party credential this app has ever stored**, which
+  scoped a sentence in `ARCHITECTURE.md` that had been written as a claim about
+  the whole app rather than about Discord. It is encrypted at rest under its
+  own secret, never returned by any route, and revoked at Google on disconnect
+  and on deletion. This is also what took the Privacy Policy to version 3.
+
+**The pull half shipped in v0.8.1**, and the design held up: `freebusy.query`
+against exactly one nominated calendar, cached hourly by the sweep that was
+already running, merged into `computeBusyBlocksForUsers` at the very end so it
+goes through the same `merge()` and comes out indistinguishable from busy time
+this app computed itself.
+
+Two things worth keeping from building it:
+
+- **The cache is a JSON column, not a table**, and that is a decision about
+  *where it is read* rather than about modelling. `computeBusyBlocksForUsers`
+  runs synchronously inside a request for up to 25 users, and its own header
+  records a bug where per-user follow-up reads took a valid request past the
+  Free plan's ceiling. A blob means one chunked SELECT serves everyone.
+- **Every failure direction was chosen deliberately, because the two are not
+  symmetric.** Over-reporting busy costs someone a slot they could have taken;
+  under-reporting books a game over a real commitment. So a transient Google
+  failure keeps the stale cache rather than dropping it, a calendar that has
+  been deleted switches reading off and says so rather than caching an empty
+  array that would read as "completely free", and a cache older than a week is
+  ignored because by then it is noise rather than evidence.
+
+The limitation that cannot be engineered away, and which the Privacy Policy now
+states in plain words: **Google's calendar permissions are per account, not per
+calendar.** There is no scope for "just this one". That only one is read is
+enforced by the query this app chooses to send, not by the grant Google issued.
+
+### 5. Calendar-first, not server-first — shipped in full (v0.3, noticeboard v0.8.1)
+
+(was: "calendar landing view"). Land on "just your calendar" with no
+guild-switcher tab up front. Then offer views for: a specific server's
+calendar (showing blocked/busy time even for events you're not invited to —
+i.e. free/busy, not full detail), your personal events only, your Uncle Owen
+game events only, and personal+game combined.
+
+**Rescoped (Aug 2026) from a view change to an organizing-principle
+change.** The stated pain is that the app is "too server heavy — people
+shouldn't be thinking of this a server at a time." A landing view alone
+doesn't fix that, because the server-scoping is structural: the *only*
+event-listing endpoint is `GET /guilds/:guildId/events`, and
+`CalendarPage` early-returns when no guild is selected. There is no
+cross-guild "my events" query anywhere in the app.
+
+The counterintuitive part, and the reason this is more tractable than it
+sounds: **the cross-guild personal calendar is a cheaper query than the
+per-guild one it replaces.** Today's asks for every event in a guild
+(up to `MAX_ACTIVE_EVENTS_PER_GUILD`, whether or not you're involved);
+the replacement asks for events you organize or are invited to, which is
+bounded by your own invite rows. The expensive shape — "every event in
+every guild I'm in" — is the *server browse* view, which stays opt-in and
+keeps its existing per-guild bounds. (See `validate.ts`'s own warning
+that per-guild quotas multiply: "'300 events' becomes 4,200 the moment
+someone is in fourteen of them.")
+
+What it takes: a new `GET /me/events?from=&to=` returning events across
+every guild where you're still an active member, each carrying
+`guildId`/`guildName`; the guild switcher demoted from global nav to a
+contextual control; server becoming a label/filter rather than a mode.
+The recurrence, override and RSVP loaders already take arbitrary event-id
+lists rather than a guild, so they need no change.
+
+**The boundary that must not move:** server stays load-bearing for
+*invitation*. `filterActiveGuildMembers` is what stops an event on one
+server pulling in someone you only share a different server with, and
+relaxing that would be a real privacy regression. Servers stop mattering
+for *viewing*; they keep mattering for *who you can add*.
+
+**Built in v0.3** (`specs/0006-calendar-first.md`) — `GET /me/events` and
+`GET /me/groups`, the calendar and dashboard spanning every server, server
+demoted to a filter/label, and the top-bar switcher removed. **One piece
+deliberately deferred:** the free/busy-only *server browse* ("see what
+else is on in a server, without event detail"). It's a genuinely different
+query with a privacy dimension -- it shows blocks for events you are not
+invited to -- and belongs designed against `lib/freeBusy.ts`'s guarantees
+rather than bolted onto the personal calendar. Still open.
+
+**Rescoped again (Aug 2026), upward: not free/busy, a noticeboard.**
+"If you're in a server, that's more public noticeboard type thing than
+anything" -- so the browse view shows event *titles* and *who's going*,
+not anonymous busy blocks. Four calls locked: visible by default with a
+per-event private toggle; new events only, never retroactive;
+descriptions stay hidden; invitees cannot hide themselves from the
+attendee list. Design and the blockers (the Privacy Policy currently
+promises the exact opposite) are in
+`specs/0007-server-noticeboard.md`. Still open.
+
+**Shipped in v0.8.1**, with all four locked decisions intact: visible by
+default with a per-event private toggle, new events only, descriptions never
+shown, and no way for an invitee to hide from the attendee list.
+
+The whole feature rests on one line of migration 0038 — `UPDATE events SET
+is_private = 1` — and it is worth saying why. `ADD COLUMN ... DEFAULT 0` would
+have made every event that already existed publicly visible to its server the
+instant this deployed, silently breaking a Privacy Policy that said in as many
+words that "sharing a Discord server with someone does not let you see their
+events". The backfill is what makes this a new rule for new events rather than
+a retroactive change of terms, and it is the reason the policy bump is
+defensible at all. There is a test asserting that statement is still in the
+migration, because its absence would be invisible in review and catastrophic
+in production.
+
+The query got its own file rather than a widened `buildCalendarOccurrences`,
+exactly as spec 0007's blocker 3 predicted: that function is bounded by what
+the *caller* is attached to, and this one is scoped by guild membership, so the
+bound that makes the personal calendar cheap simply does not exist here. Own
+range cap, own event limit, own shared occurrence ceiling.
+
 
 ### 23. The sandbox has no frontend, so the sandbox-first rule has a blind spot for frontend-only changes — closed in v0.8.1
 

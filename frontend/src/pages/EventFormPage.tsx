@@ -133,6 +133,10 @@ export default function EventFormPage() {
   const effectiveGuildId = isEdit ? loadedGuildId : formGuildId;
   const [voiceChannels, setVoiceChannels] = useState<VoiceChannel[]>([]);
   const [voiceChannelId, setVoiceChannelId] = useState('');
+  // specs/0007. Default false = visible on the server's noticeboard, matching
+  // the server default, so the form and the schema agree about what "left
+  // alone" means.
+  const [isPrivate, setIsPrivate] = useState(false);
 
   // The revision this form was loaded at (F-08-B). Sent back unchanged on
   // PATCH so the server can tell this edit apart from one built on top of a
@@ -207,6 +211,7 @@ export default function EventFormPage() {
       setLoadedGuildId(ev.guildId);
       setLoadedRevision(ev.revision);
       setVoiceChannelId(ev.voiceChannelId ?? '');
+      setIsPrivate(!!ev.isPrivate);
       // The organizer's own row (idea 26) is not an invitee choice, so it is
       // not one of the picker's selections either. It is also not in the
       // picker at all -- `listFriends` excludes the caller -- so leaving it in
@@ -450,6 +455,7 @@ export default function EventFormPage() {
         voiceChannelName: voiceChannelId
           ? (voiceChannels.find((vc) => vc.id === voiceChannelId)?.name ?? null)
           : null,
+        isPrivate,
       };
 
       if (eventType === 'single') {
@@ -936,6 +942,30 @@ export default function EventFormPage() {
           </select>
         )}
       </div>
+
+      {effectiveGuildId && (
+        <div className={cardClass()}>
+          <h2 className="mb-1 font-semibold">Server noticeboard</h2>
+          <p className="mb-3 text-xs text-faint">
+            Everyone on this server can see what's on, so people know when there's a game to join.
+            Titles, times and who's going &mdash; never the description.
+          </p>
+          <label className="flex items-start gap-2 text-sm text-ink-dim">
+            <input
+              type="checkbox"
+              checked={isPrivate}
+              onChange={(e) => setIsPrivate(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              Keep this one off the noticeboard
+              <span className="block text-xs text-faint">
+                Only the people invited will be able to see it, the way every event worked before.
+              </span>
+            </span>
+          </label>
+        </div>
+      )}
 
       {effectiveGuildId && (
         <div className={cardClass()}>

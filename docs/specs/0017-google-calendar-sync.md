@@ -1,6 +1,6 @@
 # 0017 — Google Calendar sync
 
-**Status:** Built — push half in v0.8 (ships dormant: `GOOGLE_SYNC_MODE` is "off" until a Google client is provisioned). Pull half in v0.8.1
+**Status:** Built — push half v0.8, pull half v0.8.1 (ships dormant: `GOOGLE_SYNC_MODE` is "off" until a Google client is provisioned)
 **Covers:** `IDEAS.md` item 2
 **Phase:** 5 — ships in v0.8 (push half); the pull half is v0.8.1
 

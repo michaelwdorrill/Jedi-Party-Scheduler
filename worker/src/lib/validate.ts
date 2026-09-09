@@ -241,6 +241,12 @@ export const LIMITS = {
   // in-memory occurrence objects came from. Nobody schedules a game night
   // ten months out.
   MAX_FREE_BUSY_RANGE_MS: 62 * 24 * 60 * 60 * 1000, // ~2 months
+  // The noticeboard's own range, deliberately the free/busy figure rather than
+  // the calendar's year (specs/0007). It is scoped by *guild* rather than by
+  // what the caller is attached to, so the bound that makes the personal
+  // calendar cheap does not apply -- and "what's on soon" is the question a
+  // noticeboard is actually asked.
+  MAX_NOTICEBOARD_RANGE_MS: 62 * 24 * 60 * 60 * 1000, // ~2 months
   // Hard ceiling on expanded occurrences for one free/busy request, across
   // every user and event. The per-factor limits above should keep a real
   // request orders of magnitude below this; it exists so no combination of
@@ -352,6 +358,17 @@ export class FreeBusyTooLargeError extends Error {
       'That free/busy request covers too many commitments to answer accurately. Select fewer people or a shorter date range.',
     );
     this.name = 'FreeBusyTooLargeError';
+  }
+}
+
+// specs/0007's noticeboard, refusing rather than truncating -- the same call
+// FreeBusyTooLargeError makes above and for the same reason. A silently
+// shortened noticeboard is indistinguishable from a quiet server, so it would
+// assert something false; a refusal names a recoverable action instead.
+export class NoticeboardTooLargeError extends Error {
+  constructor() {
+    super('That server has too much on in this window to show at once. Try a shorter date range.');
+    this.name = 'NoticeboardTooLargeError';
   }
 }
 

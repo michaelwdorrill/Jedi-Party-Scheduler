@@ -342,6 +342,9 @@ eventRoutes.get('/:eventId', async (c) => {
     windowBlockMinutes: event.window_block_minutes,
     voiceChannelId: event.voice_channel_id,
     voiceChannelName: event.voice_channel_name,
+    // specs/0007, so the edit form can round-trip the setting rather than
+    // silently resetting it to the default on every save.
+    isPrivate: !!event.is_private,
     // specs/0014 stage 3, decision 4.
     minimumAttendees: event.minimum_attendees ?? null,
     autoCancelBelowMinimum: !!event.auto_cancel_below_minimum,
