@@ -169,6 +169,77 @@ describe('the server noticeboard', () => {
     expect(await fetchBoard(env, 'bystander')).toEqual([]);
   });
 
+  // Every other test here seeds the events table directly, which means they all
+  // exercise the column DEFAULT rather than the route that real events come
+  // through. A create path that dropped isPrivate on the floor would leave all
+  // of them green, so this one drives the actual HTTP endpoint the form posts
+  // to and then reads the board back.
+  it('puts an event created through the real endpoint on the board', async () => {
+    const { db, env } = setup();
+    await seedServer(db);
+
+    const res = await app.request(
+      'https://worker.test/guilds/guild-1/events',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${await authFor(env, 'organizer')}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          title: 'Made the normal way',
+          description: 'BANTHAFODDER',
+          eventType: 'single',
+          timezone: 'America/New_York',
+          startAt: Date.now() + 2 * DAY_MS,
+          endAt: Date.now() + 2 * DAY_MS + 4 * HOUR_MS,
+          invites: { userIds: [], groupIds: [] },
+          isPrivate: false,
+        }),
+      },
+      env,
+    );
+    expect(res.status).toBe(201);
+
+    const board = await fetchBoard(env, 'bystander');
+    expect(board.map((i) => i.title)).toEqual(['Made the normal way']);
+    // The description must not have travelled with it, checked against the raw
+    // body rather than the parsed shape.
+    const raw = await (
+      await call(env, `/guilds/guild-1/noticeboard?${RANGE}`, await authFor(env, 'bystander'))
+    ).text();
+    expect(raw).not.toContain('BANTHAFODDER');
+  });
+
+  it('keeps an event off the board when the organiser ticked the box, through the real endpoint', async () => {
+    const { db, env } = setup();
+    await seedServer(db);
+
+    const res = await app.request(
+      'https://worker.test/guilds/guild-1/events',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${await authFor(env, 'organizer')}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          title: 'Kept quiet',
+          eventType: 'single',
+          timezone: 'America/New_York',
+          startAt: Date.now() + 2 * DAY_MS,
+          endAt: Date.now() + 2 * DAY_MS + 4 * HOUR_MS,
+          invites: { userIds: [], groupIds: [] },
+          isPrivate: true,
+        }),
+      },
+      env,
+    );
+    expect(res.status).toBe(201);
+
+    expect(await fetchBoard(env, 'bystander')).toEqual([]);
+  });
+
   it('does advertise a poll once it has resolved', async () => {
     const { db, env } = setup();
     await seedServer(db);
