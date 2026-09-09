@@ -32,6 +32,21 @@ interface PollSlotDraft {
   endTime: string;
 }
 
+// What the form guesses when you haven't said otherwise.
+//
+// 7pm-11pm rather than the 1pm-5pm this used to open on, because this app
+// schedules evening game sessions among people with day jobs -- an afternoon
+// default made almost every event a two-field correction. The duration is
+// unchanged at four hours, which was never the part that was wrong.
+//
+// Named rather than inlined because the same pair appears in three places
+// (the single-event fields, the first poll slot, and every slot added after
+// it) and three literals drift. Deliberately not derived from the user's
+// timezone or their past events: a default that moves is a default nobody
+// can predict, and the fields are right there to change.
+const DEFAULT_START_TIME = '19:00';
+const DEFAULT_END_TIME = '23:00';
+
 export default function EventFormPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -62,8 +77,8 @@ export default function EventFormPage() {
   // Single-event fields
   const [date, setDate] = useState(prefillDate);
   const [endDate, setEndDate] = useState(prefillDate);
-  const [startTime, setStartTime] = useState('13:00');
-  const [endTime, setEndTime] = useState('17:00');
+  const [startTime, setStartTime] = useState(DEFAULT_START_TIME);
+  const [endTime, setEndTime] = useState(DEFAULT_END_TIME);
   const [isRecurring, setIsRecurring] = useState(false);
   // specs/0014 stage 3, decision 4 / IDEAS item 54. '' means "no minimum
   // set", distinct from 0 (which the server rejects anyway). Available on
@@ -101,7 +116,7 @@ export default function EventFormPage() {
 
   // Poll fields ('options' mode)
   const [pollSlots, setPollSlots] = useState<PollSlotDraft[]>([
-    { key: crypto.randomUUID(), date: prefillDate, startTime: '13:00', endDate: prefillDate, endTime: '17:00' },
+    { key: crypto.randomUUID(), date: prefillDate, startTime: DEFAULT_START_TIME, endDate: prefillDate, endTime: DEFAULT_END_TIME },
   ]);
   const [multiWinner, setMultiWinner] = useState(false);
 
@@ -290,7 +305,7 @@ export default function EventFormPage() {
   const addPollSlot = () =>
     setPollSlots((prev) => [
       ...prev,
-      { key: crypto.randomUUID(), date: prefillDate, startTime: '13:00', endDate: prefillDate, endTime: '17:00' },
+      { key: crypto.randomUUID(), date: prefillDate, startTime: DEFAULT_START_TIME, endDate: prefillDate, endTime: DEFAULT_END_TIME },
     ]);
 
   const removePollSlot = (key: string) =>
