@@ -1,9 +1,15 @@
 # 0014 — Attendance per occurrence, and a reminder ladder that reads it
 
-**Status:** Draft — decisions locked (see below), one build question open
+**Status:** Built — all three stages (v0.6, v0.6.1, v0.6.2)
 **Covers:** `IDEAS.md` items 47 and 48. Absorbs item 46, which is one symptom
-of the same thing.
-**Phase:** 3.8x → **v0.6** (stage 1), 0.6.x (stages 2 and 3)
+of the same thing. Item 49 and item 51's option 1 close in stage 3.
+**Phase:** 3.8x → **v0.6** (stage 1), **v0.6.1** (stage 2), **v0.6.2** (stage 3)
+
+> Status corrected Sept 2026, having said "Draft — one build question open"
+> through all three of its own releases. The open question was a measurement,
+> not a decision — whether `expandOccurrencesForEvent` could carry the
+> attendance join cheaply per event per tick against `cron/budget.ts` — and
+> stage 2 shipping is what answered it.
 
 ## The change in one sentence
 

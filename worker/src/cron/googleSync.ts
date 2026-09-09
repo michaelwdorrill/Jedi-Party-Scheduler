@@ -12,8 +12,12 @@
 // new fixed per-tick query starving sweepPurgeTerminalHistory outright, so
 // this sweep adds no fixed cost: its discovery read is uncharged (like
 // sweepStaleAccounts' and sweepPurgeTerminalHistory's own candidate SELECTs),
-// it holds no cursor, it is not in reapExhaustedDeliveries' table list, and it
-// runs last so it spends only what the notification sweeps left behind.
+// it holds no cursor, and it is not in reapExhaustedDeliveries' table list.
+//
+// It also runs at most hourly, and *first* on the tick it runs, rather than
+// last on every tick. That is not a priority claim -- see SYNC_INTERVAL_MS
+// for the measurement that forced it, and for why "last, on the leftovers"
+// cannot work for a task whose first useful unit costs ten queries.
 
 import type { Env } from '../env';
 import { buildCalendarOccurrences } from '../lib/calendar';
@@ -209,6 +213,7 @@ async function runDisconnect(
   const future = links.filter((l) => (l.synced_end_at ?? 0) >= now);
 
   let allCleared = true;
+  let removed = 0;
   if (accessToken) {
     for (const link of future) {
       if (!budget.tryCalendarWrite()) {
@@ -219,6 +224,7 @@ async function runDisconnect(
       const result = await deleteCalendarEvent(accessToken, row.calendar_id, link.google_event_id);
       if (result.ok) {
         await env.DB.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(link.id).run();
+        removed += 1;
       } else {
         allCleared = false;
         if (result.kind === 'unauthorized') break;
@@ -244,6 +250,16 @@ async function runDisconnect(
         'revoking and dropping the connection anyway.',
     );
   }
+
+  // Says what happened, for the same reason the sync path does: without this a
+  // successful disconnect is completely silent in `wrangler tail`, so the one
+  // question an operator has -- did letting go of the credential actually
+  // work? -- has no answer short of querying the database. Logged once, at the
+  // end, where the outcome is known.
+  console.log(
+    `Google disconnect for ${row.user_id}: ${removed} upcoming entr${removed === 1 ? 'y' : 'ies'} removed, ` +
+      `${links.length - future.length} past left in place, token revoked, connection dropped.`,
+  );
 
   const refreshToken = await readRefreshToken(env, row);
   if (refreshToken) await revokeToken(refreshToken);

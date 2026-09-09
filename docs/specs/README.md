@@ -37,10 +37,10 @@ enough yet.
 | [0008-visual-design-pass](0008-visual-design-pass.md) | Ideas 8, 20 | 3.5 | 0.4 | Superseded by 0009 |
 | [0009-binary-sunset](0009-binary-sunset.md) | Ideas 8, 20 | 3.5 | 0.4 | Built |
 | [0010-interactive-bot](0010-interactive-bot.md) | Idea 19 (and 32) | 3.75 | 0.5 | Built |
-| [0011-groups-without-servers](0011-groups-without-servers.md) | Ideas 36, 34 | TBD | TBD | Draft |
+| [0011-groups-without-servers](0011-groups-without-servers.md) | Ideas 36, 34 | — | 0.7.2 | Built |
 | [0012-policy-reacceptance](0012-policy-reacceptance.md) | Idea 37 | 3.9 | 0.4.4 | Built |
-| [0013-windowed-candidates](0013-windowed-candidates.md) | Idea 40 (and 39, 41) | 3.11 | 0.4.6 | Built |
-| [0014-attendance-per-occurrence](0014-attendance-per-occurrence.md) | Ideas 47, 48 (absorbs 46) | TBD | TBD | Decisions locked |
+| [0013-windowed-candidates](0013-windowed-candidates.md) | Idea 40 (and 39, 41) | 3.15 | 0.4.6 | Built |
+| [0014-attendance-per-occurrence](0014-attendance-per-occurrence.md) | Ideas 47, 48 (absorbs 46) | 3.8x | 0.6 / 0.6.1 / 0.6.2 | Built |
 | [0015-self-service-bot-add](0015-self-service-bot-add.md) | Idea 9 | 4 | 0.7.1 | Built |
 | [0016-stale-account-purge](0016-stale-account-purge.md) | Idea 10 | 4 | 0.7 | Built |
 | [0017-google-calendar-sync](0017-google-calendar-sync.md) | Idea 2 | 5 | 0.8 (push) / 0.8.1 (pull) | Built (push half) |

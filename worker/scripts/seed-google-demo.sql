@@ -24,6 +24,19 @@
 -- and gives a synthetic user membership of a real server -- fine in a sandbox,
 -- not fine anywhere else.
 --
+-- DISCONNECT GOOGLE CALENDAR BEFORE RE-RUNNING THIS, if a connection is live.
+--
+-- The deletes below clear google_event_links, which is this app's only record
+-- of which Google entries it created. Wiping them while a connection is active
+-- orphans whatever is already on the person's real calendar -- the sweep can no
+-- longer match those entries to anything, so it will neither update nor remove
+-- them -- and then writes a fresh set alongside, leaving visible duplicates
+-- that only a human deleting them by hand can clear.
+--
+-- The safe order is: disconnect in Settings, wait one cron tick for the
+-- cleanup to finish, re-seed, reconnect. This file cannot enforce that from
+-- SQL, which is why it is stated here as loudly as the production warning.
+--
 -- Usage, from worker/, with the uncleowen credentials active:
 --   npm run seed:google-demo
 
