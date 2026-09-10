@@ -1546,3 +1546,274 @@ describe('withdrawing Google access actually withdraws it (F-17 / R11, R10, R12,
     expect(await countRows(db, 'personal_events', 'google_event_id IS NOT NULL')).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// R16, R19, R17, R18
+// ---------------------------------------------------------------------------
+
+// Four ways the Google sync reported something other than what it did.
+describe('the Google sync tells the truth about what it did (R16, R19, R17, R18)', () => {
+  const app = buildApp();
+  const ENCRYPTION_KEY = 'test-google-encryption-key-at-least-32-chars';
+
+  const call = (env: Env, path: string, init: RequestInit = {}) =>
+    app.request(`https://worker.test${path}`, init, env);
+
+  const googleEnv = (base: Env): Env => ({
+    ...base,
+    GOOGLE_SYNC_MODE: 'live',
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
+    GOOGLE_TOKEN_ENCRYPTION_KEY: ENCRYPTION_KEY,
+  });
+
+  async function authHeader(env: Env, userId: string): Promise<Record<string, string>> {
+    const { id: sessionId } = await createSession(env, userId);
+    return {
+      Authorization: `Bearer ${await signJwt(userId, sessionId, env.JWT_SIGNING_KEY)}`,
+      'Content-Type': 'application/json',
+    };
+  }
+
+  async function seedReadConnection(db: ShimDatabase, userId: string): Promise<void> {
+    const sealed = await seal('stored-refresh-token', ENCRYPTION_KEY);
+    const now = Date.now();
+    await seedGuild(db);
+    await seedUser(db, userId);
+    await seedMembership(db, userId, 'guild-1');
+    await db
+      .prepare(
+        `INSERT INTO google_calendar_connections
+           (user_id, refresh_token_ciphertext, refresh_token_iv, access_token_ciphertext, access_token_iv,
+            access_token_expires_at, google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
+            last_synced_at, disconnect_attempts, connected_at, updated_at)
+         VALUES (?, ?, ?, NULL, NULL, NULL, 'someone@gmail.com', 'primary', 'primary', 1, 'active', NULL, 0, ?, ?)`,
+      )
+      .bind(userId, sealed.ciphertext, sealed.iv, now, now)
+      .run();
+  }
+
+  const TOKEN_RULE = {
+    match: 'oauth2.googleapis.com/token',
+    status: 200,
+    body: { access_token: 'a', expires_in: 3600 },
+  };
+
+  function calendarEvent(id: string, startAt: number, endAt: number) {
+    return {
+      id,
+      summary: `Meeting ${id}`,
+      start: { dateTime: new Date(startAt).toISOString() },
+      end: { dateTime: new Date(endAt).toISOString() },
+    };
+  }
+
+  // R16. Forty-one events over two months is ordinary usage. Everything past
+  // the cap was dropped with nothing recorded anywhere, so the omitted times
+  // were reported as free by the scheduling assistant -- incomplete data
+  // presented as complete.
+  it('says so when the import is truncated, instead of reporting a clean sync', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedReadConnection(db, 'u1');
+
+    const now = Date.now();
+    const items = Array.from({ length: 41 }, (_, i) =>
+      calendarEvent(`g-${i}`, now + (i + 1) * DAY_MS, now + (i + 1) * DAY_MS + HOUR_MS),
+    );
+    fetchStub = stubFetch([TOKEN_RULE, { match: '/events', status: 200, body: { timeZone: 'UTC', items } }]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(await countRows(db, 'personal_events', 'google_event_id IS NOT NULL')).toBe(40);
+    const conn = await db
+      .prepare(`SELECT last_error FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ last_error: string | null }>();
+    expect(conn?.last_error).toMatch(/only the first 40/i);
+  });
+
+  // The other half of R16: a truncated answer is not evidence that anything
+  // was removed, so reconciliation must not delete on the strength of it.
+  it('does not delete previously imported rows from a truncated response', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedReadConnection(db, 'u1');
+
+    const now = Date.now();
+    // An existing import that will not appear in the (capped) response.
+    await db
+      .prepare(
+        `INSERT INTO personal_events
+           (id, user_id, title, timezone, start_at, end_at, status, availability, is_recurring, google_event_id, created_at, updated_at)
+         VALUES ('pe-far', 'u1', 'Far meeting', 'UTC', ?, ?, 'active', 'busy', 0, 'g-far', ?, ?)`,
+      )
+      .bind(now + 50 * DAY_MS, now + 50 * DAY_MS + HOUR_MS, now, now)
+      .run();
+
+    const items = Array.from({ length: 41 }, (_, i) =>
+      calendarEvent(`g-${i}`, now + (i + 1) * DAY_MS, now + (i + 1) * DAY_MS + HOUR_MS),
+    );
+    fetchStub = stubFetch([TOKEN_RULE, { match: '/events', status: 200, body: { timeZone: 'UTC', items } }]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(await countRows(db, 'personal_events', 'google_event_id = ?', 'g-far')).toBe(1);
+  });
+
+  // Google documents nextPageToken arriving with a short page, so "fewer than
+  // maxResults" is not the same as "that was all of it". The fields mask used
+  // to strip the token, making the two indistinguishable.
+  it('treats a nextPageToken as truncation even on a short page', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedReadConnection(db, 'u1');
+
+    const now = Date.now();
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      {
+        match: '/events',
+        status: 200,
+        body: {
+          timeZone: 'UTC',
+          nextPageToken: 'more-please',
+          items: [calendarEvent('g-1', now + DAY_MS, now + DAY_MS + HOUR_MS)],
+        },
+      },
+    ]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    const conn = await db
+      .prepare(`SELECT last_error FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ last_error: string | null }>();
+    expect(conn?.last_error).toMatch(/only the first 40/i);
+  });
+
+  // R19. Google's timeMin bounds an event's END, so an in-progress event is
+  // inside the requested range -- but the stale-row DELETE required
+  // start_at >= now, which such a row can never satisfy. Deleting it in Google
+  // therefore never removed the app's copy, and the local delete route refuses
+  // to touch an imported row.
+  it('removes an in-progress imported event once it is deleted in Google', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedReadConnection(db, 'u1');
+
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO personal_events
+           (id, user_id, title, timezone, start_at, end_at, status, availability, is_recurring, google_event_id, created_at, updated_at)
+         VALUES ('pe-ongoing', 'u1', 'Ongoing', 'UTC', ?, ?, 'active', 'busy', 0, 'g-ongoing', ?, ?)`,
+      )
+      .bind(now - DAY_MS, now + DAY_MS, now, now)
+      .run();
+
+    // Deleted at the source: the current listing comes back empty.
+    fetchStub = stubFetch([TOKEN_RULE, { match: '/events', status: 200, body: { timeZone: 'UTC', items: [] } }]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(await countRows(db, 'personal_events', 'google_event_id = ?', 'g-ongoing')).toBe(0);
+  });
+
+  // The control for R19: an event that has already finished is outside the
+  // window this sync asked about, so its absence proves nothing and it stays.
+  it('leaves a finished imported event alone', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedReadConnection(db, 'u1');
+
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO personal_events
+           (id, user_id, title, timezone, start_at, end_at, status, availability, is_recurring, google_event_id, created_at, updated_at)
+         VALUES ('pe-past', 'u1', 'Last week', 'UTC', ?, ?, 'active', 'busy', 0, 'g-past', ?, ?)`,
+      )
+      .bind(now - 8 * DAY_MS, now - 7 * DAY_MS, now, now)
+      .run();
+
+    fetchStub = stubFetch([TOKEN_RULE, { match: '/events', status: 200, body: { timeZone: 'UTC', items: [] } }]);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(await countRows(db, 'personal_events', 'google_event_id = ?', 'g-past')).toBe(1);
+  });
+
+  // R17. google_event_links stores a Google event id with no record of which
+  // calendar it is in, so changing the destination left every mapping pointing
+  // at the old one -- and the sweep, seeing unchanged synced values, skipped
+  // writing those events to the newly chosen calendar entirely.
+  it('retires upcoming mappings when the write calendar changes', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedReadConnection(db, 'u1');
+
+    const now = Date.now();
+    for (const [id, endAt] of [
+      ['link-future', now + DAY_MS],
+      ['link-past', now - DAY_MS],
+    ] as const) {
+      await seedEvent(db, { id: `ev-${id}`, organizerId: 'u1', startAt: endAt - HOUR_MS, endAt });
+      await db
+        .prepare(
+          `INSERT INTO google_event_links
+             (id, user_id, event_id, occurrence_date, google_event_id, synced_title, synced_start_at, synced_end_at, synced_at)
+           VALUES (?, 'u1', ?, '', ?, 'Session', ?, ?, ?)`,
+        )
+        .bind(id, `ev-${id}`, `g-${id}`, endAt - HOUR_MS, endAt, now)
+        .run();
+    }
+
+    const res = await call(env, '/google', {
+      method: 'PATCH',
+      headers: await authHeader(env, 'u1'),
+      body: JSON.stringify({ calendarId: 'games@group.calendar.google.com' }),
+    });
+    expect(res.status).toBe(200);
+
+    // The upcoming mapping is gone, so the sweep will write that occurrence
+    // into the new calendar; the historical one stays as the record of where
+    // an entry that already happened actually lives.
+    expect(await countRows(db, 'google_event_links', 'id = ?', 'link-future')).toBe(0);
+    expect(await countRows(db, 'google_event_links', 'id = ?', 'link-past')).toBe(1);
+  });
+
+  // R18. Only 'unauthorized' ended the sync or recorded anything; a 403, a
+  // rate limit or a 5xx was ignored, and execution then stamped last_synced_at
+  // and cleared last_error -- reporting a fresh successful sync for a calendar
+  // that had accepted nothing.
+  it('records a rejected write instead of reporting a clean sync', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedReadConnection(db, 'u1');
+
+    const now = Date.now();
+    await seedEvent(db, {
+      id: 'ev-1',
+      organizerId: 'u1',
+      startAt: now + 2 * DAY_MS,
+      endAt: now + 2 * DAY_MS + HOUR_MS,
+    });
+    await seedInvite(db, 'ev-1', 'u1');
+    await seedAttendance(db, 'ev-1', 'u1', 'accepted');
+
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      // The insert is refused -- write access to the calendar was withdrawn.
+      { match: '/calendars/primary/events', status: 403, body: { error: { message: 'forbidden' } } },
+      { match: '/events', status: 200, body: { timeZone: 'UTC', items: [] } },
+    ]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    const conn = await db
+      .prepare(`SELECT last_synced_at, last_error FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ last_synced_at: number | null; last_error: string | null }>();
+    // No link row was created, because nothing was written.
+    expect(await countRows(db, 'google_event_links')).toBe(0);
+    // And Settings is told so rather than shown a fresh, clean sync.
+    expect(conn?.last_error).toMatch(/could not be written/i);
+  });
+});

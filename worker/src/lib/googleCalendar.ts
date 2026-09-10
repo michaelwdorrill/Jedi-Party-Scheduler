@@ -693,6 +693,14 @@ export interface ImportedCalendar {
   // is for an event created inside Uncle Owen.
   timeZone: string;
   events: ImportedCalendarEvent[];
+  // Whether Google says there is more beyond what came back (R16 in the
+  // Pass-11 review). The `fields` mask used to omit nextPageToken entirely,
+  // which meant a partial page was indistinguishable from a complete one --
+  // and Google documents returning fewer results than maxResults with a token
+  // rather than a full page, so this is not only about very large calendars.
+  // The caller needs it to know whether "these are all the events" is a claim
+  // it can act on.
+  hasMore: boolean;
 }
 
 export async function listCalendarEvents(
@@ -707,9 +715,9 @@ export async function listCalendarEvents(
     singleEvents: 'true',
     orderBy: 'startTime',
     maxResults: '2500',
-    fields: 'timeZone,items(id,status,start,end,summary,description)',
+    fields: 'timeZone,nextPageToken,items(id,status,start,end,summary,description)',
   });
-  const result = await callGoogle<{ timeZone?: string; items?: GoogleEventItem[] }>(
+  const result = await callGoogle<{ timeZone?: string; items?: GoogleEventItem[]; nextPageToken?: string }>(
     accessToken,
     `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events?${params}`,
   );
@@ -767,7 +775,7 @@ export async function listCalendarEvents(
     });
   }
 
-  return { ok: true, value: { timeZone: zone, events: imported } };
+  return { ok: true, value: { timeZone: zone, events: imported, hasMore: !!result.value.nextPageToken } };
 }
 
 export interface CalendarEventPayload {

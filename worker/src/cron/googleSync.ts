@@ -387,6 +387,20 @@ async function syncOneConnection(
   // cron/budget.ts's ledger, which counts D1 statements and subrequests.
   const counts = { inserted: 0, patched: 0, deleted: 0, relinked: 0 };
 
+  // Pass-11 review (R18). Only `unauthorized` used to end the sync or record
+  // anything; every other rejection was dropped on the floor and execution
+  // carried on to unconditionally stamp last_synced_at and clear last_error.
+  // So a 403 (write access to a shared calendar withdrawn), a malformed
+  // calendar id, a rate limit or a transient 5xx produced a Settings page
+  // reporting a fresh, successful sync while Google had accepted nothing --
+  // and the ordinary interval then delayed the retry as if all were well.
+  let writeFailures = 0;
+  let firstFailure: string | null = null;
+  const noteWriteFailure = (message: string) => {
+    writeFailures += 1;
+    firstFailure ??= message;
+  };
+
   for (const occ of desired) {
     const key = `${occ.eventId}::${occ.occurrenceDate}`;
     const existing = linkByKey.get(key);
@@ -430,6 +444,8 @@ async function syncOneConnection(
       } else if (result.kind === 'unauthorized') {
         await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
         return;
+      } else {
+        noteWriteFailure(result.message);
       }
       continue;
     }
@@ -455,6 +471,8 @@ async function syncOneConnection(
     } else if (result.kind === 'unauthorized') {
       await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
       return;
+    } else {
+      noteWriteFailure(result.message);
     }
   }
 
@@ -476,6 +494,8 @@ async function syncOneConnection(
     } else if (result.kind === 'unauthorized') {
       await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
       return;
+    } else {
+      noteWriteFailure(result.message);
     }
   }
 
@@ -498,10 +518,29 @@ async function syncOneConnection(
   // running this afterwards erased it immediately: reading would switch
   // itself off and the user would never learn why. Found by a test asserting
   // the message survives, which it did not.
+  // R18: last_error only clears when the push half really did succeed. A sync
+  // that Google rejected part or all of records what happened instead of
+  // reporting itself clean -- otherwise Settings shows a fresh "Last synced"
+  // for a calendar that received nothing, which is the most misleading state
+  // this feature can be in.
+  //
+  // last_synced_at is still stamped either way, deliberately: it is what
+  // paces the retry, and not advancing it would turn a persistently failing
+  // connection into a sweep that runs every tick forever, which is the
+  // starvation cron/budget.ts exists to prevent. The error is what says the
+  // freshness is not the whole story.
+  const pushError =
+    writeFailures > 0
+      ? `${writeFailures} calendar ${writeFailures === 1 ? 'entry' : 'entries'} could not be written to Google` +
+        (firstFailure ? `: ${firstFailure}` : '.')
+      : null;
+  if (pushError) {
+    console.warn(`Google sync for ${row.user_id}: ${pushError}`);
+  }
   await env.DB.prepare(
-    `UPDATE google_calendar_connections SET last_synced_at = ?, last_error = NULL, updated_at = ? WHERE user_id = ?`,
+    `UPDATE google_calendar_connections SET last_synced_at = ?, last_error = ?, updated_at = ? WHERE user_id = ?`,
   )
-    .bind(now, now, row.user_id)
+    .bind(now, pushError, now, row.user_id)
     .run();
 
   await syncImportedPersonalEvents(env, row, accessToken, budget, now, pushedGoogleEventIds);
@@ -588,11 +627,25 @@ async function syncImportedPersonalEvents(
     return;
   }
 
-  const { timeZone, events } = result.value;
-  const imported = events
+  const { timeZone, events, hasMore } = result.value;
+  const candidates = events
     .filter((e) => !pushedGoogleEventIds.has(e.googleEventId))
-    .sort((a, b) => a.startAt - b.startAt)
-    .slice(0, MAX_IMPORTED_EVENTS_PER_SYNC);
+    .sort((a, b) => a.startAt - b.startAt);
+  const imported = candidates.slice(0, MAX_IMPORTED_EVENTS_PER_SYNC);
+
+  // Pass-11 review (R16). Forty-one events over two months is ordinary
+  // calendar usage, not a pathological case, and everything past the cap used
+  // to be dropped with nothing recorded anywhere: no error, no flag, and
+  // last_error left null. The omitted meetings simply never became busy
+  // blocks, so the scheduling assistant reported those times as free -- the
+  // failure mode where incomplete data is presented as complete.
+  //
+  // Properly paging this needs a per-connection cursor and a migration, which
+  // is deliberately not smuggled in here. What is fixed is the part that
+  // actively misleads: the truncation is now visible to its owner, and the
+  // reconciliation below stops deleting on the strength of an answer it knows
+  // to be partial.
+  const truncated = candidates.length > MAX_IMPORTED_EVENTS_PER_SYNC || hasMore;
 
   const statements = [];
 
@@ -621,21 +674,37 @@ async function syncImportedPersonalEvents(
   // by being rescheduled. Bounded to the window itself: a past occurrence
   // this sync isn't even asking about is left alone rather than reasoned
   // about from its absence in an answer that was never about it.
-  const currentIds = imported.map((e) => e.googleEventId);
-  const staleSql =
-    currentIds.length > 0
-      ? `DELETE FROM personal_events
-         WHERE user_id = ? AND google_event_id IS NOT NULL
-           AND start_at >= ? AND start_at < ?
-           AND google_event_id NOT IN (${placeholders(currentIds.length)})
-           AND ${stillCurrent}`
-      : `DELETE FROM personal_events
-         WHERE user_id = ? AND google_event_id IS NOT NULL
-           AND start_at >= ? AND start_at < ?
-           AND ${stillCurrent}`;
-  statements.push(
-    env.DB.prepare(staleSql).bind(row.user_id, now, now + BUSY_CACHE_WINDOW_MS, ...currentIds, ...guardBinds),
-  );
+  //
+  // Skipped entirely when the source answer was truncated (R16): rows missing
+  // from a partial response are not evidence of anything, and deleting on
+  // that basis would churn genuinely-current entries out of the database
+  // every tick.
+  if (!truncated) {
+    const currentIds = imported.map((e) => e.googleEventId);
+    // Pass-11 review (R19): the same overlap predicate the source query uses,
+    // not `start_at >= now`. Google's timeMin bounds an event's *end*, so an
+    // event that started yesterday and ends tomorrow is inside the range this
+    // sync asked about -- but the old predicate could never match it, so
+    // deleting or cancelling an in-progress event in Google never removed the
+    // app's copy. Its busy time stayed blocked and its title and description
+    // stayed imported, permanently, with the local delete route refusing to
+    // touch it (409) because it came from Google.
+    const overlapsWindow = `end_at > ? AND start_at < ?`;
+    const staleSql =
+      currentIds.length > 0
+        ? `DELETE FROM personal_events
+           WHERE user_id = ? AND google_event_id IS NOT NULL
+             AND ${overlapsWindow}
+             AND google_event_id NOT IN (${placeholders(currentIds.length)})
+             AND ${stillCurrent}`
+        : `DELETE FROM personal_events
+           WHERE user_id = ? AND google_event_id IS NOT NULL
+             AND ${overlapsWindow}
+             AND ${stillCurrent}`;
+    statements.push(
+      env.DB.prepare(staleSql).bind(row.user_id, now, now + BUSY_CACHE_WINDOW_MS, ...currentIds, ...guardBinds),
+    );
+  }
 
   // status/availability/is_recurring are written as literals, not bound --
   // every imported row is active, counts as busy (per the decision above),
@@ -683,16 +752,33 @@ async function syncImportedPersonalEvents(
     );
   }
 
+  // Said in last_error because that is the field Settings actually shows, and
+  // "some of your calendar is missing from this" is exactly the kind of thing
+  // its owner has to be able to see. Cleared on a complete import, so it does
+  // not outlive the condition -- and deliberately not phrased as a failure,
+  // because nothing failed: the import is working and is incomplete, which is
+  // a different sentence.
+  const truncationNotice = truncated
+    ? `Only the first ${MAX_IMPORTED_EVENTS_PER_SYNC} events from this calendar are being read, so times beyond ` +
+      'them will not show as busy.'
+    : null;
   statements.push(
     env.DB.prepare(
-      `UPDATE google_calendar_connections SET updated_at = ? WHERE user_id = ? AND read_calendar_id = ?`,
-    ).bind(now, row.user_id, row.read_calendar_id),
+      `UPDATE google_calendar_connections SET updated_at = ?, last_error = COALESCE(?, last_error)
+       WHERE user_id = ? AND read_calendar_id = ?`,
+    ).bind(now, truncationNotice, row.user_id, row.read_calendar_id),
   );
 
   await env.DB.batch(statements);
 
   if (imported.length > 0) {
     console.log(`Google personal-time import for ${row.user_id}: ${imported.length} event(s) over the next 62 days.`);
+  }
+  if (truncated) {
+    console.warn(
+      `Google personal-time import for ${row.user_id} was truncated at ${MAX_IMPORTED_EVENTS_PER_SYNC} events; ` +
+        'the rest of the window is not represented as busy.',
+    );
   }
 }
 

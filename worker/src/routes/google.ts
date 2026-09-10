@@ -419,6 +419,31 @@ googleRoutes.patch('/', requireAuth, requirePolicyAcceptance, async (c) => {
       c.env.DB.prepare(`DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL`).bind(userId),
     );
   }
+
+  // Pass-11 review (R17). google_event_links records a Google event id and
+  // nothing about *which calendar* it lives in, so changing the write
+  // destination left every mapping pointing at entries in the old one. The
+  // next tick then compared each upcoming occurrence against those links,
+  // found the synced values unchanged, and skipped it -- so the newly chosen
+  // calendar received nothing at all, indefinitely, while any later edit tried
+  // to PATCH an event id that does not exist in it. The UI meanwhile says, in
+  // as many words, that future sessions will be written to the new calendar.
+  //
+  // The mappings for upcoming occurrences are retired here so the sweep
+  // recreates those events under the new destination. Past ones are kept: they
+  // are the record of sessions that actually happened, they are not going to be
+  // rewritten anywhere, and dropping their links would only lose track of what
+  // is already in the old calendar. Entries already written to the old
+  // calendar stay where they are, which is exactly what ConnectedCalendars
+  // tells the user will happen.
+  if (calendarId !== null && calendarId !== row.calendar_id) {
+    statements.push(
+      c.env.DB.prepare(
+        `DELETE FROM google_event_links WHERE user_id = ? AND (synced_end_at IS NULL OR synced_end_at >= ?)`,
+      ).bind(userId, now),
+    );
+  }
+
   await c.env.DB.batch(statements);
 
   return c.json({ ok: true });
