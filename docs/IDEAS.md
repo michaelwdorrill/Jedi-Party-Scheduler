@@ -125,6 +125,45 @@ That is the middle row above, warning and all. Shipping production in Testing
 mode would silently break every user's sync a week after they connect, and
 that is a correctness issue rather than a cosmetic one.
 
+### 65. The scheduling assistant can show someone busy from a server they can no longer see on their own calendar
+
+Found during 0.8.1 sandbox verification, chasing what looked like a phantom
+busy block: a weekly recurring event, organized in one server, correctly made
+its organizer show as busy to someone inviting them from a *different*
+server -- but that same event had silently dropped off the organizer's own
+calendar.
+
+The cause is a real asymmetry, not a data bug. `GET /me/events`
+(`buildCalendarOccurrences`) joins `user_guild_membership` and applies the
+same `MEMBERSHIP_GRACE_MS` freshness bound the cron's recipient queries use --
+an organizer whose membership row in that guild has gone stale stops seeing
+their own event there. `computeBusyBlocksForUsers`' native-event source
+(`lib/freeBusy.ts`) applies no such filter at all: an event's organizer and
+invitees count as busy purely from `events`/`event_invites`, regardless of
+whether their membership in that event's guild is current, fresh, or even
+still active.
+
+**Probably the right behavior, not a bug to fix reflexively.** `freeBusy.ts`'s
+own header argues the direction of error this module should prefer: "over-
+reporting busy costs someone a slot they could have taken; under-reporting
+schedules a game over a real commitment... an omitted commitment is
+indistinguishable from free time." A stale membership row doesn't un-happen a
+real-world commitment, so continuing to count it as busy is consistent with
+that stated philosophy. What's inconsistent is only the *display* side: the
+organizer can no longer see the event that's still shaping how others
+schedule around them, which is confusing to debug (as this entry's own
+discovery proves) but not a privacy leak -- both reads are computing the
+organizer's own data, for the organizer's own benefit in one case and for
+someone scheduling with them in the other.
+
+If this gets revisited: either `/me/events` could stop hiding an event the
+caller still organizes (membership lapsing arguably shouldn't hide someone's
+own creation from themselves, whatever it does for invitees), or
+`computeBusyBlocksForUsers` could adopt the same freshness join for
+symmetry's sake. Leaving both as they are is also a legitimate answer -- nothing
+here is unsafe in the direction that matters, just a rough edge that cost real
+debugging time once.
+
 ## Already built
 
 Kept for the reasoning, not as a to-do list. Nothing below counts against the
