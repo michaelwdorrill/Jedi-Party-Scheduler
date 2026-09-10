@@ -452,7 +452,10 @@ eventRoutes.post('/:eventId/invites', async (c) => {
   // Additive only -- unlike PATCH /:eventId (the full edit form, which
   // replaces the invite list to match whatever it submits), this endpoint's
   // whole purpose is inviting more people without touching anyone already invited.
-  await addInvitesToEvent(c.env, eventId, event.guild_id, userIds, groupIds);
+  // loadOwnedActiveEvent above already established this caller is the
+  // organizer, which is what makes them the actor for the group-scoping check
+  // inside (F-25 / R08).
+  await addInvitesToEvent(c.env, eventId, event.guild_id, userIds, groupIds, userId);
   return c.json({ ok: true });
 });
 

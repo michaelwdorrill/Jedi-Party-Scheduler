@@ -129,9 +129,26 @@ groupRoutes.post('/', async (c) => {
 // only source of truth an editor has for "would this roster actually be
 // valid", since the real check (assertValidRoster) only runs on save.
 groupRoutes.post('/common-servers', async (c) => {
+  const userId = c.get('userId');
   const body = await readJsonBody<{ member_user_ids: string[] }>(c);
   const memberIds = assertStringArray(body.member_user_ids ?? [], 'member_user_ids', LIMITS.MAX_GROUP_MEMBERS, 64);
-  return c.json({ servers: await commonServerSet(c.env, memberIds) });
+
+  // Pass-11 review (F-26 / R07): the caller goes into the intersection, which
+  // is what POST / above already does before it validates a roster for real
+  // (`rosterIds`). Without it this route answered a question group creation
+  // never asks -- "which servers do these people share?" rather than "which
+  // servers would this group have?" -- and answering the first one leaks.
+  // Any authenticated user could post any Discord ids and be told the id and
+  // name of every active server those people share, including servers the
+  // caller has no part in and could not otherwise see; lib/db.ts's
+  // FriendWithGuilds comment says exactly that must never happen. It also
+  // doubled as an oracle for whether a given Discord id has an account here.
+  //
+  // Including the caller fixes both in the query itself rather than by
+  // filtering afterwards, and it cannot drift from the creation path's answer
+  // the way a second, parallel rule would.
+  const rosterIds = memberIds.includes(userId) ? memberIds : [userId, ...memberIds];
+  return c.json({ servers: await commonServerSet(c.env, rosterIds) });
 });
 
 groupRoutes.patch('/:groupId', async (c) => {

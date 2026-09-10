@@ -224,8 +224,11 @@ describe('overlapping maximum groups resolve without one query per group', () =>
       )
         .bind(groupId, `Group ${groupId}`, Date.now())
         .run();
-      for (const userId of members) {
-        await db.prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`)
+      // The creator included, as migration 0017 makes true of every real
+      // group -- and as F-25 in the Pass-11 review now requires, since an
+      // organizer can only invite through groups they belong to.
+      for (const userId of [...members, 'organizer']) {
+        await db.prepare(`INSERT OR IGNORE INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`)
           .bind(groupId, userId, Date.now())
           .run();
       }
@@ -264,8 +267,10 @@ describe('overlapping maximum groups resolve without one query per group', () =>
       )
         .bind(groupId, groupId, Date.now())
         .run();
-      for (const userId of members.slice(i * 200, (i + 1) * 200)) {
-        await db.prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`)
+      // The creator included, as migration 0017 makes true of every real
+      // group -- and as F-25 in the Pass-11 review now requires.
+      for (const userId of [...members.slice(i * 200, (i + 1) * 200), 'organizer']) {
+        await db.prepare(`INSERT OR IGNORE INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`)
           .bind(groupId, userId, Date.now())
           .run();
       }

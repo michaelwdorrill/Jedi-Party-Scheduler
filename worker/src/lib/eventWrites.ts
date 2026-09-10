@@ -154,6 +154,11 @@ async function resolveInviteeUserIds(
   // it is handed: a call site that forgot would not fail to add the row, it
   // would delete the existing one on the next edit.
   organizerId: string | null,
+  // Who is actually asking. Distinct from `organizerId`, which is null on the
+  // additive path and is about whose row gets folded into the result -- this
+  // one is about authority, and every caller has it (each route has already
+  // proven the caller owns the event). Pass-11 review, F-25 / R08.
+  actorId: string,
 ): Promise<ResolvedInvitee[]> {
   // `source` is `null` for a directly-chosen invitee and the winning group ID
   // for a group-derived one. Built up front, before any membership check
@@ -168,6 +173,29 @@ async function resolveInviteeUserIds(
   for (const userId of userIds) source.set(userId, null);
 
   if (groupIds.length > 0) {
+    // Pass-11 review (F-25 / R08): a group id is a capability to read that
+    // group's roster, so it has to be checked against the person holding it.
+    // Rosters are private everywhere else -- GET /groups/:id requires
+    // membership, and the per-guild listing was removed in v0.4.3 for exactly
+    // this reason -- but this resolver expanded any id it was handed. The ids
+    // are not secret either: `sourceGroupId` on GET /events/:id discloses one
+    // to every invitee of any event built from that group. So someone removed
+    // from a group could keep reading its roster by creating an event from
+    // it, and everyone still in it got an invite DM from a stranger.
+    //
+    // MAX_GROUP_IDS is 10, so one statement covers it with no chunking.
+    const { results: ownGroups } = await env.DB.prepare(
+      `SELECT group_id FROM group_members WHERE user_id = ? AND group_id IN (${placeholders(groupIds.length)})`,
+    )
+      .bind(actorId, ...groupIds)
+      .all<{ group_id: string }>();
+    const allowed = new Set(ownGroups.map((r) => r.group_id));
+    if (groupIds.some((id) => !allowed.has(id))) {
+      // Deliberately does not name which id was refused: that would confirm
+      // the existence of a group to someone probing for one.
+      throw new ValidationError('You can only invite through groups you belong to');
+    }
+
     // One roster query per chunk of groups, not one per group. specs/0011 /
     // IDEAS item 36: a group no longer belongs to one guild, so there is no
     // `g.guild_id = ?` left to filter on here -- every member of a selected
@@ -893,6 +921,11 @@ export async function addInvitesToEvent(
   guildId: string,
   userIds: string[],
   groupIds: string[],
+  // The event's organizer, which every caller has already established is the
+  // person asking (F-25 / R08). Needed even though the organizer's own invite
+  // row is not written here -- the group ids still have to be checked against
+  // somebody, and this path was previously the one with no actor at all.
+  actorId: string,
 ): Promise<void> {
   assertStringArray(userIds, 'userIds', LIMITS.MAX_INVITEES, 64);
   assertStringArray(groupIds, 'groupIds', LIMITS.MAX_GROUP_IDS, 64);
@@ -900,7 +933,7 @@ export async function addInvitesToEvent(
   // Folding them in here would be harmless (ON CONFLICT DO NOTHING) but would
   // also mean this path silently invites the organizer to an event they might
   // deliberately have been removed from -- so it stays out of it.
-  const invitees = await resolveInviteeUserIds(env, guildId, userIds, groupIds, null);
+  const invitees = await resolveInviteeUserIds(env, guildId, userIds, groupIds, null, actorId);
   if (invitees.length === 0) return;
   await env.DB.batch(inviteStatements(env, eventId, invitees, false));
 }
@@ -930,6 +963,7 @@ export async function createEventWithInvites(
     guildId,
     input.invites?.userIds ?? [],
     input.invites?.groupIds ?? [],
+    organizerId,
     organizerId,
   );
   assertThresholdReachable(input.pollStrategy, input.pollThresholdCount, invitees.length);
@@ -1253,6 +1287,7 @@ export async function updateEvent(
         guildId,
         input.invites.userIds,
         input.invites.groupIds,
+        stored.organizer_id,
         stored.organizer_id,
       )
     : null;

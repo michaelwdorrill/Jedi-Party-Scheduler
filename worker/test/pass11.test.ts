@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/router';
 import { base64UrlEncode } from '../src/lib/base64url';
 import { deleteUserCompletely } from '../src/lib/db';
-import { updateEvent } from '../src/lib/eventWrites';
+import { createEventWithInvites, updateEvent } from '../src/lib/eventWrites';
 import { buildNoticeboard } from '../src/lib/noticeboard';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
@@ -1001,5 +1001,201 @@ describe('a Google grant attaches only to the account that claims it (F-16 / R01
     await expect(deleteUserCompletely(env, 'alice')).resolves.toBeUndefined();
     expect(await countRows(db, 'users', 'id = ?', 'alice')).toBe(0);
     expect(await countRows(db, 'google_pending_connections')).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-26 / R07, F-25 / R08, F-23
+// ---------------------------------------------------------------------------
+
+// Three leaks of the same shape: an id the caller happens to know was treated
+// as permission to use it. Grouped because the fix is the same idea three
+// times -- resolve every id against what the caller is actually entitled to.
+describe('an id the caller knows is not permission to use it (F-26 / R07, F-25 / R08, F-23)', () => {
+  const app = buildApp();
+  const call = (env: Env, path: string, init: RequestInit = {}) =>
+    app.request(`https://worker.test${path}`, init, env);
+
+  async function authHeader(env: Env, userId: string): Promise<Record<string, string>> {
+    const { id: sessionId } = await createSession(env, userId);
+    return {
+      Authorization: `Bearer ${await signJwt(userId, sessionId, env.JWT_SIGNING_KEY)}`,
+      'Content-Type': 'application/json',
+    };
+  }
+
+  // POST /groups/common-servers passed only the submitted ids to
+  // commonServerSet, so any authenticated user could post any Discord ids and
+  // be told the id and name of every active server those people share --
+  // including servers the caller has no part in. lib/db.ts's FriendWithGuilds
+  // comment says a server the caller cannot already see must never leak.
+  it('does not name a server the caller is not in', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'guild-1');
+    await seedGuild(db, 'guild-secret');
+    await seedUser(db, 'caller');
+    await seedUser(db, 'subject-a');
+    await seedUser(db, 'subject-b');
+    // The caller shares guild-1 with both subjects; the subjects also share a
+    // second server the caller knows nothing about.
+    await seedMembership(db, 'caller', 'guild-1');
+    for (const id of ['subject-a', 'subject-b']) {
+      await seedMembership(db, id, 'guild-1');
+      await seedMembership(db, id, 'guild-secret');
+    }
+
+    const res = await call(env, '/groups/common-servers', {
+      method: 'POST',
+      headers: await authHeader(env, 'caller'),
+      body: JSON.stringify({ member_user_ids: ['subject-a', 'subject-b'] }),
+    });
+
+    expect(res.status).toBe(200);
+    const { servers } = (await res.json()) as { servers: { id: string; name: string }[] };
+    expect(servers.map((s) => s.id)).toEqual(['guild-1']);
+  });
+
+  // The other half: the answer still has to be right for the picker it exists
+  // to serve, which is the one that decides whether a roster is usable.
+  it('still answers for a roster the caller really shares a server with', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'guild-1');
+    for (const id of ['caller', 'friend']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+
+    const res = await call(env, '/groups/common-servers', {
+      method: 'POST',
+      headers: await authHeader(env, 'caller'),
+      body: JSON.stringify({ member_user_ids: ['friend'] }),
+    });
+    const { servers } = (await res.json()) as { servers: { id: string }[] };
+    expect(servers.map((s) => s.id)).toEqual(['guild-1']);
+  });
+
+  // resolveInviteeUserIds expanded any group id it was handed. Rosters are
+  // private everywhere else, but the id leaks through sourceGroupId on
+  // GET /events/:id -- so someone removed from a group could keep reading its
+  // roster by building an event from it, and every member got an invite DM
+  // from a stranger.
+  it('refuses a group the organizer does not belong to, and accepts one they do', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'guild-1');
+    for (const id of ['outsider', 'insider', 'member-1']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    const now = Date.now();
+    await db
+      .prepare(`INSERT INTO groups (id, name, idle_reminder_days, created_by, created_at) VALUES ('grp', 'Private', 2, 'insider', ?)`)
+      .bind(now)
+      .run();
+    for (const id of ['insider', 'member-1']) {
+      await db
+        .prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES ('grp', ?, ?)`)
+        .bind(id, now)
+        .run();
+    }
+
+    fetchStub = stubFetch([membershipRule(200)]);
+
+    const base = {
+      title: 'Session',
+      description: null,
+      game: null,
+      timezone: 'UTC',
+      eventType: 'single' as const,
+      startAt: now + 24 * HOUR_MS,
+      endAt: now + 25 * HOUR_MS,
+    };
+
+    // The outsider knows the id but is not in the group.
+    await expect(
+      createEventWithInvites(env, 'guild-1', 'outsider', {
+        ...base,
+        invites: { userIds: [], groupIds: ['grp'] },
+      } as EventWriteInput),
+    ).rejects.toThrow(/groups you belong to/i);
+
+    // A member of the same group is unaffected.
+    await expect(
+      createEventWithInvites(env, 'guild-1', 'insider', {
+        ...base,
+        invites: { userIds: [], groupIds: ['grp'] },
+      } as EventWriteInput),
+    ).resolves.toBeTruthy();
+  });
+
+  // The additive path had no actor at all before this, so it was the way
+  // around the check above even once creation was scoped.
+  it('refuses the same group id on the additive invite route', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'guild-1');
+    for (const id of ['outsider', 'insider', 'member-1']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    const now = Date.now();
+    await db
+      .prepare(`INSERT INTO groups (id, name, idle_reminder_days, created_by, created_at) VALUES ('grp', 'Private', 2, 'insider', ?)`)
+      .bind(now)
+      .run();
+    for (const id of ['insider', 'member-1']) {
+      await db
+        .prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES ('grp', ?, ?)`)
+        .bind(id, now)
+        .run();
+    }
+    await seedEvent(db, { id: 'ev-1', organizerId: 'outsider' });
+
+    fetchStub = stubFetch([membershipRule(200)]);
+
+    const res = await call(env, '/events/ev-1/invites', {
+      method: 'POST',
+      headers: await authHeader(env, 'outsider'),
+      body: JSON.stringify({ userIds: [], groupIds: ['grp'] }),
+    });
+    expect(res.status).toBe(400);
+    // member-1 was never invited to anything.
+    expect(await countRows(db, 'event_invites', 'user_id = ?', 'member-1')).toBe(0);
+  });
+
+  // Diffing free/busy with and without an arbitrary exclude_event_id reveals
+  // whether a given person holds a non-declined invite to that event. The
+  // parameter is only meaningful for an event the caller can already see.
+  it('ignores an exclude_event_id the caller cannot see', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'guild-1');
+    for (const id of ['snooper', 'subject', 'organizer']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    const now = Date.now();
+    const from = now;
+    const to = now + 7 * DAY_MS;
+    // An event the snooper is not invited to, which the subject is.
+    await seedEvent(db, {
+      id: 'secret',
+      organizerId: 'organizer',
+      startAt: now + 2 * HOUR_MS,
+      endAt: now + 3 * HOUR_MS,
+    });
+    await seedInvite(db, 'secret', 'subject');
+
+    const headers = await authHeader(env, 'snooper');
+    const read = async (query: string) => {
+      const res = await call(
+        env,
+        `/guilds/guild-1/free-busy?from=${from}&to=${to}&user_ids=subject${query}`,
+        { headers },
+      );
+      const body = (await res.json()) as { userId: string; busy: unknown[] }[];
+      return body.find((m) => m.userId === 'subject')!.busy.length;
+    };
+
+    // Without the fix the excluded read drops a block and the difference is
+    // the answer to "is subject invited to `secret`?".
+    expect(await read('&exclude_event_id=secret')).toBe(await read(''));
   });
 });

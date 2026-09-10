@@ -6,6 +6,7 @@ import { createEventWithInvites, type EventWriteInput } from '../lib/eventWrites
 import { buildCalendarOccurrences } from '../lib/calendar';
 import { computeBusyBlocksForUsers } from '../lib/freeBusy';
 import { buildNoticeboard } from '../lib/noticeboard';
+import { loadEventIfVisible } from './events';
 import { fetchGuildVoiceChannels } from '../lib/discord';
 import { assertStringArray, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
 
@@ -89,7 +90,20 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
   }
 
   const visibleIds = members.filter((m) => !!m.free_busy_visible || m.id === userId).map((m) => m.id);
-  const excludeEventId = c.req.query('exclude_event_id') || undefined;
+  // Pass-11 review (F-23): resolved through the visibility check rather than
+  // trusted as given. The parameter exists so the edit form stops showing an
+  // event's own invitees as busy during it (IDEAS item 63), but an arbitrary
+  // id was accepted -- and diffing the busy blocks with and without one tells
+  // you whether a given person holds a non-declined invite to that event.
+  // Low, since it needs the event's UUID (they do appear in DM links), but the
+  // fix is one lookup the caller is entitled to make anyway: an id they cannot
+  // see is ignored rather than refused, since the parameter is an optimisation
+  // and failing the whole free/busy read over it would be worse.
+  const requestedExcludeId = c.req.query('exclude_event_id') || undefined;
+  const excludeEventId =
+    requestedExcludeId && (await loadEventIfVisible(c.env, requestedExcludeId, userId))
+      ? requestedExcludeId
+      : undefined;
   const busyByUser = await computeBusyBlocksForUsers(c.env, visibleIds, from, to, excludeEventId);
 
   const out = [];

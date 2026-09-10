@@ -354,7 +354,9 @@ async function applyAndAccept(
     if ((countRow?.n ?? 0) >= LIMITS.MAX_INVITEES) {
       throw new ValidationError('This event has reached its limit of invitees');
     }
-    await addInvitesToEvent(env, event.id, event.guild_id, [request.target_user_id!], []);
+    // The organizer is the actor: accepting a request is their decision, and
+    // this path passes no group ids anyway.
+    await addInvitesToEvent(env, event.id, event.guild_id, [request.target_user_id!], [], event.organizer_id);
   }
 
   // Best-effort bookkeeping, not a joint transaction with the write above --
