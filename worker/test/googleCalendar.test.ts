@@ -829,7 +829,12 @@ describe('the personal-time import', () => {
     }[],
     timeZone = 'America/New_York',
   ) => ({
-    match: '/calendars/work%40example.com/events',
+    // Specific enough to distinguish this GET from the push half's POST to
+    // the very same /calendars/{id}/events path -- stubFetch matches by URL
+    // substring only, not by method, so the two would otherwise collide the
+    // moment a test points both halves at the same calendar id (see 'does
+    // not re-import an event this same connection just pushed' below).
+    match: '/calendars/work%40example.com/events?',
     status: 200,
     body: {
       timeZone,
@@ -925,6 +930,56 @@ describe('the personal-time import', () => {
     // And it's what the scheduling assistant sees for this person.
     const blocks = (await computeBusyBlocksForUsers(env, ['u1'], Date.now(), Date.now() + 10 * DAY_MS)).get('u1') ?? [];
     expect(blocks.some((b) => b.startAt === start && b.endAt === end)).toBe(true);
+  });
+
+  // Found live, on the sandbox: nothing stops someone picking the same
+  // Google calendar for both write and read -- the two settings are
+  // independent on purpose, so a dedicated "Games" calendar can legitimately
+  // be both. Without this, a session pushed to that calendar came straight
+  // back in on the very same tick as a "new" personal-time entry: 3 sessions
+  // pushed, 3 duplicates imported, all in one sync.
+  it('does not re-import an event this same connection just pushed to a shared calendar', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedMember(db, 'u1');
+    // Both settings point at the same calendar -- the exact configuration
+    // that produced the duplicates.
+    await seedConnection(db, 'u1', { calendarId: 'work@example.com' });
+    await db
+      .prepare(`UPDATE google_calendar_connections SET read_calendar_id = 'work@example.com' WHERE user_id = 'u1'`)
+      .run();
+
+    const start = Date.now() + 3 * DAY_MS;
+    await seedEvent(db, { id: 'evt-shared', organizerId: 'u1', startAt: start, endAt: start + HOUR_MS });
+
+    // INSERT_RULE hands back id 'google-event-1' for the push; the read half
+    // is told that exact id exists on the calendar, which is what a real
+    // Google would report the moment the push above actually landed there.
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      EVENTS_LIST_RULE([
+        {
+          id: 'google-event-1',
+          summary: 'Uncle Owen session (echoed back by Google)',
+          start: { dateTime: new Date(start).toISOString() },
+          end: { dateTime: new Date(start + HOUR_MS).toISOString() },
+        },
+      ]),
+      INSERT_RULE,
+    ]);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    // The push succeeded --
+    const link = await db
+      .prepare(`SELECT google_event_id FROM google_event_links WHERE user_id = 'u1' AND event_id = 'evt-shared'`)
+      .first<{ google_event_id: string }>();
+    expect(link?.google_event_id).toBe('google-event-1');
+
+    // -- but it was not also imported back as a personal-time entry.
+    const imported = await db
+      .prepare(`SELECT id FROM personal_events WHERE user_id = 'u1' AND google_event_id IS NOT NULL`)
+      .all();
+    expect(imported.results).toHaveLength(0);
   });
 
   it('counts an all-day event as busy even though Google marks it Free by default', async () => {

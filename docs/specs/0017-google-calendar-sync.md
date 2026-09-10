@@ -496,6 +496,40 @@ What this changed, concretely:
 Nothing about *when* this runs changed: still the same hourly slot, still
 first on the tick, for the same reasons recorded above.
 
+**A third bug, found within an hour of shipping the second reversal, live on
+the sandbox.** Nothing stops someone choosing the same Google calendar for
+both `calendar_id` (write) and `read_calendar_id` (read) — the constraint
+section above even names this as the obvious legitimate setup for a
+dedicated "Games" calendar. Nobody had tried it with the *same* calendar on
+both sides. The result: the push half writes a session, and the pull half —
+having no way to tell "an event we ourselves wrote" from "an event that
+happens to exist on the calendar we're reading" — reads it straight back in
+as a brand-new personal-time entry. Reproduced exactly as it happened live:
+three sessions pushed, three duplicates imported, in the same tick.
+
+Fixed by tracking every Google event id this connection's push half has ever
+written — starting from `google_event_links` (covers anything pushed on a
+prior tick) and adding one entry per successful insert as the push loop
+runs (covers anything pushed *in this same tick*, which is what the live
+reproduction actually needed: a pre-tick snapshot alone would have missed
+it, since `google_event_links` doesn't gain the new row until partway
+through the very loop that's building it). `syncImportedPersonalEvents`
+filters the freshly-fetched event list against that set before anything
+else. Costs nothing extra against the budget: no new query, since the set
+is built from data the push half was already loading and writing.
+
+The regression test for this is worth a specific note, because writing it
+wrong looked identical to writing it right. The first version filtered
+nothing, mocked the push's insert response and the pull's events.list
+response with `stubFetch`, and passed -- for the wrong reason: the two
+mocked HTTP calls hit the same URL prefix (`/calendars/{id}/events`, one a
+POST without a query string, one a GET with one), and `stubFetch` matches by
+URL substring only, not by method, so an earlier, broader rule in the array
+was silently answering both. Caught by the same discipline this project
+applies everywhere else -- revert the fix, expect the test to fail, and it
+didn't -- which is what found the mock ordering bug rather than trusting a
+green test built on a coincidence.
+
 ## Policy
 
 `CURRENT_POLICY_VERSION` 2 → 3, with `policy-version.txt` in the same commit

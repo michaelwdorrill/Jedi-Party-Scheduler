@@ -345,6 +345,17 @@ async function syncOneConnection(
   const desired = await desiredOccurrencesFor(env, row.user_id, now);
   const links = await loadLinks(env, row.user_id);
   const linkByKey = new Map(links.map((l) => [`${l.event_id}::${l.occurrence_date}`, l]));
+  // Found live: choosing the same Google calendar for both push and pull is
+  // never blocked, and nothing was stopping the pull half from reading an
+  // event straight back in that the push half in this exact tick just wrote
+  // -- three sessions pushed, then imported right back as three "new"
+  // personal-time entries, on the very first sync after reconnecting.
+  // Every id already in `links` covers everything pushed on a *previous*
+  // tick; this set starts there and gains one entry per successful insert
+  // below, so an event pushed and read back in the *same* tick -- which is
+  // exactly what happened -- is caught too, not just from the second sync
+  // onward.
+  const pushedGoogleEventIds = new Set(links.map((l) => l.google_event_id));
 
   // Counted so a tick that did something says so, once, at the end.
   //
@@ -420,6 +431,7 @@ async function syncOneConnection(
         .bind(newId(), row.user_id, occ.eventId, occ.occurrenceDate, result.value.id, occ.title, occ.startAt, occ.endAt, now)
         .run();
       counts.inserted += 1;
+      pushedGoogleEventIds.add(result.value.id);
     } else if (result.kind === 'unauthorized') {
       await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
       return;
@@ -472,7 +484,7 @@ async function syncOneConnection(
     .bind(now, now, row.user_id)
     .run();
 
-  await syncImportedPersonalEvents(env, row, accessToken, budget, now);
+  await syncImportedPersonalEvents(env, row, accessToken, budget, now, pushedGoogleEventIds);
 }
 
 // One statement per upsert chunk, plus this one DELETE -- computed once from
@@ -504,6 +516,12 @@ async function syncImportedPersonalEvents(
   accessToken: string,
   budget: TickBudget,
   now: number,
+  // Every Google event id this connection's own push half has ever written,
+  // including anything it wrote earlier in this same tick. Filtered out of
+  // the import below so a shared or overlapping read/write calendar can't
+  // feed a session back in as a "new" personal-time entry -- see the call
+  // site for how this set is built.
+  pushedGoogleEventIds: ReadonlySet<string>,
 ): Promise<void> {
   if (!row.read_calendar_id) return;
   // Reserved for the worst case (every chunked upsert statement plus the
@@ -551,7 +569,8 @@ async function syncImportedPersonalEvents(
   }
 
   const { timeZone, events } = result.value;
-  const imported = [...events]
+  const imported = events
+    .filter((e) => !pushedGoogleEventIds.has(e.googleEventId))
     .sort((a, b) => a.startAt - b.startAt)
     .slice(0, MAX_IMPORTED_EVENTS_PER_SYNC);
 
