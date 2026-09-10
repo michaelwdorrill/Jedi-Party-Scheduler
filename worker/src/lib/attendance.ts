@@ -86,6 +86,17 @@ function membershipCutoff(): number {
 // 10/21 one. Written as NOT EXISTS rather than a join so an occurrence
 // nobody has answered for -- which is every occurrence, for an
 // organizer who has never pressed anything -- behaves exactly like "there".
+// The event states in which an RSVP still means something (R20 in the Pass-11
+// review). 'resolved' belongs here because a single-winner poll that has
+// resolved deliberately keeps event_type='poll' and status='resolved' -- it is
+// a settled session people are still answering about, and the cron sends it
+// RSVP buttons on exactly that basis. Same set freeBusy.ts and noticeboard.ts
+// already use, for the same reason.
+//
+// Declared once and used in both the read and the write below, so the two can
+// never drift into disagreeing about which events accept an answer.
+const ACCEPTS_RSVP_STATUSES: readonly string[] = ['active', 'resolved'];
+
 const ORGANIZER_UNLESS_DECLINED = `UNION
        SELECT ? WHERE NOT EXISTS (
          SELECT 1 FROM event_attendance
@@ -412,7 +423,22 @@ export async function recordRsvp(
   // otherwise never be told the session isn't happening. Checked before the
   // occurrence guard below so the more specific "this event is over" answer
   // wins over "that date doesn't match" whenever both would apply.
-  if (event.status !== 'active') return 'event_not_active';
+  //
+  // Pass-11 review (R20): 'resolved' is a live state, not a terminal one, and
+  // the blanket `!== 'active'` broke every RSVP on a settled poll. A
+  // single-winner poll that resolves deliberately keeps event_type='poll' and
+  // status='resolved'; cron/reminders.ts sends rsvpControls for exactly that
+  // state, and the attendance reader is built so an RSVP overrides a prior
+  // vote. So the buttons the app itself puts in front of people all answered
+  // event_not_active: nobody could withdraw an earlier yes or join after
+  // resolution, and the attendee count that decides voice-channel invites and
+  // the minimum-attendees cascade stayed frozen on stale votes.
+  //
+  // Cancelled is what actually has to be refused, which is what the original
+  // guard was for (specs/0014 stage 3): an accept landing after the cascade
+  // already cancelled the event, and after the cancellation notices went out,
+  // would otherwise never be told the session is not happening.
+  if (!ACCEPTS_RSVP_STATUSES.includes(event.status)) return 'event_not_active';
 
   // A non-recurring event's only occurrence is '' and a recurring one's is
   // never ''. Guarding it here, not just at the callers that construct it,
@@ -427,10 +453,27 @@ export async function recordRsvp(
     `INSERT INTO event_attendance (id, event_id, occurrence_date, user_id, rsvp_status, responded_at)
      SELECT ?, ?, ?, ?, ?, ?
      WHERE EXISTS (SELECT 1 FROM event_invites WHERE event_id = ? AND user_id = ?)
+       -- R20: the same predicate as the read above, restated where the write
+       -- happens. The read cannot see a cancellation that lands between it
+       -- and this statement, and that gap is exactly the case the status
+       -- check exists for.
+       AND EXISTS (SELECT 1 FROM events
+                   WHERE id = ? AND status IN (${ACCEPTS_RSVP_STATUSES.map(() => '?').join(', ')}))
      ON CONFLICT(event_id, occurrence_date, user_id) DO UPDATE SET
        rsvp_status = excluded.rsvp_status, responded_at = excluded.responded_at`,
   )
-    .bind(newId(), eventId, occurrenceDate, userId, status, Date.now(), eventId, userId)
+    .bind(
+      newId(),
+      eventId,
+      occurrenceDate,
+      userId,
+      status,
+      Date.now(),
+      eventId,
+      userId,
+      eventId,
+      ...ACCEPTS_RSVP_STATUSES,
+    )
     .run();
 
   if (result.meta.changes === 0) return 'not_invited';

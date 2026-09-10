@@ -769,6 +769,13 @@ export function inviteStatements(
   invitees: ResolvedInvitee[],
   guarded: boolean,
   mutationToken: string | null = null,
+  // R21: when set, each statement refuses to write if the event's invite
+  // count has already reached this total. Evaluated at execution time inside
+  // the batch, so rows written by an earlier chunk of the same batch count --
+  // and so does a concurrent request that got there first, which is the part
+  // a preflight count cannot cover. Only the additive path passes it; a full
+  // replace is bounded by the resolved set it submits.
+  totalCap: number | null = null,
 ): D1PreparedStatement[] {
   const extraGuard = mutationToken === null ? '' : ' AND mutation_token = ?';
   const extraBinds = mutationToken === null ? [] : [mutationToken];
@@ -785,6 +792,21 @@ export function inviteStatements(
       now,
     ]);
     if (!guarded) {
+      if (totalCap !== null) {
+        const arms = chunk
+          .map((_, i) =>
+            i === 0
+              ? `SELECT ${INVITE_COLUMNS.map((c) => `? AS ${c}`).join(', ')}`
+              : `SELECT ${INVITE_COLUMNS.map(() => '?').join(', ')}`,
+          )
+          .join(' UNION ALL ');
+        return env.DB.prepare(
+          `INSERT INTO event_invites (${INVITE_COLUMNS.join(', ')})
+           SELECT * FROM (${arms})
+           WHERE (SELECT COUNT(*) FROM event_invites WHERE event_id = ?) < ?
+           ${conflict}`,
+        ).bind(...values, eventId, totalCap);
+      }
       return env.DB.prepare(
         `INSERT INTO event_invites (${INVITE_COLUMNS.join(', ')})
          VALUES ${chunk.map(() => `(${INVITE_COLUMNS.map(() => '?').join(', ')})`).join(', ')}
@@ -935,7 +957,35 @@ export async function addInvitesToEvent(
   // deliberately have been removed from -- so it stays out of it.
   const invitees = await resolveInviteeUserIds(env, guildId, userIds, groupIds, null, actorId);
   if (invitees.length === 0) return;
-  await env.DB.batch(inviteStatements(env, eventId, invitees, false));
+
+  // Pass-11 review (R21). resolveInviteeUserIds caps the set *this request*
+  // resolves, and nothing anywhere checked the existing-plus-new union -- so
+  // repeated calls to this endpoint walked an event past
+  // MAX_RESOLVED_INVITEES without ever tripping a limit. The cap is not
+  // decoration: every downstream query that fans out over an invite list
+  // (event detail, the noticeboard, vote tallies, DM fan-out) is sized on the
+  // assumption that it holds, and lib/changeRequests.ts already had to write
+  // its own preflight count because this function had none.
+  //
+  // Two layers, deliberately. The read-then-check gives a refusal the
+  // organizer can act on; the guard inside each INSERT is what actually holds
+  // under two concurrent additions, where both preflights can pass. Neither
+  // alone is enough -- a preflight is racy, and a bare guard would refuse with
+  // no explanation.
+  const { results: existing } = await env.DB.prepare(
+    `SELECT user_id FROM event_invites WHERE event_id = ?`,
+  )
+    .bind(eventId)
+    .all<{ user_id: string }>();
+  const union = new Set(existing.map((r) => r.user_id));
+  for (const invitee of invitees) union.add(invitee.userId);
+  if (union.size > LIMITS.MAX_RESOLVED_INVITEES) {
+    throw new ValidationError(
+      `This event would have ${union.size} invitees, more than the limit of ${LIMITS.MAX_RESOLVED_INVITEES}`,
+    );
+  }
+
+  await env.DB.batch(inviteStatements(env, eventId, invitees, false, null, LIMITS.MAX_RESOLVED_INVITEES));
 }
 
 export async function createEventWithInvites(

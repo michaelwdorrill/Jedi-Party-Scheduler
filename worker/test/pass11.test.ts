@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/router';
 import { base64UrlEncode } from '../src/lib/base64url';
 import { deleteUserCompletely } from '../src/lib/db';
-import { createEventWithInvites, updateEvent } from '../src/lib/eventWrites';
+import { createEventWithInvites, inviteStatements, updateEvent } from '../src/lib/eventWrites';
+import { recordRsvp } from '../src/lib/attendance';
+import { LIMITS } from '../src/lib/validate';
 import { buildNoticeboard } from '../src/lib/noticeboard';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
@@ -22,6 +24,7 @@ import {
   DM_CHANNEL_RULE,
   dmSendRule,
   HOUR_MS,
+  ids,
   loadEventRow,
   membershipRule,
   seedAttendance,
@@ -2115,5 +2118,141 @@ describe('the data export returns everything held about the caller (F-21 / R13)'
     // But the read calendar and last error -- the person's own settings --
     // are there now, which they were not before.
     expect(whole).toContain('read_calendar_id');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R20, R21
+// ---------------------------------------------------------------------------
+
+// Two limits that were enforced against the wrong thing.
+describe('RSVPs on a resolved poll, and the invitee cap (R20, R21)', () => {
+  const app = buildApp();
+  const call = (env: Env, path: string, init: RequestInit = {}) =>
+    app.request(`https://worker.test${path}`, init, env);
+
+  async function authHeader(env: Env, userId: string): Promise<Record<string, string>> {
+    const { id: sessionId } = await createSession(env, userId);
+    return {
+      Authorization: `Bearer ${await signJwt(userId, sessionId, env.JWT_SIGNING_KEY)}`,
+      'Content-Type': 'application/json',
+    };
+  }
+
+  // R20. A single-winner poll that resolves deliberately keeps
+  // event_type='poll' and status='resolved'; the cron sends rsvpControls for
+  // exactly that state, and the attendance reader is built so an RSVP
+  // overrides a prior vote. The blanket `status !== 'active'` guard made every
+  // one of those advertised buttons answer event_not_active.
+  it('accepts an RSVP on a resolved poll', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'voter');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'voter', 'guild-1');
+
+    const start = Date.now() + 3 * DAY_MS;
+    await seedEvent(db, {
+      id: 'poll-1',
+      organizerId: 'organizer',
+      eventType: 'poll',
+      status: 'resolved',
+      startAt: start,
+      endAt: start + 2 * HOUR_MS,
+    });
+    await seedInvite(db, 'poll-1', 'voter');
+
+    // The person voted yes earlier and now wants out -- the exact case the
+    // resolved-poll DM's buttons offer.
+    await expect(recordRsvp(env, 'voter', 'poll-1', '', 'declined')).resolves.toBe('recorded');
+    expect(await countRows(db, 'event_attendance', 'user_id = ? AND rsvp_status = ?', 'voter', 'declined')).toBe(1);
+  });
+
+  // The state the guard actually exists for stays refused.
+  it('still refuses an RSVP on a cancelled event', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'voter');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'voter', 'guild-1');
+    await seedEvent(db, { id: 'ev-cancelled', organizerId: 'organizer', status: 'cancelled' });
+    await seedInvite(db, 'ev-cancelled', 'voter');
+
+    await expect(recordRsvp(env, 'voter', 'ev-cancelled', '', 'accepted')).resolves.toBe('event_not_active');
+    expect(await countRows(db, 'event_attendance')).toBe(0);
+  });
+
+  // R21. resolveInviteeUserIds caps the set *this request* resolves; nothing
+  // checked existing-plus-new, so repeated calls walked an event past the
+  // limit every downstream fan-out query assumes.
+  it('refuses an additive invite that would take the event past the cap', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    const members = ids('m', LIMITS.MAX_RESOLVED_INVITEES + 1);
+    for (const id of members) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    await seedEvent(db, { id: 'ev-1', organizerId: 'organizer' });
+    await seedInvite(db, 'ev-1', 'organizer');
+
+    fetchStub = stubFetch([membershipRule(200)]);
+    const headers = await authHeader(env, 'organizer');
+
+    // Fill the event to the cap in one call...
+    const first = await call(env, '/events/ev-1/invites', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ userIds: members.slice(0, LIMITS.MAX_RESOLVED_INVITEES - 1), groupIds: [] }),
+    });
+    expect(first.status).toBe(200);
+    expect(await countRows(db, 'event_invites', 'event_id = ?', 'ev-1')).toBe(LIMITS.MAX_RESOLVED_INVITEES);
+
+    // ...then one more, which is the bypass.
+    const second = await call(env, '/events/ev-1/invites', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ userIds: [members[LIMITS.MAX_RESOLVED_INVITEES]], groupIds: [] }),
+    });
+    expect(second.status).toBe(400);
+    expect(await countRows(db, 'event_invites', 'event_id = ?', 'ev-1')).toBe(LIMITS.MAX_RESOLVED_INVITEES);
+  });
+
+  // The write-side guard, which is what holds when two additions race and
+  // both preflights pass. Exercised directly, since a race cannot be staged
+  // through the route.
+  it('will not write past the cap even when the preflight is bypassed', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    const members = ids('m', LIMITS.MAX_RESOLVED_INVITEES + 2);
+    for (const id of members) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    await seedEvent(db, { id: 'ev-1', organizerId: 'organizer' });
+    for (const id of members.slice(0, LIMITS.MAX_RESOLVED_INVITEES)) {
+      await seedInvite(db, 'ev-1', id);
+    }
+
+    // Straight to the statement builder, standing in for the loser of a race
+    // whose preflight passed against a smaller count.
+    await env.DB.batch(
+      inviteStatements(
+        env,
+        'ev-1',
+        [{ userId: members[LIMITS.MAX_RESOLVED_INVITEES], invitedVia: 'individual', sourceGroupId: null, rsvpStatus: 'pending' }],
+        false,
+        null,
+        LIMITS.MAX_RESOLVED_INVITEES,
+      ),
+    );
+
+    expect(await countRows(db, 'event_invites', 'event_id = ?', 'ev-1')).toBe(LIMITS.MAX_RESOLVED_INVITEES);
   });
 });
