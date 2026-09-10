@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { DateTime } from 'luxon';
+import { scheduleFieldsFromRecurrence } from '../lib/recurrenceFields';
 import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
@@ -85,8 +86,28 @@ export default function PersonalEventPage() {
             endDate: pe.recurrence.endDate ?? '',
             endCount: pe.recurrence.endCount ?? 10,
           });
-          if (pe.recurrence.startDate) setDate(pe.recurrence.startDate);
-          if (pe.recurrence.startTime) setStartTime(pe.recurrence.startTime);
+          // Pass-11 review (R25). The start was restored from the rule and the
+          // *end* was not, so it kept the form's own defaults -- today's date
+          // at 17:00 -- while the start jumped back to whenever the series
+          // began. Saving then recomputed durationMinutes from those two
+          // unrelated points: a recurring one-hour block that started a week
+          // ago came back as a duration of seven days plus the span to 17:00,
+          // so every weekly occurrence covered more than a week and its owner
+          // showed as continuously busy. A block starting in the future could
+          // produce a negative duration instead, and one more than 366 days
+          // old failed validation outright. None of that needed the schedule
+          // to be touched: renaming the block was enough.
+          //
+          // A recurring personal event has null startAt/endAt by design, so
+          // the rule is the only description of when it happens -- both ends
+          // of it have to be read from there.
+          if (pe.recurrence.startDate && pe.recurrence.startTime) {
+            const fields = scheduleFieldsFromRecurrence(pe.recurrence, pe.timezone);
+            setDate(fields.date);
+            setStartTime(fields.startTime);
+            setEndDate(fields.endDate);
+            setEndTime(fields.endTime);
+          }
         }
       })
       .catch((e: unknown) => {

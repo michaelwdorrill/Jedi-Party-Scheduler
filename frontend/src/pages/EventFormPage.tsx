@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { DateTime } from 'luxon';
+import { scheduleFieldsFromRecurrence } from '../lib/recurrenceFields';
 import { api, ApiError } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
@@ -273,6 +274,31 @@ export default function EventFormPage() {
           endDate: ev.recurrence.endDate ?? '',
           endCount: ev.recurrence.endCount ?? 10,
         });
+
+        // Pass-11 review (R24). The date and time fields have to come from the
+        // recurrence *rule*, not from ev.startAt/ev.endAt, and this block runs
+        // after the one above precisely to override what it set.
+        //
+        // GET /events/:id resolves startAt/endAt to the NEXT OCCURRENCE, and
+        // per-occurrence time overrides apply to it. Every save then resends
+        // whatever is in these fields as the entire rule -- startDate,
+        // startTime and a duration derived from the end fields. So editing the
+        // title of a weekly series that began in August re-anchored the whole
+        // series to today: the earlier occurrences dropped out of expansion
+        // entirely, and `after_count` started again from the upcoming one,
+        // silently adding sessions at the far end. A one-occurrence time
+        // override could likewise become the time and duration of every
+        // occurrence. And a series whose occurrences are all in the past has
+        // no next occurrence at all, so the fields kept the form's own
+        // unrelated defaults -- today's date at 17:00.
+        //
+        // The rule is the series' own definition and is what a save is
+        // rewriting, so it is what the editor has to show.
+        const fields = scheduleFieldsFromRecurrence(ev.recurrence, ev.timezone);
+        setDate(fields.date);
+        setStartTime(fields.startTime);
+        setEndDate(fields.endDate);
+        setEndTime(fields.endTime);
       }
       if (ev.eventType === 'poll') {
         setPollStrategy(ev.pollStrategy ?? 'threshold');
