@@ -2753,8 +2753,19 @@ async function sweepStaleAccounts(env: Env, budget: TickBudget): Promise<void> {
         `Purging stale account ${user.id}: no login since ${new Date(referenceAt).toISOString()} ` +
           `(${Math.floor(age / DAY_MS)} days).`,
       );
-      await deleteUserCompletely(env, user.id);
-      purged++;
+      // Contained rather than allowed to propagate (Pass-11 review, F-15): a
+      // throw here exits the whole loop, so one account the erasure cannot
+      // finish means every stale account sorting after it by id is never
+      // warned or purged either -- indefinitely, since the ordering is stable
+      // from tick to tick. The FK gap that made that reachable is fixed in
+      // deleteUserCompletely, but the sweep should not be one bad row away
+      // from silently stopping regardless of the cause.
+      try {
+        await deleteUserCompletely(env, user.id);
+        purged++;
+      } catch (err) {
+        console.error(`Stale-account purge failed for ${user.id}; will retry next tick:`, err);
+      }
       continue;
     }
 

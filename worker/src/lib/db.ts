@@ -511,6 +511,48 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
     // being reassigned or left dangling.
     env.DB.prepare(`DELETE FROM guild_add_requests WHERE requested_by = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM notification_log WHERE user_id = ?`).bind(userId),
+    // Pass-11 review (F-15 / R04): four tables reference users(id) with no ON
+    // DELETE action and were missing here, so `DELETE FROM users` failed for
+    // anyone who had ever answered someone else's event, or filed, voted on or
+    // been told about a change request on one. Where the user *organised* the
+    // event these cascade from events(id) above; where they merely took part,
+    // nothing cleared them. organizer_rsvp_notice_log made that the common
+    // case rather than an edge one -- sweepOrganizerRsvpNotices writes a row
+    // per RSVP to someone else's event and never removes it (it is the dedupe
+    // record), so since migration 0035 pressing one RSVP button was enough to
+    // make an account undeletable.
+    //
+    // Children before parents, as everywhere else in this batch: the log and
+    // votes for requests this person filed or was the target of go before the
+    // requests themselves.
+    env.DB.prepare(
+      `DELETE FROM change_request_log
+       WHERE user_id = ?
+          OR request_id IN (SELECT id FROM event_change_requests WHERE requester_id = ? OR target_user_id = ?)`,
+    ).bind(userId, userId, userId),
+    env.DB.prepare(
+      `DELETE FROM event_change_request_votes
+       WHERE user_id = ?
+          OR request_id IN (SELECT id FROM event_change_requests WHERE requester_id = ? OR target_user_id = ?)`,
+    ).bind(userId, userId, userId),
+    // A request this person filed is theirs and goes with them. One where they
+    // were the target goes too: an add_invitee request names exactly one person
+    // to add, so with that person erased the request has no subject left to
+    // act on -- there is no meaningful row to keep for the organiser.
+    env.DB.prepare(`DELETE FROM event_change_requests WHERE requester_id = ? OR target_user_id = ?`).bind(
+      userId,
+      userId,
+    ),
+    // decided_by is normally the organiser, whose own events cascade above;
+    // this is the belt for any row that is not. NULL is already this column's
+    // "resolved without an organiser decision" value and decided_at still
+    // says the request was decided, so the surviving request stays readable to
+    // everyone else on an event that is not this user's to delete.
+    env.DB.prepare(`UPDATE event_change_requests SET decided_by = NULL WHERE decided_by = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM organizer_rsvp_notice_log WHERE responder_id = ? OR organizer_id = ?`).bind(
+      userId,
+      userId,
+    ),
     // IDEAS item 2 / specs/0017. Links before the connection, children before
     // parents like everything else in this batch. The entries already written
     // to the person's Google calendar are deliberately left where they are:
