@@ -407,6 +407,75 @@ describe('the connect round trip', () => {
   });
 });
 
+describe('GET /calendars', () => {
+  it('lists the calendars the account can write to', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedMember(db, 'u1');
+    await seedConnection(db, 'u1');
+
+    fetchStub = stubFetch([TOKEN_RULE, CALENDAR_LIST_RULE]);
+    const res = await call(env, '/google/calendars', {
+      headers: { Authorization: `Bearer ${await authFor(env, 'u1')}` },
+    });
+    expect(res.status).toBe(200);
+    const list = await res.json<{ id: string }[]>();
+    expect(list.map((c) => c.id)).toEqual(['someone@gmail.com', 'games@group.calendar.google.com']);
+  });
+
+  // Found live, on the sandbox: accessTokenFor can hand back an access token
+  // it still believes is good (inside its cached expiry, so no refresh was
+  // even attempted) that Google rejects anyway the moment it's actually
+  // used -- a grant revoked since the token was cached. Before this fix that
+  // fell through to a generic 503 ("Could not list your Google calendars",
+  // implying "try again"), when what Google actually said was "reconnect";
+  // retrying can never succeed until the person does.
+  it("switches sync off and says why when Google rejects a token that still looked fresh", async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedMember(db, 'u1');
+    await seedConnection(db, 'u1');
+
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      { match: 'users/me/calendarList', status: 401, body: { error: 'invalid_grant' } },
+    ]);
+    const res = await call(env, '/google/calendars', {
+      headers: { Authorization: `Bearer ${await authFor(env, 'u1')}` },
+    });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain('Google rejected the access token');
+
+    const row = await db
+      .prepare(`SELECT sync_enabled, last_error FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ sync_enabled: number; last_error: string | null }>();
+    expect(row!.sync_enabled).toBe(0);
+    expect(row!.last_error).toContain('Google rejected the access token');
+  });
+
+  it('returns a plain 503, sync left on, for a transient calendar-list failure', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedMember(db, 'u1');
+    await seedConnection(db, 'u1');
+
+    fetchStub = stubFetch([TOKEN_RULE, { match: 'users/me/calendarList', status: 503, body: {} }]);
+    const res = await call(env, '/google/calendars', {
+      headers: { Authorization: `Bearer ${await authFor(env, 'u1')}` },
+    });
+    expect(res.status).toBe(503);
+
+    // Unlike the unauthorized case above: a transient failure doesn't mean
+    // reconnecting would help, so sync stays on and nothing is written to
+    // last_error -- the next request just tries again.
+    const row = await db
+      .prepare(`SELECT sync_enabled, last_error FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ sync_enabled: number; last_error: string | null }>();
+    expect(row!.sync_enabled).toBe(1);
+    expect(row!.last_error).toBeNull();
+  });
+});
+
 describe('the sync sweep', () => {
   async function seedSyncable(db: ShimDatabase, userId = 'u1'): Promise<string> {
     await seedMember(db, userId);

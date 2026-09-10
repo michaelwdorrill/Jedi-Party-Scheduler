@@ -12,6 +12,7 @@
 
 import { Hono, type Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
+import type { Env } from '../env';
 import type { AppEnv } from '../lib/authMiddleware';
 import { requireAuth, requirePolicyAcceptance } from '../lib/authMiddleware';
 import {
@@ -57,6 +58,21 @@ function randomNonce(): string {
 function notConfigured(c: Context<AppEnv>) {
   c.header('Cache-Control', NO_STORE);
   return c.text('Google Calendar sync is not configured on this deployment yet.', 503);
+}
+
+// Shared by both places in GET /calendars that can discover a dead grant --
+// accessTokenFor's own pre-flight check, and a still-cached access token
+// Google rejects anyway once it's actually used. Same outcome either way:
+// sync_enabled off (retrying costs a request forever, since only
+// reconnecting fixes this) and last_error set to what Google actually said,
+// so Settings shows why rather than a stale "Last synced: ..." nobody can
+// explain.
+async function markCalendarUnauthorized(env: Env, userId: string, message: string): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE google_calendar_connections SET sync_enabled = 0, last_error = ?, updated_at = ? WHERE user_id = ?`,
+  )
+    .bind(message, Date.now(), userId)
+    .run();
 }
 
 // Hop 1 of the connect flow. Authenticated, because this is the only step that
@@ -222,11 +238,7 @@ googleRoutes.get('/calendars', requireAuth, requirePolicyAcceptance, async (c) =
     // A dead grant surfaced here as well as by the sweep, so someone who opens
     // Settings finds out why it stopped instead of watching an empty calendar.
     if (token.reason === 'unauthorized') {
-      await c.env.DB.prepare(
-        `UPDATE google_calendar_connections SET sync_enabled = 0, last_error = ?, updated_at = ? WHERE user_id = ?`,
-      )
-        .bind(token.message, Date.now(), row.user_id)
-        .run();
+      await markCalendarUnauthorized(c.env, row.user_id, token.message);
       return c.text(token.message, 409);
     }
     // Retryable -- a network blip, Google briefly unhappy -- so this is worth
@@ -241,11 +253,23 @@ googleRoutes.get('/calendars', requireAuth, requirePolicyAcceptance, async (c) =
 
   const calendars = await listWritableCalendars(token.accessToken);
   if (!calendars.ok) {
-    // Same reasoning as above: the actual reason (rate limit, a transient
-    // Google 5xx, a network failure) was being thrown away here, so a
-    // real -- and possibly recurring -- failure had no trace anywhere
+    // Same reasoning as above for logging -- the actual reason (rate limit, a
+    // transient Google 5xx, a network failure) was being thrown away here, so
+    // a real -- and possibly recurring -- failure had no trace anywhere
     // `wrangler tail` could show.
     console.warn(`Google calendar list failed for ${row.user_id}: ${calendars.kind} - ${calendars.message}`);
+    // Found live: `accessTokenFor` above can hand back an access token it
+    // still believes is good (inside its cached expiry, so no refresh was
+    // attempted) that Google rejects anyway the moment it's actually used --
+    // a grant revoked since the token was cached, for instance. Treated as a
+    // generic 503 before this, which reads as "try again in a moment" when
+    // retrying can never succeed until the person reconnects -- the same
+    // unauthorized outcome `accessTokenFor`'s own pre-flight check handles a
+    // few lines up, just discovered one call later.
+    if (calendars.kind === 'unauthorized') {
+      await markCalendarUnauthorized(c.env, row.user_id, calendars.message);
+      return c.text(calendars.message, 409);
+    }
     return c.text('Could not list your Google calendars.', 503);
   }
   return c.json(calendars.value);
