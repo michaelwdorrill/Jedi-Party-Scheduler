@@ -30,7 +30,7 @@ import {
 import { editBotDm } from '../lib/discord';
 import { cancelButton, cancelOccurrenceButton, linkButton, pollSelect, rsvpButtons } from '../lib/dmComponents';
 import { LIMITS } from '../lib/validate';
-import { chunkIds, placeholders } from '../lib/d1';
+import { chunkIds, chunkRows, placeholders } from '../lib/d1';
 import { planFrom, TickBudget } from './budget';
 import { googleSyncDue, sweepGoogleCalendar } from './googleSync';
 import {
@@ -2089,23 +2089,76 @@ async function resolveMinimumAttendeesDeadline(
     }
     if (changed === 0) return; // already cancelled by an earlier tick
 
-    const limit = budget.deliveriesAffordable;
-    if (limit <= 0) return;
     // The recipient lookup itself is a query, and was not charged for either.
     if (!budget.trySpend(1)) return;
-    const pending = await getConfirmedAttendeeIds(env, event, null, occurrenceDate, {
+
+    // Pass-11 review (R23). The whole recipient set, not just the slice this
+    // tick can afford to DM.
+    //
+    // The old code took `budget.deliveriesAffordable` as the query's LIMIT,
+    // which quietly made the tick's remaining allowance decide who would ever
+    // be told. Everyone past that cut had no notification_log row written at
+    // all -- and once this occurrence is marked cancelled, expandOccurrences
+    // stops returning it, so resolveMinimumAttendeesDeadline is never called
+    // for it again and the general cancellation sweep deliberately skips
+    // recurring events. The source-independent retry consumer cannot help
+    // either: it scans for rows that exist, and these never existed. Measured
+    // in the review: 20 attendees, 11 notified, the other 9 never told their
+    // session was cancelled, on that tick or any later one.
+    //
+    // MAX_RESOLVED_INVITEES bounds an event's invite list, so this is the
+    // complete set by construction rather than another disguised cap.
+    const recipients = await getConfirmedAttendeeIds(env, event, null, occurrenceDate, {
       notificationType: 'event_cancelled_below_minimum',
       occurrenceDate,
-      limit,
+      limit: LIMITS.MAX_RESOLVED_INVITEES,
     });
-    await notifyPending(
-      env,
-      budget,
-      pending,
+    if (recipients.length === 0) return;
+
+    const cancelMessage = `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`;
+
+    // The obligation is recorded for everyone before anything is delivered, so
+    // it survives this tick running out. These rows are pending outbox entries
+    // in the ordinary sense -- next_attempt_at due now, no claim held -- which
+    // is exactly what sweepDueNotificationRetries drains, at whatever pace the
+    // budget allows, across as many ticks as it takes. Pre-creating them does
+    // not suppress an immediate send: the claim below updates a row in this
+    // state rather than skipping it.
+    //
+    // ON CONFLICT DO NOTHING so a row from an earlier attempt keeps its own
+    // attempt count and backoff.
+    const cancelledAt = Date.now();
+    const rows = recipients.map((r) => [
+      newId(),
+      r.id,
       event.id,
       'event_cancelled_below_minimum',
       occurrenceDate,
-      () => `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`,
+      cancelledAt,
+      cancelledAt,
+      cancelMessage,
+    ]);
+    const obligationStatements = chunkRows(rows, 8).map((chunk) =>
+      env.DB.prepare(
+        `INSERT INTO notification_log
+           (id, user_id, event_id, notification_type, occurrence_date, sent_at, next_attempt_at, content)
+         VALUES ${chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}
+         ON CONFLICT(user_id, event_id, notification_type, occurrence_date) DO NOTHING`,
+      ).bind(...chunk.flat()),
+    );
+    if (!budget.trySpend(obligationStatements.length)) return;
+    await env.DB.batch(obligationStatements);
+
+    // Then deliver as much of it as this tick can pay for. Whatever is left
+    // is already durable above.
+    await notifyPending(
+      env,
+      budget,
+      recipients,
+      event.id,
+      'event_cancelled_below_minimum',
+      occurrenceDate,
+      () => cancelMessage,
     );
     return;
   }

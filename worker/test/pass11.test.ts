@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DateTime } from 'luxon';
+import { expandOccurrences } from '../src/lib/recurrence';
 import { buildApp } from '../src/router';
 import { base64UrlEncode } from '../src/lib/base64url';
 import { deleteUserCompletely } from '../src/lib/db';
@@ -2254,5 +2256,176 @@ describe('RSVPs on a resolved poll, and the invitee cap (R20, R21)', () => {
     );
 
     expect(await countRows(db, 'event_invites', 'event_id = ?', 'ev-1')).toBe(LIMITS.MAX_RESOLVED_INVITEES);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R22
+// ---------------------------------------------------------------------------
+
+// `after_count` was measured against the wrong thing in both non-daily
+// branches -- months for MONTHLY, week slots for WEEKLY -- so a series ended
+// before it should have. The consequences are not cosmetic: a missing
+// occurrence is a commitment reported as free time, and one that never gets
+// its reminders.
+describe('a recurring series counts its own occurrences (R22)', () => {
+  const RULE = {
+    freq: 'MONTHLY' as const,
+    interval: 1,
+    byWeekday: null,
+    byMonthDay: 31,
+    startDate: '2026-01-31',
+    startTime: '19:00',
+    durationMinutes: 60,
+    endType: 'after_count' as const,
+    endDate: null,
+    endCount: 3,
+  };
+
+  const at = (iso: string) => DateTime.fromISO(iso, { zone: 'UTC' }).toMillis();
+
+  // The reviewer's own reproduction. January has a 31st, February does not --
+  // and February was counted anyway, so the third occurrence was never
+  // reached.
+  it('does not count months that cannot contain the chosen day', () => {
+    const occurrences = expandOccurrences(RULE, 'UTC', at('2026-01-01'), at('2026-07-31T23:59'), []);
+    expect(occurrences.map((o) => o.date)).toEqual(['2026-01-31', '2026-03-31', '2026-05-31']);
+  });
+
+  // WEEKLY: the first week is partial whenever the series starts on anything
+  // but its earliest selected weekday, and those earlier slots are not
+  // occurrences. Counting them made the series end early -- by an amount that
+  // depended on how far the fast-forward jumped, so the same series expanded
+  // over two overlapping windows disagreed about which dates exist.
+  const WEEKLY = {
+    freq: 'WEEKLY' as const,
+    interval: 1,
+    byWeekday: '0,2', // Monday and Wednesday
+    byMonthDay: null,
+    startDate: '2026-01-07', // a Wednesday: that week's Monday is not an occurrence
+    startTime: '19:00',
+    durationMinutes: 60,
+    endType: 'after_count' as const,
+    endDate: null,
+    endCount: 5,
+  };
+
+  it('gives the same answer whatever window it is asked about', () => {
+    const wholeMonth = expandOccurrences(WEEKLY, 'UTC', at('2026-01-01'), at('2026-01-31T23:59'), []);
+    const fromThe19th = expandOccurrences(WEEKLY, 'UTC', at('2026-01-19'), at('2026-01-31T23:59'), []);
+
+    // Five occurrences from Wed 7 Jan: 7th, 12th, 14th, 19th, 21st.
+    expect(wholeMonth.map((o) => o.date)).toEqual([
+      '2026-01-07',
+      '2026-01-12',
+      '2026-01-14',
+      '2026-01-19',
+      '2026-01-21',
+    ]);
+    // The narrower window has to agree about the ones it covers. It used to
+    // drop the 21st, because the fast-forward had already counted the Monday
+    // before the series began.
+    expect(fromThe19th.map((o) => o.date)).toEqual(['2026-01-19', '2026-01-21']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R23
+// ---------------------------------------------------------------------------
+
+// The recurring minimum-attendees auto-cancellation marked the occurrence
+// cancelled and then notified only as many attendees as the tick could afford
+// -- and everyone past that cut got no notification_log row at all. Once the
+// occurrence is cancelled expandOccurrences stops returning it, so
+// resolveMinimumAttendeesDeadline is never called for it again; the general
+// cancellation sweep deliberately skips recurring events; and the
+// source-independent retry consumer only helps rows that exist. So those
+// people were never told their session was cancelled -- not late, never.
+describe('a recurring auto-cancellation tells everyone eventually (R23)', () => {
+  it('records the obligation for every attendee, not just the affordable ones', async () => {
+    vi.useFakeTimers();
+    let base = Date.UTC(2026, 8, 10, 12, 0, 0);
+    vi.setSystemTime(base);
+
+    // Free plan deliberately, and this is the whole point of the test. On a
+    // paid plan one tick can afford to DM everybody, so the old code looked
+    // fine -- the bug only appears when the tick's allowance is smaller than
+    // the recipient list, which is when `deliveriesAffordable` was silently
+    // deciding who would ever be told.
+    const { db, env } = setup('free');
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+
+    // The reviewer's scenario: 25 current invited members, 20 accepted and 5
+    // declined, on a recurring occurrence six hours out with a 24h deadline
+    // and a minimum it cannot meet.
+    const attendees = ids('att', 20);
+    const decliners = ids('dec', 5);
+    for (const id of [...attendees, ...decliners]) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+
+    const firstStart = base + 6 * HOUR_MS;
+    const s = new Date(firstStart);
+    const startDate = s.toISOString().slice(0, 10);
+    const startTime = `${String(s.getUTCHours()).padStart(2, '0')}:${String(s.getUTCMinutes()).padStart(2, '0')}`;
+
+    await seedEvent(db, { id: 'rec-1', organizerId: 'organizer', isRecurring: 1, startAt: null, endAt: null });
+    await db
+      .prepare(
+        `UPDATE events SET timezone = 'UTC', minimum_attendees = 25, auto_cancel_below_minimum = 1,
+           minimum_attendees_deadline_hours_before = 24 WHERE id = 'rec-1'`,
+      )
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO event_recurrence_rules (event_id, freq, interval, start_date, start_time, duration_minutes, end_type)
+         VALUES ('rec-1', 'DAILY', 1, ?, ?, 60, 'never')`,
+      )
+      .bind(startDate, startTime)
+      .run();
+
+    const occurrenceDate = startDate;
+    for (const id of [...attendees, ...decliners]) await seedInvite(db, 'rec-1', id);
+    for (const id of attendees) await seedAttendance(db, 'rec-1', id, 'accepted', occurrenceDate);
+    for (const id of decliners) await seedAttendance(db, 'rec-1', id, 'declined', occurrenceDate);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    // Several ticks, which is what the outbox is for -- the point is that
+    // everyone is eventually told, not that one tick manages it.
+    for (let tick = 0; tick < 3; tick++) {
+      await runReminderSweep(env);
+      base += 15 * 60 * 1000;
+      vi.setSystemTime(base);
+    }
+
+    // The occurrence really was cancelled...
+    expect(
+      await countRows(db, 'event_occurrence_overrides', 'event_id = ? AND is_cancelled = 1', 'rec-1'),
+    ).toBe(1);
+    // ...and everyone owed a notice has a durable row for it: the twenty who
+    // accepted, plus the organizer, who counts as attending their own session
+    // unless they declined it.
+    //
+    // Rows, not deliveries, is the assertion that matters. Whether a given
+    // tick can afford to send is the budget's business and always was; what
+    // was broken is that the people it could not afford had nothing recorded,
+    // so no later tick could pick them up either -- the occurrence is
+    // cancelled by then, expandOccurrences stops returning it, and the retry
+    // consumer only scans rows that exist. Before the fix this count stops at
+    // whatever the first tick could pay for and never grows again, however
+    // many ticks run.
+    expect(
+      await countRows(
+        db,
+        'notification_log',
+        'event_id = ? AND notification_type = ?',
+        'rec-1',
+        'event_cancelled_below_minimum',
+      ),
+    ).toBe(attendees.length + 1);
   });
 });

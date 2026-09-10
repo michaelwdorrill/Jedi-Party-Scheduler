@@ -116,7 +116,21 @@ export function expandOccurrences(
 
     // Occurrences elapsed before the week we fast-forwarded to, so `end_count`
     // is measured against the true series position rather than the window.
-    let seriesIndex = weekIndex * weekdays.length;
+    //
+    // Pass-11 review (R22): the first week is partial whenever the series
+    // starts on anything but its earliest selected weekday, and those earlier
+    // slots are not occurrences -- the loop below skips them with `continue`
+    // without counting them. The fast-forward has to skip them too, or every
+    // occurrence after the first week is numbered one too high per missed
+    // slot, and an `after_count` series ends early. Worse, it ended early by a
+    // different amount depending on how far the fast-forward jumped, so the
+    // same series expanded over two overlapping windows disagreed about which
+    // dates exist -- a whole-month view showing an occurrence that vanished
+    // when the range was narrowed.
+    const slotsBeforeSeriesStart = weekdays.filter(
+      (wd) => seriesStartWeek.plus({ days: wd }) < seriesStart,
+    ).length;
+    let seriesIndex = weekIndex === 0 ? 0 : weekIndex * weekdays.length - slotsBeforeSeriesStart;
 
     outer: for (let i = 0; i < MAX_ITERATIONS; i++) {
       const weekStart = seriesStartWeek.plus({ weeks: weekIndex * interval });
@@ -138,11 +152,30 @@ export function expandOccurrences(
     const monthsSinceStart = Math.max(0, Math.floor(windowStart.diff(seriesStartMonth, 'months').months));
     let monthIndex = Math.max(0, Math.floor(monthsSinceStart / interval) - 1);
 
+    // Pass-11 review (R22): months are not occurrences. A rule on day 31 has
+    // no occurrence in February, April, June, September or November, but the
+    // old code passed `monthIndex` straight to the end_count check -- so those
+    // empty months were counted as though they had produced something and an
+    // `after_count` series stopped early. "The 31st of every month, three
+    // times" starting 31 January yielded 31 January and 31 March and then
+    // gave up, because by May the month counter already read 4.
+    //
+    // Counted here rather than derived, for the months the fast-forward
+    // skipped over: only day 29-31 rules can miss a month at all, so for
+    // everything else this is exactly monthIndex, and the loop runs at most
+    // once per month the series has existed.
+    let occurrenceIndex = 0;
+    for (let m = 0; m < monthIndex; m++) {
+      const monthStart = seriesStartMonth.plus({ months: m * interval });
+      if (day <= (monthStart.daysInMonth ?? 0)) occurrenceIndex++;
+    }
+
     for (let i = 0; i < MAX_ITERATIONS; i++) {
       const monthStart = seriesStartMonth.plus({ months: monthIndex * interval });
       if (day <= (monthStart.daysInMonth ?? 0)) {
         const candidate = monthStart.set({ day });
-        if (!pushIfInWindow(candidate, monthIndex)) break;
+        if (!pushIfInWindow(candidate, occurrenceIndex)) break;
+        occurrenceIndex++;
         if (candidate > windowEnd) break;
       } else if (monthStart > windowEnd) {
         break;
