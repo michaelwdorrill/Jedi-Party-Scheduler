@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deleteUserCompletely } from '../src/lib/db';
+import { buildNoticeboard } from '../src/lib/noticeboard';
 import { runReminderSweep } from '../src/cron/reminders';
 import type { ShimDatabase } from './d1shim';
 import {
@@ -273,5 +274,82 @@ describe('account deletion clears every table that references the user (F-15 / R
 
     expect(await countRows(db, 'users', 'id = ?', 'aaa')).toBe(0);
     expect(await countRows(db, 'users', 'id = ?', 'zzz')).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-18 / R03
+// ---------------------------------------------------------------------------
+
+// createFannedOutEvent's INSERT omitted is_private and the sweep's SELECT
+// never read it, so migration 0038's default (0 = visible) applied to every
+// event a confirmed multi-winner option spawned. The organiser ticked "keep
+// this one off the noticeboard" on the poll; each confirmed day then appeared
+// on it anyway -- title, time, organiser, invitee list and RSVP answers, to
+// every member of the server, none of whom were invited.
+describe('a private multi-winner poll fans out private events (F-18 / R03)', () => {
+  async function seedMultiWinnerPoll(db: ShimDatabase, isPrivate: number): Promise<number> {
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'invitee');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'invitee', 'guild-1');
+
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO events (id, guild_id, organizer_id, title, event_type, timezone, start_at, end_at, status,
+           poll_mode, poll_resolution_mode, is_recurring, is_private, created_at, updated_at)
+         VALUES ('poll-1', 'guild-1', 'organizer', 'Private therapy discussion', 'poll', 'America/New_York', NULL, NULL,
+           'active', 'options', 'multi_winner', 0, ?, ?, ?)`,
+      )
+      .bind(isPrivate, now, now)
+      .run();
+    await seedInvite(db, 'poll-1', 'organizer');
+    await seedInvite(db, 'poll-1', 'invitee');
+    await db
+      .prepare(
+        `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order, confirmed_at)
+         VALUES ('opt-1', 'poll-1', ?, ?, 0, ?)`,
+      )
+      .bind(now + 3 * DAY_MS, now + 3 * DAY_MS + 2 * HOUR_MS, now)
+      .run();
+    return now;
+  }
+
+  it('copies is_private from the parent poll onto the spawned event and keeps it off the noticeboard', async () => {
+    const { db, env } = setup();
+    const now = await seedMultiWinnerPoll(db, 1);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200)]);
+    await runReminderSweep(env);
+
+    const spawned = await db
+      .prepare(`SELECT id, is_private FROM events WHERE created_from_option_id = 'opt-1'`)
+      .first<{ id: string; is_private: number }>();
+    expect(spawned).not.toBeNull();
+    expect(spawned!.is_private).toBe(1);
+
+    const board = await buildNoticeboard(env, 'guild-1', now, now + 30 * DAY_MS);
+    expect(board.map((o) => o.eventId)).not.toContain(spawned!.id);
+  });
+
+  // The other direction, so the fix cannot be "always private" -- a poll the
+  // organiser left on the noticeboard still spawns days that appear on it.
+  it("leaves a public poll's confirmed days on the noticeboard", async () => {
+    const { db, env } = setup();
+    const now = await seedMultiWinnerPoll(db, 0);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200)]);
+    await runReminderSweep(env);
+
+    const spawned = await db
+      .prepare(`SELECT id, is_private FROM events WHERE created_from_option_id = 'opt-1'`)
+      .first<{ id: string; is_private: number }>();
+    expect(spawned).not.toBeNull();
+    expect(spawned!.is_private).toBe(0);
+
+    const board = await buildNoticeboard(env, 'guild-1', now, now + 30 * DAY_MS);
+    expect(board.map((o) => o.eventId)).toContain(spawned!.id);
   });
 });

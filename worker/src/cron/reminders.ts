@@ -1627,6 +1627,7 @@ async function createFannedOutEvent(
     timezone: string;
     voice_channel_id: string | null;
     voice_channel_name: string | null;
+    is_private: number;
   },
 ): Promise<RowOutcome> {
   if (!budget.trySpend(1)) return 'incomplete';
@@ -1658,9 +1659,9 @@ async function createFannedOutEvent(
          start_at, end_at, status, poll_strategy, poll_threshold_count, poll_deadline_at,
          poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
          is_recurring, voice_channel_id, voice_channel_name, created_from_poll_id, created_from_option_id,
-         created_at, updated_at)
+         is_private, created_at, updated_at)
        SELECT ?, ?, ?, ?, NULL, NULL, 'single', ?, ?, ?, 'active', NULL, NULL, NULL,
-         'options', 'single_winner', NULL, NULL, NULL, 0, ?, ?, ?, ?, ?, ?
+         'options', 'single_winner', NULL, NULL, NULL, 0, ?, ?, ?, ?, ?, ?, ?
        WHERE NOT EXISTS (SELECT 1 FROM events WHERE created_from_option_id = ?)`,
     ).bind(
       newEventId,
@@ -1674,6 +1675,14 @@ async function createFannedOutEvent(
       opt.voice_channel_name,
       opt.event_id,
       opt.id,
+      // Pass-11 review (F-18 / R03): omitted here, so migration 0038's
+      // default (0 = on the noticeboard) applied to every spawned day and a
+      // deliberately private poll published its title, time, organiser and
+      // full invitee list to the whole server the moment one option
+      // confirmed. Inherited from the parent, which is the only answer
+      // consistent with 0038's promise that an organiser can keep any event
+      // off the noticeboard.
+      opt.is_private,
       now,
       now,
       opt.id,
@@ -1707,13 +1716,14 @@ async function sweepConfirmedMultiWinnerOptions(
     timezone: string;
     voice_channel_id: string | null;
     voice_channel_name: string | null;
+    is_private: number;
   }>(
     env,
     budget,
     cursors,
     'confirmed_options',
     `SELECT epo.id AS id, epo.event_id, epo.start_at, epo.end_at, e.title, e.guild_id, e.organizer_id,
-            e.timezone, e.voice_channel_id, e.voice_channel_name
+            e.timezone, e.voice_channel_id, e.voice_channel_name, e.is_private
      FROM event_poll_options epo
      JOIN events e ON e.id = epo.event_id
      WHERE e.poll_resolution_mode = 'multi_winner' AND epo.confirmed_at IS NOT NULL
