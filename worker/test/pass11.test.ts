@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { buildApp } from '../src/router';
+import { base64UrlEncode } from '../src/lib/base64url';
 import { deleteUserCompletely } from '../src/lib/db';
 import { updateEvent } from '../src/lib/eventWrites';
 import { buildNoticeboard } from '../src/lib/noticeboard';
+import { createSession } from '../src/lib/sessions';
+import { signToken } from '../src/lib/signedToken';
 import { runReminderSweep } from '../src/cron/reminders';
+import type { Env } from '../src/env';
 import type { EventWriteInput } from '../src/lib/eventWrites';
 import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
 import {
@@ -639,5 +644,127 @@ describe('a recurring-deadline tick stays inside the Free-plan D1 ceiling (R06)'
       .prepare(`SELECT DISTINCT event_id FROM notification_log WHERE notification_type = 'organizer_cancel_prompt'`)
       .all<{ event_id: string }>();
     expect(prompted.results).toHaveLength(EVENT_COUNT);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R02
+// ---------------------------------------------------------------------------
+
+// The Worker used to finish a login by redirecting to
+// `${FRONTEND_URL}/#/auth/callback?token=<jwt>`, and the frontend installed
+// whatever token was in that fragment as the browser's session. The Discord
+// leg was properly CSRF-bound by the oauth_state cookie, but this last hop was
+// bound to nothing: anyone holding a valid session could send someone else
+// that URL carrying their *own* token, and the visitor silently became logged
+// in as them -- then saved personal time, private notes or a Google connection
+// into an account the sender controls. Login CSRF, not a stolen token.
+//
+// The redirect now carries a one-time code that is useless without the
+// verifier the initiating browser parked before it ever navigated (PKCE, on
+// this app's own final hop). These are the Worker's half; the browser's half
+// lives in frontend/src/auth/loginTransaction.ts.
+describe('a login can only be completed by the browser that started it (R02)', () => {
+  const app = buildApp();
+  const call = (env: Env, path: string, init: RequestInit = {}) =>
+    app.request(`https://worker.test${path}`, init, env);
+
+  const VERIFIER = 'a-browser-transaction-secret-nobody-else-has';
+
+  async function challengeFor(verifier: string): Promise<string> {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    return base64UrlEncode(new Uint8Array(digest));
+  }
+
+  async function codeFor(env: Env, userId: string, challenge: string): Promise<string> {
+    const { id: sessionId } = await createSession(env, userId);
+    return signToken('login_code', { userId, sessionId, challenge }, env.JWT_SIGNING_KEY, 120);
+  }
+
+  it('refuses to start a login with no challenge, rather than falling back to the old flow', async () => {
+    const { env } = setup();
+    const res = await call(env, '/auth/login');
+    expect(res.status).toBe(400);
+    // Specifically not a redirect to Discord: a login that cannot be bound to
+    // this browser must not begin at all.
+    expect(res.headers.get('location')).toBeNull();
+  });
+
+  it('redeems a code for the browser holding the matching verifier', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+
+    const code = await codeFor(env, 'alice', await challengeFor(VERIFIER));
+    const res = await call(env, '/auth/redeem', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, verifier: VERIFIER }),
+    });
+
+    expect(res.status).toBe(200);
+    const { token } = (await res.json()) as { token: string };
+    // A real session token: it authenticates against /me like any other.
+    const me = await call(env, '/me', { headers: { Authorization: `Bearer ${token}` } });
+    expect(me.status).toBe(200);
+  });
+
+  // The finding itself. The attacker mints a code through a genuine login of
+  // their own, then sends the victim the callback URL carrying it.
+  it("refuses a code sent to a browser that never started a login", async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'attacker');
+    await seedMembership(db, 'attacker', 'guild-1');
+
+    const attackerCode = await codeFor(env, 'attacker', await challengeFor(VERIFIER));
+
+    // The victim's browser has no verifier for this transaction, so the best
+    // it could send is a guess.
+    const res = await call(env, '/auth/redeem', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: attackerCode, verifier: 'a-guess' }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain('eyJ');
+  });
+
+  it('refuses a forged code, and one signed for a different purpose', async () => {
+    const { env } = setup();
+
+    for (const code of [
+      'not-a-token',
+      // Correctly signed with the real key, but minted for the Google connect
+      // flow -- the purpose check is what stops one being spent as the other.
+      await signToken('google_connect', { userId: 'alice', challenge: await challengeFor(VERIFIER) }, env.JWT_SIGNING_KEY, 120),
+    ]) {
+      const res = await call(env, '/auth/redeem', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, verifier: VERIFIER }),
+      });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it('refuses a code whose two-minute window has passed', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+
+    const code = await codeFor(env, 'alice', await challengeFor(VERIFIER));
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 3 * 60 * 1000);
+
+    const res = await call(env, '/auth/redeem', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, verifier: VERIFIER }),
+    });
+    expect(res.status).toBe(400);
   });
 });

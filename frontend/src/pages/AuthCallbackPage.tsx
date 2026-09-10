@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
+import { LoginNotStartedError, redeemLoginCode } from '../auth/loginTransaction';
 
 export default function AuthCallbackPage() {
   const { login } = useAuth();
@@ -13,14 +14,26 @@ export default function AuthCallbackPage() {
     ran.current = true;
 
     const params = new URLSearchParams(window.location.hash.split('?')[1] ?? '');
-    const token = params.get('token');
-    if (!token) {
-      setError('No login token was returned by Discord. Please try logging in again.');
+    const code = params.get('code');
+    if (!code) {
+      setError('No login code was returned by Discord. Please try logging in again.');
       return;
     }
-    login(token)
+    // The code is not a session -- it has to be redeemed with the verifier
+    // this browser parked before it started the login (R02 in the Pass-11
+    // review). A callback URL that arrives any other way has no verifier to
+    // redeem it with, which is what stops someone being logged into an
+    // account they did not ask for.
+    redeemLoginCode(code)
+      .then((token) => login(token))
       .then(() => setDone(true))
-      .catch(() => setError('Login failed. Please try again.'));
+      .catch((e: unknown) => {
+        setError(
+          e instanceof LoginNotStartedError
+            ? 'This browser did not start a login. Open the app and log in from there.'
+            : 'Login failed. Please try again.',
+        );
+      });
   }, [login]);
 
   if (error) {
