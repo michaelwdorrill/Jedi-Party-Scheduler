@@ -10,7 +10,8 @@ import { signToken } from '../src/lib/signedToken';
 import { seal } from '../src/lib/crypto';
 import { revokeToken, storeConnection } from '../src/lib/googleCalendar';
 import { runReminderSweep } from '../src/cron/reminders';
-import { sweepGoogleCalendar } from '../src/cron/googleSync';
+import { googleSyncDue, sweepGoogleCalendar } from '../src/cron/googleSync';
+import { CURRENT_POLICY_VERSION } from '../src/lib/policy';
 import { TickBudget } from '../src/cron/budget';
 import type { Env } from '../src/env';
 import type { EventWriteInput } from '../src/lib/eventWrites';
@@ -1815,5 +1816,140 @@ describe('the Google sync tells the truth about what it did (R16, R19, R17, R18)
     expect(await countRows(db, 'google_event_links')).toBe(0);
     // And Settings is told so rather than shown a fresh, clean sync.
     expect(conn?.last_error).toMatch(/could not be written/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R15
+// ---------------------------------------------------------------------------
+
+// Every API route runs requirePolicyAcceptance, so someone who has not
+// accepted the current Privacy Policy is refused at the door -- GET
+// /google/status answers 403. The cron never joined that check, so it went on
+// reading their calendar, storing real titles and descriptions, and sending
+// their sessions to Google on their behalf. A gate the person meets on their
+// next request but their data does not is not a gate, and it matters most
+// across exactly the change this release makes: lib/policy describes v4 as
+// opaque busy/free and v5 as retaining real titles and descriptions.
+describe('Google background processing waits for the current policy to be accepted (R15)', () => {
+  const ENCRYPTION_KEY = 'test-google-encryption-key-at-least-32-chars';
+
+  const googleEnv = (base: Env): Env => ({
+    ...base,
+    GOOGLE_SYNC_MODE: 'live',
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
+    GOOGLE_TOKEN_ENCRYPTION_KEY: ENCRYPTION_KEY,
+  });
+
+  async function seedStaleAcceptance(db: ShimDatabase, userId: string, status = 'active'): Promise<void> {
+    const sealed = await seal('stored-refresh-token', ENCRYPTION_KEY);
+    const now = Date.now();
+    await seedGuild(db);
+    await seedUser(db, userId);
+    await seedMembership(db, userId, 'guild-1');
+    // Accepted the *previous* policy -- the state a version bump creates for
+    // everybody until each person accepts again.
+    await db
+      .prepare(`UPDATE users SET accepted_policy_version = ? WHERE id = ?`)
+      .bind(CURRENT_POLICY_VERSION - 1, userId)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO google_calendar_connections
+           (user_id, refresh_token_ciphertext, refresh_token_iv, access_token_ciphertext, access_token_iv,
+            access_token_expires_at, google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
+            last_synced_at, disconnect_attempts, connected_at, updated_at)
+         VALUES (?, ?, ?, NULL, NULL, NULL, 'someone@gmail.com', 'primary', 'primary', 1, ?, NULL, 0, ?, ?)`,
+      )
+      .bind(userId, sealed.ciphertext, sealed.iv, status, now, now)
+      .run();
+  }
+
+  it('imports nothing for a user who has not accepted the current policy', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedStaleAcceptance(db, 'u1');
+
+    const now = Date.now();
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', expires_in: 3600 } },
+      {
+        match: '/events',
+        status: 200,
+        body: {
+          timeZone: 'UTC',
+          items: [
+            {
+              id: 'g-1',
+              summary: 'Therapy',
+              description: 'private',
+              start: { dateTime: new Date(now + DAY_MS).toISOString() },
+              end: { dateTime: new Date(now + DAY_MS + HOUR_MS).toISOString() },
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(await googleSyncDue(env)).toBe(false);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(await countRows(db, 'personal_events', 'google_event_id IS NOT NULL')).toBe(0);
+    // Not even asked for: nothing left this deployment on their behalf.
+    expect(fetchStub.calls.some((u) => u.includes('/events'))).toBe(false);
+  });
+
+  it('resumes the moment they accept', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedStaleAcceptance(db, 'u1');
+    await db
+      .prepare(`UPDATE users SET accepted_policy_version = ? WHERE id = 'u1'`)
+      .bind(CURRENT_POLICY_VERSION)
+      .run();
+
+    const now = Date.now();
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', expires_in: 3600 } },
+      {
+        match: '/events',
+        status: 200,
+        body: {
+          timeZone: 'UTC',
+          items: [
+            {
+              id: 'g-1',
+              summary: 'Therapy',
+              start: { dateTime: new Date(now + DAY_MS).toISOString() },
+              end: { dateTime: new Date(now + DAY_MS + HOUR_MS).toISOString() },
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(await googleSyncDue(env)).toBe(true);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+    expect(await countRows(db, 'personal_events', 'google_event_id IS NOT NULL')).toBe(1);
+  });
+
+  // Withdrawal is not processing. Someone who declines a new policy must still
+  // be able to disconnect, and a cleanup that stalled waiting for acceptance
+  // would trap exactly the people most likely to want it.
+  it('still finishes a disconnect for someone who has not accepted', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedStaleAcceptance(db, 'u1', 'disconnecting');
+
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', expires_in: 3600 } },
+      { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
+    ]);
+
+    expect(await googleSyncDue(env)).toBe(true);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(await countRows(db, 'google_calendar_connections')).toBe(0);
   });
 });

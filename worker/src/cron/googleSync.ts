@@ -34,6 +34,7 @@ import {
   revokeToken,
 } from '../lib/googleCalendar';
 import { newId } from '../lib/ids';
+import { CURRENT_POLICY_VERSION } from '../lib/policy';
 import { LIMITS } from '../lib/validate';
 import type { TickBudget } from './budget';
 
@@ -796,13 +797,20 @@ async function syncImportedPersonalEvents(
 export async function googleSyncDue(env: Env): Promise<boolean> {
   if (!isGoogleConfigured(env)) return false;
   const row = await env.DB.prepare(
-    `SELECT 1 FROM google_calendar_connections
-     WHERE status = 'disconnecting'
-        OR (sync_enabled = 1 AND status = 'active'
-            AND (last_synced_at IS NULL OR last_synced_at < ?))
+    // Same policy-acceptance join as sweepGoogleCalendar's own candidate query
+    // (R15). These two predicates have to agree: this one decides whether the
+    // tick reorders itself to run the calendar sweep first, and if it said
+    // "due" for a connection the sweep then declines to process, the tick
+    // would give up its ordering for work that was never going to happen.
+    `SELECT 1 FROM google_calendar_connections c
+     JOIN users u ON u.id = c.user_id
+     WHERE c.status = 'disconnecting'
+        OR (c.sync_enabled = 1 AND c.status = 'active'
+            AND u.accepted_policy_version >= ?
+            AND (c.last_synced_at IS NULL OR c.last_synced_at < ?))
      LIMIT 1`,
   )
-    .bind(Date.now() - SYNC_INTERVAL_MS)
+    .bind(CURRENT_POLICY_VERSION, Date.now() - SYNC_INTERVAL_MS)
     .first();
   return row != null;
 }
@@ -818,15 +826,35 @@ export async function sweepGoogleCalendar(env: Env, budget: TickBudget): Promise
   // never-synced connection goes ahead of every synced one, and whatever this
   // tick could not afford is at the front of the next tick's page. That is a
   // cursor's whole job, without a CursorStore slot or the statement it costs.
+  // Pass-11 review (R15). The policy version is joined here because background
+  // processing was the one path that never checked it. Every API route runs
+  // requirePolicyAcceptance, so a user who has not accepted the current
+  // Privacy Policy is refused at the door -- and yet this sweep went on
+  // reading their calendar, storing real titles and descriptions, and sending
+  // their sessions to Google on their behalf. A policy gate that the person
+  // meets on their next request but their data does not is not a gate.
+  //
+  // It matters most across exactly the change this app just made: lib/policy
+  // describes version 4 as opaque busy/free only and version 5 as retaining
+  // real titles and descriptions. Bumping the version is what asks for consent
+  // to that; without this join, the new behaviour would have started for
+  // everyone regardless of whether they gave it.
+  //
+  // `status = 'disconnecting'` is deliberately outside the check: someone who
+  // declines a new policy must still be able to withdraw, and a disconnect
+  // that stalled waiting for acceptance would trap the very people most likely
+  // to want it. Withdrawal is not processing.
   const { results: connections } = await env.DB.prepare(
-    `SELECT * FROM google_calendar_connections
-     WHERE status = 'disconnecting'
-        OR (sync_enabled = 1 AND status = 'active'
-            AND (last_synced_at IS NULL OR last_synced_at < ?))
-     ORDER BY status DESC, last_synced_at ASC
+    `SELECT c.* FROM google_calendar_connections c
+     JOIN users u ON u.id = c.user_id
+     WHERE c.status = 'disconnecting'
+        OR (c.sync_enabled = 1 AND c.status = 'active'
+            AND u.accepted_policy_version >= ?
+            AND (c.last_synced_at IS NULL OR c.last_synced_at < ?))
+     ORDER BY c.status DESC, c.last_synced_at ASC
      LIMIT ?`,
   )
-    .bind(Date.now() - SYNC_INTERVAL_MS, MAX_CONNECTIONS_PER_TICK)
+    .bind(CURRENT_POLICY_VERSION, Date.now() - SYNC_INTERVAL_MS, MAX_CONNECTIONS_PER_TICK)
     .all<GoogleConnectionRow>();
 
   for (const row of connections) {
