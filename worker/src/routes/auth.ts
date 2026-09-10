@@ -256,10 +256,14 @@ authRoutes.post('/refresh', async (c) => {
   const payload = await verifyJwt(token, c.env.JWT_SIGNING_KEY, { ignoreExpiration: true });
   if (!payload) return c.text('Unauthorized', 401);
 
-  const rotated = await rotateSession(c.env, payload.sid, payload.sub);
-  if (!rotated) return c.text('Unauthorized', 401);
+  // F-20: the new token names a NEW session, not the one just presented. That
+  // is the whole point -- a token that could be exchanged for an equivalent
+  // token forever made the 30-minute access lifetime meaningless against a
+  // capture.
+  const rotatedSessionId = await rotateSession(c.env, payload.sid, payload.sub);
+  if (!rotatedSessionId) return c.text('Unauthorized', 401);
 
-  const jwt = await signJwt(payload.sub, payload.sid, c.env.JWT_SIGNING_KEY);
+  const jwt = await signJwt(payload.sub, rotatedSessionId, c.env.JWT_SIGNING_KEY);
   return c.json({ token: jwt });
 });
 

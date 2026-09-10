@@ -2558,3 +2558,132 @@ describe('an emailed decision needs a person, and a refused login leaves nothing
     expect(await countRows(db, 'users', 'id = ? AND last_login_attempt_at IS NOT NULL', 'former')).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-20
+// ---------------------------------------------------------------------------
+
+// /auth/refresh accepts an expired JWT by design -- that is what refresh is
+// for -- but rotateSession only bumped last_used_at, so the token handed back
+// carried the same sid and was interchangeable with the one presented. A
+// captured token could therefore be refreshed for the whole seven-day session,
+// and the 30-minute access lifetime that jwt.ts and README section 4 both
+// describe as bounding a theft bounded nothing. The token lives in
+// localStorage, so any script on the frontend origin got a week rather than
+// half an hour.
+describe('refreshing rotates the session rather than reissuing it (F-20)', () => {
+  const app = buildApp();
+  const call = (env: Env, path: string, init: RequestInit = {}) =>
+    app.request(`https://worker.test${path}`, init, env);
+
+  async function refresh(env: Env, token: string): Promise<Response> {
+    return call(env, '/auth/refresh', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+  }
+
+  it('issues a token naming a different session', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+
+    const { id: sessionId } = await createSession(env, 'alice');
+    const original = await signJwt('alice', sessionId, env.JWT_SIGNING_KEY);
+
+    const res = await refresh(env, original);
+    expect(res.status).toBe(200);
+    const { token: rotated } = (await res.json()) as { token: string };
+
+    const before = JSON.parse(atob(original.split('.')[1])) as { sid: string };
+    const after = JSON.parse(atob(rotated.split('.')[1])) as { sid: string };
+    expect(after.sid).not.toBe(before.sid);
+
+    // And the new one authenticates.
+    const me = await call(env, '/me', { headers: { Authorization: `Bearer ${rotated}` } });
+    expect(me.status).toBe(200);
+  });
+
+  // The finding itself: a captured token must stop working, rather than
+  // remaining exchangeable for the rest of the week.
+  it('stops the old token once the rotation grace has passed', async () => {
+    vi.useFakeTimers();
+    const base = Date.UTC(2026, 8, 10, 12, 0, 0);
+    vi.setSystemTime(base);
+
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+
+    const { id: sessionId } = await createSession(env, 'alice');
+    const captured = await signJwt('alice', sessionId, env.JWT_SIGNING_KEY);
+
+    // The legitimate holder refreshes.
+    expect((await refresh(env, captured)).status).toBe(200);
+
+    // Two minutes later -- past the grace -- the captured token is dead, both
+    // as a credential and as something to refresh with.
+    vi.setSystemTime(base + 2 * 60 * 1000);
+    expect((await call(env, '/me', { headers: { Authorization: `Bearer ${captured}` } })).status).toBe(401);
+    expect((await refresh(env, captured)).status).toBe(401);
+  });
+
+  // Why the grace exists. Two tabs can hit a 401 at the same moment and both
+  // call refresh with the same token; without a window the loser gets a 401
+  // from refresh itself, and the frontend's API client treats that as terminal
+  // -- it clears the stored token and bounces to login, throwing away the good
+  // token the winning tab just wrote. Both tabs end up logged out over an
+  // ordinary race.
+  it('lets a second tab mid-flight refresh too', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+
+    const { id: sessionId } = await createSession(env, 'alice');
+    const shared = await signJwt('alice', sessionId, env.JWT_SIGNING_KEY);
+
+    expect((await refresh(env, shared)).status).toBe(200);
+    // Immediately after, which is the racing tab.
+    expect((await refresh(env, shared)).status).toBe(200);
+  });
+
+  // Rotation must not become a way to hold a session open forever: the
+  // successor inherits the original expiry rather than starting a new week.
+  it('does not extend the absolute session lifetime', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+
+    const { id: sessionId } = await createSession(env, 'alice');
+    const original = await db
+      .prepare(`SELECT expires_at FROM sessions WHERE id = ?`)
+      .bind(sessionId)
+      .first<{ expires_at: number }>();
+
+    const res = await refresh(env, await signJwt('alice', sessionId, env.JWT_SIGNING_KEY));
+    const { token } = (await res.json()) as { token: string };
+    const { sid } = JSON.parse(atob(token.split('.')[1])) as { sid: string };
+
+    const successor = await db
+      .prepare(`SELECT expires_at FROM sessions WHERE id = ?`)
+      .bind(sid)
+      .first<{ expires_at: number }>();
+    expect(successor!.expires_at).toBe(original!.expires_at);
+  });
+
+  // Logout stays absolute -- the grace is for rotation only, and must not
+  // soften revocation.
+  it('does not grace a revoked session', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+
+    const { id: sessionId } = await createSession(env, 'alice');
+    const token = await signJwt('alice', sessionId, env.JWT_SIGNING_KEY);
+
+    expect((await call(env, '/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${token}` } })).status).toBe(200);
+    expect((await refresh(env, token)).status).toBe(401);
+  });
+});
