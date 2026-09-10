@@ -164,16 +164,37 @@ export async function exchangeCodeForTokens(
 // Google no longer honours it", so this is always attempted -- but a failure
 // here must not stop the disconnect, or a Google outage would leave someone
 // permanently unable to unlink their account.
-export async function revokeToken(token: string): Promise<void> {
+// Returns whether Google actually confirmed the revocation (R12 in the
+// Pass-11 review). It used to return void: the response status was never
+// looked at and a network error was caught and swallowed, so every caller
+// treated "we sent a request into the void" as "the grant is gone". The cron
+// then logged 'token revoked' and deleted the stored credential regardless --
+// which is the one thing that makes the failure permanent, since the refresh
+// token is what a retry would need. A Google 500 therefore left the grant
+// potentially live in the user's account with nothing on this side able to
+// reach it, while the Privacy Policy said disconnecting revokes it.
+//
+// Still never throws: a Google outage must not be able to block an account
+// deletion. The difference is that callers can now tell the two outcomes
+// apart and say so.
+export async function revokeToken(token: string): Promise<boolean> {
   try {
-    await fetch(OAUTH_REVOKE, {
+    const res = await fetch(OAUTH_REVOKE, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ token }),
       signal: AbortSignal.timeout(GOOGLE_FETCH_TIMEOUT_MS),
     });
+    if (res.ok) return true;
+    // 400 with error=invalid_token means the grant is already gone -- which is
+    // the outcome being asked for, so it counts as success rather than as a
+    // failure to retry forever.
+    if (res.status === 400) return true;
+    console.warn(`Google token revocation returned ${res.status}; the grant may still be live.`);
+    return false;
   } catch (err) {
     console.warn('Google token revocation failed (continuing with local disconnect):', err);
+    return false;
   }
 }
 
@@ -201,6 +222,23 @@ export async function storeConnection(
   const sealedRefresh = await seal(refreshToken, secret);
   const sealedAccess = await seal(accessToken, secret);
 
+  // Pass-11 review (F-22). `prompt=consent` mints a brand-new refresh token on
+  // every reconnect, and the one being replaced here stays valid at Google
+  // indefinitely -- the user would have to find it themselves under their
+  // Google account's third-party access settings. Overwriting our copy is not
+  // the same as ending the grant, so the superseded one is revoked before the
+  // row is replaced.
+  //
+  // Best-effort by construction: a reconnect must not fail because Google's
+  // revoke endpoint is having a bad minute. The new grant is the one that
+  // matters and it is about to be stored either way.
+  const existing = await loadConnection(env, userId);
+  const switchingAccount =
+    !!existing && !!existing.google_account_email && existing.google_account_email !== accountEmail;
+  if (existing) {
+    const previous = await readRefreshToken(env, existing);
+    if (previous && previous !== refreshToken) await revokeToken(previous);
+  }
   // Reconnecting resets sync_enabled, status and last_error deliberately: the
   // most likely reason someone is back here is that the previous grant broke,
   // and leaving the row's failure state behind would mean a successful
@@ -224,6 +262,14 @@ export async function storeConnection(
        status = 'active',
        last_error = NULL,
        disconnect_attempts = 0,
+       -- F-22: a reconnect to a *different* Google account must not inherit
+       -- the previous one's read selection. read_calendar_id names a
+       -- calendar on the old account, which the new grant has no authority
+       -- over and may not even be able to see -- so keeping it would leave
+       -- the sweep reading nothing while Settings displayed a calendar as
+       -- selected. Same account: left alone, since re-authorising a broken
+       -- grant should not silently switch reading off.
+       read_calendar_id = CASE WHEN ? THEN NULL ELSE read_calendar_id END,
        updated_at = excluded.updated_at`,
   )
     .bind(
@@ -237,8 +283,21 @@ export async function storeConnection(
       calendarId,
       now,
       now,
+      switchingAccount ? 1 : 0,
     )
     .run();
+
+  // And the rows the old account's calendar produced, for the same reason
+  // PATCH deletes them when reading is switched off: nothing will ever
+  // reconcile them again (the sweep now reads a different account, or none),
+  // routes/personal.ts refuses to let their owner delete them, and until
+  // something does they keep making that person look busy at times taken from
+  // a calendar this app no longer has any connection to.
+  if (switchingAccount) {
+    await env.DB.prepare(`DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL`)
+      .bind(userId)
+      .run();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -365,11 +424,33 @@ export async function readRefreshToken(env: Env, row: GoogleConnectionRow): Prom
 // The rows go regardless; what is lost in that case is only the courtesy of
 // telling Google first.
 export async function revokeGoogleAccess(env: Env, userId: string): Promise<void> {
-  if (!isGoogleConfigured(env)) return;
+  // R12: deliberately NOT gated on isGoogleConfigured any more. A stored
+  // credential is a stored credential -- if the feature was switched off on
+  // this deployment after someone connected, their grant is still live at
+  // Google and erasing their account has to tear it down. Skipping revocation
+  // because a config flag changed meant the one case where nobody would ever
+  // come back to fix it was also the case that got nothing done.
+  //
+  // Revocation needs no client id or secret, only the token, so the call is
+  // possible whatever the feature mode says. The encryption key is the one
+  // thing genuinely required, since without it there is no token to send.
+  if (!env.GOOGLE_TOKEN_ENCRYPTION_KEY) return;
   const row = await loadConnection(env, userId);
   if (!row) return;
   const refreshToken = await readRefreshToken(env, row);
-  if (refreshToken) await revokeToken(refreshToken);
+  if (!refreshToken) return;
+
+  // Account erasure never blocks on this (see deleteUserCompletely's own
+  // comment): a Google outage must not stop someone deleting their account.
+  // But the outcome is recorded rather than assumed, so an operator can tell
+  // "revoked" from "we deleted our copy and hoped" -- the distinction R12 is
+  // about, and one the Privacy Policy has to stop eliding.
+  if (!(await revokeToken(refreshToken))) {
+    console.warn(
+      `Google revocation for ${userId} was not confirmed during account erasure; the local credential is gone, ` +
+        'so the grant can now only be removed from that Google account\'s own settings.',
+    );
+  }
 }
 
 export type AccessTokenResult =

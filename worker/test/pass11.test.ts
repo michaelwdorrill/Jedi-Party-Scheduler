@@ -7,7 +7,11 @@ import { buildNoticeboard } from '../src/lib/noticeboard';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
 import { signToken } from '../src/lib/signedToken';
+import { seal } from '../src/lib/crypto';
+import { revokeToken, storeConnection } from '../src/lib/googleCalendar';
 import { runReminderSweep } from '../src/cron/reminders';
+import { sweepGoogleCalendar } from '../src/cron/googleSync';
+import { TickBudget } from '../src/cron/budget';
 import type { Env } from '../src/env';
 import type { EventWriteInput } from '../src/lib/eventWrites';
 import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
@@ -1267,7 +1271,7 @@ describe('a queued DM does not outlive the access that justified it (R09)', () =
     await runReminderSweep(env);
 
     // Nothing carrying the private content went out.
-    expect(fetchStub!.bodies.some((b) => b.includes('Private therapy discussion'))).toBe(false);
+    expect(fetchStub!.bodies.some((b) => (b ?? '').includes('Private therapy discussion'))).toBe(false);
     const row = await db
       .prepare(`SELECT delivered_at FROM notification_log WHERE id = 'nl-1'`)
       .first<{ delivered_at: number | null }>();
@@ -1312,5 +1316,233 @@ describe('a queued DM does not outlive the access that justified it (R09)', () =
       .prepare(`SELECT delivered_at FROM notification_log WHERE id = 'nl-org'`)
       .first<{ delivered_at: number | null }>();
     expect(row?.delivered_at).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-17 / R11, R10, R12, F-22
+// ---------------------------------------------------------------------------
+
+// Four ways "stop using my calendar" did not stop. Grouped because they are
+// one promise -- the Privacy Policy's account of withdrawal -- failing at four
+// different points in the same lifecycle.
+describe('withdrawing Google access actually withdraws it (F-17 / R11, R10, R12, F-22)', () => {
+  const app = buildApp();
+  const ENCRYPTION_KEY = 'test-google-encryption-key-at-least-32-chars';
+
+  const call = (env: Env, path: string, init: RequestInit = {}) =>
+    app.request(`https://worker.test${path}`, init, env);
+
+  const googleEnv = (base: Env): Env => ({
+    ...base,
+    GOOGLE_SYNC_MODE: 'live',
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
+    GOOGLE_TOKEN_ENCRYPTION_KEY: ENCRYPTION_KEY,
+  });
+
+  async function authHeader(env: Env, userId: string): Promise<Record<string, string>> {
+    const { id: sessionId } = await createSession(env, userId);
+    return {
+      Authorization: `Bearer ${await signJwt(userId, sessionId, env.JWT_SIGNING_KEY)}`,
+      'Content-Type': 'application/json',
+    };
+  }
+
+  async function seedConnection(
+    db: ShimDatabase,
+    userId: string,
+    overrides: { readCalendarId?: string | null; email?: string } = {},
+  ): Promise<void> {
+    const sealed = await seal('stored-refresh-token', ENCRYPTION_KEY);
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO google_calendar_connections
+           (user_id, refresh_token_ciphertext, refresh_token_iv, access_token_ciphertext, access_token_iv,
+            access_token_expires_at, google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
+            last_synced_at, disconnect_attempts, connected_at, updated_at)
+         VALUES (?, ?, ?, NULL, NULL, NULL, ?, 'primary', ?, 1, 'active', NULL, 0, ?, ?)`,
+      )
+      .bind(
+        userId,
+        sealed.ciphertext,
+        sealed.iv,
+        overrides.email ?? 'someone@gmail.com',
+        overrides.readCalendarId === undefined ? 'primary' : overrides.readCalendarId,
+        now,
+        now,
+      )
+      .run();
+  }
+
+  async function seedImported(db: ShimDatabase, userId: string, googleEventId: string): Promise<void> {
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO personal_events
+           (id, user_id, title, description, timezone, start_at, end_at, status, availability, is_recurring,
+            google_event_id, created_at, updated_at)
+         VALUES (?, ?, 'Dentist', 'root canal, do not reschedule', 'UTC', ?, ?, 'active', 'busy', 0, ?, ?, ?)`,
+      )
+      .bind(`pe-${googleEventId}`, userId, now + DAY_MS, now + DAY_MS + HOUR_MS, googleEventId, now, now)
+      .run();
+  }
+
+  // F-17 / R11, found by both reviewers. PATCH readCalendarId:null dropped the
+  // imports; DELETE /google did not -- and once the connection row is gone no
+  // sync ever reconciles them, while routes/personal.ts answers 409 to any
+  // attempt to delete one by hand. The person keeps titles and descriptions
+  // from a calendar they disconnected, still counted as busy against them.
+  it('drops imported personal time the moment disconnect is requested', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db);
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await seedConnection(db, 'u1');
+    await seedImported(db, 'u1', 'g-1');
+    // A hand-made entry, which must survive: this is about what *reading*
+    // created, not about the person's own personal time.
+    await db
+      .prepare(
+        `INSERT INTO personal_events (id, user_id, title, timezone, start_at, end_at, status, availability, is_recurring, created_at, updated_at)
+         VALUES ('mine', 'u1', 'Gym', 'UTC', ?, ?, 'active', 'busy', 0, ?, ?)`,
+      )
+      .bind(Date.now() + DAY_MS, Date.now() + DAY_MS + HOUR_MS, Date.now(), Date.now())
+      .run();
+
+    const res = await call(env, '/google', { method: 'DELETE', headers: await authHeader(env, 'u1') });
+    expect(res.status).toBe(200);
+
+    expect(await countRows(db, 'personal_events', 'google_event_id IS NOT NULL')).toBe(0);
+    expect(await countRows(db, 'personal_events', 'id = ?', 'mine')).toBe(1);
+    // Reading is off in the same breath, so nothing re-imports in the window
+    // before the sweep finishes the disconnect.
+    expect(await countRows(db, 'google_calendar_connections', 'read_calendar_id IS NULL')).toBe(1);
+  });
+
+  // R10. The sweep snapshots the connection, awaits Google over the network,
+  // then writes. If the person switches reading off during that await, PATCH
+  // deletes the imports and clears the preference -- and the older sweep used
+  // to write them straight back, permanently, since the next sweep returns
+  // early for a null read calendar.
+  it('does not write imports back when reading was switched off mid-flight', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db);
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await seedConnection(db, 'u1');
+
+    const headers = await authHeader(env, 'u1');
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', expires_in: 3600 } },
+      {
+        match: '/events',
+        status: 200,
+        // The opt-out lands while this request is in flight, which is the
+        // whole scenario -- a real interleaving, not a doctored database.
+        before: async () => {
+          await call(env, '/google', {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify({ readCalendarId: null }),
+          });
+        },
+        body: {
+          items: [
+            {
+              id: 'g-1',
+              summary: 'Therapy',
+              description: 'private',
+              start: { dateTime: new Date(Date.now() + DAY_MS).toISOString() },
+              end: { dateTime: new Date(Date.now() + DAY_MS + HOUR_MS).toISOString() },
+            },
+          ],
+        },
+      },
+    ]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(await countRows(db, 'google_calendar_connections', 'read_calendar_id IS NULL')).toBe(1);
+    // The finding: nothing the person opted out of got written back.
+    expect(await countRows(db, 'personal_events', 'google_event_id IS NOT NULL')).toBe(0);
+  });
+
+  // R12. revokeToken never looked at the response and swallowed network
+  // errors, so a Google 500 was reported as a successful revocation while the
+  // cron deleted the one credential a retry would have needed.
+  it('reports a failed revocation as failed rather than as success', async () => {
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 500, body: {} }]);
+    expect(await revokeToken('a-token')).toBe(false);
+
+    fetchStub.restore();
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    expect(await revokeToken('a-token')).toBe(true);
+
+    // Already-revoked is the outcome being asked for, not a failure to retry.
+    fetchStub.restore();
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 400, body: { error: 'invalid_token' } }]);
+    expect(await revokeToken('a-token')).toBe(true);
+  });
+
+  // F-22. prompt=consent mints a new refresh token every reconnect and the old
+  // one stays live at Google until the user hunts it down in their account
+  // settings.
+  it('revokes the superseded grant when reconnecting', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db);
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await seedConnection(db, 'u1');
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    await storeConnection(env, 'u1', 'a-new-refresh-token', 'a', 3600, 'someone@gmail.com', 'primary');
+
+    expect(fetchStub.calls.some((u) => u.includes('oauth2.googleapis.com/revoke'))).toBe(true);
+    expect(fetchStub.bodies.some((b) => (b ?? '').includes('stored-refresh-token'))).toBe(true);
+  });
+
+  // The other half of F-22: reconnecting as a *different* Google account must
+  // not inherit the previous account's read selection or keep the rows it
+  // produced -- nothing would ever reconcile those again.
+  it('clears the old account\'s read selection and imports when the account changes', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db);
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await seedConnection(db, 'u1', { email: 'old@gmail.com' });
+    await seedImported(db, 'u1', 'g-old');
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    await storeConnection(env, 'u1', 'new-refresh', 'a', 3600, 'new@gmail.com', 'primary');
+
+    expect(await countRows(db, 'google_calendar_connections', 'read_calendar_id IS NULL')).toBe(1);
+    expect(await countRows(db, 'personal_events', 'google_event_id IS NOT NULL')).toBe(0);
+  });
+
+  // Reconnecting the *same* account is a repair, not a switch: switching
+  // reading off underneath someone who just fixed a broken grant would be its
+  // own bug.
+  it('leaves the read selection alone when reconnecting the same account', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db);
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await seedConnection(db, 'u1', { email: 'same@gmail.com', readCalendarId: 'games@group.calendar.google.com' });
+    await seedImported(db, 'u1', 'g-keep');
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    await storeConnection(env, 'u1', 'new-refresh', 'a', 3600, 'same@gmail.com', 'primary');
+
+    expect(
+      await countRows(db, 'google_calendar_connections', 'read_calendar_id = ?', 'games@group.calendar.google.com'),
+    ).toBe(1);
+    expect(await countRows(db, 'personal_events', 'google_event_id IS NOT NULL')).toBe(1);
   });
 });

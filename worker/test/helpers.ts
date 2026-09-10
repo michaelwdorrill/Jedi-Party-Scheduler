@@ -46,13 +46,22 @@ export interface FetchRule {
   headers?: Record<string, string>;
   // Throw instead of responding, modelling a network failure.
   networkError?: boolean;
+  // Runs while this request is "in flight", before its response is produced.
+  // The point is to model a real interleaving rather than a doctored database
+  // state: code that awaits a network call is genuinely suspended there, and
+  // anything the app can do in that window (R10's read opt-out landing during
+  // a Google fetch) really can happen between the request and its answer.
+  before?: () => Promise<void>;
 }
 
 export interface FetchStub {
   calls: string[];
   // The request bodies, in the same order as `calls`, so a test can assert on
-  // what was actually sent rather than only on where. Non-string bodies (none
-  // today) record as null.
+  // what was actually sent rather than only on where. URLSearchParams bodies
+  // (Google's token and revoke endpoints use them) are recorded in their
+  // serialised form -- without that, "revoke was called" and "the *superseded*
+  // token was revoked" are indistinguishable, and only the second one is the
+  // property worth having. Anything else records as null.
   bodies: (string | null)[];
   restore: () => void;
 }
@@ -67,9 +76,16 @@ export function stubFetch(rules: FetchRule[]): FetchStub {
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     calls.push(url);
-    bodies.push(typeof init?.body === 'string' ? init.body : null);
+    bodies.push(
+      typeof init?.body === 'string'
+        ? init.body
+        : init?.body instanceof URLSearchParams
+          ? init.body.toString()
+          : null,
+    );
     const rule = rules.find((r) => url.includes(r.match));
     if (!rule) throw new Error(`Unstubbed fetch to ${url}`);
+    if (rule.before) await rule.before();
     if (rule.networkError) throw new TypeError('network failure');
     return new Response(rule.body === undefined ? '' : JSON.stringify(rule.body), {
       status: rule.status,

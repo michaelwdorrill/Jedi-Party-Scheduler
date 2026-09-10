@@ -437,13 +437,26 @@ googleRoutes.delete('/', requireAuth, requirePolicyAcceptance, async (c) => {
   const row = await loadConnection(c.env, userId);
   if (!row) return c.json({ ok: true });
 
-  await c.env.DB.prepare(
-    `UPDATE google_calendar_connections
-     SET status = 'disconnecting', sync_enabled = 0, disconnect_attempts = 0, updated_at = ?
-     WHERE user_id = ?`,
-  )
-    .bind(Date.now(), userId)
-    .run();
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE google_calendar_connections
+       SET status = 'disconnecting', sync_enabled = 0, read_calendar_id = NULL,
+           disconnect_attempts = 0, updated_at = ?
+       WHERE user_id = ?`,
+    ).bind(Date.now(), userId),
+    // Pass-11 review (F-17 / R11), found by both reviewers. Disconnecting is
+    // the strongest form of "stop reading my calendar", so it has to drop what
+    // reading created -- the same moment PATCH's `readCalendarId: null`
+    // already does, and for the reason PATCH's own comment gives: an imported
+    // row whose connection no longer exists is never reconciled by another
+    // sync, and routes/personal.ts answers 409 to any PATCH or DELETE on a row
+    // with a google_event_id. Without this the person is left holding titles
+    // and descriptions from a calendar they disconnected, still counted as
+    // busy against them by the scheduling assistant, removable only by
+    // reconnecting Google in order to switch reading off, or by deleting
+    // their whole account.
+    c.env.DB.prepare(`DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL`).bind(userId),
+  ]);
 
   return c.json({ ok: true, status: 'disconnecting' });
 });

@@ -299,12 +299,32 @@ async function runDisconnect(
   );
 
   const refreshToken = await readRefreshToken(env, row);
-  if (refreshToken) await revokeToken(refreshToken);
+  const revoked = refreshToken ? await revokeToken(refreshToken) : false;
 
   await env.DB.batch([
     env.DB.prepare(`DELETE FROM google_event_links WHERE user_id = ?`).bind(row.user_id),
+    // Belt for F-17 / R11: DELETE /google already nulls read_calendar_id and
+    // drops these, so a row imported between the request and this sweep should
+    // not exist. One statement in a rare path is worth not having to be right
+    // about that.
+    env.DB.prepare(`DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL`).bind(row.user_id),
     env.DB.prepare(`DELETE FROM google_calendar_connections WHERE user_id = ?`).bind(row.user_id),
   ]);
+
+  // Said separately from the line above, and only when it is true (R12). The
+  // previous version logged "token revoked" unconditionally, as part of a
+  // sentence describing a successful disconnect, whether or not Google had
+  // accepted the revocation -- which is the same thing the Privacy Policy
+  // says happens. Local deletion and confirmed remote revocation are
+  // different promises and now read differently in the log.
+  if (revoked) {
+    console.log(`Google disconnect for ${row.user_id}: credential revoked with Google.`);
+  } else {
+    console.warn(
+      `Google disconnect for ${row.user_id}: the credential was deleted here, but Google did not confirm ` +
+        'revocation. The grant may still exist in that account and has to be removed from Google account settings.',
+    );
+  }
 }
 
 async function syncOneConnection(
@@ -576,6 +596,26 @@ async function syncImportedPersonalEvents(
 
   const statements = [];
 
+  // Pass-11 review (R10). Everything below is conditioned on the connection
+  // still being the one this sync started against.
+  //
+  // The race is ordinary, not exotic: this function snapshots the connection,
+  // awaits listCalendarEvents over the network, and then writes. If the person
+  // switches reading off (PATCH /google `readCalendarId: null`) or picks a
+  // different calendar while that call is in flight, PATCH correctly deletes
+  // the imports and clears the preference -- and then this sweep, holding a
+  // snapshot from before, writes them all back. The next sweep returns
+  // immediately for a null read calendar, so nothing ever cleans up after it:
+  // titles and descriptions from a calendar the person stopped sharing sit
+  // there indefinitely, still counted as busy against them.
+  //
+  // Re-reading the row before the batch would not fix it -- there is still a
+  // gap between that read and the write. The guard has to be inside the
+  // statements, where D1's batch transaction makes it atomic with them.
+  const stillCurrent = `EXISTS (SELECT 1 FROM google_calendar_connections
+       WHERE user_id = ? AND status = 'active' AND sync_enabled = 1 AND read_calendar_id = ?)`;
+  const guardBinds = [row.user_id, row.read_calendar_id];
+
   // Anything previously imported that fell inside this window and did not
   // come back this time -- deleted, cancelled, or moved outside the window
   // by being rescheduled. Bounded to the window itself: a past occurrence
@@ -587,12 +627,14 @@ async function syncImportedPersonalEvents(
       ? `DELETE FROM personal_events
          WHERE user_id = ? AND google_event_id IS NOT NULL
            AND start_at >= ? AND start_at < ?
-           AND google_event_id NOT IN (${placeholders(currentIds.length)})`
+           AND google_event_id NOT IN (${placeholders(currentIds.length)})
+           AND ${stillCurrent}`
       : `DELETE FROM personal_events
          WHERE user_id = ? AND google_event_id IS NOT NULL
-           AND start_at >= ? AND start_at < ?`;
+           AND start_at >= ? AND start_at < ?
+           AND ${stillCurrent}`;
   statements.push(
-    env.DB.prepare(staleSql).bind(row.user_id, now, now + BUSY_CACHE_WINDOW_MS, ...currentIds),
+    env.DB.prepare(staleSql).bind(row.user_id, now, now + BUSY_CACHE_WINDOW_MS, ...currentIds, ...guardBinds),
   );
 
   // status/availability/is_recurring are written as literals, not bound --
@@ -601,7 +643,20 @@ async function syncImportedPersonalEvents(
   // already expanded any recurring source event into individual instances,
   // each with its own googleEventId, before this ever saw it.
   for (const chunk of chunkRows(imported, IMPORT_PARAMS_PER_ROW)) {
-    const values = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, 'active', 'busy', 0, ?, ?, ?)`).join(', ');
+    // `SELECT ... WHERE EXISTS` rather than `VALUES`, so the same guard the
+    // DELETE carries applies to the rows being written too -- a VALUES clause
+    // has nowhere to put a condition. Literals stay literal in the first arm's
+    // column aliases; every later arm is positional, the same shape
+    // lib/d1.ts's conditionalRowsSql builds for guarded event writes.
+    const arms = chunk
+      .map((_, i) =>
+        i === 0
+          ? `SELECT ? AS id, ? AS user_id, ? AS title, ? AS description, ? AS timezone, ? AS start_at, ? AS end_at,
+                    'active' AS status, 'busy' AS availability, 0 AS is_recurring, ? AS google_event_id,
+                    ? AS created_at, ? AS updated_at`
+          : `SELECT ?, ?, ?, ?, ?, ?, ?, 'active', 'busy', 0, ?, ?, ?`,
+      )
+      .join(' UNION ALL ');
     const params = chunk.flatMap((e) => [
       newId(),
       row.user_id,
@@ -619,16 +674,19 @@ async function syncImportedPersonalEvents(
         `INSERT INTO personal_events
            (id, user_id, title, description, timezone, start_at, end_at, status, availability, is_recurring,
             google_event_id, created_at, updated_at)
-         VALUES ${values}
+         SELECT * FROM (${arms})
+         WHERE ${stillCurrent}
          ON CONFLICT(user_id, google_event_id) DO UPDATE SET
            title = excluded.title, description = excluded.description, timezone = excluded.timezone,
            start_at = excluded.start_at, end_at = excluded.end_at, updated_at = excluded.updated_at`,
-      ).bind(...params),
+      ).bind(...params, ...guardBinds),
     );
   }
 
   statements.push(
-    env.DB.prepare(`UPDATE google_calendar_connections SET updated_at = ? WHERE user_id = ?`).bind(now, row.user_id),
+    env.DB.prepare(
+      `UPDATE google_calendar_connections SET updated_at = ? WHERE user_id = ? AND read_calendar_id = ?`,
+    ).bind(now, row.user_id, row.read_calendar_id),
   );
 
   await env.DB.batch(statements);
