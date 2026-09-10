@@ -227,13 +227,17 @@ async function createPendingRequest(db: ShimDatabase, env: Env, guildId = 'g1'):
   return row!.id;
 }
 
-describe('GET /guild-requests/:token/decide', () => {
+// POST, not GET, since the Pass-11 review's F-19: the emailed link now opens
+// a confirmation page and this is what the button on it submits. See
+// pass11.test.ts for the finding itself -- that a bare GET used to decide, and
+// mail scanners fetch links.
+describe('POST /guild-requests/:token/decide', () => {
   it('approving adds the guild to the allow-list', async () => {
     const { db, env } = setup();
     const requestId = await createPendingRequest(db, env);
     const token = await signToken(DECISION_TOKEN_PURPOSE, { requestId, action: 'approve' }, env.JWT_SIGNING_KEY, 600);
 
-    const res = await call(env, `/guild-requests/${token}/decide`);
+    const res = await call(env, `/guild-requests/${token}/decide`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(await countRows(db, 'guilds', "id = 'g1' AND is_active = 1")).toBe(1);
     expect(await countRows(db, 'guild_add_requests', "guild_id = 'g1' AND status = 'approved'")).toBe(1);
@@ -244,7 +248,7 @@ describe('GET /guild-requests/:token/decide', () => {
     const requestId = await createPendingRequest(db, env, 'g2');
     const token = await signToken(DECISION_TOKEN_PURPOSE, { requestId, action: 'reject' }, env.JWT_SIGNING_KEY, 600);
 
-    const res = await call(env, `/guild-requests/${token}/decide`);
+    const res = await call(env, `/guild-requests/${token}/decide`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(await countRows(db, 'guilds', "id = 'g2'")).toBe(0);
     expect(await countRows(db, 'guild_add_requests', "guild_id = 'g2' AND status = 'rejected'")).toBe(1);
@@ -256,8 +260,8 @@ describe('GET /guild-requests/:token/decide', () => {
     const approveToken = await signToken(DECISION_TOKEN_PURPOSE, { requestId, action: 'approve' }, env.JWT_SIGNING_KEY, 600);
     const rejectToken = await signToken(DECISION_TOKEN_PURPOSE, { requestId, action: 'reject' }, env.JWT_SIGNING_KEY, 600);
 
-    await call(env, `/guild-requests/${approveToken}/decide`);
-    const secondRes = await call(env, `/guild-requests/${rejectToken}/decide`);
+    await call(env, `/guild-requests/${approveToken}/decide`, { method: 'POST' });
+    const secondRes = await call(env, `/guild-requests/${rejectToken}/decide`, { method: 'POST' });
     expect(secondRes.status).toBe(200);
     // Still approved -- the first decision wins, the second is a no-op.
     expect(await countRows(db, 'guilds', "id = 'g3' AND is_active = 1")).toBe(1);
@@ -267,7 +271,7 @@ describe('GET /guild-requests/:token/decide', () => {
   it('an unknown request id is a 404', async () => {
     const { env } = setup();
     const token = await signToken(DECISION_TOKEN_PURPOSE, { requestId: 'nope', action: 'approve' }, env.JWT_SIGNING_KEY, 600);
-    const res = await call(env, `/guild-requests/${token}/decide`);
+    const res = await call(env, `/guild-requests/${token}/decide`, { method: 'POST' });
     expect(res.status).toBe(404);
   });
 });

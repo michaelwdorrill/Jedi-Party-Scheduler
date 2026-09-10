@@ -2429,3 +2429,132 @@ describe('a recurring auto-cancellation tells everyone eventually (R23)', () => 
     ).toBe(attendees.length + 1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-19, F-24
+// ---------------------------------------------------------------------------
+
+describe('an emailed decision needs a person, and a refused login leaves nothing (F-19, F-24)', () => {
+  const app = buildApp();
+  const call = (env: Env, path: string, init: RequestInit = {}) =>
+    app.request(`https://worker.test${path}`, init, env);
+
+  // F-19. Outlook Safe Links, Gmail's proxies and corporate mail gateways
+  // fetch the URLs in inbound mail before any human sees them, and this app's
+  // decision email lists Approve first. Since `guilds` is the entire admission
+  // control -- everyone in an allow-listed server can log in -- a prefetch
+  // could hand a whole Discord server accounts here with nobody deciding
+  // anything. And because the decision is one-shot, the owner's later click
+  // would report it "already decided", with no clue by what.
+  it('does not decide anything when the approve link is merely fetched', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'requester');
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO guild_add_requests (id, guild_id, guild_name, requested_by, status, requested_at)
+         VALUES ('req-1', 'g-new', 'Someone Else''s Server', 'requester', 'pending', ?)`,
+      )
+      .bind(now)
+      .run();
+    const token = await signToken(
+      'guild_request_decision',
+      { requestId: 'req-1', action: 'approve' },
+      env.JWT_SIGNING_KEY,
+      600,
+    );
+
+    // Exactly what a link-scanner does.
+    const res = await call(env, `/guild-requests/${token}/decide`);
+
+    expect(res.status).toBe(200);
+    // Nothing decided, nothing allow-listed.
+    expect(await countRows(db, 'guild_add_requests', "id = 'req-1' AND status = 'pending'")).toBe(1);
+    expect(await countRows(db, 'guilds', "id = 'g-new'")).toBe(0);
+
+    // What came back is a confirmation a person has to submit.
+    const html = await res.text();
+    expect(html).toContain('<form method="post"');
+    // And the guild name is escaped rather than interpolated raw -- this is
+    // the one place in the app that builds HTML by hand.
+    expect(html).toContain('Someone Else&#39;s Server');
+  });
+
+  it('decides once the form is actually submitted', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'requester');
+    await db
+      .prepare(
+        `INSERT INTO guild_add_requests (id, guild_id, guild_name, requested_by, status, requested_at)
+         VALUES ('req-1', 'g-new', 'A Server', 'requester', 'pending', ?)`,
+      )
+      .bind(Date.now())
+      .run();
+    const token = await signToken(
+      'guild_request_decision',
+      { requestId: 'req-1', action: 'approve' },
+      env.JWT_SIGNING_KEY,
+      600,
+    );
+
+    const res = await call(env, `/guild-requests/${token}/decide`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await countRows(db, 'guilds', "id = 'g-new' AND is_active = 1")).toBe(1);
+  });
+
+  // F-24. upsertUser ran before the allow-list check, so someone who shares no
+  // allow-listed server was refused a session and kept a full profile row --
+  // id, username, display name, avatar hash -- shown on the owner's user list,
+  // undisclosed to them, and not deletable by them since they cannot log in.
+  it('keeps no profile for a login it refuses', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'guild-1');
+
+    fetchStub = stubFetch([
+      { match: '/oauth2/token', status: 200, body: { access_token: 'a', token_type: 'Bearer' } },
+      { match: '/users/@me/guilds', status: 200, body: [{ id: 'some-other-server' }] },
+      { match: '/users/@me', status: 200, body: { id: 'stranger', username: 'stranger', global_name: 'A Stranger', avatar: 'abc' } },
+    ]);
+
+    const state = 'a-state-value';
+    const challenge = base64UrlEncode(
+      new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('verifier'))),
+    );
+    const res = await call(env, `/auth/callback?code=abc&state=${state}`, {
+      headers: { Cookie: `oauth_state=${state}:${challenge}` },
+    });
+
+    expect(res.status).toBe(403);
+    // The whole finding: no row at all for someone who cannot use the app.
+    expect(await countRows(db, 'users', 'id = ?', 'stranger')).toBe(0);
+  });
+
+  // The other half of the same decision. Migration 0018 exists so the owner
+  // can tell "logged in" from "tried and was turned away", and that stays true
+  // for someone who actually has an account -- a returning user who has since
+  // left every allow-listed server. Their record is their own, and it appears
+  // in their export.
+  it('still records the attempt for a returning user who has lost access', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'former');
+    await db.prepare(`UPDATE users SET last_login_attempt_at = NULL WHERE id = 'former'`).run();
+
+    fetchStub = stubFetch([
+      { match: '/oauth2/token', status: 200, body: { access_token: 'a', token_type: 'Bearer' } },
+      { match: '/users/@me/guilds', status: 200, body: [{ id: 'some-other-server' }] },
+      { match: '/users/@me', status: 200, body: { id: 'former', username: 'former', global_name: null, avatar: null } },
+    ]);
+
+    const state = 'a-state-value';
+    const challenge = base64UrlEncode(
+      new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('verifier'))),
+    );
+    const res = await call(env, `/auth/callback?code=abc&state=${state}`, {
+      headers: { Cookie: `oauth_state=${state}:${challenge}` },
+    });
+
+    expect(res.status).toBe(403);
+    expect(await countRows(db, 'users', 'id = ? AND last_login_attempt_at IS NOT NULL', 'former')).toBe(1);
+  });
+});

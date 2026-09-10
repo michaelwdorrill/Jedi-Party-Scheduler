@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { AppEnv } from '../lib/authMiddleware';
 import { exchangeCodeForToken, fetchDiscordUser, fetchDiscordUserGuilds } from '../lib/discord';
-import { listUserGuilds, markLoginSucceeded, syncGuildMembership, upsertUser } from '../lib/db';
+import { activeAllowListedGuildIds, markLoginSucceeded, syncGuildMembership, upsertUser } from '../lib/db';
 import { signJwt, verifyJwt } from '../lib/jwt';
 import { createSession, revokeSession, rotateSession } from '../lib/sessions';
 import { signToken, verifyToken } from '../lib/signedToken';
@@ -134,6 +134,45 @@ authRoutes.get('/callback', async (c) => {
       fetchDiscordUserGuilds(token.access_token),
     ]);
 
+    // This app has nothing to offer someone who shares none of the
+    // allow-listed servers -- personal scheduling is meant to complement a
+    // guild's calendar, not stand alone.
+    //
+    // Pass-11 review (F-24): checked BEFORE anything is written, which it was
+    // not. upsertUser ran first, so a Discord account that shares no
+    // allow-listed server was turned away with a 403 and no session -- and
+    // kept a full users row: id, username, display name, avatar hash,
+    // last_login_attempt_at, listed on the owner's user page. Those people
+    // never logged in, cannot log in to export or delete the row, and are not
+    // told it exists, against a Privacy Policy that describes what is stored
+    // "when you log in" and says "if something isn't listed here, the service
+    // doesn't collect it".
+    //
+    // The intersection is a pure read, so the refusal now costs no record at
+    // all for someone with no account here.
+    const allowListed = await activeAllowListedGuildIds(
+      c.env,
+      discordGuilds.map((g) => g.id),
+    );
+    if (allowListed.length === 0) {
+      // Migration 0018 exists so the owner can tell "logged in" from "tried
+      // and was turned away", and that is still worth having -- for someone
+      // who *has* an account. A returning user who has left every allow-listed
+      // server is a real user whose own record this is, and it appears in
+      // their export; a stranger is not, and gets a log line instead of a
+      // profile. That distinction is the whole of this finding.
+      const existing = await c.env.DB.prepare(`SELECT 1 FROM users WHERE id = ?`).bind(discordUser.id).first();
+      if (existing) {
+        await c.env.DB.prepare(`UPDATE users SET last_login_attempt_at = ? WHERE id = ?`)
+          .bind(Date.now(), discordUser.id)
+          .run();
+      } else {
+        console.warn(`Login refused for Discord id ${discordUser.id}: shares no allow-listed server. No record kept.`);
+      }
+      c.header('Cache-Control', NO_STORE);
+      return c.text("You're not a member of any server this app is set up for.", 403);
+    }
+
     // Discord's access/refresh tokens are deliberately NOT persisted -- they
     // are used once here to read the profile and guild list, then discarded.
     // Nothing in the app needs to act on Discord's behalf later, so keeping
@@ -149,16 +188,6 @@ authRoutes.get('/callback', async (c) => {
       discordUser.id,
       discordGuilds.map((g) => g.id),
     );
-
-    // This app has nothing to offer someone who shares none of the
-    // allow-listed servers -- personal scheduling is meant to complement a
-    // guild's calendar, not stand alone. Reject before any session/JWT is
-    // issued rather than letting an unrelated Discord account accumulate data.
-    const activeGuilds = await listUserGuilds(c.env, discordUser.id);
-    if (activeGuilds.length === 0) {
-      c.header('Cache-Control', NO_STORE);
-      return c.text("You're not a member of any server this app is set up for.", 403);
-    }
 
     // Past the guild check, so this is a real login rather than an attempt
     // that got turned away (migration 0018).

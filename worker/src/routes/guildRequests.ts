@@ -178,23 +178,102 @@ guildRequestRoutes.post('/', async (c) => {
 });
 
 // Consumed from an email, not a browser session -- see this file's header
-// comment. A GET rather than POST because that's what a mail client's own
-// link-click gives us, and the token itself (single-purpose, short-lived,
-// one-shot via decided_at) is what makes a GET safe to act on here.
+// comment.
+//
+// Pass-11 review (F-19): the GET used to *make* the decision, and the comment
+// here argued that the token being single-purpose, short-lived and one-shot
+// was what made that safe. It is not. Outlook Safe Links, Gmail's image and
+// link proxies and corporate mail gateways fetch the URLs in inbound mail
+// before any human sees them, and this app's email lists Approve first. So a
+// request could be approved with nothing but the mail arriving -- and since
+// the decision is one-shot, the owner's own later click would tell them it
+// had "already been decided", with no indication by what.
+//
+// What is being approved makes that worse than an ordinary prefetch bug:
+// `guilds` is this app's entire admission control. Everyone in an allow-listed
+// server can log in, so an auto-approval hands a whole Discord server accounts
+// here without anybody agreeing to it.
+//
+// The fix is a confirmation step. Prefetchers follow links; they do not submit
+// forms. The GET now verifies the token and renders one button, and the POST
+// below is what actually decides -- which is also just the correct HTTP for a
+// state change.
+function decisionPage(title: string, body: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
+button{font:inherit;padding:.6rem 1.1rem;border-radius:.4rem;border:1px solid #888;background:#f4f4f5;cursor:pointer}</style>
+</head><body>${body}</body></html>`;
+}
+
+// The guild name is operator-facing but originates from Discord, so it is
+// escaped rather than trusted -- this is the one place in the app that builds
+// an HTML document by hand.
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 guildRequestRoutes.get('/:token/decide', async (c) => {
   c.header('Cache-Control', NO_STORE);
+  const token = c.req.param('token');
+  const payload = await verifyToken<DecisionTokenPayload>(token, DECISION_TOKEN_PURPOSE, c.env.JWT_SIGNING_KEY);
+  if (!payload) return c.html(decisionPage('Link expired', '<p>This link has expired or is invalid.</p>'), 400);
+
+  const request = await c.env.DB.prepare(`SELECT guild_name, decided_at FROM guild_add_requests WHERE id = ?`)
+    .bind(payload.requestId)
+    .first<{ guild_name: string; decided_at: number | null }>();
+  if (!request) return c.html(decisionPage('Not found', '<p>This request no longer exists.</p>'), 404);
+  if (request.decided_at !== null) {
+    return c.html(
+      decisionPage(
+        'Already decided',
+        '<p>This request was already decided (by this link or the admin page). No changes were made.</p>',
+      ),
+    );
+  }
+
+  const verb = payload.action === 'approve' ? 'Approve' : 'Reject';
+  const name = escapeHtml(request.guild_name);
+  return c.html(
+    decisionPage(
+      `${verb} ${name}?`,
+      `<h1>${verb} “${name}”?</h1>
+       <p>${
+         payload.action === 'approve'
+           ? 'Approving adds this server to the allow-list. Everyone in it will be able to log in.'
+           : 'Rejecting leaves the allow-list unchanged.'
+       }</p>
+       <form method="post"><button type="submit">Confirm: ${verb.toLowerCase()} “${name}”</button></form>`,
+    ),
+  );
+});
+
+// The decision itself. Same token, same one-shot semantics as before -- the
+// only change is that reaching here takes a deliberate submission.
+guildRequestRoutes.post('/:token/decide', async (c) => {
+  c.header('Cache-Control', NO_STORE);
   const payload = await verifyToken<DecisionTokenPayload>(c.req.param('token'), DECISION_TOKEN_PURPOSE, c.env.JWT_SIGNING_KEY);
-  if (!payload) return c.text('This link has expired or is invalid.', 400);
+  if (!payload) return c.html(decisionPage('Link expired', '<p>This link has expired or is invalid.</p>'), 400);
 
   const result = await decideGuildAddRequest(c.env, payload.requestId, payload.action);
   switch (result) {
     case 'approved':
-      return c.text('Approved -- the server has been added to the allow-list.');
+      return c.html(decisionPage('Approved', '<p>Approved -- the server has been added to the allow-list.</p>'));
     case 'rejected':
-      return c.text('Rejected -- no changes were made.');
+      return c.html(decisionPage('Rejected', '<p>Rejected -- no changes were made.</p>'));
     case 'already_decided':
-      return c.text('This request was already decided (by this link or the admin page). No changes were made.');
+      return c.html(
+        decisionPage(
+          'Already decided',
+          '<p>This request was already decided (by this link or the admin page). No changes were made.</p>',
+        ),
+      );
     case 'not_found':
-      return c.text('This request no longer exists.', 404);
+      return c.html(decisionPage('Not found', '<p>This request no longer exists.</p>'), 404);
   }
 });

@@ -581,6 +581,29 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
 // updates the membership cache: allow-listed guilds they're currently in are
 // marked is_member=1, previously-cached memberships they're no longer in
 // (left the server, or it dropped off the allow-list) are marked is_member=0.
+// Which of the guilds Discord just reported for someone are on this app's
+// active allow-list. A pure read.
+//
+// Extracted for F-24 (Pass-11 review): routes/auth.ts needs this answer
+// *before* it writes anything, so a login it is going to refuse creates no
+// record of the person. Shared with syncGuildMembership below rather than
+// duplicated, since two copies of an admission-control intersection is how
+// they end up disagreeing.
+export async function activeAllowListedGuildIds(env: Env, discordGuildIds: string[]): Promise<string[]> {
+  // Discord returns up to 200 guilds for one account, past D1's per-statement
+  // parameter ceiling, so the intersection against the allow-list is chunked.
+  const found: string[] = [];
+  for (const chunk of chunkIds(discordGuildIds)) {
+    const { results } = await env.DB.prepare(
+      `SELECT id FROM guilds WHERE is_active = 1 AND id IN (${placeholders(chunk.length)})`,
+    )
+      .bind(...chunk)
+      .all<{ id: string }>();
+    found.push(...results.map((r) => r.id));
+  }
+  return found;
+}
+
 export async function syncGuildMembership(
   env: Env,
   userId: string,
@@ -588,17 +611,7 @@ export async function syncGuildMembership(
 ): Promise<void> {
   const now = Date.now();
 
-  // Discord returns up to 200 guilds for one account, past D1's per-statement
-  // parameter ceiling, so the intersection against the allow-list is chunked.
-  const currentlyMemberOf: string[] = [];
-  for (const chunk of chunkIds(discordGuildIds)) {
-    const { results } = await env.DB.prepare(
-      `SELECT id FROM guilds WHERE is_active = 1 AND id IN (${placeholders(chunk.length)})`,
-    )
-      .bind(...chunk)
-      .all<{ id: string }>();
-    currentlyMemberOf.push(...results.map((r) => r.id));
-  }
+  const currentlyMemberOf = await activeAllowListedGuildIds(env, discordGuildIds);
 
   // Which cached memberships need clearing is computed here rather than with a
   // `NOT IN (...)` list: NOT IN can't be chunked (each chunk would clear every
