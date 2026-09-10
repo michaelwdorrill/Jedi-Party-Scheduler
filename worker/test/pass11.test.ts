@@ -4,7 +4,7 @@ import { updateEvent } from '../src/lib/eventWrites';
 import { buildNoticeboard } from '../src/lib/noticeboard';
 import { runReminderSweep } from '../src/cron/reminders';
 import type { EventWriteInput } from '../src/lib/eventWrites';
-import type { ShimDatabase } from './d1shim';
+import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
 import {
   countRows,
   DAY_MS,
@@ -12,6 +12,7 @@ import {
   dmSendRule,
   HOUR_MS,
   loadEventRow,
+  membershipRule,
   seedAttendance,
   seedEvent,
   seedGuild,
@@ -531,5 +532,112 @@ describe('editing a poll keeps the votes on candidates that did not change (R05)
     expect(await countRows(db, 'event_poll_options', 'id = ?', 'opt-7')).toBe(1);
     // The confirmation survived too -- it lives on the candidate row.
     expect(await countRows(db, 'event_poll_options', 'confirmed_at IS NOT NULL AND id = ?', 'opt-7')).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R06
+// ---------------------------------------------------------------------------
+
+// sweepMinimumAttendeesDeadlines' recurring arm ran two scalable reads per
+// candidate event -- the occurrence overrides, and the recurrence rule
+// expandOccurrencesForEvent falls back to loading itself -- and charged the
+// budget for neither. resolveMinimumAttendeesDeadline then spent its
+// cancellation write and its recipient lookups uncharged too. So an entirely
+// valid, in-quota install could sail past Cloudflare's documented 50 D1
+// queries per Worker invocation on the Free plan while TickBudget still
+// believed it was well inside its allowance: the review measured 89. In
+// production that is the invocation failing partway through, every tick,
+// against the same workload each time.
+//
+// Measured against the database rather than the ledger, which is the whole
+// point -- the ledger was what was wrong.
+describe('a recurring-deadline tick stays inside the Free-plan D1 ceiling (R06)', () => {
+  const EVENT_COUNT = 30;
+
+  // Thirty daily recurring events, well under the configured per-guild cap,
+  // each with a deadline 24h before an occurrence that is already due.
+  async function seedRecurringDeadlineEvents(
+    db: ShimDatabase,
+    base: number,
+    minimumAttendees: number,
+  ): Promise<void> {
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+
+    const seriesStart = new Date(base + 12 * HOUR_MS);
+    const startDate = seriesStart.toISOString().slice(0, 10);
+    const startTime = `${String(seriesStart.getUTCHours()).padStart(2, '0')}:${String(seriesStart.getUTCMinutes()).padStart(2, '0')}`;
+
+    for (let i = 0; i < EVENT_COUNT; i++) {
+      const id = `rec-${String(i).padStart(2, '0')}`;
+      await seedEvent(db, { id, organizerId: 'organizer', isRecurring: 1, startAt: null, endAt: null });
+      await db
+        .prepare(
+          `UPDATE events SET timezone = 'UTC', minimum_attendees = ?, auto_cancel_below_minimum = 0,
+             minimum_attendees_deadline_hours_before = 24 WHERE id = ?`,
+        )
+        .bind(minimumAttendees, id)
+        .run();
+      await db
+        .prepare(
+          `INSERT INTO event_recurrence_rules (event_id, freq, interval, start_date, start_time, duration_minutes, end_type)
+           VALUES (?, 'DAILY', 1, ?, ?, 60, 'never')`,
+        )
+        .bind(id, startDate, startTime)
+        .run();
+      await seedInvite(db, id, 'organizer');
+    }
+  }
+
+  it('measures actual statements for thirty in-quota recurring events', async () => {
+    vi.useFakeTimers();
+    const base = Date.UTC(2026, 8, 10, 12, 0, 0);
+    vi.setSystemTime(base);
+
+    const { db, env } = setup();
+    await seedRecurringDeadlineEvents(db, base, 1);
+    // Notifications off, so nothing here is bounded by delivery cost -- what
+    // is being measured is the discovery work alone.
+    await db.prepare(`UPDATE users SET notifications_enabled = 0 WHERE id = 'organizer'`).run();
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    db.resetQueryCount();
+    await runReminderSweep(env);
+    expect(db.queryCount).toBeLessThanOrEqual(D1_FREE_PLAN_QUERY_BUDGET);
+  });
+
+  // The other half of R06, and the reason charging the queries is not enough
+  // on its own: once the ledger is honest, a tick can only afford a dozen or
+  // so events, and both arms of this sweep selected their page with a LIMIT
+  // and no cursor. So the same prefix came back every tick and everything
+  // behind it was never resolved at all -- ten ticks reached nine of thirty
+  // before the keyset cursor was added. Deadlines that silently never resolve
+  // are worse than a tick that stops early, which is why this is measured
+  // over several ticks rather than one.
+  it('reaches every event across successive ticks rather than the same prefix', async () => {
+    vi.useFakeTimers();
+    let base = Date.UTC(2026, 8, 10, 12, 0, 0);
+    vi.setSystemTime(base);
+
+    const { db, env } = setup();
+    // Minimum of five against a single attendee, so every occurrence really
+    // is below its minimum and owes its organizer a prompt.
+    await seedRecurringDeadlineEvents(db, base, 5);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    for (let tick = 0; tick < 10; tick++) {
+      await runReminderSweep(env);
+      base += 15 * 60 * 1000;
+      vi.setSystemTime(base);
+    }
+
+    const prompted = await db
+      .prepare(`SELECT DISTINCT event_id FROM notification_log WHERE notification_type = 'organizer_cancel_prompt'`)
+      .all<{ event_id: string }>();
+    expect(prompted.results).toHaveLength(EVENT_COUNT);
   });
 });

@@ -1929,17 +1929,31 @@ async function sendCancelledEventNotice(
 // No cursor, uncharged discovery reads, same reasoning as
 // sweepCancellationCascade and sweepGroupDrift's own comments -- see
 // RESERVED_QUERIES in cron/budget.ts.
-async function sweepMinimumAttendeesDeadlines(env: Env, budget: TickBudget): Promise<void> {
+async function sweepMinimumAttendeesDeadlines(
+  env: Env,
+  budget: TickBudget,
+  cursors: CursorStore,
+): Promise<void> {
   const now = Date.now();
 
+  // Both arms are keyset-cursored (Pass-11 review, R06). They were bounded by
+  // a LIMIT alone, and since a tick can only afford a dozen or so events, the
+  // same prefix came back every tick and every event behind it was never
+  // resolved -- ten consecutive ticks reached nine of thirty. The cursor costs
+  // nothing to carry: CursorStore reads every cursor in one statement at the
+  // start of the tick and writes them in one at the end, which is what let
+  // migration 0012's global scans take the same treatment.
+  const afterSingle = cursors.get('minimum_attendees_single');
   const { results: dueNonRecurring } = await env.DB.prepare(
     `SELECT * FROM events
      WHERE status = 'active' AND event_type = 'single' AND is_recurring = 0
        AND minimum_attendees IS NOT NULL AND minimum_attendees_deadline_at IS NOT NULL
        AND minimum_attendees_deadline_at <= ?
+       AND (? IS NULL OR id > ?)
+     ORDER BY id
      LIMIT ?`,
   )
-    .bind(now, GLOBAL_SCAN_LIMIT)
+    .bind(now, afterSingle, afterSingle ?? '', GLOBAL_SCAN_LIMIT)
     .all<EventRow & { minimum_attendees: number }>();
 
   for (const event of dueNonRecurring) {
@@ -1949,34 +1963,80 @@ async function sweepMinimumAttendeesDeadlines(env: Env, budget: TickBudget): Pro
     } catch (err) {
       console.error(`sweepMinimumAttendeesDeadlines failed for event ${event.id}:`, err);
     }
+    // Advanced only once the event is actually finished with, and never past
+    // one the tick ran out on -- the same rule forEachGlobalRow follows, and
+    // for the same reason: an event this tick could not pay for has to come
+    // up again rather than be skipped.
+    if (budget.exhausted) return;
+    cursors.set('minimum_attendees_single', event.id);
   }
+  // A short page is the end of the pass, so the next tick starts a fresh one.
+  if (dueNonRecurring.length < GLOBAL_SCAN_LIMIT) cursors.set('minimum_attendees_single', null);
 
+  const afterRecurring = cursors.get('minimum_attendees_recurring');
   const { results: recurringCandidates } = await env.DB.prepare(
     `SELECT * FROM events
      WHERE status = 'active' AND event_type = 'single' AND is_recurring = 1
        AND minimum_attendees IS NOT NULL AND minimum_attendees_deadline_hours_before IS NOT NULL
+       AND (? IS NULL OR id > ?)
+     ORDER BY id
      LIMIT ?`,
   )
-    .bind(GLOBAL_SCAN_LIMIT)
+    .bind(afterRecurring, afterRecurring ?? '', GLOBAL_SCAN_LIMIT)
     .all<EventRow & { minimum_attendees: number; minimum_attendees_deadline_hours_before: number }>();
 
-  for (const event of recurringCandidates) {
-    if (budget.exhausted) return;
-    try {
-      const hoursBeforeMs = event.minimum_attendees_deadline_hours_before * HOUR_MS;
-      const overrides = (await loadOverridesForEvents(env, [event.id])).get(event.id) ?? [];
-      // Occurrences starting soon enough that their own deadline
-      // (start - hoursBefore) has already arrived, but that haven't started
-      // yet -- nothing to resolve for one already underway or past.
-      const occurrences = await expandOccurrencesForEvent(env, event, now, now + hoursBeforeMs, overrides);
-      for (const occ of occurrences) {
-        if (budget.exhausted) return;
-        if (occ.startAt - hoursBeforeMs > now) continue; // this occurrence's own deadline isn't due yet
-        await resolveMinimumAttendeesDeadline(env, budget, event, occ.date);
+  // Pass-11 review (R06). These two reads used to run *per candidate event*,
+  // inside the loop, and neither was charged: the overrides lookup, and the
+  // recurrence-rule query expandOccurrencesForEvent falls back to issuing when
+  // it is not handed a rule. Thirty recurring events -- well inside the
+  // configured per-guild cap -- therefore spent sixty D1 queries that the
+  // budget did not know about, and a measured tick reached 89 against
+  // Cloudflare's documented Free-plan ceiling of 50 while TickBudget still
+  // reported itself safe. In production that is the invocation being cut off
+  // partway through, every tick, against a workload that recurs unchanged.
+  //
+  // Bulk-loaded once for the whole admitted set instead, which is the same
+  // fix forEachRecurringPage's own comment records making for the ladder
+  // sweep, and charged for what it actually costs: both loaders chunk their
+  // ids identically, so the chunk count is the query count for each.
+  if (recurringCandidates.length > 0) {
+    const recurringIds = recurringCandidates.map((e) => e.id);
+    const bulkLoadCost = chunkIds(recurringIds).length * 2;
+    if (!budget.trySpend(bulkLoadCost)) return;
+
+    const overridesByEvent = await loadOverridesForEvents(env, recurringIds);
+    const rulesByEvent = await loadRecurrenceRulesForEvents(env, recurringIds);
+
+    for (const event of recurringCandidates) {
+      if (budget.exhausted) return;
+      try {
+        const hoursBeforeMs = event.minimum_attendees_deadline_hours_before * HOUR_MS;
+        const overrides = overridesByEvent.get(event.id) ?? [];
+        // Occurrences starting soon enough that their own deadline
+        // (start - hoursBefore) has already arrived, but that haven't started
+        // yet -- nothing to resolve for one already underway or past.
+        const occurrences = await expandOccurrencesForEvent(
+          env,
+          event,
+          now,
+          now + hoursBeforeMs,
+          overrides,
+          rulesByEvent.get(event.id),
+        );
+        for (const occ of occurrences) {
+          if (budget.exhausted) return;
+          if (occ.startAt - hoursBeforeMs > now) continue; // this occurrence's own deadline isn't due yet
+          await resolveMinimumAttendeesDeadline(env, budget, event, occ.date);
+        }
+      } catch (err) {
+        console.error(`sweepMinimumAttendeesDeadlines failed for recurring event ${event.id}:`, err);
       }
-    } catch (err) {
-      console.error(`sweepMinimumAttendeesDeadlines failed for recurring event ${event.id}:`, err);
+      // As above: never advance past an event the tick ran out partway
+      // through, since its remaining occurrences are still unresolved.
+      if (budget.exhausted) return;
+      cursors.set('minimum_attendees_recurring', event.id);
     }
+    if (recurringCandidates.length < GLOBAL_SCAN_LIMIT) cursors.set('minimum_attendees_recurring', null);
   }
 }
 
@@ -1996,6 +2056,13 @@ async function resolveMinimumAttendeesDeadline(
   if (confirmed >= event.minimum_attendees) return;
 
   if (event.auto_cancel_below_minimum) {
+    // Charged before the write rather than after (Pass-11 review, R06): this
+    // statement was previously free as far as the ledger was concerned. Doing
+    // it in this order also means a tick that cannot afford the cancellation
+    // does not perform it -- leaving the occurrence for the next tick, rather
+    // than cancelling it and then discovering it cannot pay for the notices
+    // that are supposed to accompany it.
+    if (!budget.trySpend(1)) return;
     let changed: number;
     if (occurrenceDate) {
       // One occurrence, not the series -- same primitive
@@ -2024,6 +2091,8 @@ async function resolveMinimumAttendeesDeadline(
 
     const limit = budget.deliveriesAffordable;
     if (limit <= 0) return;
+    // The recipient lookup itself is a query, and was not charged for either.
+    if (!budget.trySpend(1)) return;
     const pending = await getConfirmedAttendeeIds(env, event, null, occurrenceDate, {
       notificationType: 'event_cancelled_below_minimum',
       occurrenceDate,
@@ -2042,6 +2111,11 @@ async function resolveMinimumAttendeesDeadline(
   }
 
   const now = Date.now();
+  // Same again for the organizer-prompt arm's own recipient lookup: one query,
+  // previously uncharged, and the one this sweep runs most often -- every
+  // candidate occurrence below its minimum reaches it, whether or not a DM
+  // ends up going anywhere.
+  if (!budget.trySpend(1)) return;
   const recipient = await env.DB.prepare(
     `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
      FROM users u
@@ -3121,7 +3195,7 @@ export async function runReminderSweep(env: Env): Promise<void> {
   );
   await runIsolated('confirmedMultiWinnerOptions', () => sweepConfirmedMultiWinnerOptions(env, budget, cursors));
   await runIsolated('cancellationCascade', () => sweepCancellationCascade(env, budget));
-  await runIsolated('minimumAttendeesDeadlines', () => sweepMinimumAttendeesDeadlines(env, budget));
+  await runIsolated('minimumAttendeesDeadlines', () => sweepMinimumAttendeesDeadlines(env, budget, cursors));
   await runIsolated('minimumAttendeesDeadlineWarnings', () => sweepMinimumAttendeesDeadlineWarnings(env, budget));
   await runIsolated('newInvites', () => sweepNewInvites(env, budget));
   await runIsolated('changeRequestNotifications', () => sweepChangeRequestNotifications(env, budget));

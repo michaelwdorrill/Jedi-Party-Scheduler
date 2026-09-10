@@ -34,7 +34,17 @@ export type CursorName =
   // scanned by next_attempt_at directly, not reached through whatever
   // event/poll/group source query originally created them.
   | 'due_notification_retries'
-  | 'due_nudge_retries';
+  | 'due_nudge_retries'
+  // Pass-11 review (R06). Both arms of sweepMinimumAttendeesDeadlines were
+  // bounded by a LIMIT with no cursor and no ORDER BY -- the same shape
+  // migration 0012 records fixing for the global poll scans, and with the
+  // same consequence: one tick can only afford a dozen or so events, so the
+  // identical prefix was re-examined every tick and everything behind it
+  // never had its deadline resolved at all. Measured before the fix: ten
+  // consecutive ticks reached nine of thirty events, and would never have
+  // reached the other twenty-one.
+  | 'minimum_attendees_single'
+  | 'minimum_attendees_recurring';
 
 // The single-event scan orders by (start_at, id), so its key is both.
 export interface EventKey {
