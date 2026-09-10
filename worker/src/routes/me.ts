@@ -120,11 +120,57 @@ meRoutes.get('/export', async (c) => {
     // wildcard would put them in a file the user downloads and may well email
     // to themselves. An export is a right of access to *your data*, not to the
     // app's keys for acting on your behalf.
-    googleCalendar: `SELECT google_account_email, calendar_id, sync_enabled, status, last_synced_at,
-                       connected_at, updated_at
+    googleCalendar: `SELECT google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
+                       last_synced_at, last_error, connected_at, updated_at
                      FROM google_calendar_connections WHERE user_id = ?`,
     googleCalendarLinks: `SELECT event_id, occurrence_date, synced_title, synced_start_at, synced_end_at, synced_at
                           FROM google_event_links WHERE user_id = ?`,
+
+    // Pass-11 review (F-21 / R13), found by both reviewers. Everything below
+    // was held about the caller and left out of the download, against a policy
+    // that says it "returns everything the service holds about you" -- and
+    // which discloses several of these categories by name earlier in the same
+    // document, so this was more than loose wording.
+    //
+    // The same discipline as googleCalendar above applies throughout: columns
+    // are listed explicitly on any table that could grow a credential-shaped
+    // one, and `SELECT *` is used only where the whole row is the person's own
+    // content.
+    //
+    // Session *metadata*, not session credentials: a row here says when you
+    // signed in, when it was last used and when it expires. There is nothing
+    // to authenticate with -- the id is meaningless without a JWT signed by a
+    // key that is never exported -- but the policy discloses that these rows
+    // exist, so their subject can see them.
+    sessions: `SELECT created_at, last_used_at, expires_at, revoked_at FROM sessions WHERE user_id = ?`,
+
+    // The free-text `message` on a change request is the person's own writing,
+    // which is exactly the sort of thing an access request is for.
+    changeRequestsFiled: `SELECT * FROM event_change_requests WHERE requester_id = ?`,
+    changeRequestsAboutYou: `SELECT * FROM event_change_requests WHERE target_user_id = ?`,
+    changeRequestsDecided: `SELECT * FROM event_change_requests WHERE decided_by = ?`,
+    changeRequestVotes: `SELECT * FROM event_change_request_votes WHERE user_id = ?`,
+    changeRequestNotifications: `SELECT * FROM change_request_log WHERE user_id = ?`,
+
+    // Both directions: you are the subject of one and the audience of the
+    // other, and both are records about you.
+    rsvpNoticesYouTriggered: `SELECT * FROM organizer_rsvp_notice_log WHERE responder_id = ?`,
+    rsvpNoticesSentToYou: `SELECT * FROM organizer_rsvp_notice_log WHERE organizer_id = ?`,
+
+    groupNudges: `SELECT * FROM group_nudge_log WHERE user_id = ?`,
+    inactivityWarnings: `SELECT * FROM account_purge_warnings WHERE user_id = ?`,
+    // Includes the server name the person typed, which is their own input.
+    serverRequests: `SELECT * FROM guild_add_requests WHERE requested_by = ?`,
+
+    // Without these an exported event cannot be reconstructed: a recurring
+    // event's rows say is_recurring = 1 and carry no start time, and its real
+    // schedule lives entirely in these two tables.
+    recurrenceRules: `SELECT r.* FROM event_recurrence_rules r
+                      JOIN events e ON e.id = r.event_id WHERE e.organizer_id = ?`,
+    occurrenceOverrides: `SELECT o.* FROM event_occurrence_overrides o
+                          JOIN events e ON e.id = o.event_id WHERE e.organizer_id = ?`,
+    personalEventOverrides: `SELECT o.* FROM personal_event_overrides o
+                             JOIN personal_events p ON p.id = o.personal_event_id WHERE p.user_id = ?`,
   };
 
   const out: Record<string, unknown> = { exportedAt: new Date().toISOString() };

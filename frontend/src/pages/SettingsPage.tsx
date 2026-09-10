@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { API_BASE_URL, api } from '../api/client';
+import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
-import { clearToken, getToken } from '../auth/tokenStorage';
+import { clearToken } from '../auth/tokenStorage';
 import ConnectedCalendars from '../components/ConnectedCalendars';
 import TimezoneSelect from '../components/TimezoneSelect';
-import { buttonClass, cardClass } from '../components/ui';
+import { InlineError, buttonClass, cardClass } from '../components/ui';
+import { describeError } from '../lib/async';
+import { downloadMyData } from '../lib/dataExport';
 import { getScenery, setScenery, type Scenery } from '../lib/scenery';
 
 export default function SettingsPage() {
@@ -19,6 +21,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   const handleSave = async () => {
@@ -37,17 +40,14 @@ export default function SettingsPage() {
   // export never travels through anything but the user's own browser.
   const handleExport = async () => {
     setExporting(true);
+    setExportError(null);
     try {
-      const res = await fetch(`${API_BASE_URL}/me/export`, {
-        headers: { Authorization: `Bearer ${getToken()}` },
-      });
-      const blob = new Blob([JSON.stringify(await res.json(), null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `uncle-owen-data-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      await downloadMyData();
+    } catch (e) {
+      // R26: this path had no catch at all, so an expired access token made
+      // the button quietly go back to normal having produced no file and said
+      // nothing. A failed download has to be visible.
+      setExportError(describeError(e));
     } finally {
       setExporting(false);
     }
@@ -189,6 +189,7 @@ export default function SettingsPage() {
         >
           {exporting ? 'Preparing…' : 'Download my data'}
         </button>
+        {exportError && <InlineError message={exportError} />}
       </div>
 
       {user?.isOwner && (

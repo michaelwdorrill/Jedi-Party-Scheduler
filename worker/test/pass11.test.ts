@@ -1953,3 +1953,167 @@ describe('Google background processing waits for the current policy to be accept
     expect(await countRows(db, 'google_calendar_connections')).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-21 / R13
+// ---------------------------------------------------------------------------
+
+// GET /me/export's fixed table map left out most of what the app holds about
+// someone, against a policy that says the download "returns everything the
+// service holds about you" -- and which discloses several of the missing
+// categories by name earlier in the same document, so this was more than
+// loose wording. Recurrence rules and overrides are the worst of it: without
+// them an exported recurring event carries no schedule at all.
+describe('the data export returns everything held about the caller (F-21 / R13)', () => {
+  const app = buildApp();
+  const call = (env: Env, path: string, init: RequestInit = {}) =>
+    app.request(`https://worker.test${path}`, init, env);
+
+  it('includes every category the policy says it does', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedUser(db, 'bob');
+    await seedMembership(db, 'alice', 'guild-1');
+    await seedMembership(db, 'bob', 'guild-1');
+
+    const now = Date.now();
+    // A session, which the export is issued through anyway.
+    const { id: sessionId } = await createSession(env, 'alice');
+    const token = await signJwt('alice', sessionId, env.JWT_SIGNING_KEY);
+
+    // A recurring event alice organizes, with an override.
+    await seedEvent(db, { id: 'ev-rec', organizerId: 'alice', isRecurring: 1, startAt: null, endAt: null });
+    await db
+      .prepare(
+        `INSERT INTO event_recurrence_rules (event_id, freq, interval, start_date, start_time, duration_minutes, end_type)
+         VALUES ('ev-rec', 'WEEKLY', 1, '2026-09-01', '19:00', 120, 'never')`,
+      )
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled) VALUES ('ovr', 'ev-rec', '2026-09-08', 1)`,
+      )
+      .run();
+
+    // A recurring personal block with an override of its own.
+    await db
+      .prepare(
+        `INSERT INTO personal_events (id, user_id, title, timezone, start_at, end_at, status, availability, is_recurring, created_at, updated_at)
+         VALUES ('pe-1', 'alice', 'Gym', 'UTC', NULL, NULL, 'active', 'busy', 1, ?, ?)`,
+      )
+      .bind(now, now)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO personal_event_overrides (id, personal_event_id, occurrence_date, is_cancelled) VALUES ('pov', 'pe-1', '2026-09-09', 1)`,
+      )
+      .run();
+
+    // A change request alice filed on bob's event, with her own free text.
+    await seedEvent(db, { id: 'ev-bob', organizerId: 'bob' });
+    await db
+      .prepare(
+        `INSERT INTO event_change_requests
+           (id, event_id, requester_id, kind, proposed_start_at, proposed_end_at, message, event_revision, created_at)
+         VALUES ('cr-1', 'ev-bob', 'alice', 'time_change', ?, ?, 'can we push this an hour?', 0, ?)`,
+      )
+      .bind(now + DAY_MS, now + DAY_MS + HOUR_MS, now)
+      .run();
+    await db
+      .prepare(`INSERT INTO event_change_request_votes (request_id, user_id, vote, voted_at) VALUES ('cr-1', 'alice', 'yes', ?)`)
+      .bind(now)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO change_request_log (id, request_id, user_id, notification_type, sent_at)
+         VALUES ('crl-1', 'cr-1', 'alice', 'change_request_opened', ?)`,
+      )
+      .bind(now)
+      .run();
+
+    // An RSVP notice she triggered on someone else's event.
+    await db
+      .prepare(
+        `INSERT INTO organizer_rsvp_notice_log
+           (id, organizer_id, event_id, occurrence_date, responder_id, responded_at, sent_at)
+         VALUES ('rsvp-1', 'bob', 'ev-bob', '', 'alice', ?, ?)`,
+      )
+      .bind(now, now)
+      .run();
+
+    // An inactivity warning, and a server request carrying a name she typed.
+    await db
+      .prepare(
+        `INSERT INTO account_purge_warnings (id, user_id, last_login_at, warning_type, sent_at) VALUES ('apw', 'alice', ?, 'stale_2wk', ?)`,
+      )
+      .bind(now, now)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO guild_add_requests (id, guild_id, guild_name, requested_by, status, requested_at)
+         VALUES ('gar', 'guild-9', 'A Very Private Server', 'alice', 'pending', ?)`,
+      )
+      .bind(now)
+      .run();
+
+    const res = await call(env, '/me/export', { headers: { Authorization: `Bearer ${token}` } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown[]>;
+
+    for (const key of [
+      'sessions',
+      'changeRequestsFiled',
+      'changeRequestVotes',
+      'changeRequestNotifications',
+      'rsvpNoticesYouTriggered',
+      'inactivityWarnings',
+      'serverRequests',
+      'recurrenceRules',
+      'occurrenceOverrides',
+      'personalEventOverrides',
+    ]) {
+      expect(body[key], `expected ${key} in the export`).toHaveLength(1);
+    }
+
+    // The specific things a reader would look for, rather than only the
+    // shape: her own words, and the schedule without which the recurring
+    // event cannot be reconstructed.
+    const whole = JSON.stringify(body);
+    expect(whole).toContain('can we push this an hour?');
+    expect(whole).toContain('A Very Private Server');
+    expect(whole).toContain('WEEKLY');
+  });
+
+  // The one thing that must NOT be in there, and the reason the Google block
+  // lists its columns rather than using SELECT *.
+  it('still never exports credential material', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+    const sealed = await seal('super-secret-refresh-token', 'test-google-encryption-key-at-least-32-chars');
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO google_calendar_connections
+           (user_id, refresh_token_ciphertext, refresh_token_iv, access_token_ciphertext, access_token_iv,
+            access_token_expires_at, google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
+            last_synced_at, disconnect_attempts, connected_at, updated_at)
+         VALUES ('alice', ?, ?, NULL, NULL, NULL, 'a@gmail.com', 'primary', 'primary', 1, 'active', NULL, 0, ?, ?)`,
+      )
+      .bind(sealed.ciphertext, sealed.iv, now, now)
+      .run();
+
+    const { id: sessionId } = await createSession(env, 'alice');
+    const token = await signJwt('alice', sessionId, env.JWT_SIGNING_KEY);
+    const res = await call(env, '/me/export', { headers: { Authorization: `Bearer ${token}` } });
+    const whole = JSON.stringify(await res.json());
+
+    expect(whole).not.toContain(sealed.ciphertext);
+    expect(whole).not.toContain('refresh_token');
+    // But the read calendar and last error -- the person's own settings --
+    // are there now, which they were not before.
+    expect(whole).toContain('read_calendar_id');
+  });
+});
