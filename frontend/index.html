@@ -3,12 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@500;600;700&family=Barlow:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap"
-      rel="stylesheet"
-    />
+    <!-- The webfonts are self-hosted (src/fonts.css, public/fonts/). This
+         used to be a preconnect pair and a stylesheet <link> to
+         fonts.googleapis.com, which meant every visitor's browser contacted
+         Google before login and before any Calendar choice -- while the
+         Privacy Policy said nothing is sent to Google without a connected
+         account. See src/fonts.css for the whole reasoning; do not
+         reintroduce a remote font host without changing that text too. -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="theme-color" content="#1A1410" />
     <title>Uncle Owen</title>

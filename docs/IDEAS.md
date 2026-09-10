@@ -57,13 +57,64 @@ identity, not a position — it never changes and is never reused.
 
 ## Still open
 
-*Nothing.*
+This section emptied for the first time in v0.8.1 and did not stay empty,
+which is the definition working as intended rather than a problem with it:
+these three were found by the Pass-11 security review and are the parts of it
+that were deliberately *not* fixed in the same pass. Everything else it found
+was.
 
-This section being empty is the test `ROADMAP.md` defines 1.0 by, and it
-emptied for the first time in v0.8.1. It is not a finish line so much as a
-checkpoint: anything captured from here on lands here and pushes 1.0 back out
-again, which is the definition working as intended rather than a problem with
-it.
+### 66. The Google import has a forty-event horizon and no way past it
+
+The pull half reads the chosen calendar about two months ahead and keeps the
+first forty events, dropping the rest. Forty-one events over two months is
+ordinary calendar usage, not a pathological case, and the ones past the cap
+never become busy blocks -- so the scheduling assistant reports those times as
+free.
+
+Pass 11 (R16) fixed the half of this that actively misled: truncation is now
+detected (either the cap bit, or Google returned a `nextPageToken`), it is
+surfaced in `last_error` where Settings shows it, and reconciliation no longer
+deletes rows on the strength of a response it knows to be partial. What is
+still open is the horizon itself.
+
+Doing it properly means paging across ticks: a per-connection cursor, a
+persisted "this window is complete" marker, and reconciliation that only
+deletes once a full pass has actually finished. That is a migration and a
+chunk of state machine, and it was deliberately not smuggled into a security
+fix. The constant is `MAX_IMPORTED_EVENTS_PER_SYNC` in `cron/googleSync.ts`,
+and it moves together with `tryPersonalEventImport`'s reservation in
+`cron/budget.ts` -- see both comments before changing either.
+
+### 67. A retried voice DM does not re-check attendance
+
+`sweepDueNotificationRetries` now requires the recipient to still be invited to
+the event (Pass 11, R09 -- before that, a queued DM could be delivered for the
+first time *after* someone's invite was removed, carrying a private event's
+title or a live voice-channel link). That closes the privacy boundary.
+
+The narrower case left open: `voice_channel_invite` is only ever sent to
+confirmed attendees, and someone who declines between the DM being queued and
+the retry running will still get a "join the voice channel" ping. They are
+still an invitee, so nothing is disclosed that they could not already see in
+the app -- it is a wrong message, not a leak.
+
+It is open rather than fixed because the definition of "confirmed" lives in
+`getConfirmedAttendeeIds` and is genuinely intricate (window polls matched on
+the resolved span, an RSVP overriding a prior vote, organizer-unless-declined).
+Restating it in the retry consumer's SQL would fork the one definition of
+attendance in the codebase, which is a worse failure than the thing it fixes.
+The honest fix is to make that predicate callable for a single (user,
+occurrence) pair and have the consumer ask it.
+
+### 68. Login still has no rate limit
+
+Carried forward from the Pass-11 review, which noted it as an already-known
+open item rather than a new discovery (it is F-06 in the earlier register).
+`login_attempts` is record-keeping only -- nothing reads it to refuse anything.
+Real rate limiting needs somewhere to keep counters that is not D1, which is
+the piece of infrastructure this app does not have yet; `lib/sessions.ts`'s
+`MAX_SESSIONS_PER_USER` comment records the same reasoning for the storage
+consequence it caps instead.
 
 ## Parked until after 1.0
 

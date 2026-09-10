@@ -54,8 +54,9 @@ export default function PrivacyPage() {
         <p>
           <strong>If you connect a Google calendar.</strong> This is entirely optional, off unless you
           switch it on, and can be disconnected at any time. Connecting asks Google for permission to
-          manage events (<code>calendar.events</code>) and to read your calendar list and free/busy
-          times (<code>calendar.readonly</code>), and stores: a long-lived Google credential (a
+          manage events (<code>calendar.events</code>) and to read your calendar list and, if you
+          nominate one, the events on it (<code>calendar.readonly</code>), and stores: a long-lived
+          Google credential (a
           "refresh token"), the email address of the Google account you connected, which of your
           calendars you chose, and a record of which sessions have been written to it so the same
           entry isn't created twice.
@@ -63,8 +64,11 @@ export default function PrivacyPage() {
         <p>
           The credential is <strong>encrypted before it is written to the database</strong>, using a
           key held separately from the data, and it is never returned by any part of the app — not on
-          screen, and not in "Download my data". Disconnecting, or deleting your account, revokes it
-          with Google as well as deleting this service's copy.
+          screen, and not in "Download my data". Disconnecting, or deleting your account, deletes
+          this service's copy and asks Google to revoke it. Google almost always confirms that
+          immediately; if it does not — an outage, say — the credential is still deleted here, so
+          this service can no longer use it, but the permission may survive on Google's side until
+          you remove it yourself under your Google account's third-party access settings.
         </p>
         <p>
           <strong>What is written to your Google calendar</strong> is limited on purpose: the session
@@ -83,8 +87,12 @@ export default function PrivacyPage() {
           When it is on, every event on that one calendar is imported as a personal time entry on
           your own Uncle Owen calendar — with its real title, time and any description, exactly as it
           appears in Google, regardless of whether Google itself has that event marked "busy" or
-          "free". These entries are <strong>read-only</strong>: they can only be changed or removed
-          by editing the source event in Google, which then updates here on the next sync. Only you
+          "free". These entries are <strong>read-only</strong>: they can only be changed by editing
+          the source event in Google, which then updates here on the next sync — and they are all
+          removed the moment you switch reading off, pick a different calendar, or disconnect. Two
+          honest limits: entries are read about two months ahead, and if that window holds more than
+          forty events only the earliest forty are imported, which Settings will tell you when it
+          happens. Only you
           can see them, the same as any personal time block you create by hand — never anyone you
           share a server with, and never anyone scheduling with you.
         </p>
@@ -177,8 +185,9 @@ export default function PrivacyPage() {
             </>,
             <>
               <strong>Requests to add the bot to a server.</strong> If you ask to add the bot
-              somewhere, the operator sees your Discord username and which server you asked for, since
-              that's what they need to approve or reject the request.
+              somewhere, the operator sees your Discord display name, username and account id, and
+              which server you asked for, since that's what they need to approve or reject the
+              request.
             </>,
           ]}
         />
@@ -233,13 +242,15 @@ export default function PrivacyPage() {
             <>
               <strong>Resend</strong> — sends the one email this service generates: telling the
               operator about a pending request to add the bot to a new server, including the
-              requester's Discord username. Nothing else triggers an email, and this service does not
+              requester's Discord display name, username and account id. Nothing else triggers an
+              email, and this service does not
               otherwise hold or use your email address (see "What is deliberately not collected"
               above).
             </>,
             <>
               <strong>Google</strong> — <em>only if you connect a Google calendar</em>, which is off
-              by default. Google then receives the session titles, times, server name, and app links
+              by default — the site's fonts are served from this app's own domain, precisely so that
+              visiting it contacts Google not at all. Google then receives the session titles, times, server name, and app links
               described above, so that it can put them on the calendar you chose. Nothing is sent to
               Google for anyone who has not connected an account, and disconnecting stops it. Google
               processes that information under its own privacy policy and terms.
@@ -260,7 +271,8 @@ export default function PrivacyPage() {
         </p>
         <p>
           <strong>An account can also close itself.</strong> If you haven't logged in for close to a
-          year, you'll get a DM two weeks and then one week before it happens, and the account —
+          year, the service will try to DM you two weeks and then one week before it happens (if
+          Discord will not accept a DM from the bot, the deletion still goes ahead), and the account —
           including everything listed on this page — is deleted the same way "Delete my account"
           would delete it. This is paused for as long as you're organizing, or invited and haven't
           declined, anything not yet in the past — deleting you shouldn't quietly change plans other
@@ -306,11 +318,14 @@ export default function PrivacyPage() {
       <Section heading="Security">
         <p>
           Traffic is served over HTTPS, the database is encrypted at rest by the hosting provider,
-          credentials are held as secrets outside the source code, and session tokens are short-lived
+          credentials are held as secrets outside the source code, and session tokens are short-lived,
+          revocable, and replaced with a new one each time they are renewed
           and signed. Long-lived Discord credentials are not stored at all. The one long-lived
           third-party credential that is stored — the Google calendar connection, only if you create
           one — is encrypted before it reaches the database, under a key kept separately from the
-          service's other secrets, and no part of the app can read it back out. No system is
+          service's other secrets, and it is never returned by any part of the app — not on screen,
+          and not in "Download my data". (The scheduled sync must of course decrypt it to use it;
+          what it is never allowed to do is hand it back to anyone.) No system is
           perfectly secure, and this is a hobby project run by one person rather than a company with
           a security team — please weigh that when deciding what to put in it.
         </p>
