@@ -229,11 +229,25 @@ googleRoutes.get('/calendars', requireAuth, requirePolicyAcceptance, async (c) =
         .run();
       return c.text(token.message, 409);
     }
+    // Retryable -- a network blip, Google briefly unhappy -- so this is worth
+    // knowing about but not worth writing to last_error the way an
+    // unauthorized grant is; the next request just tries again. Logged
+    // rather than silently discarded: without this, "Could not reach
+    // Google" on screen had no way to be traced back to what actually
+    // failed.
+    console.warn(`Google token refresh failed for ${row.user_id} (route: /calendars): ${token.message}`);
     return c.text('Could not reach Google just now. Try again in a moment.', 503);
   }
 
   const calendars = await listWritableCalendars(token.accessToken);
-  if (!calendars.ok) return c.text('Could not list your Google calendars.', 503);
+  if (!calendars.ok) {
+    // Same reasoning as above: the actual reason (rate limit, a transient
+    // Google 5xx, a network failure) was being thrown away here, so a
+    // real -- and possibly recurring -- failure had no trace anywhere
+    // `wrangler tail` could show.
+    console.warn(`Google calendar list failed for ${row.user_id}: ${calendars.kind} - ${calendars.message}`);
+    return c.text('Could not list your Google calendars.', 503);
+  }
   return c.json(calendars.value);
 });
 
