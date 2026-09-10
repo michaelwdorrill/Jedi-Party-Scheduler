@@ -4,6 +4,7 @@ import { base64UrlEncode } from '../src/lib/base64url';
 import { deleteUserCompletely } from '../src/lib/db';
 import { updateEvent } from '../src/lib/eventWrites';
 import { buildNoticeboard } from '../src/lib/noticeboard';
+import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
 import { signToken } from '../src/lib/signedToken';
 import { runReminderSweep } from '../src/cron/reminders';
@@ -766,5 +767,239 @@ describe('a login can only be completed by the browser that started it (R02)', (
       body: JSON.stringify({ code, verifier: VERIFIER }),
     });
     expect(res.status).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-16 / R01
+// ---------------------------------------------------------------------------
+
+// The most serious finding of the pass, and both reviewers found it. /google/
+// start is unauthenticated by construction -- it is the top-level navigation
+// that sets the nonce cookie -- so it took the app identity from the signed
+// `t` token in its own URL, and that URL is transferable to anyone. An
+// attacker could mint one naming their own account, send it to someone else,
+// and every downstream check still passed: the state signature was valid, and
+// the nonce matched because the *victim's* browser is the one that created it
+// at /start. The victim's refresh token was then stored against the attacker's
+// user_id, handing them the victim's calendar -- readable through the hourly
+// import, writable through the push half -- while the victim's own Settings
+// page showed nothing connected.
+//
+// The missing proof was never a second demonstration that the browser began
+// the flow; it was any demonstration that the browser belongs to the account
+// being connected. Grants are parked now and claimed through an ordinary
+// authenticated request, which is the one hop that can answer that.
+describe('a Google grant attaches only to the account that claims it (F-16 / R01)', () => {
+  const app = buildApp();
+  const ENCRYPTION_KEY = 'test-google-encryption-key-at-least-32-chars';
+
+  const call = (env: Env, path: string, init: RequestInit = {}) =>
+    app.request(`https://worker.test${path}`, init, env);
+
+  const googleEnv = (base: Env): Env => ({
+    ...base,
+    GOOGLE_SYNC_MODE: 'live',
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
+    GOOGLE_TOKEN_ENCRYPTION_KEY: ENCRYPTION_KEY,
+  });
+
+  async function authHeader(env: Env, userId: string): Promise<Record<string, string>> {
+    const { id: sessionId } = await createSession(env, userId);
+    return {
+      Authorization: `Bearer ${await signJwt(userId, sessionId, env.JWT_SIGNING_KEY)}`,
+      'Content-Type': 'application/json',
+    };
+  }
+
+  // Plays the attack out through the real routes: the attacker gets a start
+  // URL naming themselves, and the victim's browser is what follows it and
+  // consents at Google.
+  async function victimConsentsToAttackersLink(
+    env: Env,
+    attacker: string,
+  ): Promise<{ pendingId: string }> {
+    const urlRes = await call(env, '/google/connect-url', {
+      method: 'POST',
+      headers: await authHeader(env, attacker),
+    });
+    const { startUrl } = await urlRes.json<{ startUrl: string }>();
+
+    // From here on, this is the victim's browser -- it carries no session of
+    // the attacker's, only the nonce cookie /start hands it.
+    const startRes = await call(env, `/google/start${new URL(startUrl).search}`, { redirect: 'manual' });
+    const cookie = startRes.headers.get('set-cookie')!.split(';')[0];
+    const state = new URL(startRes.headers.get('location')!).searchParams.get('state')!;
+
+    const cbRes = await call(env, `/google/callback?code=abc&state=${encodeURIComponent(state)}`, {
+      headers: { Cookie: cookie },
+      redirect: 'manual',
+    });
+    const location = cbRes.headers.get('location')!;
+    return { pendingId: new URL(location.replace('#/', '')).searchParams.get('pending')! };
+  }
+
+  it("does not attach the victim's grant to the attacker's account, and revokes it", async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db);
+    for (const id of ['attacker', 'victim']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
+      { match: 'users/me/calendarList', status: 200, body: { items: [{ id: 'victim@gmail.com', summary: 'Personal', accessRole: 'owner', primary: true }] } },
+      { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
+    ]);
+
+    const { pendingId } = await victimConsentsToAttackersLink(env, 'attacker');
+
+    // Nothing is attached to anyone yet -- which is already the difference.
+    expect(await countRows(db, 'google_calendar_connections')).toBe(0);
+
+    // The victim's browser lands on Settings and claims the grant, as their
+    // own signed-in account. The claim does not match the account the
+    // transferable start URL named, so it is refused outright.
+    const res = await call(env, '/google/finalize', {
+      method: 'POST',
+      headers: await authHeader(env, 'victim'),
+      body: JSON.stringify({ pendingId }),
+    });
+
+    expect(res.status).toBe(403);
+    // Neither account ends up holding it.
+    expect(await countRows(db, 'google_calendar_connections')).toBe(0);
+    // And the grant is torn down at Google rather than left live with nothing
+    // here to show for it.
+    expect(fetchStub!.calls.some((u) => u.includes('oauth2.googleapis.com/revoke'))).toBe(true);
+    // The pending row is spent either way, so a second attempt has nothing.
+    expect(await countRows(db, 'google_pending_connections')).toBe(0);
+  });
+
+  it('cannot be finalized by the attacker either, since the id only ever reached the other browser', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db);
+    for (const id of ['attacker', 'victim']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
+      { match: 'users/me/calendarList', status: 200, body: { items: [] } },
+      { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
+    ]);
+
+    await victimConsentsToAttackersLink(env, 'attacker');
+
+    // The attacker never saw the pending id -- it went to the browser that
+    // consented -- so the best they can do is guess one.
+    const res = await call(env, '/google/finalize', {
+      method: 'POST',
+      headers: await authHeader(env, 'attacker'),
+      body: JSON.stringify({ pendingId: 'a-guessed-id' }),
+    });
+    expect(res.status).toBe(410);
+    expect(await countRows(db, 'google_calendar_connections')).toBe(0);
+  });
+
+  it('requires a session at all -- an unauthenticated claim gets nowhere', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
+      { match: 'users/me/calendarList', status: 200, body: { items: [] } },
+    ]);
+
+    const { pendingId } = await victimConsentsToAttackersLink(env, 'alice');
+    const res = await call(env, '/google/finalize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingId }),
+    });
+    expect(res.status).toBe(401);
+    // Still parked, not consumed -- an unauthenticated attempt must not be
+    // able to burn somebody else's pending grant either.
+    expect(await countRows(db, 'google_pending_connections')).toBe(1);
+  });
+
+  it('expires an unclaimed grant rather than leaving it available', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
+      { match: 'users/me/calendarList', status: 200, body: { items: [] } },
+    ]);
+
+    const { pendingId } = await victimConsentsToAttackersLink(env, 'alice');
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 6 * 60 * 1000);
+
+    const res = await call(env, '/google/finalize', {
+      method: 'POST',
+      headers: await authHeader(env, 'alice'),
+      body: JSON.stringify({ pendingId }),
+    });
+    expect(res.status).toBe(410);
+  });
+
+  // Cleared on the path that creates them rather than from the cron, so
+  // abandoned grants cannot accumulate without costing a fixed per-tick query
+  // -- see storePendingConnection for why that trade matters here.
+  it('clears expired grants the next time one is parked', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
+      { match: 'users/me/calendarList', status: 200, body: { items: [] } },
+    ]);
+
+    await victimConsentsToAttackersLink(env, 'alice');
+    expect(await countRows(db, 'google_pending_connections')).toBe(1);
+
+    // Long enough that the first one is dead, then a second connect attempt.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 6 * 60 * 1000);
+    await victimConsentsToAttackersLink(env, 'alice');
+
+    // Only the live one is left.
+    expect(await countRows(db, 'google_pending_connections')).toBe(1);
+    expect(await countRows(db, 'google_pending_connections', 'expires_at > ?', Date.now())).toBe(1);
+  });
+
+  // Migration 0040 adds another REFERENCES users(id) with no ON DELETE action,
+  // which is exactly the shape of F-15 in this same review. Covered here in
+  // the same commit as the table, which is the rule that finding established.
+  it('does not block account deletion for someone with a grant still pending', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db);
+    await seedUser(db, 'alice');
+    await seedMembership(db, 'alice', 'guild-1');
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
+      { match: 'users/me/calendarList', status: 200, body: { items: [] } },
+      { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
+    ]);
+
+    await victimConsentsToAttackersLink(env, 'alice');
+    expect(await countRows(db, 'google_pending_connections')).toBe(1);
+
+    await expect(deleteUserCompletely(env, 'alice')).resolves.toBeUndefined();
+    expect(await countRows(db, 'users', 'id = ?', 'alice')).toBe(0);
+    expect(await countRows(db, 'google_pending_connections')).toBe(0);
   });
 });

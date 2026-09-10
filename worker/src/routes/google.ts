@@ -28,7 +28,13 @@ import {
   isGoogleConfigured,
   listWritableCalendars,
   loadConnection,
+  loadPendingConnection,
+  deletePendingConnection,
+  readPendingAccessToken,
+  readPendingRefreshToken,
+  revokeToken,
   storeConnection,
+  storePendingConnection,
 } from '../lib/googleCalendar';
 import { signToken, verifyToken } from '../lib/signedToken';
 import { assertBoolean, assertString, readJsonBody } from '../lib/validate';
@@ -182,16 +188,22 @@ googleRoutes.get('/callback', async (c) => {
     const calendars = await listWritableCalendars(tokens.access_token);
     const email = calendars.ok ? accountEmailFrom(calendars.value) : null;
 
-    await storeConnection(
+    // Pass-11 review (F-16 / R01): the grant is parked, not attached. Every
+    // check reachable from here -- the state signature, the nonce cookie --
+    // proves this browser began the flow; none of them proves this browser
+    // belongs to the account the start token names, and that URL is
+    // transferable to anyone. So the account has to come back and claim it
+    // through POST /finalize, where an ordinary Authorization header settles
+    // the question this hop structurally cannot.
+    const pendingId = await storePendingConnection(
       c.env,
       payload.userId,
       tokens.refresh_token,
       tokens.access_token,
       tokens.expires_in,
       email,
-      'primary',
     );
-    return c.redirect(`${settingsUrl}?google=connected`);
+    return c.redirect(`${settingsUrl}?google=pending&pending=${encodeURIComponent(pendingId)}`);
   } catch (err) {
     // Never reflect the upstream body back to the browser -- it can carry
     // Google error detail and, on a token endpoint, echoes of what was sent.
@@ -199,6 +211,65 @@ googleRoutes.get('/callback', async (c) => {
     console.error('Google callback failed:', err);
     return c.redirect(`${settingsUrl}?google=failed`);
   }
+});
+
+// The step that actually attaches a grant to an account (F-16 / R01), and the
+// only one in this flow that can: unlike /start and /callback, it is a normal
+// authenticated API call, so `userId` here is who is really signed in rather
+// than who a transferable URL claimed.
+//
+// The refusal path revokes rather than merely deleting. A mismatch means the
+// person who consented at Google is not the person this grant was minted to
+// attach to -- which is the attack -- and they are owed the grant they just
+// issued being torn down at Google, not silently dropped here while it stays
+// live in their account.
+googleRoutes.post('/finalize', requireAuth, requirePolicyAcceptance, async (c) => {
+  c.header('Cache-Control', NO_STORE);
+  if (!isGoogleConfigured(c.env)) return notConfigured(c);
+
+  const body = await readJsonBody<{ pendingId?: unknown }>(c);
+  const pendingId = assertString(body.pendingId, 'pendingId', 128);
+
+  const pending = await loadPendingConnection(c.env, pendingId);
+  // Expired, already claimed, or never existed -- all the same answer, and
+  // deliberately so: distinguishing them would confirm the existence of a
+  // pending id to someone guessing at them.
+  if (!pending) return c.text('That connection attempt has expired. Please connect Google again.', 410);
+
+  if (pending.user_id !== c.get('userId')) {
+    console.warn(
+      `Google pending connection ${pendingId} was claimed by ${c.get('userId')} but minted for ${pending.user_id}; revoking.`,
+    );
+    const refreshToken = await readPendingRefreshToken(c.env, pending);
+    if (refreshToken) await revokeToken(refreshToken);
+    await deletePendingConnection(c.env, pendingId);
+    return c.text('That connection attempt does not belong to this account.', 403);
+  }
+
+  const [refreshToken, accessToken] = await Promise.all([
+    readPendingRefreshToken(c.env, pending),
+    readPendingAccessToken(c.env, pending),
+  ]);
+  if (!refreshToken || !accessToken) {
+    await deletePendingConnection(c.env, pendingId);
+    return c.text('That connection attempt could not be completed. Please connect Google again.', 410);
+  }
+
+  await storeConnection(
+    c.env,
+    c.get('userId'),
+    refreshToken,
+    accessToken,
+    // storeConnection wants a lifetime, and what survived the redirect is an
+    // absolute expiry. Converted back here, floored at zero so a grant that
+    // sat through its access token's lifetime simply reads as already stale
+    // and gets refreshed on first use rather than looking valid.
+    Math.max(0, Math.floor(((pending.access_token_expires_at ?? 0) - Date.now()) / 1000)),
+    pending.google_account_email,
+    'primary',
+  );
+  await deletePendingConnection(c.env, pendingId);
+  return c.json({ connected: true });
 });
 
 googleRoutes.get('/status', requireAuth, requirePolicyAcceptance, async (c) => {

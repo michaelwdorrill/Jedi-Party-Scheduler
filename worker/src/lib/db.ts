@@ -561,6 +561,13 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
     // they actually played.
     env.DB.prepare(`DELETE FROM google_event_links WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM google_calendar_connections WHERE user_id = ?`).bind(userId),
+    // Migration 0040's pending grants (F-16 / R01). Another REFERENCES
+    // users(id) with no ON DELETE action, so this is here for the same reason
+    // the four statements above are -- and added in the same commit as the
+    // table itself, which is the rule F-15 exists to establish: a migration
+    // that points a new column at users(id) belongs in this batch before it
+    // ships, not after a review finds it.
+    env.DB.prepare(`DELETE FROM google_pending_connections WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM user_guild_membership WHERE user_id = ?`).bind(userId),
     // revokeAllSessionsForUser() above only sets revoked_at, so the rows (and
     // their FK to users) are still here -- delete them for real, or the final

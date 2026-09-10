@@ -295,7 +295,7 @@ describe('the connect round trip', () => {
     expect(forged.headers.get('set-cookie')).toBeNull();
   });
 
-  it('stores the connection when the callback checks out', async () => {
+  it('stores the connection when the callback checks out and its owner finalizes it', async () => {
     const { db, env: base } = setup();
     const env = googleEnv(base);
     await seedMember(db, 'u1');
@@ -307,7 +307,20 @@ describe('the connect round trip', () => {
       redirect: 'manual',
     });
     expect(res.status).toBe(302);
-    expect(res.headers.get('location')).toContain('google=connected');
+    // Parked, not attached (F-16 / R01): the callback cannot see who is signed
+    // in, so the account has to claim the grant from an authenticated request.
+    expect(res.headers.get('location')).toContain('google=pending');
+    expect(await countRows(db, 'google_calendar_connections')).toBe(0);
+
+    const pendingId = new URL(res.headers.get('location')!.replace('#/', '')).searchParams.get('pending')!;
+    const finalize = await call(env, '/google/finalize', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${await authFor(env, 'u1')}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingId }),
+    });
+    expect(finalize.status).toBe(200);
+    // Consumed, so it cannot be replayed.
+    expect(await countRows(db, 'google_pending_connections')).toBe(0);
 
     const row = await db
       .prepare(`SELECT * FROM google_calendar_connections WHERE user_id = 'u1'`)

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
-import { useAction, useAsync } from '../lib/async';
+import { describeError, useAction, useAsync } from '../lib/async';
 import { buttonClass, cardClass, InlineError, Select } from './ui';
 import type { GoogleCalendarOption, GoogleCalendarStatus } from '../types';
 
@@ -48,6 +48,7 @@ export default function ConnectedCalendars() {
   const [calendarsError, setCalendarsError] = useState(false);
   const [calendarsNonce, setCalendarsNonce] = useState(0);
   const [returnNotice, setReturnNotice] = useState<{ tone: 'ok' | 'bad'; text: string } | null>(null);
+  const reloadStatus = status.reload;
 
   // The Worker redirects to `#/settings?google=…`, so the parameter lives in
   // the hash rather than in location.search -- the same HashRouter quirk
@@ -57,11 +58,37 @@ export default function ConnectedCalendars() {
   useEffect(() => {
     const query = window.location.hash.split('?')[1];
     if (!query) return;
-    const outcome = new URLSearchParams(query).get('google');
+    const params = new URLSearchParams(query);
+    const outcome = params.get('google');
     if (!outcome) return;
-    setReturnNotice(RETURN_MESSAGES[outcome] ?? RETURN_MESSAGES.failed);
+    const pendingId = params.get('pending');
     window.history.replaceState(null, '', window.location.hash.split('?')[0]);
-  }, []);
+
+    // A grant comes back parked rather than attached now (F-16 / R01 in the
+    // Pass-11 review). Claiming it is an ordinary authenticated request, and
+    // that is the whole point: the Worker can finally see *who is signed in*
+    // here, which neither the start URL nor the OAuth callback could. If this
+    // browser is signed in as someone else -- which is exactly what happens
+    // when the connect link came from another person -- the Worker refuses
+    // the claim and revokes the grant at Google rather than attaching it.
+    if (outcome === 'pending' && pendingId) {
+      api
+        .post('/google/finalize', { pendingId })
+        .then(() => {
+          setReturnNotice(RETURN_MESSAGES.connected);
+          reloadStatus();
+        })
+        .catch((e: unknown) => {
+          setReturnNotice({ tone: 'bad', text: describeError(e) });
+        });
+      return;
+    }
+
+    setReturnNotice(RETURN_MESSAGES[outcome] ?? RETURN_MESSAGES.failed);
+    // `reloadStatus` is useAsync's stable useCallback, so this still runs
+    // exactly once on mount -- it is named as a dependency rather than
+    // suppressed because it genuinely is one.
+  }, [reloadStatus]);
 
   const connection = status.data;
 

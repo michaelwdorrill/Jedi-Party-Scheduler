@@ -5,6 +5,7 @@
 import { DateTime } from 'luxon';
 import type { Env } from '../env';
 import { seal, unseal, type SealedValue } from './crypto';
+import { newId } from './ids';
 
 const OAUTH_AUTHORIZE = 'https://accounts.google.com/o/oauth2/v2/auth';
 const OAUTH_TOKEN = 'https://oauth2.googleapis.com/token';
@@ -238,6 +239,115 @@ export async function storeConnection(
       now,
     )
     .run();
+}
+
+// ---------------------------------------------------------------------------
+// Pending connections (F-16 / R01) -- see migration 0040 for the full why.
+// ---------------------------------------------------------------------------
+
+// How long a grant may sit unclaimed. Long enough for the redirect to land and
+// the Settings page to finish loading and call finalize; short enough that an
+// abandoned one is gone well before anybody could come looking for it.
+export const PENDING_CONNECTION_TTL_MS = 5 * 60 * 1000;
+
+export interface PendingConnectionRow {
+  id: string;
+  user_id: string;
+  refresh_token_ciphertext: string;
+  refresh_token_iv: string;
+  access_token_ciphertext: string;
+  access_token_iv: string;
+  access_token_expires_at: number | null;
+  google_account_email: string | null;
+}
+
+// Called from the OAuth callback, which has proven the nonce cookie but cannot
+// prove who is signed in -- so nothing is attached to an account here.
+export async function storePendingConnection(
+  env: Env,
+  userId: string,
+  refreshToken: string,
+  accessToken: string,
+  expiresInSeconds: number,
+  accountEmail: string | null,
+): Promise<string> {
+  const now = Date.now();
+  const secret = env.GOOGLE_TOKEN_ENCRYPTION_KEY!;
+  const sealedRefresh = await seal(refreshToken, secret);
+  const sealedAccess = await seal(accessToken, secret);
+  const id = newId();
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO google_pending_connections (
+         id, user_id, refresh_token_ciphertext, refresh_token_iv,
+         access_token_ciphertext, access_token_iv, access_token_expires_at,
+         google_account_email, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      id,
+      userId,
+      sealedRefresh.ciphertext,
+      sealedRefresh.iv,
+      sealedAccess.ciphertext,
+      sealedAccess.iv,
+      now + expiresInSeconds * 1000,
+      accountEmail,
+      now,
+      now + PENDING_CONNECTION_TTL_MS,
+    ),
+    // Grants nobody ever came back to claim -- someone who closed the tab
+    // between Google's consent screen and Settings. Swept here, on the only
+    // path that creates these rows, rather than from the cron: cron/budget.ts
+    // records at length what one more fixed per-tick query costs (it starved
+    // sweepPurgeTerminalHistory outright, twice), and this table does not
+    // deserve that when clearing it as we add to it bounds it just as well.
+    // Every insert empties the expired set, so the table cannot grow past the
+    // connections actually in flight.
+    //
+    // Deliberately not revoked at Google on the way out, unlike a claim
+    // refused in /finalize. This grant was issued by the owner of the account
+    // it belongs to, for a connection they began themselves and simply did
+    // not finish; tearing down an authorisation on their side because a tab
+    // closed would be a surprise, and the credential is gone from here
+    // either way.
+    env.DB.prepare(`DELETE FROM google_pending_connections WHERE expires_at < ?`).bind(now),
+  ]);
+  return id;
+}
+
+export async function loadPendingConnection(env: Env, id: string): Promise<PendingConnectionRow | null> {
+  return env.DB.prepare(`SELECT * FROM google_pending_connections WHERE id = ? AND expires_at > ?`)
+    .bind(id, Date.now())
+    .first<PendingConnectionRow>();
+}
+
+export async function deletePendingConnection(env: Env, id: string): Promise<void> {
+  await env.DB.prepare(`DELETE FROM google_pending_connections WHERE id = ?`).bind(id).run();
+}
+
+// Unseals a pending grant's refresh token so it can be revoked at Google. Used
+// on the refusal path: a grant claimed by the wrong account is not merely
+// dropped, because dropping our copy leaves the grant live in the consenting
+// person's Google account with nothing in this app to show for it.
+export async function readPendingRefreshToken(
+  env: Env,
+  row: PendingConnectionRow,
+): Promise<string | null> {
+  return unseal(
+    { ciphertext: row.refresh_token_ciphertext, iv: row.refresh_token_iv },
+    env.GOOGLE_TOKEN_ENCRYPTION_KEY!,
+  );
+}
+
+export async function readPendingAccessToken(
+  env: Env,
+  row: PendingConnectionRow,
+): Promise<string | null> {
+  return unseal(
+    { ciphertext: row.access_token_ciphertext, iv: row.access_token_iv },
+    env.GOOGLE_TOKEN_ENCRYPTION_KEY!,
+  );
 }
 
 export async function readRefreshToken(env: Env, row: GoogleConnectionRow): Promise<string | null> {
