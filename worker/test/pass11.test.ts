@@ -1199,3 +1199,118 @@ describe('an id the caller knows is not permission to use it (F-26 / R07, F-25 /
     expect(await read('&exclude_event_id=secret')).toBe(await read(''));
   });
 });
+
+// ---------------------------------------------------------------------------
+// R09
+// ---------------------------------------------------------------------------
+
+// The source-independent retry consumer (migration 0014) checked that the
+// recipient was still in the event's server and still had notifications on,
+// but never that they were still invited to the event itself. Removing an
+// invitee deletes their event_invites and event_attendance rows and nothing
+// else -- it has no say over a DM already queued -- so a pending notification
+// outlived the access that justified it. This is not a copy of something
+// already delivered: delivered_at stays NULL until the unauthorized retry
+// sends it, so the removed person learns the private event's title and time,
+// or gets a live voice-channel link, for the first time after losing access.
+describe('a queued DM does not outlive the access that justified it (R09)', () => {
+  async function seedPendingVoiceInvite(db: ShimDatabase): Promise<void> {
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'removed');
+    await seedMembership(db, 'organizer', 'guild-1');
+    // Still a fully current member of the server -- only their invite goes.
+    await seedMembership(db, 'removed', 'guild-1');
+
+    const now = Date.now();
+    // Deliberately well past the voice-invite lead window, so the primary
+    // voice sweep does not also select this event -- what is under test is the
+    // source-independent retry consumer alone, and that consumer scans by
+    // next_attempt_at rather than by the event's timing. An event starting
+    // within the lead window would have the primary sweep sending the
+    // organizer their own (legitimate) copy, which is not the question here.
+    await seedEvent(db, {
+      id: 'ev-private',
+      organizerId: 'organizer',
+      title: 'Private therapy discussion',
+      startAt: now + 3 * DAY_MS,
+      endAt: now + 3 * DAY_MS + HOUR_MS,
+    });
+    await db
+      .prepare(`UPDATE events SET is_private = 1, voice_channel_id = 'vc-1', voice_channel_name = 'Table 1' WHERE id = 'ev-private'`)
+      .run();
+    await seedInvite(db, 'ev-private', 'removed');
+    await seedAttendance(db, 'ev-private', 'removed', 'accepted');
+
+    // An undelivered notification, due for retry, carrying the private
+    // content -- exactly what migration 0014's durable content column holds.
+    await db
+      .prepare(
+        `INSERT INTO notification_log
+           (id, user_id, event_id, notification_type, occurrence_date, sent_at, next_attempt_at, attempt_count, content)
+         VALUES ('nl-1', 'removed', 'ev-private', 'voice_channel_invite', '', ?, ?, 1,
+                 '"Private therapy discussion" is starting soon -- join the "Table 1" voice channel')`,
+      )
+      .bind(now - 60_000, now - 30_000)
+      .run();
+  }
+
+  it('does not deliver a pending private DM to someone whose invite was removed', async () => {
+    const { db, env } = setup();
+    await seedPendingVoiceInvite(db);
+
+    // The invite-removal route's actual effect, and all of it.
+    await db.prepare(`DELETE FROM event_invites WHERE event_id = 'ev-private' AND user_id = 'removed'`).run();
+    await db.prepare(`DELETE FROM event_attendance WHERE event_id = 'ev-private' AND user_id = 'removed'`).run();
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    // Nothing carrying the private content went out.
+    expect(fetchStub!.bodies.some((b) => b.includes('Private therapy discussion'))).toBe(false);
+    const row = await db
+      .prepare(`SELECT delivered_at FROM notification_log WHERE id = 'nl-1'`)
+      .first<{ delivered_at: number | null }>();
+    expect(row?.delivered_at).toBeNull();
+  });
+
+  // The control: an invitee who still holds their invite is owed the retry,
+  // which is the whole reason this consumer exists.
+  it('still delivers to someone who is still invited', async () => {
+    const { db, env } = setup();
+    await seedPendingVoiceInvite(db);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    const row = await db
+      .prepare(`SELECT delivered_at FROM notification_log WHERE id = 'nl-1'`)
+      .first<{ delivered_at: number | null }>();
+    expect(row?.delivered_at).not.toBeNull();
+  });
+
+  // The organizer has no event_invites row of their own on every path, so the
+  // check has to admit them explicitly or it would silently stop their own
+  // retries.
+  it('still delivers to the organizer, who holds no invite row', async () => {
+    const { db, env } = setup();
+    await seedPendingVoiceInvite(db);
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO notification_log
+           (id, user_id, event_id, notification_type, occurrence_date, sent_at, next_attempt_at, attempt_count, content)
+         VALUES ('nl-org', 'organizer', 'ev-private', 'voice_channel_invite', '', ?, ?, 1, 'organizer copy')`,
+      )
+      .bind(now - 60_000, now - 30_000)
+      .run();
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    const row = await db
+      .prepare(`SELECT delivered_at FROM notification_log WHERE id = 'nl-org'`)
+      .first<{ delivered_at: number | null }>();
+    expect(row?.delivered_at).not.toBeNull();
+  });
+});

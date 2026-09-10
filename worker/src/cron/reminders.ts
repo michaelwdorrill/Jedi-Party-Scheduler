@@ -2946,7 +2946,20 @@ async function sweepDueNotificationRetries(env: Env, budget: TickBudget, cursors
      WHERE nl.delivered_at IS NULL AND nl.failed_at IS NULL
        AND nl.next_attempt_at IS NOT NULL AND nl.next_attempt_at <= ?
        AND (nl.claimed_until IS NULL OR nl.claimed_until < ?)
-       AND nl.content IS NOT NULL`,
+       AND nl.content IS NOT NULL
+       -- Pass-11 review (R09): still authorized on the *event*, not merely
+       -- still in its server. This consumer checked guild membership and
+       -- notifications_enabled but never that the recipient is still invited,
+       -- and the invite-removal route deletes only event_invites and
+       -- event_attendance -- it has nothing to say about a DM already queued.
+       -- So a pending notification outlived the access that justified it and
+       -- was delivered for the FIRST time afterwards, carrying a private
+       -- event's title and time, or a voice-channel link. Not a copy of a DM
+       -- already sent: delivered_at stays NULL right up until the
+       -- unauthorized retry sends it.
+       AND (e.organizer_id = nl.user_id
+            OR EXISTS (SELECT 1 FROM event_invites ei
+                       WHERE ei.event_id = nl.event_id AND ei.user_id = nl.user_id))`,
     [membershipCutoff(), Date.now(), Date.now()],
     async (row) => {
       if (budget.exhausted) return 'incomplete';
