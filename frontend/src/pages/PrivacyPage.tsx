@@ -80,12 +80,20 @@ export default function PrivacyPage() {
           never starts this; it is a second choice, and it defaults to none.
         </p>
         <p>
-          When it is on, this service asks Google only for <strong>busy and free times</strong> on
-          that one calendar — not the events themselves. What comes back is blocks of time with no
-          titles, no attendees and no detail of any kind, and that is also all anyone else ever sees:
-          the same opaque blocks described under "Free/busy availability" below. Turning off
-          "Let people I share a server with see when I'm busy" hides them, as it hides everything
-          else.
+          When it is on, every event on that one calendar is imported as a personal time entry on
+          your own Uncle Owen calendar — with its real title, time and any description, exactly as it
+          appears in Google, regardless of whether Google itself has that event marked "busy" or
+          "free". These entries are <strong>read-only</strong>: they can only be changed or removed
+          by editing the source event in Google, which then updates here on the next sync. Only you
+          can see them, the same as any personal time block you create by hand — never anyone you
+          share a server with, and never anyone scheduling with you.
+        </p>
+        <p>
+          What anyone <em>else</em> ever sees from this is unchanged: opaque blocks of time, no
+          titles, no attendees, no detail of any kind — the same opaque blocks described under
+          "Free/busy availability" below. Turning off "Let people I share a server with see when I'm
+          busy" hides them, as it hides everything else. Turning reading off entirely, or switching to
+          a different calendar, deletes every entry it created immediately.
         </p>
         <p>
           <strong>An honest limitation worth stating plainly:</strong> Google's permissions are

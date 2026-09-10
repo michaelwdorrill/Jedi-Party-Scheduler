@@ -203,7 +203,6 @@ googleRoutes.get('/status', requireAuth, requirePolicyAcceptance, async (c) => {
     // different field from calendarId -- one is where we write, the other is
     // the single calendar we may read (specs/0017).
     readCalendarId: row.read_calendar_id,
-    busyCachedAt: row.busy_cached_at,
     syncEnabled: !!row.sync_enabled,
     status: row.status,
     lastSyncedAt: row.last_synced_at,
@@ -264,13 +263,13 @@ googleRoutes.patch('/', requireAuth, requirePolicyAcceptance, async (c) => {
       ? null
       : assertString(body.readCalendarId, 'readCalendarId', 512);
 
-  // Switching which calendar is read, or switching reading off, drops the
-  // cache immediately rather than waiting for the next sweep. Otherwise the
-  // scheduling assistant would keep answering from the calendar the person
-  // just stopped sharing -- for up to an hour, and up to a week if the sweep
-  // could not run. Turning a disclosure off has to take effect at the moment
-  // it is asked for.
-  const dropsCache = clearsRead || readCalendarId !== null;
+  // Switching which calendar is read, or switching reading off, drops every
+  // row it imported immediately rather than waiting for the next sweep.
+  // Otherwise the scheduling assistant would keep answering from the
+  // calendar the person just stopped sharing -- for up to an hour, and up to
+  // a week if the sweep could not run. Turning a disclosure off has to take
+  // effect at the moment it is asked for.
+  const dropsImports = clearsRead || readCalendarId !== null;
 
   // The read setting is resolved in TypeScript rather than in SQL. Expressing
   // "absent means leave alone, null means clear, a string means set" as CASE
@@ -279,32 +278,39 @@ googleRoutes.patch('/', requireAuth, requirePolicyAcceptance, async (c) => {
   // one branch of it. `nextRead` is computed once, here, where it is readable.
   const nextRead = clearsRead ? null : readCalendarId !== null ? readCalendarId : row.read_calendar_id;
 
-  await c.env.DB.prepare(
-    `UPDATE google_calendar_connections
-     SET calendar_id = COALESCE(?, calendar_id),
-         sync_enabled = COALESCE(?, sync_enabled),
-         read_calendar_id = ?,
-         busy_blocks = CASE WHEN ? = 1 THEN NULL ELSE busy_blocks END,
-         busy_cached_at = CASE WHEN ? = 1 THEN NULL ELSE busy_cached_at END,
-         busy_window_end_at = CASE WHEN ? = 1 THEN NULL ELSE busy_window_end_at END,
-         -- Changing any of these settings is the user telling us to try again,
-         -- so a stale failure message must not outlive the fix. The sweep
-         -- writes a fresh one if the problem is still there.
-         last_error = NULL,
-         updated_at = ?
-     WHERE user_id = ?`,
-  )
-    .bind(
+  const now = Date.now();
+  const statements = [
+    c.env.DB.prepare(
+      `UPDATE google_calendar_connections
+       SET calendar_id = COALESCE(?, calendar_id),
+           sync_enabled = COALESCE(?, sync_enabled),
+           read_calendar_id = ?,
+           -- Changing any of these settings is the user telling us to try
+           -- again, so a stale failure message must not outlive the fix. The
+           -- sweep writes a fresh one if the problem is still there.
+           last_error = NULL,
+           updated_at = ?
+       WHERE user_id = ?`,
+    ).bind(
       calendarId,
       syncEnabled === null ? null : syncEnabled ? 1 : 0,
       nextRead,
-      dropsCache ? 1 : 0,
-      dropsCache ? 1 : 0,
-      dropsCache ? 1 : 0,
-      Date.now(),
+      now,
       userId,
-    )
-    .run();
+    ),
+  ];
+  // Real personal_events rows now, not a cache blob on this row -- dropping
+  // the disclosure means deleting what it created, immediately, same as
+  // switching a calendar means the old one's imports have to go too (an
+  // orphaned row from a calendar this connection no longer reads would keep
+  // making its owner look busy to others forever, never touched by another
+  // sync).
+  if (dropsImports) {
+    statements.push(
+      c.env.DB.prepare(`DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL`).bind(userId),
+    );
+  }
+  await c.env.DB.batch(statements);
 
   return c.json({ ok: true });
 });

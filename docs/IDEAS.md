@@ -170,7 +170,7 @@ Kept for the reasoning, not as a to-do list. Nothing below counts against the
 1.0 test above: where an entry argues its way to a decision and rejects an
 alternative, that argument is why the entry is still here at all.
 
-### 2. Google Calendar sync — shipped in full (push v0.8, pull v0.8.1)
+### 2. Google Calendar sync — shipped in full (push v0.8, pull v0.8.1, reworked same release)
 
 Pull a single chosen Google calendar (not all of them — e.g. just "D&D
 Scheduling", not "Family" or "Fulham FC") in as read-only availability on
@@ -262,6 +262,31 @@ The limitation that cannot be engineered away, and which the Privacy Policy now
 states in plain words: **Google's calendar permissions are per account, not per
 calendar.** There is no scope for "just this one". That only one is read is
 enforced by the query this app chooses to send, not by the grant Google issued.
+
+**Reworked within the same v0.8.1, before it left the branch — `specs/0017`,
+"The pull half, twice over" has the full record.** The two bullets above
+("The cache is a JSON column"; "Every failure direction was chosen
+deliberately") describe a design that shipped and then didn't survive contact
+with a real calendar. `freebusy.query` only reports events Google itself
+considers Busy — an all-day event defaults to Free the moment it's created,
+with no parameter to ask otherwise — and sandbox verification hit that
+directly: a genuine all-day commitment produced an empty answer, no error,
+because Google had correctly answered a question nobody actually meant to
+ask. In the same conversation, once Google's own Busy/Free flag stopped
+deciding the answer, the natural next question — what should an imported
+event actually *become* — landed on Personal Time (no server, no invite list,
+no RSVP, already exactly that shape), not on caching a slightly-differently-
+sourced opaque interval.
+
+So as of the same release: `events.list` replaces `freebusy.query`, and every
+event on the chosen calendar counts as busy regardless of Google's own flag on
+it. What it produces is real, read-only `personal_events` rows (title, time,
+description), not a JSON blob — editable only by editing the source event in
+Google. The JSON-column reasoning above is no longer how this works, but it's
+left in place rather than deleted: it was the right call for the question it
+was answering, and the record of *why a blob beat a table* for a synchronous,
+request-scoped read is worth keeping even though the mechanism it justified
+was replaced the same day it shipped.
 
 ### 5. Calendar-first, not server-first — shipped in full (v0.3, noticeboard v0.8.1)
 

@@ -2,6 +2,7 @@
 // OAuth round trip, token storage, and the three Calendar API calls the sweep
 // makes. Nothing here decides *what* to sync; that's cron/googleSync.ts.
 
+import { DateTime } from 'luxon';
 import type { Env } from '../env';
 import { seal, unseal, type SealedValue } from './crypto';
 
@@ -21,9 +22,9 @@ export const GOOGLE_FETCH_TIMEOUT_MS = 20_000;
 const EXPIRY_SKEW_MS = 5 * 60 * 1000;
 
 // specs/0017. calendar.events is what lets us write; calendar.readonly is what
-// lets us list the person's calendars for the picker AND, in v0.8.1, run
-// freebusy.query -- requested now precisely so that release doesn't have to
-// send everyone back through a consent screen.
+// lets us list the person's calendars for the picker AND, in v0.8.1, list
+// events on the one nominated for reading -- requested now precisely so that
+// release doesn't have to send everyone back through a consent screen.
 export const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/calendar.events',
   'https://www.googleapis.com/auth/calendar.readonly',
@@ -76,10 +77,13 @@ export interface GoogleConnectionRow {
   // The pull half (migration 0037). NULL means reading is off for this user,
   // which is the default for everyone -- connecting to push never starts a
   // pull. Deliberately not the same column as calendar_id above.
+  //
+  // 0.8.1 v2 (migration 0039): what this feeds changed from a JSON cache on
+  // this row to real personal_events rows keyed by google_event_id, so the
+  // three columns that used to live here (busy_blocks, busy_cached_at,
+  // busy_window_end_at) are gone. Nothing on this row tracks the pull half's
+  // state any more beyond whether it's on and where it's reading from.
   read_calendar_id: string | null;
-  busy_blocks: string | null;
-  busy_cached_at: number | null;
-  busy_window_end_at: number | null;
   sync_enabled: number;
   status: 'active' | 'disconnecting';
   last_synced_at: number | null;
@@ -426,63 +430,153 @@ export function accountEmailFrom(calendars: GoogleCalendarSummary[]): string | n
   return calendars.find((c) => c.primary)?.id ?? null;
 }
 
-export interface BusyPeriod {
+export interface ImportedCalendarEvent {
+  googleEventId: string;
+  title: string;
+  description: string | null;
   startAt: number;
   endAt: number;
 }
 
-// freebusy.query against exactly one calendar.
+// Google's own event shape, narrowed to exactly the fields this function
+// requests -- see the `fields` mask below.
+interface GoogleEventItem {
+  id: string;
+  status?: 'confirmed' | 'tentative' | 'cancelled';
+  start?: { date?: string; dateTime?: string };
+  end?: { date?: string; dateTime?: string };
+  summary?: string;
+  description?: string;
+}
+
+// events.list against exactly one calendar, expanded to real instances
+// (`singleEvents: true`), read for title, description and time -- the whole
+// of what a personal_events row needs.
 //
-// This is the whole of the pull half's contact with Google, and the narrowness
-// is the point: it returns busy/free *intervals* and nothing else -- no
-// titles, no attendees, no event ids, not even how many events make up a
-// block. That matches lib/freeBusy.ts's own BusyBlock contract exactly ("no
-// title, no game, no guild, no attendees, no event id"), so busy time pulled
-// from Google is indistinguishable in shape from busy time computed here.
+// This replaces what used to be a freebusy.query call, and the reason is
+// worth recording because it reverses a decision this file used to make in
+// the opposite direction, twice over.
 //
-// Reading full events would have been the alternative, and item 2 ruled it out
-// before any of this was built: scheduling needs busy/free, and asking for
-// less is both a smaller privacy surface and less to get wrong.
-export async function queryFreeBusy(
+// First reversal: freebusy.query only reports events Google itself considers
+// "Busy" -- an all-day event defaults to "Free" transparency the moment it's
+// created, silently excluded from the busy/free answer with no parameter to
+// override it. Found in 0.8.1 sandbox verification: a real all-day
+// commitment produced an empty busy list, `last_error` null, because Google
+// had genuinely and correctly answered "nothing marked Busy here" -- just not
+// the question anyone asking to nominate a calendar as their availability
+// source actually meant to ask. Decided (Michael, Sept 2026): every event on
+// the chosen calendar counts as busy, Google's own Free/Busy toggle on each
+// one notwithstanding -- the choice of *which calendar* is the privacy
+// control this feature offers, not a second filter on top of it.
+//
+// Second reversal, decided the same day: this used to return opaque
+// {startAt, endAt} pairs on purpose, with a comment recording that reading
+// full events was considered and rejected ("scheduling needs busy/free, and
+// asking for less is both a smaller privacy surface and less to get
+// wrong"). What changed the answer is what those blocks were *for* on the
+// owner's own side: Personal Time already has exactly the shape an imported
+// Google event needs -- no server, no invite list, no RSVP, just a title, a
+// time, and an optional description, private to its owner. Caching an
+// anonymous interval and then asking the owner to separately remember what
+// it was is strictly worse than storing what it actually is, once the
+// destination is a place only the owner ever sees.
+//
+// That narrowness is preserved everywhere it still matters, though: the
+// `fields` mask below is the full extent of what's requested (no attendees,
+// no location, no conferencing links, no organizer identity), and what this
+// returns is used ONLY to populate the requesting user's own personal_events
+// rows -- lib/freeBusy.ts's BusyBlock, the shape anyone *else* scheduling
+// around this person receives, is still computed from those rows exactly the
+// way it always was, and still carries nothing but a time range. Nobody but
+// the calendar's owner ever sees a title or description that came from here.
+//
+// No pagination: `maxResults` is set to the API's own ceiling (2500) and a
+// second page is never requested. cron/googleSync.ts truncates the result
+// further, to a number a real person's calendar could plausibly need and a
+// single D1 batch can afford -- see MAX_IMPORTED_EVENTS_PER_SYNC there.
+export interface ImportedCalendar {
+  // The calendar's own timezone, needed alongside the events themselves: an
+  // imported row's `timezone` column has to be *something*, and the source
+  // calendar's own zone is the only honest answer -- there is no per-user
+  // "the timezone I meant this in" for someone else's calendar the way there
+  // is for an event created inside Uncle Owen.
+  timeZone: string;
+  events: ImportedCalendarEvent[];
+}
+
+export async function listCalendarEvents(
   accessToken: string,
   calendarId: string,
   fromMs: number,
   toMs: number,
-): Promise<ApiOutcome<BusyPeriod[]>> {
-  const result = await callGoogle<{
-    calendars?: Record<string, { busy?: { start: string; end: string }[]; errors?: { reason: string }[] }>;
-  }>(accessToken, `${CALENDAR_API}/freeBusy`, {
-    method: 'POST',
-    body: JSON.stringify({
-      timeMin: new Date(fromMs).toISOString(),
-      timeMax: new Date(toMs).toISOString(),
-      items: [{ id: calendarId }],
-    }),
+): Promise<ApiOutcome<ImportedCalendar>> {
+  const params = new URLSearchParams({
+    timeMin: new Date(fromMs).toISOString(),
+    timeMax: new Date(toMs).toISOString(),
+    singleEvents: 'true',
+    orderBy: 'startTime',
+    maxResults: '2500',
+    fields: 'timeZone,items(id,status,start,end,summary,description)',
   });
-  if (!result.ok) return result;
-
-  const entry = result.value.calendars?.[calendarId];
-  // Google reports per-calendar problems inside a 200 rather than as an HTTP
-  // error -- notFound when the calendar was deleted, notACalendar, and so on.
-  // Treated as 'missing' so the caller can switch reading off and say why,
-  // instead of caching an empty array that would read as "this person is
-  // completely free" -- the one wrong answer this feature must never give.
-  if (entry?.errors?.length) {
-    return {
-      ok: false,
-      kind: 'missing',
-      status: 200,
-      message: `Google could not read that calendar: ${entry.errors.map((e) => e.reason).join(', ')}`,
-    };
+  const result = await callGoogle<{ timeZone?: string; items?: GoogleEventItem[] }>(
+    accessToken,
+    `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events?${params}`,
+  );
+  if (!result.ok) {
+    // classify()'s 404/410 message ("No such Google event") is phrased for
+    // the push half's per-event calls; reworded here so a calendar that no
+    // longer exists reads clearly in the last_error column the sync writes
+    // it into, rather than talking about "an event" nobody asked about.
+    // Every other kind (unauthorized, retryable, permanent) passes through
+    // unchanged -- the caller branches on `kind`, not on this text, for
+    // those.
+    if (result.kind === 'missing') {
+      return { ok: false, kind: 'missing', status: result.status, message: 'Google could not read that calendar' };
+    }
+    return result;
   }
 
-  return {
-    ok: true,
-    value: (entry?.busy ?? []).map((b) => ({
-      startAt: Date.parse(b.start),
-      endAt: Date.parse(b.end),
-    })).filter((b) => Number.isFinite(b.startAt) && Number.isFinite(b.endAt)),
-  };
+  // Falls back to UTC only if Google ever omits the field entirely, which the
+  // API does not document doing -- a defensive floor, not an expected path.
+  const zone = result.value.timeZone || 'UTC';
+
+  const imported: ImportedCalendarEvent[] = [];
+  for (const item of result.value.items ?? []) {
+    if (item.status === 'cancelled') continue;
+    const start = item.start;
+    const end = item.end;
+    if (!start || !end) continue;
+
+    let startAt: number;
+    let endAt: number;
+    if (start.dateTime && end.dateTime) {
+      // A timed event's own dateTime carries its offset already.
+      startAt = Date.parse(start.dateTime);
+      endAt = Date.parse(end.dateTime);
+    } else if (start.date && end.date) {
+      // An all-day event has no time or offset of its own -- Google's
+      // convention is midnight-to-midnight in the *calendar's* timezone
+      // (returned once, at the top of this same response, not per item).
+      // `end.date` is already the exclusive boundary (the day after the
+      // event's last day), so no adjustment is needed beyond parsing it in
+      // the same zone as the start.
+      startAt = DateTime.fromISO(start.date, { zone }).toMillis();
+      endAt = DateTime.fromISO(end.date, { zone }).toMillis();
+    } else {
+      continue;
+    }
+    if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || endAt <= startAt) continue;
+
+    imported.push({
+      googleEventId: item.id,
+      title: item.summary?.trim() || 'Busy',
+      description: item.description?.trim() || null,
+      startAt,
+      endAt,
+    });
+  }
+
+  return { ok: true, value: { timeZone: zone, events: imported } };
 }
 
 export interface CalendarEventPayload {

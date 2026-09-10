@@ -27,6 +27,13 @@ export interface PersonalEventRow {
   end_type: 'never' | 'on_date' | 'after_count' | null;
   rule_end_date: string | null;
   end_count: number | null;
+  // 0.8.1 v2 (migration 0039). NULL for every hand-created personal event;
+  // set to the Google event id it mirrors when cron/googleSync.ts imported
+  // this row. routes/personal.ts refuses to PATCH or DELETE a row where this
+  // is set -- the source of truth is Google, and a local edit would just be
+  // silently overwritten (or resurrected) by the next sync, which is worse
+  // than not letting it happen.
+  google_event_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -42,6 +49,10 @@ export function mapPersonalEvent(row: PersonalEventRow) {
     endAt: row.end_at,
     status: row.status,
     availability: row.availability,
+    // Present only on a row imported from a connected Google calendar. The
+    // frontend uses this to render the entry read-only and label it, rather
+    // than discovering that the hard way from a 409 on save.
+    importedFromGoogle: row.google_event_id != null,
     isRecurring: !!row.is_recurring,
     recurrence: row.is_recurring
       ? {

@@ -1,8 +1,8 @@
 # 0017 — Google Calendar sync
 
-**Status:** Built — push half v0.8, pull half v0.8.1 (ships dormant: `GOOGLE_SYNC_MODE` is "off" until a Google client is provisioned)
+**Status:** Built — push half v0.8, pull half v0.8.1, pull half reworked v0.8.1 v2 (ships dormant: `GOOGLE_SYNC_MODE` is "off" until a Google client is provisioned)
 **Covers:** `IDEAS.md` item 2
-**Phase:** 5 — ships in v0.8 (push half); the pull half is v0.8.1
+**Phase:** 5 — ships in v0.8 (push half); the pull half is v0.8.1, reworked within the same unreleased branch -- see **The pull half, twice over** below
 
 ## The change in one sentence
 
@@ -73,9 +73,17 @@ review:
   that we touch only one is kept by the query we choose to send, not by the
   grant. That is an honest limitation to state plainly in the Privacy Policy
   rather than imply otherwise, and it is exactly the kind of claim a security
-  reviewer should push on. It also raises the value of `freebusy.query` over a
-  full event read: busy/free times carry no titles, so even the calendar we do
-  read gives up far less than the grant would allow.
+  reviewer should push on.
+
+  The paragraph that used to close this bullet argued the opposite of what
+  actually shipped, and it is worth saying so rather than quietly editing it
+  away: it claimed `freebusy.query` over a full event read meant "even the
+  calendar we do read gives up far less than the grant would allow." **The
+  pull half, twice over** below records why that argument lost to a
+  sandbox-verification finding and a direct request in the same day. The
+  calendar-scope limitation above is unchanged and still the right way to
+  read it; what changed is that *within* the one calendar chosen, this app now
+  reads real events, not opaque intervals.
 
 ## What the user sees
 
@@ -129,13 +137,16 @@ Two, both requested at connect time:
 | Scope | For | Used by |
 |---|---|---|
 | `calendar.events` | create/update/delete the events we author | v0.8 |
-| `calendar.readonly` | list the user's calendars; `freebusy.query` | v0.8 / v0.8.1 |
+| `calendar.readonly` | list the user's calendars; `events.list` on the one chosen for reading | v0.8 / v0.8.1 |
 
 `calendar.readonly` is broader than the picker strictly needs today
 (`calendar.calendarlist.readonly` would list calendars and nothing else), and
-it is requested anyway *on purpose*: `freebusy.query` needs it, and asking for
-it now is what stops v0.8.1 from putting a fresh consent screen in front of
-everyone who already connected. The alternative — narrow now, re-consent later
+it is requested anyway *on purpose*: reading the chosen calendar needs it, and
+asking for it now is what stops v0.8.1 from putting a fresh consent screen in
+front of everyone who already connected. (`freebusy.query` was the original
+call this scope covered; **The pull half, twice over** below records why that
+call was replaced by `events.list` within the same release — the scope
+requested did not need to change either time.) The alternative — narrow now, re-consent later
 — trades a slightly smaller ask today for a worse moment later, and the whole
 account is already inside the read/write `calendar.events` grant regardless.
 
@@ -222,13 +233,19 @@ hour and then cannot be renewed.
 
 ## Data model
 
-Two tables, migration `0036_google_calendar_sync.sql`.
+Two tables from migration `0036_google_calendar_sync.sql`, plus what the pull
+half added and then changed — see **The pull half, twice over** below for the
+column history; this section states where things ended up.
 
 **`google_calendar_connections`** — one row per user, `user_id` the primary key.
 Holds the encrypted refresh token and IV, the cached access token with its
 expiry (so an ordinary tick spends no subrequest on a refresh), the Google
-account email, the chosen `calendar_id`, `sync_enabled`, `last_synced_at`,
-`last_error`, and a `status` of `active` or `disconnecting`.
+account email, the chosen `calendar_id`, `read_calendar_id` (migration `0037`;
+null means the pull half is off), `sync_enabled`, `last_synced_at`,
+`last_error`, and a `status` of `active` or `disconnecting`. It carries no
+state about what the pull half has actually imported any more — migration
+`0039` dropped `busy_blocks`/`busy_cached_at`/`busy_window_end_at`, which is
+where that used to live; `personal_events` (below) is where it lives now.
 
 **`google_event_links`** — the mapping, keyed `UNIQUE(user_id, event_id,
 occurrence_date)`. Carries the `google_event_id` we were given back, and
@@ -384,6 +401,101 @@ because a tidy-up failed is the worse of the two outcomes.
 `deleteUserCompletely` (`lib/db.ts:437`) gains both tables, children first,
 consistent with every other table in that batch.
 
+## The pull half, twice over
+
+The pull half shipped in v0.8.1 as `freebusy.query` against the chosen
+calendar, cached as an opaque `{startAt, endAt}` blob on
+`google_calendar_connections` and merged into `computeBusyBlocksForUsers`
+indistinguishably from Uncle Owen's own busy time. Both the endpoint choice
+and the cache-not-content choice were deliberate, argued positions in this
+spec's earlier revision. Both reversed, in the same day, before this release
+left the branch — found and decided during sandbox verification, not planned
+in advance, which is exactly the kind of correction this file exists to keep
+honest about rather than edit away.
+
+**First reversal: `freebusy.query` → `events.list`.** Google's `freebusy.query`
+only reports events Google itself considers "Busy" — an all-day event defaults
+to "Free" transparency the instant it is created, with no request parameter to
+override that. Sandbox verification hit this directly: a real all-day
+commitment produced an empty busy answer, `last_error` null, because Google
+had genuinely and correctly answered the question asked — just not the
+question anyone nominating a calendar as *their availability source* actually
+meant to ask. Decided (Michael, Sept 2026): every event on the chosen calendar
+counts as busy, Google's own per-event flag notwithstanding. The calendar-scope
+constraint above (**A constraint on the pull half**) is still the privacy
+control this feature offers; a second filter on top of it, keyed to a toggle
+inside Google's own UI nobody using this feature would think to check, was
+never actually protecting anything.
+
+**Second reversal, decided the same conversation: cache opaque intervals →
+import real entries.** Once the calendar-of-record's own Busy/Free flag no
+longer decided what counted, the next question was what an imported item
+should *become* inside Uncle Owen — and Personal Time (`specs/0004`'s design,
+carried since v0.1) turned out to already be exactly that shape: no server, no
+invite list, no RSVP, just a title, a time, an optional description, private
+to its owner (`migrations/0004_personal_events_and_free_busy.sql` — this
+feature predates the `specs/` convention, which is why there is no numbered
+design doc to point to for it instead). Caching an anonymous interval and
+asking the owner to separately
+remember what it was is strictly worse than storing what it actually is, once
+the destination is a place only the owner ever sees. So `read_calendar_id` now
+drives a real sync into `personal_events` (migration `0039`) rather than a
+JSON cache on the connection row, and `google_calendar_connections` carries no
+memory of what the pull half has produced any more — `personal_events` is that
+memory.
+
+What this changed, concretely:
+
+- **Storage.** `personal_events` gains `google_event_id` (migration `0039`),
+  unique per `(user_id, google_event_id)`, which is what makes re-syncing the
+  same window idempotent — an upsert, not a duplicate. `busy_blocks` /
+  `busy_cached_at` / `busy_window_end_at` are dropped from
+  `google_calendar_connections`; nothing reads them once this shipped.
+- **What Google is asked for.** `listCalendarEvents`
+  (`worker/src/lib/googleCalendar.ts`) replaces `queryFreeBusy`, calling
+  `events.list` with `singleEvents: true` (Google itself expands any recurring
+  source event into individual instances, each with its own id — nothing here
+  imports a recurrence rule) and a `fields` mask of exactly `id`, `status`,
+  `start`, `end`, `summary`, `description`. Still the narrowest request that
+  can do the job: no attendees, no location, no conferencing links, no
+  organizer identity, ever requested.
+- **What the privacy guarantee actually is, now.** It moved from "Google never
+  sends us a title" to "nobody but the row's owner ever receives one." Both
+  are real guarantees; the second is the one that matters for a feature whose
+  whole point, after this change, is showing the owner what they imported.
+  `computeBusyBlocksForUsers` — what *someone else* scheduling around this
+  person receives — is unchanged in shape and still carries nothing but a time
+  range; it now reads that range from `personal_events` like any other row
+  rather than from a Google-specific cache, which is one less special case in
+  a function whose header already argues for fewer of them.
+- **Read-only, structurally.** An imported row's source of truth is Google, so
+  `routes/personal.ts` refuses to `PATCH` or `DELETE` one (409, server-side —
+  the frontend's matching UI state is a convenience, not the boundary). A sync
+  reconciles the window: an event that stops appearing gets its row deleted,
+  bounded to `start_at` falling inside the window being synced, so a past
+  occurrence this sync was never asked about is left alone rather than
+  reasoned about from its absence in an answer that was never about it.
+  Disabling the read calendar, or switching which one is read, deletes every
+  row it produced immediately (`routes/google.ts`'s `PATCH` handler) — the
+  same "a disclosure has to stop the moment it's turned off" rule the cache
+  version already followed, now enforced by deleting real rows instead of
+  clearing a blob.
+- **Budget.** The old mechanism cost one subrequest and one D1 write, flatly,
+  because `freebusy.query` merged everything into a handful of intervals
+  before it ever reached this app. Reading real events one-for-one does not
+  merge anything, so `MAX_IMPORTED_EVENTS_PER_SYNC` (40) caps what one sync
+  will import, and `cron/budget.ts`'s new `tryPersonalEventImport` reserves
+  the exact worst-case statement count that cap produces — one subrequest, one
+  `DELETE`, and however many chunked multi-row upserts 40 rows need at
+  `IMPORT_PARAMS_PER_ROW` (10) bound parameters each, computed once from those
+  two constants so the reservation can never silently drift from what the sync
+  actually sends. Reserved fully before the Google call runs, same
+  reserve-before-spend shape **The sweep, and the budget it has to fit**
+  already established the hard way for the push half.
+
+Nothing about *when* this runs changed: still the same hourly slot, still
+first on the tick, for the same reasons recorded above.
+
 ## Policy
 
 `CURRENT_POLICY_VERSION` 2 → 3, with `policy-version.txt` in the same commit
@@ -396,7 +508,21 @@ This bumps even though the feature ships dormant, which is the precedent v0.7
 set exactly: version 2 shipped for Resend while `EMAIL_MODE` was `"stub"`. The
 capability is in the code and the policy should describe the code.
 
-## Ships dormant
+**Bumped again, 4 → 5, for the pull half's rework** (**The pull half, twice
+over**, above). Version 4 already covered a Google connection reading
+busy/free times from a nominated calendar; what it did not cover, and could
+not stand in for, is that this service now *stores* real content from that
+calendar — event titles and descriptions, not opaque time ranges — even
+though that content is disclosed to nobody but the connection's own owner. A
+version whose text says "Google reads nothing but blank blocks reach anyone
+else" is accurate about disclosure and silent about retention, and retention
+of a third party's calendar content is exactly the class of change this
+mechanism exists to surface consent for. Both reversals landed on the same
+branch before v0.8.1 left it, so this is a second bump within one still-held
+release rather than a second release — the same situation `policy.ts`'s own
+history already has a precedent for staying honest about (see the
+scratch-commit note there for what happens when a bump like this is folded in
+silently instead).
 
 `GOOGLE_SYNC_MODE` is `"off"` in both environments until Michael provisions a
 Google Cloud project, OAuth client and the encryption secret (`docs/SETUP.md`

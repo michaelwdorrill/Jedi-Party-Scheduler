@@ -209,6 +209,26 @@ export class TickBudget {
     return true;
   }
 
+  // The Google pull half's personal-time import (0.8.1 v2, specs/0017): one
+  // events.list call, then a bounded D1 batch that reconciles the result
+  // into personal_events -- an upsert of the (capped, chunked) rows Google
+  // returned, plus one DELETE for rows that dropped out of the window.
+  //
+  // Priced as a flat worst case rather than per-row, because the actual row
+  // count isn't known until after the Google call already ran, and this
+  // method exists to be checked *before* spending anything -- same
+  // "reserve fully or not at all" shape as reserveDelivery. The number is
+  // cron/googleSync.ts's own MAX_IMPORTED_EVENTS_PER_SYNC and its chunk size,
+  // both walked through in the comment there; this constant and that one
+  // have to move together; a caller passes what the sync actually intends to
+  // send so the reservation can never drift from it.
+  tryPersonalEventImport(maxStatements: number): boolean {
+    if (this.subrequests < 1 || this.queries < maxStatements) return false;
+    this.subrequests -= 1;
+    this.queries -= maxStatements;
+    return true;
+  }
+
   // An upper bound on how many more deliveries this tick could fund, used to
   // size the LIMIT on recipient queries. Deliberately optimistic (it assumes
   // the cheap, cached-channel case): the point is to stop a sweep asking the

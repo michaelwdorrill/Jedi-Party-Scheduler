@@ -45,6 +45,12 @@ export default function PersonalEventPage() {
   // there is nothing safe to show at all.
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadNonce, setLoadNonce] = useState(0);
+  // 0.8.1 v2: true for a row cron/googleSync.ts imported from a connected
+  // Google calendar. The worker refuses to save or delete one of these
+  // (409, "can only be changed there") -- disabled here so that shows up as
+  // a read-only form, not a failed save after someone filled the whole thing
+  // in.
+  const [importedFromGoogle, setImportedFromGoogle] = useState(false);
 
   useEffect(() => {
     if (!isEdit) return;
@@ -57,6 +63,7 @@ export default function PersonalEventPage() {
         setDescription(pe.description ?? '');
         setTimezone(pe.timezone);
         setAvailability(pe.availability);
+        setImportedFromGoogle(pe.importedFromGoogle);
         if (pe.startAt) {
           const s = DateTime.fromMillis(pe.startAt).setZone(pe.timezone);
           setDate(s.toISODate()!);
@@ -178,17 +185,28 @@ export default function PersonalEventPage() {
         {isEdit && (
           <button
             onClick={handleDelete}
-            className="rounded-md border border-danger/60 px-3 py-1.5 text-sm text-danger-text hover:bg-danger-surface"
+            disabled={importedFromGoogle}
+            title={importedFromGoogle ? 'Imported entries can only be removed on the Google side.' : undefined}
+            className="rounded-md border border-danger/60 px-3 py-1.5 text-sm text-danger-text hover:bg-danger-surface disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
           >
             Delete
           </button>
         )}
       </div>
 
-      <p className="rounded-md border border-edge bg-surface px-3 py-2 text-sm text-muted">
-        Only you can see this. Others just see that you're unavailable — never the name or details.
-      </p>
+      {importedFromGoogle ? (
+        <p className="rounded-md border border-edge bg-surface px-3 py-2 text-sm text-muted">
+          Imported from your connected Google calendar, and read-only here — change the time, title
+          or description on the Google side and it'll update on the next sync. Only you can see this;
+          others just see that you're unavailable, never the name or details.
+        </p>
+      ) : (
+        <p className="rounded-md border border-edge bg-surface px-3 py-2 text-sm text-muted">
+          Only you can see this. Others just see that you're unavailable — never the name or details.
+        </p>
+      )}
 
+      <fieldset disabled={importedFromGoogle} className="space-y-5">
       <div className="space-y-3">
         <input
           value={title}
@@ -302,6 +320,7 @@ export default function PersonalEventPage() {
           </label>
         </div>
       </div>
+      </fieldset>
 
       {error && <InlineError message={error} onDismiss={() => setError(null)} />}
 
@@ -310,15 +329,17 @@ export default function PersonalEventPage() {
           onClick={() => navigate(-1)}
           className={buttonClass('secondary', 'lg')}
         >
-          Cancel
+          {importedFromGoogle ? 'Close' : 'Cancel'}
         </button>
-        <button
-          disabled={saving}
-          onClick={handleSubmit}
-          className={buttonClass('primary', 'lg')}
-        >
-          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Block this time'}
-        </button>
+        {!importedFromGoogle && (
+          <button
+            disabled={saving}
+            onClick={handleSubmit}
+            className={buttonClass('primary', 'lg')}
+          >
+            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Block this time'}
+          </button>
+        )}
       </div>
     </div>
   );

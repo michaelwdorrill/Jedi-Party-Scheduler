@@ -21,6 +21,7 @@
 
 import type { Env } from '../env';
 import { buildCalendarOccurrences } from '../lib/calendar';
+import { chunkRows, placeholders } from '../lib/d1';
 import {
   accessTokenFor,
   deleteCalendarEvent,
@@ -28,11 +29,12 @@ import {
   insertCalendarEvent,
   isGoogleConfigured,
   patchCalendarEvent,
-  queryFreeBusy,
+  listCalendarEvents,
   readRefreshToken,
   revokeToken,
 } from '../lib/googleCalendar';
 import { newId } from '../lib/ids';
+import { LIMITS } from '../lib/validate';
 import type { TickBudget } from './budget';
 
 // How far ahead we mirror. Sixty days is already this app's own idea of
@@ -84,23 +86,39 @@ const PER_CONNECTION_READ_QUERIES = 10;
 // first ran on rather than drifting an extra tick later each hour.
 export const SYNC_INTERVAL_MS = 55 * 60 * 1000;
 
-// How far ahead the busy cache reaches (the pull half, migration 0037).
+// How far ahead the imported calendar reaches (the pull half, migration
+// 0037, reworked by 0039).
 //
 // Matched to LIMITS.MAX_FREE_BUSY_RANGE_MS rather than to SYNC_WINDOW_MS,
-// because this cache answers a different question from the push half: it feeds
-// the scheduling assistant, whose own request range is capped at the same ~2
-// months. Caching further would be work nobody can ask about; caching less
-// would leave a gap inside a range they can.
+// because this answers a different question from the push half: it feeds the
+// scheduling assistant, whose own request range is capped at the same ~2
+// months. Importing further would create rows nobody's availability check
+// can reach; importing less would leave a gap inside a range they can.
 export const BUSY_CACHE_WINDOW_MS = 62 * 24 * 60 * 60 * 1000;
 
-// A ceiling on how many busy intervals are stored for one person.
+// A ceiling on how many of the chosen calendar's events get imported per
+// sync.
 //
-// freebusy.query merges overlapping events itself, so a normal calendar yields
-// tens of intervals across two months, not thousands. This exists so a
-// pathological calendar cannot put an unbounded blob in a column that
-// lib/freeBusy.ts parses inside a request. Exceeding it keeps the EARLIEST
-// blocks, since the assistant is overwhelmingly used for the near term.
-const MAX_CACHED_BUSY_BLOCKS = 400;
+// This is a much smaller number than the JSON-blob cache this replaced ever
+// needed (that one merged overlapping events into far fewer intervals; this
+// keeps one row per event). It exists for two reasons at once: a pathological
+// calendar cannot make one sync's D1 batch unbounded, and each import becomes
+// a real, visible personal_events row -- someone genuinely logging every
+// meeting from a work calendar is a heavier use of this feature than a
+// friend-group scheduler's availability check was sized for, and a hard cap
+// is the honest way to say so rather than quietly falling over. Exceeding it
+// keeps the EARLIEST events, since the assistant is overwhelmingly used for
+// the near term.
+//
+// Sized together with the chunking below: cron/budget.ts's
+// tryPersonalEventImport reserves for the exact worst case this produces,
+// and the two have to move together if either changes.
+const MAX_IMPORTED_EVENTS_PER_SYNC = 40;
+
+// How many bound parameters one imported row costs in the upsert statement
+// below: id, user_id, title, description, timezone, start_at, end_at,
+// google_event_id, created_at, updated_at.
+const IMPORT_PARAMS_PER_ROW = 10;
 
 // A safety valve on the disconnect path. If cleanup cannot succeed -- the
 // grant is already revoked at Google's end, the calendar was deleted -- the
@@ -443,22 +461,35 @@ async function syncOneConnection(
   // Stamped BEFORE the pull half runs, and the order is load-bearing.
   //
   // This statement clears last_error, which is correct for the push half it
-  // reports on -- that half just succeeded. But refreshBusyCache can record an
-  // error of its own (a chosen calendar that no longer exists), and running
-  // this afterwards erased it immediately: reading would switch itself off and
-  // the user would never learn why. Found by a test asserting the message
-  // survives, which it did not.
+  // reports on -- that half just succeeded. But syncImportedPersonalEvents can
+  // record an error of its own (a chosen calendar that no longer exists), and
+  // running this afterwards erased it immediately: reading would switch
+  // itself off and the user would never learn why. Found by a test asserting
+  // the message survives, which it did not.
   await env.DB.prepare(
     `UPDATE google_calendar_connections SET last_synced_at = ?, last_error = NULL, updated_at = ? WHERE user_id = ?`,
   )
     .bind(now, now, row.user_id)
     .run();
 
-  await refreshBusyCache(env, row, accessToken, budget, now);
+  await syncImportedPersonalEvents(env, row, accessToken, budget, now);
 }
 
-// The pull half: one freebusy.query against the ONE calendar this person
-// chose, cached for lib/freeBusy.ts to merge into the scheduling assistant.
+// One statement per upsert chunk, plus this one DELETE -- computed once from
+// the same two constants tryPersonalEventImport is reserved against, so the
+// two can never silently drift apart.
+const MAX_UPSERT_STATEMENTS = chunkRows(
+  new Array<null>(MAX_IMPORTED_EVENTS_PER_SYNC).fill(null),
+  IMPORT_PARAMS_PER_ROW,
+).length;
+const MAX_IMPORT_STATEMENTS = MAX_UPSERT_STATEMENTS + 1;
+
+// The pull half: one events.list call against the ONE calendar this person
+// chose, reconciled into that person's own personal_events rows. Every event
+// on it becomes one, regardless of Google's own Busy/Free flag on it -- see
+// listCalendarEvents' own comment in googleCalendar.ts for why that's 0.8.1's
+// answer, and for why this imports real events rather than caching opaque
+// intervals the way the mechanism it replaced did.
 //
 // Runs inside the same hourly slot as the push, deliberately -- it is the same
 // connection, the same access token, and the same "a mirror within the hour is
@@ -467,7 +498,7 @@ async function syncOneConnection(
 //
 // Does nothing at all unless read_calendar_id is set, which it is not for
 // anyone by default. Connecting to push never starts a pull.
-async function refreshBusyCache(
+async function syncImportedPersonalEvents(
   env: Env,
   row: GoogleConnectionRow,
   accessToken: string,
@@ -475,11 +506,14 @@ async function refreshBusyCache(
   now: number,
 ): Promise<void> {
   if (!row.read_calendar_id) return;
-  // One subrequest plus the single UPDATE below -- exactly the shape
-  // tryCalendarWrite prices.
-  if (!budget.tryCalendarWrite()) return;
+  // Reserved for the worst case (every chunked upsert statement plus the
+  // DELETE) before the Google call runs at all -- the actual statement count
+  // this tick spends can only be less than or equal to what was reserved,
+  // never more, which is what keeps `exhausted` meaning what its callers
+  // assume regardless of how many events the calendar actually has.
+  if (!budget.tryPersonalEventImport(MAX_IMPORT_STATEMENTS)) return;
 
-  const result = await queryFreeBusy(accessToken, row.read_calendar_id, now, now + BUSY_CACHE_WINDOW_MS);
+  const result = await listCalendarEvents(accessToken, row.read_calendar_id, now, now + BUSY_CACHE_WINDOW_MS);
 
   if (!result.ok) {
     if (result.kind === 'unauthorized') {
@@ -487,45 +521,101 @@ async function refreshBusyCache(
       return;
     }
     if (result.kind === 'missing') {
-      // The calendar is gone, or was never readable. Switch reading off and
-      // say why, rather than leaving a stale cache to answer for a calendar
-      // that no longer exists. Note this clears read_calendar_id: the person
-      // has to pick again, which is the honest outcome of "the thing you
-      // chose isn't there".
-      await env.DB.prepare(
-        `UPDATE google_calendar_connections
-         SET read_calendar_id = NULL, busy_blocks = NULL, busy_cached_at = NULL,
-             busy_window_end_at = NULL, last_error = ?, updated_at = ?
-         WHERE user_id = ?`,
-      )
-        .bind(result.message, now, row.user_id)
-        .run();
-      console.warn(`Google busy cache disabled for ${row.user_id}: ${result.message}`);
+      // The calendar is gone, or was never readable. Switch reading off, say
+      // why, and remove every row this connection ever imported -- the honest
+      // outcome of "the thing you chose isn't there" now that what it
+      // produces is real, visible entries rather than an opaque cache nobody
+      // but this code ever read. This DELETE is outside the reservation
+      // above (which was already spent on the events.list call that just
+      // failed): a rare, terminal, once-per-disappearance cost, the same
+      // category runDisconnect's own cleanup already sits outside the ledger
+      // for.
+      await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE google_calendar_connections
+           SET read_calendar_id = NULL, last_error = ?, updated_at = ?
+           WHERE user_id = ?`,
+        ).bind(result.message, now, row.user_id),
+        env.DB.prepare(`DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL`).bind(
+          row.user_id,
+        ),
+      ]);
+      console.warn(`Google personal-time import disabled for ${row.user_id}: ${result.message}`);
       return;
     }
-    // Transient. The existing cache is deliberately left in place: stale busy
-    // time is the safe direction to be wrong in, and dropping it would report
-    // someone as free when we simply could not ask.
-    console.warn(`Google busy refresh deferred for ${row.user_id}: ${result.message}`);
+    // Transient. Existing imported rows are deliberately left in place: stale
+    // busy time is the safe direction to be wrong in, and clearing them would
+    // report someone as free when we simply could not ask Google.
+    console.warn(`Google personal-time import deferred for ${row.user_id}: ${result.message}`);
     return;
   }
 
-  const blocks = result.value
-    .filter((b) => b.endAt > b.startAt)
+  const { timeZone, events } = result.value;
+  const imported = [...events]
     .sort((a, b) => a.startAt - b.startAt)
-    .slice(0, MAX_CACHED_BUSY_BLOCKS)
-    .map((b) => [b.startAt, b.endAt]);
+    .slice(0, MAX_IMPORTED_EVENTS_PER_SYNC);
 
-  await env.DB.prepare(
-    `UPDATE google_calendar_connections
-     SET busy_blocks = ?, busy_cached_at = ?, busy_window_end_at = ?, updated_at = ?
-     WHERE user_id = ?`,
-  )
-    .bind(JSON.stringify(blocks), now, now + BUSY_CACHE_WINDOW_MS, now, row.user_id)
-    .run();
+  const statements = [];
 
-  if (blocks.length > 0) {
-    console.log(`Google busy cache for ${row.user_id}: ${blocks.length} interval(s) over the next 62 days.`);
+  // Anything previously imported that fell inside this window and did not
+  // come back this time -- deleted, cancelled, or moved outside the window
+  // by being rescheduled. Bounded to the window itself: a past occurrence
+  // this sync isn't even asking about is left alone rather than reasoned
+  // about from its absence in an answer that was never about it.
+  const currentIds = imported.map((e) => e.googleEventId);
+  const staleSql =
+    currentIds.length > 0
+      ? `DELETE FROM personal_events
+         WHERE user_id = ? AND google_event_id IS NOT NULL
+           AND start_at >= ? AND start_at < ?
+           AND google_event_id NOT IN (${placeholders(currentIds.length)})`
+      : `DELETE FROM personal_events
+         WHERE user_id = ? AND google_event_id IS NOT NULL
+           AND start_at >= ? AND start_at < ?`;
+  statements.push(
+    env.DB.prepare(staleSql).bind(row.user_id, now, now + BUSY_CACHE_WINDOW_MS, ...currentIds),
+  );
+
+  // status/availability/is_recurring are written as literals, not bound --
+  // every imported row is active, counts as busy (per the decision above),
+  // and is never itself a recurring series: Google's own singleEvents=true
+  // already expanded any recurring source event into individual instances,
+  // each with its own googleEventId, before this ever saw it.
+  for (const chunk of chunkRows(imported, IMPORT_PARAMS_PER_ROW)) {
+    const values = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, 'active', 'busy', 0, ?, ?, ?)`).join(', ');
+    const params = chunk.flatMap((e) => [
+      newId(),
+      row.user_id,
+      e.title.slice(0, LIMITS.TITLE),
+      e.description ? e.description.slice(0, LIMITS.DESCRIPTION) : null,
+      timeZone,
+      e.startAt,
+      e.endAt,
+      e.googleEventId,
+      now,
+      now,
+    ]);
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO personal_events
+           (id, user_id, title, description, timezone, start_at, end_at, status, availability, is_recurring,
+            google_event_id, created_at, updated_at)
+         VALUES ${values}
+         ON CONFLICT(user_id, google_event_id) DO UPDATE SET
+           title = excluded.title, description = excluded.description, timezone = excluded.timezone,
+           start_at = excluded.start_at, end_at = excluded.end_at, updated_at = excluded.updated_at`,
+      ).bind(...params),
+    );
+  }
+
+  statements.push(
+    env.DB.prepare(`UPDATE google_calendar_connections SET updated_at = ? WHERE user_id = ?`).bind(now, row.user_id),
+  );
+
+  await env.DB.batch(statements);
+
+  if (imported.length > 0) {
+    console.log(`Google personal-time import for ${row.user_id}: ${imported.length} event(s) over the next 62 days.`);
   }
 }
 

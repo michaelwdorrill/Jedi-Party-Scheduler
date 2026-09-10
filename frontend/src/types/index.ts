@@ -33,7 +33,6 @@ export interface GoogleCalendarStatus {
   // write). null means reading is off, which is the default for everyone —
   // connecting to push never starts a pull.
   readCalendarId?: string | null;
-  busyCachedAt?: number | null;
   syncEnabled?: boolean;
   // 'disconnecting' while the cron removes the entries already written, before
   // the credential is revoked and the connection dropped.
@@ -240,6 +239,11 @@ export interface PersonalEvent {
   endAt: number | null;
   status: 'active' | 'cancelled';
   availability: PersonalAvailability;
+  // 0.8.1 v2: true for a row cron/googleSync.ts imported from a connected
+  // Google calendar. The worker refuses to PATCH or DELETE one of these
+  // (Google is the source of truth for it) -- this is what lets the UI show
+  // that up front, as a disabled form, rather than as a 409 after the fact.
+  importedFromGoogle: boolean;
   isRecurring: boolean;
   recurrence: RecurrenceRule | null;
 }

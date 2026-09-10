@@ -79,4 +79,23 @@
 // wrangler.toml. Bumping this for real means updating both files in the same
 // commit, on purpose -- an accidental edit surviving a `git checkout` or a
 // stray `git add -A` now fails the build instead of shipping silently.
-export const CURRENT_POLICY_VERSION = 4;
+//
+// Bumped to 5, within the same v0.8.1 that introduced 4 and before it left
+// the branch (specs/0017, "The pull half, twice over"). Version 4 already
+// covered a Google connection reading busy/free times from a nominated
+// calendar; what it did not cover, and could not stand in for, is that this
+// service now *stores* real content from that calendar -- event titles and
+// descriptions, imported as personal time entries -- rather than the opaque
+// time ranges version 4 described. That content is disclosed to nobody but
+// the connection's own owner, same as any personal time block made by hand,
+// but retention is a different fact from disclosure, and version 4's text
+// was accurate about the second and silent about the first.
+//
+// A bump this close to the one before it looks unusual, and the honest
+// reading is the boring one: this is still one unreleased branch, corrected
+// twice in the same sandbox-verification pass, not two separate releases
+// each asking for consent. Recorded as its own bump anyway rather than
+// folded backward into 4's, because folding it in would mean this comment
+// -- and the spec section it points at -- describing a decision that was
+// never actually made at the time 4 was written.
+export const CURRENT_POLICY_VERSION = 5;

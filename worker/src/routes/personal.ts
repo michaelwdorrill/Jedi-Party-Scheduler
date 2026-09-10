@@ -167,10 +167,17 @@ personalRoutes.post('/', async (c) => {
 personalRoutes.patch('/:id', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
-  const existing = await c.env.DB.prepare(`SELECT user_id FROM personal_events WHERE id = ?`)
+  const existing = await c.env.DB.prepare(`SELECT user_id, google_event_id FROM personal_events WHERE id = ?`)
     .bind(id)
-    .first<{ user_id: string }>();
+    .first<{ user_id: string; google_event_id: string | null }>();
   if (!existing || existing.user_id !== userId) return c.text('Not found', 404);
+  // Google is the source of truth for an imported row -- a local edit here
+  // would just be overwritten (or the row resurrected) by the next sync.
+  // Checked server-side, not just hidden in the UI: the frontend's own guard
+  // is a convenience, this is the actual boundary.
+  if (existing.google_event_id != null) {
+    return c.text('This entry was imported from Google Calendar and can only be changed there.', 409);
+  }
 
   const body = await readJsonBody<Partial<PersonalEventInput>>(c);
   validatePersonalEventInput(body);
@@ -227,10 +234,16 @@ personalRoutes.patch('/:id', async (c) => {
 personalRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
-  const existing = await c.env.DB.prepare(`SELECT user_id FROM personal_events WHERE id = ?`)
+  const existing = await c.env.DB.prepare(`SELECT user_id, google_event_id FROM personal_events WHERE id = ?`)
     .bind(id)
-    .first<{ user_id: string }>();
+    .first<{ user_id: string; google_event_id: string | null }>();
   if (!existing || existing.user_id !== userId) return c.text('Not found', 404);
+  // Same reasoning as PATCH above. Deleting it here would be undone the
+  // moment the calendar it came from syncs again -- disconnecting, or
+  // deleting the event on the Google side, is what actually removes it.
+  if (existing.google_event_id != null) {
+    return c.text('This entry was imported from Google Calendar and can only be removed there.', 409);
+  }
 
   await c.env.DB.prepare(`DELETE FROM personal_events WHERE id = ?`).bind(id).run();
   return c.json({ ok: true });
@@ -243,10 +256,18 @@ personalRoutes.post('/:id/occurrences/:date/cancel', async (c) => {
   // stored verbatim and later compared against expander-generated dates, so
   // an unvalidated value writes a row that can never match anything.
   const date = assertIsoDate(c.req.param('date'), 'date');
-  const existing = await c.env.DB.prepare(`SELECT user_id FROM personal_events WHERE id = ?`)
+  const existing = await c.env.DB.prepare(`SELECT user_id, google_event_id FROM personal_events WHERE id = ?`)
     .bind(id)
-    .first<{ user_id: string }>();
+    .first<{ user_id: string; google_event_id: string | null }>();
   if (!existing || existing.user_id !== userId) return c.text('Not found', 404);
+  // An imported row is never recurring (Google's own singleEvents=true
+  // already expanded any recurring source into individual instances before
+  // this ever saw it), so there is no occurrence of it to cancel -- but
+  // guard it the same way PATCH and DELETE are guarded, rather than let a
+  // malformed request write a meaningless override row.
+  if (existing.google_event_id != null) {
+    return c.text('This entry was imported from Google Calendar and can only be changed there.', 409);
+  }
 
   const overrides = await c.env.DB.prepare(
     `SELECT COUNT(*) AS n FROM personal_event_overrides WHERE personal_event_id = ?`,

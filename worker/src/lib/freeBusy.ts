@@ -279,103 +279,17 @@ export async function computeBusyBlocksForUsers(
     for (const occ of occurrences) blocks.push({ startAt: occ.startAt, endAt: occ.endAt });
   }
 
-  // Busy time pulled from a connected Google calendar (IDEAS item 2 /
-  // specs/0017, pull half). Folded in here, at the very end, so it goes
-  // through exactly the same merge() as everything else and comes out
-  // indistinguishable in shape -- a caller cannot tell which blocks came from
-  // Uncle Owen and which from Google, which is the correct disclosure level
-  // for a feature whose whole contract is "opaque ranges only".
-  //
-  // Two properties this inherits for free by living here rather than in the
-  // route, both worth stating because they are load-bearing privacy
-  // guarantees:
-  //
-  //   - routes/guilds.ts filters on free_busy_visible BEFORE calling this, so
-  //     a user who hid their availability contributes no Google blocks either.
-  //     Adding the pull half needed no change there and opened no new surface.
-  //   - the shape is still {startAt, endAt}. freebusy.query returns intervals
-  //     and nothing else, so there is no title to leak even by accident.
-  for (const [userId, blocks] of await loadCachedGoogleBusy(env, userIds, fromMs, toMs)) {
-    const existing = out.get(userId);
-    if (existing) existing.push(...blocks);
-  }
+  // Busy time from a connected Google calendar needs no special case here any
+  // more (0.8.1 v2, specs/0017): it arrives as ordinary personal_events rows,
+  // imported by cron/googleSync.ts and indistinguishable from a hand-created
+  // personal time block by the time expandPersonalOccurrencesForUsers reads
+  // them above. The route-level privacy guarantee this used to state
+  // separately still holds for exactly the same reason it did before --
+  // routes/guilds.ts filters on free_busy_visible before calling this, so a
+  // user who hid their availability contributes no imported blocks either --
+  // it is just no longer a fact about *this* function specifically.
 
   for (const [userId, blocks] of out) out.set(userId, merge(blocks));
-  return out;
-}
-
-// How stale a cached answer may be before it stops being used.
-//
-// The direction of error is what decides this. Over-reporting busy costs
-// someone a slot they could have taken; under-reporting schedules a game over
-// a real commitment, which is the failure this whole module is written to
-// avoid ("an omitted commitment is indistinguishable from free time"). A
-// slightly stale block is therefore worth keeping, and the cron refreshes
-// hourly so in practice it is minutes old.
-//
-// Past a week it stops being evidence and starts being noise -- a snapshot of
-// someone's calendar from a fortnight ago says nothing useful about next
-// Tuesday -- so it is dropped rather than trusted.
-const MAX_CACHED_BUSY_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-
-interface CachedBusyRow {
-  user_id: string;
-  busy_blocks: string | null;
-  busy_cached_at: number | null;
-}
-
-// One chunked query for every requested user, not one per user. That shape is
-// the reason the cache is a JSON column on the connection row rather than a
-// table of intervals -- see migration 0037. This function runs inside a
-// request, and this module's header records a bug where per-user follow-up
-// reads took a valid request past the Free plan's query ceiling.
-async function loadCachedGoogleBusy(
-  env: Env,
-  userIds: string[],
-  fromMs: number,
-  toMs: number,
-): Promise<Map<string, BusyBlock[]>> {
-  const out = new Map<string, BusyBlock[]>();
-  if (userIds.length === 0) return out;
-
-  const cutoff = Date.now() - MAX_CACHED_BUSY_AGE_MS;
-  for (const chunk of chunkIds(userIds, 1)) {
-    const { results } = await env.DB.prepare(
-      `SELECT user_id, busy_blocks, busy_cached_at
-       FROM google_calendar_connections
-       WHERE user_id IN (${placeholders(chunk.length)})
-         AND read_calendar_id IS NOT NULL
-         AND busy_blocks IS NOT NULL
-         AND busy_cached_at >= ?`,
-    )
-      .bind(...chunk, cutoff)
-      .all<CachedBusyRow>();
-
-    for (const row of results) {
-      // A malformed blob is treated as "no data" rather than throwing. This
-      // runs inside a request serving up to 25 people, and one unparseable row
-      // must not fail the answer for everyone else in it.
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(row.busy_blocks!);
-      } catch {
-        console.warn(`Unparseable Google busy cache for ${row.user_id}; ignoring it.`);
-        continue;
-      }
-      if (!Array.isArray(parsed)) continue;
-
-      const blocks: BusyBlock[] = [];
-      for (const pair of parsed) {
-        if (!Array.isArray(pair) || pair.length !== 2) continue;
-        const [startAt, endAt] = pair;
-        if (typeof startAt !== 'number' || typeof endAt !== 'number') continue;
-        // Range-filtered here rather than in SQL, which is the accepted cost
-        // of the blob: the array is capped when written, so this is bounded.
-        if (startAt <= toMs && endAt >= fromMs) blocks.push({ startAt, endAt });
-      }
-      if (blocks.length > 0) out.set(row.user_id, blocks);
-    }
-  }
   return out;
 }
 

@@ -9,7 +9,7 @@
 export const CONTACT_EMAIL = 'JediParty@proton.me';
 
 export const SERVICE_NAME = 'Uncle Owen';
-export const LAST_UPDATED = '9 September 2026';
+export const LAST_UPDATED = '10 September 2026';
 
 // The released version of the app, and when that version was published.
 //
@@ -19,7 +19,7 @@ export const LAST_UPDATED = '9 September 2026';
 // would make "published" mean "last redeployed" instead of "last released".
 // Bump both together when cutting a release.
 export const APP_VERSION = '0.8.1';
-export const PUBLISHED_AT = '9 September 2026, 20:05 UTC';
+export const PUBLISHED_AT = '10 September 2026, 04:14 UTC';
 
 // The person or entity legally responsible for the data ("data controller"
 // under GDPR). For a personally-run project this is just your name.

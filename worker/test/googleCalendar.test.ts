@@ -739,13 +739,40 @@ describe('the sync sweep', () => {
   });
 });
 
-// IDEAS item 2 / specs/0017, pull half: read ONE chosen calendar's busy times
-// back in, feeding the scheduling assistant.
-describe('the busy-time pull', () => {
-  const FREEBUSY_RULE = (busy: { start: string; end: string }[]) => ({
-    match: '/calendar/v3/freeBusy',
+// IDEAS item 2 / specs/0017 v2 (0.8.1): read ONE chosen calendar's events
+// back in as real, read-only personal-time entries, feeding both the
+// scheduling assistant (via computeBusyBlocksForUsers) and the owner's own
+// calendar.
+describe('the personal-time import', () => {
+  // A single-row events.list response. `date` shapes an all-day event
+  // (Google's own convention: no dateTime, no offset); `dateTime` shapes a
+  // timed one. status defaults to 'confirmed' -- a test that wants a
+  // cancelled row overrides it explicitly, which is the shape most of these
+  // tests never need.
+  const EVENTS_LIST_RULE = (
+    items: {
+      id?: string;
+      status?: string;
+      summary?: string;
+      description?: string;
+      start: { date?: string; dateTime?: string };
+      end: { date?: string; dateTime?: string };
+    }[],
+    timeZone = 'America/New_York',
+  ) => ({
+    match: '/calendars/work%40example.com/events',
     status: 200,
-    body: { calendars: { 'work@example.com': { busy } } },
+    body: {
+      timeZone,
+      items: items.map((it, i) => ({
+        id: it.id ?? `gevt-${i}`,
+        status: it.status ?? 'confirmed',
+        summary: it.summary,
+        description: it.description,
+        start: it.start,
+        end: it.end,
+      })),
+    },
   });
 
   async function seedReader(db: ShimDatabase): Promise<void> {
@@ -754,6 +781,18 @@ describe('the busy-time pull', () => {
     await db
       .prepare(`UPDATE google_calendar_connections SET read_calendar_id = 'work@example.com' WHERE user_id = 'u1'`)
       .run();
+  }
+
+  async function importedRows(db: ShimDatabase): Promise<
+    { id: string; title: string; description: string | null; start_at: number; end_at: number; availability: string; google_event_id: string }[]
+  > {
+    const { results } = await db
+      .prepare(
+        `SELECT id, title, description, start_at, end_at, availability, google_event_id
+         FROM personal_events WHERE user_id = 'u1' AND google_event_id IS NOT NULL`,
+      )
+      .all();
+    return results as never;
   }
 
   // The default, and the one that matters most: connecting to push must never
@@ -767,164 +806,253 @@ describe('the busy-time pull', () => {
     fetchStub = stubFetch([TOKEN_RULE, INSERT_RULE]);
     await sweepGoogleCalendar(env, new TickBudget('paid'));
 
-    expect(fetchStub.calls.some((u) => u.includes('freeBusy'))).toBe(false);
+    expect(fetchStub.calls.some((u) => u.includes('timeMin='))).toBe(false);
     const row = await db
-      .prepare(`SELECT read_calendar_id, busy_blocks FROM google_calendar_connections WHERE user_id = 'u1'`)
-      .first<{ read_calendar_id: string | null; busy_blocks: string | null }>();
+      .prepare(`SELECT read_calendar_id FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ read_calendar_id: string | null }>();
     expect(row!.read_calendar_id).toBeNull();
-    expect(row!.busy_blocks).toBeNull();
+    expect(await importedRows(db)).toHaveLength(0);
   });
 
-  it('caches busy intervals and feeds them to the scheduling assistant', async () => {
+  it('imports a timed event as a read-only personal-time entry, feeding the scheduling assistant', async () => {
     const { db, env: base } = setup();
     const env = googleEnv(base);
     await seedReader(db);
 
-    const busyStart = new Date(Date.now() + 3 * DAY_MS);
-    const busyEnd = new Date(busyStart.getTime() + 2 * HOUR_MS);
-    fetchStub = stubFetch([
-      TOKEN_RULE,
-      INSERT_RULE,
-      FREEBUSY_RULE([{ start: busyStart.toISOString(), end: busyEnd.toISOString() }]),
-    ]);
-    await sweepGoogleCalendar(env, new TickBudget('paid'));
-
-    // Asks about exactly one calendar -- the chosen one.
-    const call = fetchStub.calls.findIndex((u) => u.includes('/calendar/v3/freeBusy'));
-    const body = JSON.parse(fetchStub.bodies[call]!);
-    expect(body.items).toEqual([{ id: 'work@example.com' }]);
-
-    const blocks = await computeBusyBlocksForUsers(env, ['u1'], Date.now(), Date.now() + 10 * DAY_MS);
-    const mine = blocks.get('u1') ?? [];
-    expect(mine.some((b) => b.startAt === busyStart.getTime() && b.endAt === busyEnd.getTime())).toBe(true);
-  });
-
-  it('merges Google busy time with the app\'s own, indistinguishably', async () => {
-    const { db, env: base } = setup();
-    const env = googleEnv(base);
-    await seedReader(db);
-    // An Uncle Owen session that butts up against the Google block: merge()
-    // should fuse them into one range, which is what proves they go through
-    // the same path rather than being appended as a separate kind of thing.
     const start = Date.now() + 3 * DAY_MS;
-    await seedEvent(db, { id: 'evt-1', organizerId: 'u1', startAt: start, endAt: start + HOUR_MS });
-
+    const end = start + 2 * HOUR_MS;
     fetchStub = stubFetch([
       TOKEN_RULE,
-      INSERT_RULE,
-      FREEBUSY_RULE([
-        { start: new Date(start + HOUR_MS).toISOString(), end: new Date(start + 3 * HOUR_MS).toISOString() },
+      EVENTS_LIST_RULE([
+        {
+          id: 'work-standup',
+          summary: 'Team standup',
+          description: 'Daily sync',
+          start: { dateTime: new Date(start).toISOString() },
+          end: { dateTime: new Date(end).toISOString() },
+        },
       ]),
+      INSERT_RULE,
     ]);
     await sweepGoogleCalendar(env, new TickBudget('paid'));
 
+    // Asks events.list against exactly the chosen calendar, expanded to real
+    // instances.
+    const call = fetchStub.calls.find((u) => u.includes('/calendars/work%40example.com/events'));
+    const url = new URL(call!);
+    expect(url.searchParams.get('singleEvents')).toBe('true');
+
+    const rows = await importedRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      title: 'Team standup',
+      description: 'Daily sync',
+      start_at: start,
+      end_at: end,
+      availability: 'busy',
+      google_event_id: 'work-standup',
+    });
+
+    // And it's what the scheduling assistant sees for this person.
     const blocks = (await computeBusyBlocksForUsers(env, ['u1'], Date.now(), Date.now() + 10 * DAY_MS)).get('u1') ?? [];
-    const fused = blocks.find((b) => b.startAt === start);
-    expect(fused?.endAt).toBe(start + 3 * HOUR_MS);
+    expect(blocks.some((b) => b.startAt === start && b.endAt === end)).toBe(true);
   });
 
-  it('never returns anything but opaque start/end pairs', async () => {
+  it('counts an all-day event as busy even though Google marks it Free by default', async () => {
     const { db, env: base } = setup();
     const env = googleEnv(base);
     await seedReader(db);
 
-    const s0 = Date.now() + DAY_MS;
+    // Google's own default for an all-day event -- no explicit transparency
+    // field here, which is the point: this code never asks for or checks
+    // that field at all, so there is nothing for a "Free" flag to be filtered
+    // by in the first place. The old freebusy.query mechanism would have
+    // silently omitted this from the answer.
     fetchStub = stubFetch([
       TOKEN_RULE,
+      EVENTS_LIST_RULE([
+        { id: 'day-off', summary: 'Day off', start: { date: '2026-09-12' }, end: { date: '2026-09-13' } },
+      ], 'America/New_York'),
       INSERT_RULE,
-      FREEBUSY_RULE([{ start: new Date(s0).toISOString(), end: new Date(s0 + HOUR_MS).toISOString() }]),
     ]);
     await sweepGoogleCalendar(env, new TickBudget('paid'));
 
+    const rows = await importedRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].availability).toBe('busy');
+    // Midnight-to-midnight in the calendar's own zone (America/New_York,
+    // UTC-4 in September): 2026-09-12T00:00 EDT -> 2026-09-12T04:00:00.000Z.
+    expect(new Date(rows[0].start_at).toISOString()).toBe('2026-09-12T04:00:00.000Z');
+    expect(new Date(rows[0].end_at).toISOString()).toBe('2026-09-13T04:00:00.000Z');
+  });
+
+  it('skips a cancelled instance', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedReader(db);
+    const start = Date.now() + DAY_MS;
+
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      EVENTS_LIST_RULE([
+        {
+          id: 'called-off',
+          status: 'cancelled',
+          start: { dateTime: new Date(start).toISOString() },
+          end: { dateTime: new Date(start + HOUR_MS).toISOString() },
+        },
+      ]),
+      INSERT_RULE,
+    ]);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(await importedRows(db)).toHaveLength(0);
+  });
+
+  it("never lets a title or description reach someone else's scheduling assistant", async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedReader(db);
+    const start = Date.now() + DAY_MS;
+
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      EVENTS_LIST_RULE([
+        {
+          id: 'secret-thing',
+          summary: 'Something private',
+          description: 'Very private details',
+          start: { dateTime: new Date(start).toISOString() },
+          end: { dateTime: new Date(start + HOUR_MS).toISOString() },
+        },
+      ]),
+      INSERT_RULE,
+    ]);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    // The privacy contract of the whole free/busy feature: what someone else
+    // scheduling around this person receives is still opaque, even though
+    // the row backing it now stores real content for the owner's own view.
     const blocks = (await computeBusyBlocksForUsers(env, ['u1'], Date.now(), Date.now() + 10 * DAY_MS)).get('u1') ?? [];
-    // The privacy contract of the whole free/busy feature. freebusy.query
-    // returns intervals only, so there is nothing else to leak -- this asserts
-    // the shape stays that way rather than growing a field later.
     for (const b of blocks) expect(Object.keys(b).sort()).toEqual(['endAt', 'startAt']);
+    expect(JSON.stringify(blocks)).not.toContain('private');
   });
 
-  it('keeps a stale cache rather than reporting someone free when Google is unreachable', async () => {
+  it('keeps existing imports rather than reporting someone free when Google is unreachable', async () => {
     const { db, env: base } = setup();
     const env = googleEnv(base);
     await seedReader(db);
+    const start = Date.now() + DAY_MS;
 
-    const s0 = Date.now() + DAY_MS;
     fetchStub = stubFetch([
       TOKEN_RULE,
+      EVENTS_LIST_RULE([
+        { id: 'stays', start: { dateTime: new Date(start).toISOString() }, end: { dateTime: new Date(start + HOUR_MS).toISOString() } },
+      ]),
       INSERT_RULE,
-      FREEBUSY_RULE([{ start: new Date(s0).toISOString(), end: new Date(s0 + HOUR_MS).toISOString() }]),
     ]);
     await sweepGoogleCalendar(env, new TickBudget('paid'));
     fetchStub.restore();
 
     // Next hour, Google is down.
     await makeDue(db);
-    fetchStub = stubFetch([TOKEN_RULE, INSERT_RULE, { match: '/calendar/v3/freeBusy', status: 503, body: {} }]);
+    fetchStub = stubFetch([TOKEN_RULE, { match: '/calendars/work%40example.com/events', status: 503, body: {} }, INSERT_RULE]);
     await sweepGoogleCalendar(env, new TickBudget('paid'));
 
-    // Still busy. Over-reporting busy costs someone a slot; under-reporting
-    // books a game over a real commitment, which is the failure lib/freeBusy.ts
-    // is written to avoid.
-    const blocks = (await computeBusyBlocksForUsers(env, ['u1'], Date.now(), Date.now() + 10 * DAY_MS)).get('u1') ?? [];
-    expect(blocks).toHaveLength(1);
+    // Still there. Over-reporting busy costs someone a slot; under-reporting
+    // books a game over a real commitment, which is the failure
+    // lib/freeBusy.ts is written to avoid.
+    expect(await importedRows(db)).toHaveLength(1);
   });
 
-  it('ignores a cache older than a week', async () => {
+  it('switches reading off, says why, and removes every imported row when the chosen calendar is gone', async () => {
     const { db, env: base } = setup();
     const env = googleEnv(base);
     await seedReader(db);
-    const s0 = Date.now() + DAY_MS;
-    await db
-      .prepare(
-        `UPDATE google_calendar_connections
-         SET busy_blocks = ?, busy_cached_at = ? WHERE user_id = 'u1'`,
-      )
-      .bind(JSON.stringify([[s0, s0 + HOUR_MS]]), Date.now() - 8 * DAY_MS)
-      .run();
-
-    const blocks = (await computeBusyBlocksForUsers(env, ['u1'], Date.now(), Date.now() + 10 * DAY_MS)).get('u1') ?? [];
-    // A fortnight-old snapshot says nothing useful about next Tuesday.
-    expect(blocks).toHaveLength(0);
-  });
-
-  it('switches reading off and says why when the chosen calendar is gone', async () => {
-    const { db, env: base } = setup();
-    const env = googleEnv(base);
-    await seedReader(db);
+    const start = Date.now() + DAY_MS;
 
     fetchStub = stubFetch([
       TOKEN_RULE,
+      EVENTS_LIST_RULE([
+        { id: 'first', start: { dateTime: new Date(start).toISOString() }, end: { dateTime: new Date(start + HOUR_MS).toISOString() } },
+      ]),
       INSERT_RULE,
-      {
-        match: '/calendar/v3/freeBusy',
-        status: 200,
-        body: { calendars: { 'work@example.com': { errors: [{ reason: 'notFound' }] } } },
-      },
     ]);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+    expect(await importedRows(db)).toHaveLength(1);
+    fetchStub.restore();
+
+    await makeDue(db);
+    fetchStub = stubFetch([TOKEN_RULE, { match: '/calendars/work%40example.com/events', status: 404, body: {} }, INSERT_RULE]);
     await sweepGoogleCalendar(env, new TickBudget('paid'));
 
     const row = await db
-      .prepare(`SELECT read_calendar_id, busy_blocks, last_error FROM google_calendar_connections WHERE user_id = 'u1'`)
-      .first<{ read_calendar_id: string | null; busy_blocks: string | null; last_error: string | null }>();
-    // Not cached as "no busy time" -- that would read as "completely free",
-    // the one wrong answer this must never give.
+      .prepare(`SELECT read_calendar_id, last_error FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ read_calendar_id: string | null; last_error: string | null }>();
     expect(row!.read_calendar_id).toBeNull();
-    expect(row!.busy_blocks).toBeNull();
     expect(row!.last_error).toContain('could not read that calendar');
+    // Not left behind orphaned: nothing will ever sync them again.
+    expect(await importedRows(db)).toHaveLength(0);
   });
 
-  it('drops the cache the moment reading is switched off, not at the next sweep', async () => {
+  it("removes an imported row the moment its source event stops appearing, without touching the owner's own entries", async () => {
     const { db, env: base } = setup();
     const env = googleEnv(base);
     await seedReader(db);
-    const s0 = Date.now() + DAY_MS;
+    const start = Date.now() + DAY_MS;
+
     fetchStub = stubFetch([
       TOKEN_RULE,
+      EVENTS_LIST_RULE([
+        { id: 'goes-away', start: { dateTime: new Date(start).toISOString() }, end: { dateTime: new Date(start + HOUR_MS).toISOString() } },
+      ]),
       INSERT_RULE,
-      FREEBUSY_RULE([{ start: new Date(s0).toISOString(), end: new Date(s0 + HOUR_MS).toISOString() }]),
     ]);
     await sweepGoogleCalendar(env, new TickBudget('paid'));
-    expect((await computeBusyBlocksForUsers(env, ['u1'], Date.now(), Date.now() + 10 * DAY_MS)).get('u1')).toHaveLength(1);
+    expect(await importedRows(db)).toHaveLength(1);
+    fetchStub.restore();
+
+    // A personal time block the owner made by hand, in the same window --
+    // must survive the reconciliation below untouched.
+    const handMade = await call(
+      env,
+      '/personal-events',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${await authFor(env, 'u1')}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: 'My own note',
+          timezone: 'America/New_York',
+          startAt: start + 3 * HOUR_MS,
+          endAt: start + 4 * HOUR_MS,
+        }),
+      },
+    );
+    expect(handMade.status).toBe(201);
+
+    await makeDue(db);
+    fetchStub = stubFetch([TOKEN_RULE, EVENTS_LIST_RULE([]), INSERT_RULE]);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(await importedRows(db)).toHaveLength(0);
+    const survivor = await db.prepare(`SELECT title FROM personal_events WHERE user_id = 'u1'`).first<{ title: string }>();
+    expect(survivor?.title).toBe('My own note');
+  });
+
+  it('drops every imported row the moment reading is switched off, not at the next sweep', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedReader(db);
+    const start = Date.now() + DAY_MS;
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      EVENTS_LIST_RULE([
+        { id: 'goes-too', start: { dateTime: new Date(start).toISOString() }, end: { dateTime: new Date(start + HOUR_MS).toISOString() } },
+      ]),
+      INSERT_RULE,
+    ]);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+    expect(await importedRows(db)).toHaveLength(1);
 
     const auth = await authFor(env, 'u1');
     const res = await call(env, '/google', {
@@ -934,12 +1062,46 @@ describe('the busy-time pull', () => {
     });
     expect(res.status).toBe(200);
 
-    // Turning a disclosure off has to take effect when it is asked for, not up
-    // to an hour later.
-    const blocks = (await computeBusyBlocksForUsers(env, ['u1'], Date.now(), Date.now() + 10 * DAY_MS)).get('u1') ?? [];
-    expect(blocks).toHaveLength(0);
+    // Turning a disclosure off has to take effect when it is asked for, not
+    // up to an hour later.
+    expect(await importedRows(db)).toHaveLength(0);
+  });
+
+  it('refuses to edit an imported entry, pointing at Google as the source of truth', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedReader(db);
+    const start = Date.now() + DAY_MS;
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      EVENTS_LIST_RULE([
+        { id: 'immutable', summary: 'Locked', start: { dateTime: new Date(start).toISOString() }, end: { dateTime: new Date(start + HOUR_MS).toISOString() } },
+      ]),
+      INSERT_RULE,
+    ]);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+    const [row] = await importedRows(db);
+
+    const auth = await authFor(env, 'u1');
+    const patchRes = await call(env, `/personal-events/${row.id}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Renamed locally' }),
+    });
+    expect(patchRes.status).toBe(409);
+
+    const deleteRes = await call(env, `/personal-events/${row.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${auth}` },
+    });
+    expect(deleteRes.status).toBe(409);
+
+    // Untouched by either refused request.
+    const still = await db.prepare(`SELECT title FROM personal_events WHERE id = ?`).bind(row.id).first<{ title: string }>();
+    expect(still?.title).toBe('Locked');
   });
 });
+
 
 describe('disconnecting', () => {
   it('marks the connection disconnecting rather than deleting it outright', async () => {
