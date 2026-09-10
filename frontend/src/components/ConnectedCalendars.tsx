@@ -40,6 +40,13 @@ export default function ConnectedCalendars() {
   const status = useAsync(() => api.get<GoogleCalendarStatus>('/google/status'), []);
   const action = useAction();
   const [calendars, setCalendars] = useState<GoogleCalendarOption[] | null>(null);
+  // Distinct from `calendars === null`, which also describes "still loading"
+  // and "never fetched" -- this is specifically "we tried and it failed",
+  // which is what the picker being stuck disabled needs to explain rather
+  // than leave silent. `calendarsNonce` is what a Retry click bumps to make
+  // the effect below run again without duplicating its own fetch logic.
+  const [calendarsError, setCalendarsError] = useState(false);
+  const [calendarsNonce, setCalendarsNonce] = useState(0);
   const [returnNotice, setReturnNotice] = useState<{ tone: 'ok' | 'bad'; text: string } | null>(null);
 
   // The Worker redirects to `#/settings?google=…`, so the parameter lives in
@@ -63,20 +70,27 @@ export default function ConnectedCalendars() {
   useEffect(() => {
     if (!connection?.connected || connection.status === 'disconnecting') return;
     let cancelled = false;
+    setCalendarsError(false);
     api
       .get<GoogleCalendarOption[]>('/google/calendars')
       .then((list) => {
         if (!cancelled) setCalendars(list);
       })
-      // Deliberately swallowed rather than surfaced: failing to list calendars
-      // does not stop syncing, and connection.lastError below already carries
-      // the reason when the grant itself is the problem. Showing two errors for
-      // one cause reads as two faults.
-      .catch(() => undefined);
+      .catch(() => {
+        // Not surfaced as connection.lastError's kind of failure -- that field
+        // is about the grant itself, and this can fail for reasons that have
+        // nothing to do with it (a slow Google response, a network blip). But
+        // it has to be surfaced as *something*: leaving `calendars` at `null`
+        // forever disabled both pickers below with nothing on screen to say
+        // why, which read as the app being broken rather than one request
+        // having failed. `calendarsError` is what lets the picker say so and
+        // offer a way to try again, instead of silently sitting there.
+        if (!cancelled) setCalendarsError(true);
+      });
     return () => {
       cancelled = true;
     };
-  }, [connection?.connected, connection?.status]);
+  }, [connection?.connected, connection?.status, calendarsNonce]);
 
   // Hidden entirely when the operator hasn't provisioned Google on this
   // deployment. A button whose only possible outcome is a 503 is worse than no
@@ -154,6 +168,13 @@ export default function ConnectedCalendars() {
 
           {connection.lastError && (
             <InlineError message={connection.lastError} onRetry={connect} />
+          )}
+
+          {calendarsError && (
+            <InlineError
+              message="Couldn't load your list of Google calendars, so the pickers below are stuck empty."
+              onRetry={() => setCalendarsNonce((n) => n + 1)}
+            />
           )}
 
           <div>
