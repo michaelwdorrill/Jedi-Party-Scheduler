@@ -778,17 +778,26 @@ const POLL_OPTION_COLUMNS = ['id', 'event_id', 'start_at', 'end_at', 'display_or
 // way inviteStatements' does -- the recurring-conversion PATCH passes
 // `is_recurring = 1` so replacement options are written only if that
 // conversion's quota admission actually applied.
+// `displayOrder` is explicit only for the reconciling edit path, which inserts
+// a subset of the desired candidates and so cannot derive each one's position
+// from its position in the array it was given. Omitting it keeps the original
+// behaviour -- position in the array is the display order.
 function pollOptionStatements(
   env: Env,
   eventId: string,
-  options: readonly { startAt: number; endAt: number }[],
+  options: readonly { startAt: number; endAt: number; displayOrder?: number }[],
   guarded: boolean,
   mutationToken: string | null = null,
 ): D1PreparedStatement[] {
   const extraGuard = mutationToken === null ? '' : ' AND mutation_token = ?';
   const extraBinds = mutationToken === null ? [] : [mutationToken];
-  let order = 0;
-  const rows = options.map((opt) => [newId(), eventId, opt.startAt, opt.endAt, order++]);
+  const rows = options.map((opt, index) => [
+    newId(),
+    eventId,
+    opt.startAt,
+    opt.endAt,
+    opt.displayOrder ?? index,
+  ]);
   return chunkRows(rows, POLL_OPTION_COLUMNS.length, guarded ? 1 : 0).map((chunk) => {
     const values = chunk.flat();
     if (!guarded) {
@@ -1337,22 +1346,67 @@ export async function updateEvent(
   }
 
   if (input.pollOptions) {
-    // Replacing poll options resets any votes already cast on the old set --
-    // acceptable for v1 since editing a poll's candidate slots after voting
-    // has started is an edge case, not the common path.
     const { pollMode, pollResolutionMode } = normalizePollModes(input);
-    statements.push(
-      guardedStatement(
-        `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id = ?)`,
-        eventId,
-      ),
-      // Window submissions go with the candidates they were made on: they
-      // cascade from event_poll_options, so this DELETE clears them without
-      // a statement of its own. That is why the availability table keeps a
-      // foreign key on the option and not only on the event.
-      guardedStatement(`DELETE FROM event_poll_options WHERE event_id = ?`, eventId),
-    );
-    statements.push(...pollOptionStatements(env, eventId, input.pollOptions, true, mutationToken));
+
+    // Pass-11 review (R05). This block used to delete every vote on the event
+    // and then every candidate row, rebuilding the whole set from the request.
+    // EventFormPage sends `pollOptions` on *every* poll save -- it has no
+    // notion of "the candidates didn't change" -- so correcting a typo in the
+    // title, or just pressing Save changes, silently destroyed every vote
+    // already cast, with no warning and no confirmation. The option ids that
+    // existing Discord vote messages point at changed underneath them too.
+    //
+    // So candidates are now reconciled rather than replaced. Identity is the
+    // (start_at, end_at) pair, which is the only identity available: the
+    // request carries no ids, and two candidate slots with the same start and
+    // end *are* the same candidate to anyone voting on them. A row that
+    // survives keeps its id, and with it its votes, its window-availability
+    // submissions and its confirmed_at -- so an unrelated edit is now a no-op
+    // against all three, and an edit that changes one slot out of five no
+    // longer takes the votes on the other four with it.
+    const { results: existingOptions } = await env.DB.prepare(
+      `SELECT id, start_at, end_at, display_order FROM event_poll_options WHERE event_id = ?`,
+    )
+      .bind(eventId)
+      .all<{ id: string; start_at: number; end_at: number; display_order: number }>();
+
+    const slotKey = (startAt: number, endAt: number) => `${startAt}:${endAt}`;
+    const survivingByKey = new Map(existingOptions.map((row) => [slotKey(row.start_at, row.end_at), row]));
+    const desiredKeys = new Set(input.pollOptions.map((opt) => slotKey(opt.startAt, opt.endAt)));
+
+    // Candidates the organizer actually removed. Their votes and window
+    // submissions both cascade from event_poll_options (see that table's
+    // foreign keys), so deleting the row is enough to take them with it --
+    // which is correct here, unlike the blanket delete this replaces: these
+    // are the only candidates that genuinely stopped existing.
+    const removedIds = existingOptions
+      .filter((row) => !desiredKeys.has(slotKey(row.start_at, row.end_at)))
+      .map((row) => row.id);
+    // Reserving the two binds guardedStatement appends, the same way
+    // chunkRows' callers reserve theirs.
+    for (const chunk of chunkIds(removedIds, guardBinds.length)) {
+      statements.push(
+        guardedStatement(`DELETE FROM event_poll_options WHERE id IN (${placeholders(chunk.length)})`, ...chunk),
+      );
+    }
+
+    // Reordering the candidate list has to move the surviving rows with it, or
+    // the poll would render in its old order while claiming the new one.
+    const added: { startAt: number; endAt: number; displayOrder: number }[] = [];
+    input.pollOptions.forEach((opt, index) => {
+      const surviving = survivingByKey.get(slotKey(opt.startAt, opt.endAt));
+      if (!surviving) {
+        added.push({ startAt: opt.startAt, endAt: opt.endAt, displayOrder: index });
+        return;
+      }
+      if (surviving.display_order !== index) {
+        statements.push(
+          guardedStatement(`UPDATE event_poll_options SET display_order = ? WHERE id = ?`, index, surviving.id),
+        );
+      }
+    });
+
+    statements.push(...pollOptionStatements(env, eventId, added, true, mutationToken));
     statements.push(
       guardedStatement(
         `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,

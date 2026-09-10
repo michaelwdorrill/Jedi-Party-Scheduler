@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deleteUserCompletely } from '../src/lib/db';
+import { updateEvent } from '../src/lib/eventWrites';
 import { buildNoticeboard } from '../src/lib/noticeboard';
 import { runReminderSweep } from '../src/cron/reminders';
+import type { EventWriteInput } from '../src/lib/eventWrites';
 import type { ShimDatabase } from './d1shim';
 import {
   countRows,
@@ -9,6 +11,7 @@ import {
   DM_CHANNEL_RULE,
   dmSendRule,
   HOUR_MS,
+  loadEventRow,
   seedAttendance,
   seedEvent,
   seedGuild,
@@ -351,5 +354,182 @@ describe('a private multi-winner poll fans out private events (F-18 / R03)', () 
 
     const board = await buildNoticeboard(env, 'guild-1', now, now + 30 * DAY_MS);
     expect(board.map((o) => o.eventId)).toContain(spawned!.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R05
+// ---------------------------------------------------------------------------
+
+// updateEvent treated the presence of `pollOptions` as "replace the candidate
+// set", deleting every vote on the event and rebuilding the rows from the
+// request. EventFormPage sends that array on every poll save -- it has no
+// notion of "the candidates didn't change" -- so correcting a typo in the
+// title, or just pressing Save changes, silently destroyed every vote already
+// cast. Candidates are reconciled by their (start_at, end_at) slot now, so a
+// row that survives keeps its id, its votes, its window submissions and its
+// confirmed_at.
+describe('editing a poll keeps the votes on candidates that did not change (R05)', () => {
+  const SLOTS = [7, 8, 9];
+
+  async function seedPollWithVotes(db: ShimDatabase): Promise<{ now: number; optionIds: string[] }> {
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'voter');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'voter', 'guild-1');
+
+    const now = Date.now();
+    await seedEvent(db, {
+      id: 'poll-1',
+      organizerId: 'organizer',
+      title: 'Which night?',
+      eventType: 'poll',
+      startAt: null,
+      endAt: null,
+    });
+    await seedInvite(db, 'poll-1', 'organizer');
+    await seedInvite(db, 'poll-1', 'voter');
+
+    const optionIds: string[] = [];
+    for (const [index, day] of SLOTS.entries()) {
+      const id = `opt-${day}`;
+      optionIds.push(id);
+      await db
+        .prepare(
+          `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order)
+           VALUES (?, 'poll-1', ?, ?, ?)`,
+        )
+        .bind(id, now + day * DAY_MS, now + day * DAY_MS + HOUR_MS, index)
+        .run();
+      await db
+        .prepare(`INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES (?, 'voter', 'yes', ?)`)
+        .bind(id, now)
+        .run();
+    }
+    return { now, optionIds };
+  }
+
+  const slotsFor = (now: number, days: number[]) =>
+    days.map((day) => ({ startAt: now + day * DAY_MS, endAt: now + day * DAY_MS + HOUR_MS }));
+
+  // The reported case: nothing about the candidates changed at all.
+  it('keeps every vote when only the title changed', async () => {
+    const { db, env } = setup();
+    const { now, optionIds } = await seedPollWithVotes(db);
+
+    await updateEvent(
+      env,
+      'poll-1',
+      'guild-1',
+      { title: 'Which night? (fixed typo)', pollOptions: slotsFor(now, SLOTS) } as Partial<EventWriteInput>,
+      await loadEventRow(db, 'poll-1'),
+    );
+
+    expect(await countRows(db, 'event_poll_votes')).toBe(SLOTS.length);
+    // The rows themselves survived, so the option ids existing Discord vote
+    // messages point at are still the right ones.
+    for (const id of optionIds) {
+      expect(await countRows(db, 'event_poll_options', 'id = ?', id)).toBe(1);
+    }
+    const title = await db.prepare(`SELECT title FROM events WHERE id = 'poll-1'`).first<{ title: string }>();
+    expect(title?.title).toBe('Which night? (fixed typo)');
+  });
+
+  it('keeps the votes on the candidates that survive when one slot is replaced', async () => {
+    const { db, env } = setup();
+    const { now } = await seedPollWithVotes(db);
+
+    // Day 8 goes, day 12 arrives; days 7 and 9 are untouched.
+    await updateEvent(
+      env,
+      'poll-1',
+      'guild-1',
+      { pollOptions: slotsFor(now, [7, 12, 9]) } as Partial<EventWriteInput>,
+      await loadEventRow(db, 'poll-1'),
+    );
+
+    expect(await countRows(db, 'event_poll_votes', 'option_id = ?', 'opt-7')).toBe(1);
+    expect(await countRows(db, 'event_poll_votes', 'option_id = ?', 'opt-9')).toBe(1);
+    // The candidate the organizer actually removed took its vote with it.
+    expect(await countRows(db, 'event_poll_options', 'id = ?', 'opt-8')).toBe(0);
+    expect(await countRows(db, 'event_poll_votes', 'option_id = ?', 'opt-8')).toBe(0);
+    expect(await countRows(db, 'event_poll_options', 'event_id = ?', 'poll-1')).toBe(3);
+  });
+
+  it('reorders surviving candidates without dropping their votes', async () => {
+    const { db, env } = setup();
+    const { now } = await seedPollWithVotes(db);
+
+    await updateEvent(
+      env,
+      'poll-1',
+      'guild-1',
+      { pollOptions: slotsFor(now, [9, 7, 8]) } as Partial<EventWriteInput>,
+      await loadEventRow(db, 'poll-1'),
+    );
+
+    expect(await countRows(db, 'event_poll_votes')).toBe(SLOTS.length);
+    const order = await db
+      .prepare(`SELECT id, display_order FROM event_poll_options WHERE event_id = 'poll-1' ORDER BY display_order`)
+      .all<{ id: string; display_order: number }>();
+    expect(order.results.map((r) => r.id)).toEqual(['opt-9', 'opt-7', 'opt-8']);
+  });
+
+  // Window submissions cascade from the candidate row, so they are only safe
+  // for as long as the row is.
+  it('keeps window-availability submissions across an unrelated edit', async () => {
+    const { db, env } = setup();
+    const { now } = await seedPollWithVotes(db);
+    await db
+      .prepare(
+        `INSERT INTO event_window_availability (option_id, event_id, user_id, avail_start_at, avail_end_at, submitted_at)
+         VALUES ('opt-7', 'poll-1', 'voter', ?, ?, ?)`,
+      )
+      .bind(now + 7 * DAY_MS, now + 7 * DAY_MS + HOUR_MS, now)
+      .run();
+
+    await updateEvent(
+      env,
+      'poll-1',
+      'guild-1',
+      { title: 'Renamed', pollOptions: slotsFor(now, SLOTS) } as Partial<EventWriteInput>,
+      await loadEventRow(db, 'poll-1'),
+    );
+
+    expect(await countRows(db, 'event_window_availability', 'option_id = ?', 'opt-7')).toBe(1);
+  });
+
+  // A confirmed multi-winner day is referenced by the event it spawned
+  // (events.created_from_option_id, a foreign key with no ON DELETE action),
+  // so the blanket delete could not run at all once fan-out had happened.
+  it('lets an unrelated edit through on a poll whose day has already fanned out', async () => {
+    const { db, env } = setup();
+    const { now } = await seedPollWithVotes(db);
+    await db.prepare(`UPDATE event_poll_options SET confirmed_at = ? WHERE id = 'opt-7'`).bind(now).run();
+    await db
+      .prepare(
+        `INSERT INTO events (id, guild_id, organizer_id, title, event_type, timezone, start_at, end_at, status,
+           poll_mode, poll_resolution_mode, is_recurring, created_from_poll_id, created_from_option_id,
+           created_at, updated_at)
+         VALUES ('spawned', 'guild-1', 'organizer', 'Which night?', 'single', 'America/New_York', ?, ?, 'active',
+           'options', 'single_winner', 0, 'poll-1', 'opt-7', ?, ?)`,
+      )
+      .bind(now + 7 * DAY_MS, now + 7 * DAY_MS + HOUR_MS, now, now)
+      .run();
+
+    await expect(
+      updateEvent(
+        env,
+        'poll-1',
+        'guild-1',
+        { title: 'Renamed', pollOptions: slotsFor(now, SLOTS) } as Partial<EventWriteInput>,
+        await loadEventRow(db, 'poll-1'),
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(await countRows(db, 'event_poll_options', 'id = ?', 'opt-7')).toBe(1);
+    // The confirmation survived too -- it lives on the candidate row.
+    expect(await countRows(db, 'event_poll_options', 'confirmed_at IS NOT NULL AND id = ?', 'opt-7')).toBe(1);
   });
 });
