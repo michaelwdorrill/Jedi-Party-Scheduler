@@ -101,7 +101,7 @@ function calendarCalls(stub: FetchStub): string[] {
 // and the orphan sweep addressed the calendar they moved to. Two branches
 // disagreeing about where one event lives.
 describe('a destination change moves the entry rather than maintaining the old one (P15-01)', () => {
-  async function seedMovedDestination(db: ShimDatabase, env: Env): Promise<number> {
+  async function seedMovedDestination(db: ShimDatabase): Promise<number> {
     await seedGuild(db, 'guild-1');
     await seedUser(db, 'u1');
     await seedMembership(db, 'u1', 'guild-1');
@@ -125,7 +125,7 @@ describe('a destination change moves the entry rather than maintaining the old o
   it('creates the occurrence in the calendar the user actually chose', async () => {
     const { db, env: base } = setup('paid');
     const env = googleEnv(base);
-    await seedMovedDestination(db, env);
+    await seedMovedDestination(db);
 
     fetchStub = stubFetch([
       TOKEN_RULE,
@@ -160,7 +160,7 @@ describe('a destination change moves the entry rather than maintaining the old o
   it('keeps the old entry when its removal fails, rather than duplicating it', async () => {
     const { db, env: base } = setup('paid');
     const env = googleEnv(base);
-    await seedMovedDestination(db, env);
+    await seedMovedDestination(db);
 
     fetchStub = stubFetch([
       TOKEN_RULE,
