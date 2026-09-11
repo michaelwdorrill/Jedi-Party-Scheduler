@@ -3,6 +3,9 @@ import { deleteUserCompletely } from '../src/lib/db';
 import { createEventWithInvites, updateEvent } from '../src/lib/eventWrites';
 import { runReminderSweep } from '../src/cron/reminders';
 import { readCursorKey } from '../src/cron/cursor';
+import { sweepGoogleCalendar } from '../src/cron/googleSync';
+import { TickBudget } from '../src/cron/budget';
+import { seal } from '../src/lib/crypto';
 import { ValidationError } from '../src/lib/validate';
 import type { Env } from '../src/env';
 import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
@@ -448,5 +451,132 @@ describe('an auto-cancelled occurrence always leaves a notice behind (P12-09)', 
       ).toBe(true);
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P12-07
+// ---------------------------------------------------------------------------
+
+const GOOGLE_ENCRYPTION_KEY = 'test-google-encryption-key-at-least-32-chars';
+
+function googleEnv(base: Env): Env {
+  return {
+    ...base,
+    GOOGLE_SYNC_MODE: 'live',
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
+    GOOGLE_TOKEN_ENCRYPTION_KEY: GOOGLE_ENCRYPTION_KEY,
+  };
+}
+
+async function seedGoogleConnection(db: ShimDatabase, userId: string): Promise<void> {
+  const sealed = await seal('stored-refresh-token', GOOGLE_ENCRYPTION_KEY);
+  const now = Date.now();
+  await db
+    .prepare(
+      `INSERT INTO google_calendar_connections
+         (user_id, refresh_token_ciphertext, refresh_token_iv, access_token_ciphertext, access_token_iv,
+          access_token_expires_at, google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
+          last_synced_at, disconnect_attempts, connected_at, updated_at)
+       VALUES (?, ?, ?, NULL, NULL, NULL, ?, 'primary', NULL, 1, 'active', NULL, 0, ?, ?)`,
+    )
+    .bind(userId, sealed.ciphertext, sealed.iv, `${userId}@gmail.com`, now, now)
+    .run();
+}
+
+// sweepGoogleCalendar takes one connection per tick (MAX_CONNECTIONS_PER_TICK)
+// ordered by last_synced_at ascending, NULLs first -- so the scheduling key is
+// the bookkeeping stamp at the end of syncOneConnection. Three of that
+// function's exits skipped it: the ones where tryCalendarWrite runs out
+// mid-loop. A connection with more upcoming events than one tick's write
+// allowance, against a calendar that rejects writes, therefore made no durable
+// progress AND never got stamped -- so it sorted first again on the next tick,
+// and on every tick after that, and no other user's calendar was ever synced
+// again.
+//
+// The fix reserves the bookkeeping query up front, because tryCalendarWrite
+// draws on the same pool: a tick that has run out cannot afford to say so
+// afterwards.
+describe('one failing Google connection does not starve every later user (P12-07)', () => {
+  it('services a second due user even while the first keeps failing', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+
+    await seedGuild(db, 'guild-1');
+    for (const uid of ['a-user', 'b-user']) {
+      await seedUser(db, uid);
+      await seedMembership(db, uid, 'guild-1');
+      await seedGoogleConnection(db, uid);
+    }
+    await db.prepare(`UPDATE users SET accepted_policy_version = 99 WHERE id IN ('a-user','b-user')`).run();
+
+    // Sixteen upcoming sessions for the first user, well inside the app's own
+    // limits, against a calendar that refuses every write.
+    const now = Date.now();
+    for (let i = 0; i < 16; i++) {
+      const id = `ev-${String(i).padStart(2, '0')}`;
+      await seedEvent(db, {
+        id,
+        organizerId: 'a-user',
+        startAt: now + (i + 1) * DAY_MS,
+        endAt: now + (i + 1) * DAY_MS + HOUR_MS,
+      });
+      await seedInvite(db, id, 'a-user');
+    }
+
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'at', expires_in: 3600 } },
+      { match: '/calendar/v3/calendars/', status: 403, body: { error: { message: 'no write access' } } },
+    ]);
+
+    // Several hours of ticks. The first user can never finish; the second has
+    // nothing to do and needs only its turn.
+    for (let tick = 0; tick < 4; tick++) {
+      await sweepGoogleCalendar(env, new TickBudget('free'));
+    }
+
+    const second = await db
+      .prepare(`SELECT last_synced_at FROM google_calendar_connections WHERE user_id = 'b-user'`)
+      .first<{ last_synced_at: number | null }>();
+    expect(second!.last_synced_at, 'the second user was never serviced at all').not.toBeNull();
+  });
+
+  it('records that a truncated run is not a complete one', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'a-user');
+    await seedMembership(db, 'a-user', 'guild-1');
+    await seedGoogleConnection(db, 'a-user');
+    await db.prepare(`UPDATE users SET accepted_policy_version = 99 WHERE id = 'a-user'`).run();
+
+    const now = Date.now();
+    for (let i = 0; i < 16; i++) {
+      const id = `ev-${String(i).padStart(2, '0')}`;
+      await seedEvent(db, {
+        id,
+        organizerId: 'a-user',
+        startAt: now + (i + 1) * DAY_MS,
+        endAt: now + (i + 1) * DAY_MS + HOUR_MS,
+      });
+      await seedInvite(db, id, 'a-user');
+    }
+
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'at', expires_in: 3600 } },
+      { match: '/calendar/v3/calendars/', status: 200, body: { id: 'google-event-1' } },
+    ]);
+
+    await sweepGoogleCalendar(env, new TickBudget('free'));
+
+    // Stamped, so the next tick moves on -- but not reported as a clean sync,
+    // which is the state R18 calls the most misleading this feature can be in.
+    const row = await db
+      .prepare(`SELECT last_synced_at, last_error FROM google_calendar_connections WHERE user_id = 'a-user'`)
+      .first<{ last_synced_at: number | null; last_error: string | null }>();
+    expect(row!.last_synced_at).not.toBeNull();
+    expect(row!.last_error).not.toBeNull();
   });
 });

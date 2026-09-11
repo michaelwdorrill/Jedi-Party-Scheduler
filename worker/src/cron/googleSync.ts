@@ -346,10 +346,24 @@ async function syncOneConnection(
   // delivery this tick cannot afford costs nothing at all". The unit of work
   // here is not one write, it is read-then-write, so that is what has to be
   // affordable before anything starts.
-  if (!budget.trySpend(PER_CONNECTION_READ_QUERIES + 1)) {
+  //
+  // The `+ 2` rather than `+ 1` is the Pass-12 review (P12-07): the second is
+  // the closing bookkeeping UPDATE, reserved here so the write loops below
+  // cannot spend it. They can, and did -- tryCalendarWrite draws on the same
+  // query pool, so running out mid-loop meant returning without the one
+  // statement that records this connection was serviced. With
+  // MAX_CONNECTIONS_PER_TICK at 1 and candidates ordered by last_synced_at
+  // ascending, a connection that never gets stamped wins the single slot again
+  // on every subsequent tick, forever: sixteen upcoming events against a
+  // calendar that rejects writes were enough to make one user's broken
+  // connection the only one this deployment would ever look at again.
+  //
+  // Reserving it is the only way to hold it. A tick that has run out cannot
+  // afford to say so afterwards.
+  if (!budget.trySpend(PER_CONNECTION_READ_QUERIES + 2)) {
     console.warn(
       `Google sync skipped for ${row.user_id}: this tick could not afford the calendar read ` +
-        `(${PER_CONNECTION_READ_QUERIES + 1} queries needed). Retrying next hour.`,
+        `(${PER_CONNECTION_READ_QUERIES + 2} queries needed). Retrying next hour.`,
     );
     return;
   }
@@ -397,6 +411,9 @@ async function syncOneConnection(
   // and the ordinary interval then delayed the retry as if all were well.
   let writeFailures = 0;
   let firstFailure: string | null = null;
+  // Set instead of returning when the calendar-write allowance runs out, so
+  // every exit reaches the bookkeeping below (Pass-12 review, P12-07).
+  let outOfBudget = false;
   const noteWriteFailure = (message: string) => {
     writeFailures += 1;
     firstFailure ??= message;
@@ -426,7 +443,10 @@ async function syncOneConnection(
       // tick beyond the two reads above.
       if (unchanged) continue;
 
-      if (!budget.tryCalendarWrite()) return;
+      if (!budget.tryCalendarWrite()) {
+        outOfBudget = true;
+        break;
+      }
       const result = await patchCalendarEvent(accessToken, row.calendar_id, existing.google_event_id, payload);
       if (result.ok) {
         await env.DB.prepare(
@@ -451,7 +471,10 @@ async function syncOneConnection(
       continue;
     }
 
-    if (!budget.tryCalendarWrite()) return;
+    if (!budget.tryCalendarWrite()) {
+      outOfBudget = true;
+      break;
+    }
     const result = await insertCalendarEvent(accessToken, row.calendar_id, payload);
     if (result.ok) {
       await env.DB.prepare(
@@ -480,14 +503,17 @@ async function syncOneConnection(
   // Whatever is left in the map has a link row but no live occurrence any
   // more: cancelled, declined since, edited out of the window, or simply now
   // in the past. Only the first three should actually be removed from Google.
-  for (const orphan of linkByKey.values()) {
+  for (const orphan of outOfBudget ? [] : linkByKey.values()) {
     // A past entry is not an orphan, it is history -- and the window is
     // forward-looking, so everything that has happened falls out of `desired`
     // on the next tick regardless. Deleting on that basis would quietly erase
     // someone's record of every session they have ever played.
     if ((orphan.synced_end_at ?? 0) < now) continue;
 
-    if (!budget.tryCalendarWrite()) return;
+    if (!budget.tryCalendarWrite()) {
+      outOfBudget = true;
+      break;
+    }
     const result = await deleteCalendarEvent(accessToken, row.calendar_id, orphan.google_event_id);
     if (result.ok) {
       await env.DB.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(orphan.id).run();
@@ -534,16 +560,36 @@ async function syncOneConnection(
     writeFailures > 0
       ? `${writeFailures} calendar ${writeFailures === 1 ? 'entry' : 'entries'} could not be written to Google` +
         (firstFailure ? `: ${firstFailure}` : '.')
-      : null;
+      : outOfBudget
+        ? // Not an error in the sense the other messages are -- nothing is
+          // broken and nothing needs the user's attention -- but saying
+          // nothing would leave a fresh "Last synced" standing for a calendar
+          // that only received part of what it was owed, which is R18's
+          // "most misleading state this feature can be in".
+          'Some entries are still waiting to sync and will be sent on a later run.'
+        : null;
   if (pushError) {
     console.warn(`Google sync for ${row.user_id}: ${pushError}`);
   }
+  // Reached on every exit from the push half now, including the ones where the
+  // calendar-write allowance ran out mid-loop (Pass-12 review, P12-07). The
+  // query for it was reserved at the top of this function, so it is affordable
+  // even at the moment the loops above found they were not.
+  //
+  // last_synced_at is what paces the retry AND what orders the candidate
+  // query, so stamping it unconditionally is what makes scheduling fair
+  // independently of whether the work succeeded -- one connection's bad hour
+  // costs it its turn, not everybody else's.
   await env.DB.prepare(
     `UPDATE google_calendar_connections SET last_synced_at = ?, last_error = ?, updated_at = ? WHERE user_id = ?`,
   )
     .bind(now, pushError, now, row.user_id)
     .run();
 
+  // Nothing left to read Google with -- the pull half would spend its own
+  // reservation check and return anyway, and this says so without the round
+  // trip.
+  if (outOfBudget) return;
   await syncImportedPersonalEvents(env, row, accessToken, budget, now, pushedGoogleEventIds);
 }
 
