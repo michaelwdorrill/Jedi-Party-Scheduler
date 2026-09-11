@@ -4,6 +4,7 @@ import { addInvitesToEvent, createEventWithInvites, updateEvent } from '../src/l
 import { assertValidRoster } from '../src/lib/groups';
 import { runReminderSweep } from '../src/cron/reminders';
 import { readCursorKey } from '../src/cron/cursor';
+import { expandOccurrences } from '../src/lib/recurrence';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
 import { TickBudget } from '../src/cron/budget';
 import { seal, unseal } from '../src/lib/crypto';
@@ -1062,5 +1063,110 @@ describe('a group roster cannot exceed its cap (P12-17)', () => {
     await expect(
       assertValidRoster(env, ['owner', ...Array.from({ length: 24 }, (_, i) => `m-${String(i).padStart(2, '0')}`)]),
     ).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P12-13 / P12-14
+// ---------------------------------------------------------------------------
+
+const BASE_RULE = {
+  interval: 1,
+  byWeekday: null,
+  byMonthDay: null,
+  startTime: '19:00',
+  durationMinutes: 120,
+  endType: 'never' as const,
+  endDate: null,
+  endCount: null,
+};
+
+// R22 fixed two counting bugs in this expander: empty months for a day-31 rule,
+// and the partial first week of a WEEKLY series. The MONTHLY arm kept a third.
+//
+// A candidate that falls before the series' own start date is filtered out of
+// the output -- pushIfInWindow returns early for it -- but the MONTHLY loop
+// still advanced occurrenceIndex past it, so it consumed one of the
+// occurrences an after_count series is allowed. The WEEKLY arm already handles
+// exactly this with a `continue` that does not count; MONTHLY did not.
+describe('a monthly series does not spend an occurrence on a date before it starts (P12-13)', () => {
+  it('gives an after-count-3 series three real dates', () => {
+    const occurrences = expandOccurrences(
+      { ...BASE_RULE, freq: 'MONTHLY', byMonthDay: 1, startDate: '2026-01-15', endType: 'after_count', endCount: 3 },
+      'UTC',
+      Date.UTC(2026, 0, 1),
+      Date.UTC(2026, 11, 31),
+      [],
+    );
+
+    // January 1st precedes the 15th the series starts on, so it is not an
+    // occurrence at all -- the third is April.
+    expect(occurrences.map((o) => o.date)).toEqual(['2026-02-01', '2026-03-01', '2026-04-01']);
+  });
+
+  it('is unchanged when the start day is the rule day', () => {
+    const occurrences = expandOccurrences(
+      { ...BASE_RULE, freq: 'MONTHLY', byMonthDay: 15, startDate: '2026-01-15', endType: 'after_count', endCount: 3 },
+      'UTC',
+      Date.UTC(2026, 0, 1),
+      Date.UTC(2026, 11, 31),
+      [],
+    );
+    expect(occurrences.map((o) => o.date)).toEqual(['2026-01-15', '2026-02-15', '2026-03-15']);
+  });
+});
+
+// The fast-forward that skips a long-dormant series up to the query window
+// steps back one recurrence interval "to be safe against partial-day rounding
+// at the boundary". That slack is measured in intervals and takes no account
+// of how long an occurrence lasts -- so an occurrence longer than one interval
+// begins before the step-back point, is never generated, and is therefore
+// never tested for overlap.
+//
+// The window it vanishes from is a *narrower* one inside a window that
+// returned it, which is what makes this worse than a missing row: the
+// calendar and the free/busy assistant report a genuinely occupied interval as
+// free, and the narrower the question the more likely they are to.
+describe('a long occurrence stays visible in a narrow overlapping window (P12-14)', () => {
+  const weekLong = {
+    ...BASE_RULE,
+    freq: 'DAILY' as const,
+    startDate: '2026-09-01',
+    startTime: '09:00',
+    durationMinutes: 7 * 24 * 60,
+    endType: 'after_count' as const,
+    endCount: 1,
+  };
+
+  it('is returned by the window that contains its start', () => {
+    const occurrences = expandOccurrences(weekLong, 'UTC', Date.UTC(2026, 8, 1), Date.UTC(2026, 8, 8), []);
+    expect(occurrences.map((o) => o.date)).toEqual(['2026-09-01']);
+  });
+
+  it('is still returned by a window entirely inside it', () => {
+    const occurrences = expandOccurrences(weekLong, 'UTC', Date.UTC(2026, 8, 5), Date.UTC(2026, 8, 6), []);
+    expect(
+      occurrences.map((o) => o.date),
+      'narrowing the range dropped an event that still overlaps it',
+    ).toEqual(['2026-09-01']);
+  });
+
+  it('holds for a weekly series too', () => {
+    const longWeekly = {
+      ...BASE_RULE,
+      freq: 'WEEKLY' as const,
+      byWeekday: '1',
+      startDate: '2026-09-01',
+      startTime: '09:00',
+      durationMinutes: 10 * 24 * 60,
+      endType: 'never' as const,
+    };
+    const wide = expandOccurrences(longWeekly, 'UTC', Date.UTC(2026, 8, 1), Date.UTC(2026, 9, 15), []);
+    expect(wide.length).toBeGreaterThan(0);
+
+    // A one-day window in the middle of the series must still see whichever
+    // occurrence is running across it.
+    const narrow = expandOccurrences(longWeekly, 'UTC', Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 2), []);
+    expect(narrow.length).toBeGreaterThan(0);
   });
 });

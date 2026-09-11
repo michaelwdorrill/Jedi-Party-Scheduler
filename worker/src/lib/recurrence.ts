@@ -37,6 +37,37 @@ export interface ExpandedOccurrence {
 // pathological rule (e.g. "never"-ending daily event created years ago).
 const MAX_ITERATIONS = 3000;
 
+const MINUTES_PER_DAY = 24 * 60;
+
+// How many whole periods the fast-forward has to step back before the window
+// so that every occurrence still overlapping it is actually generated.
+//
+// Pass-12 review (P12-14). This used to be the literal 1 in each arm, with the
+// comment "step back one period to be safe against partial-day rounding at the
+// boundary" -- slack measured in intervals, with no reference to how long an
+// occurrence lasts. An occurrence longer than one interval therefore begins
+// before the step-back point, is never generated at all, and so is never
+// tested for overlap: a seven-day daily occurrence starting 1 September was
+// returned by a 1-8 September query and vanished from a 5-6 September one.
+//
+// That is worse than a missing row. The narrower window is a subset of one
+// that returned it, so the calendar and the free/busy assistant report a
+// genuinely occupied interval as free, and the more precise the question the
+// likelier they are to. MAX_EVENT_DURATION_MS allows a year, so this is well
+// inside what the app accepts rather than a pathological input.
+//
+// One period of the original rounding slack, plus however many periods the
+// duration itself spans. MAX_ITERATIONS still bounds the walk.
+//
+// What this does not cover: an override that *moves* an occurrence later, out
+// of the span its rule implies. Overrides are keyed by the pre-override date,
+// so the candidate has to be generated before its override can be read, and a
+// move of arbitrary size cannot be predicted from the rule alone. That is a
+// narrower and separate problem from the one this fixes.
+function lookbackPeriods(rule: RecurrenceRule, periodMinutes: number): number {
+  return 1 + Math.ceil(Math.max(0, rule.durationMinutes) / Math.max(1, periodMinutes));
+}
+
 // Pure: expands a recurrence rule into concrete occurrences overlapping
 // [windowFromMs, windowToMs]. No DB access, so it's equally usable for guild
 // events, personal events, and unit-style checks.
@@ -87,8 +118,7 @@ export function expandOccurrences(
 
   if (rule.freq === 'DAILY') {
     const daysSinceStart = Math.max(0, Math.floor(windowStart.diff(seriesStart, 'days').days));
-    // Step back one period to be safe against partial-day rounding at the boundary.
-    let k = Math.max(0, Math.floor(daysSinceStart / interval) - 1);
+    let k = Math.max(0, Math.floor(daysSinceStart / interval) - lookbackPeriods(rule, interval * MINUTES_PER_DAY));
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
       const candidate = seriesStart.plus({ days: k * interval });
@@ -112,7 +142,10 @@ export function expandOccurrences(
 
     const seriesStartWeek = seriesStart.startOf('week'); // Luxon weeks start Monday
     const weeksSinceStart = Math.max(0, Math.floor(windowStart.diff(seriesStartWeek, 'weeks').weeks));
-    let weekIndex = Math.max(0, Math.floor(weeksSinceStart / interval) - 1);
+    let weekIndex = Math.max(
+      0,
+      Math.floor(weeksSinceStart / interval) - lookbackPeriods(rule, interval * 7 * MINUTES_PER_DAY),
+    );
 
     // Occurrences elapsed before the week we fast-forwarded to, so `end_count`
     // is measured against the true series position rather than the window.
@@ -150,7 +183,12 @@ export function expandOccurrences(
     const day = rule.byMonthDay ?? seriesStart.day;
     const seriesStartMonth = seriesStart.startOf('month');
     const monthsSinceStart = Math.max(0, Math.floor(windowStart.diff(seriesStartMonth, 'months').months));
-    let monthIndex = Math.max(0, Math.floor(monthsSinceStart / interval) - 1);
+    // 28 days is the shortest month, so pricing a period at 28 days can only
+    // ever step back further than needed, never less far.
+    let monthIndex = Math.max(
+      0,
+      Math.floor(monthsSinceStart / interval) - lookbackPeriods(rule, interval * 28 * MINUTES_PER_DAY),
+    );
 
     // Pass-11 review (R22): months are not occurrences. A rule on day 31 has
     // no occurrence in February, April, June, September or November, but the
@@ -164,19 +202,39 @@ export function expandOccurrences(
     // skipped over: only day 29-31 rules can miss a month at all, so for
     // everything else this is exactly monthIndex, and the loop runs at most
     // once per month the series has existed.
+    // Pass-12 review (P12-13): `candidate >= seriesStart` here and in the loop
+    // below. R22 taught this arm that an empty month is not an occurrence; the
+    // remaining case is a month whose day falls *before the series' own start
+    // date*, which only the start month can produce and only when byMonthDay
+    // precedes the day the series begins on.
+    //
+    // pushIfInWindow already refuses to emit such a candidate -- it returns
+    // early for anything before seriesStart -- but the loop counted it anyway,
+    // so it consumed one of the occurrences an after_count series is allowed.
+    // "The 1st of the month, three times" starting 15 January produced
+    // 1 February and 1 March and then stopped, because 1 January had already
+    // spent the third. The WEEKLY arm has always skipped these with a
+    // `continue` that does not count; this is the same rule.
+    //
+    // Only reachable through the API directly: the form sets byMonthDay from
+    // the start date, so the two always agree there.
     let occurrenceIndex = 0;
     for (let m = 0; m < monthIndex; m++) {
       const monthStart = seriesStartMonth.plus({ months: m * interval });
-      if (day <= (monthStart.daysInMonth ?? 0)) occurrenceIndex++;
+      if (day > (monthStart.daysInMonth ?? 0)) continue;
+      if (monthStart.set({ day }) < seriesStart) continue;
+      occurrenceIndex++;
     }
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
       const monthStart = seriesStartMonth.plus({ months: monthIndex * interval });
       if (day <= (monthStart.daysInMonth ?? 0)) {
         const candidate = monthStart.set({ day });
-        if (!pushIfInWindow(candidate, occurrenceIndex)) break;
-        occurrenceIndex++;
-        if (candidate > windowEnd) break;
+        if (candidate >= seriesStart) {
+          if (!pushIfInWindow(candidate, occurrenceIndex)) break;
+          occurrenceIndex++;
+          if (candidate > windowEnd) break;
+        }
       } else if (monthStart > windowEnd) {
         break;
       }
