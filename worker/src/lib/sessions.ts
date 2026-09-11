@@ -37,10 +37,29 @@ export async function createSession(env: Env, userId: string): Promise<{ id: str
     .bind(id, userId, id, now, now, now + SESSION_TTL_MS, CURRENT_POLICY_VERSION)
     .run();
 
+  // Only *live* sessions count toward the cap, and only live sessions are
+  // evicted by it (Pass-13 review, F-36).
+  //
+  // The cap is about how many places a person is signed in. Counting rows was
+  // a fair proxy when a row meant a login, and stopped being one when F-20
+  // made every refresh insert a row: a couple of devices refreshing on their
+  // own schedules can put twenty rows in this table in a day, and the next
+  // login on a third device would evict a *current* successor belonging to one
+  // of the others -- a silent logout with no replay and nothing to explain it.
+  // P13-02's retention of superseded rows makes that a certainty rather than a
+  // risk, which is why the two land together.
+  //
+  // Superseded and revoked rows are left alone here: they are inert for
+  // authentication but still carry the id-to-family mapping that logout and
+  // reuse detection need, and pruneStaleSessions removes them at expiry.
   await env.DB.prepare(
-    `DELETE FROM sessions WHERE user_id = ? AND id NOT IN (
-       SELECT id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
-     )`,
+    `DELETE FROM sessions
+     WHERE user_id = ? AND superseded_at IS NULL AND revoked_at IS NULL
+       AND id NOT IN (
+         SELECT id FROM sessions
+         WHERE user_id = ? AND superseded_at IS NULL AND revoked_at IS NULL
+         ORDER BY created_at DESC LIMIT ?
+       )`,
   )
     .bind(userId, userId, MAX_SESSIONS_PER_USER)
     .run();
@@ -56,16 +75,33 @@ export async function pruneStaleSessions(env: Env): Promise<void> {
   // Sessions issued under a superseded policy are inert but not revoked and
   // not expired, so without this clause they would sit here until their TTL
   // ran out. Same reasoning as the other two: nothing else removes them.
-  // Superseded rows join the list for the same reason (F-20): once the
-  // rotation grace has passed they are as inert as a revoked one, and nothing
-  // else would ever remove them before their seven-day TTL. Refresh runs often
-  // enough that they would otherwise be the bulk of this table.
+  //
+  // Superseded rows are NOT in this list any more (Pass-13 review, P13-02).
+  // F-20 removed them once the rotation grace had passed, on the reasoning
+  // that they are as inert as a revoked one -- true for *authentication*, and
+  // wrong for everything migration 0042 then built on top of them. A
+  // superseded row is what maps its own id to its family, and logout, reuse
+  // detection and the offline revocation queue all resolve a family by reading
+  // the row whose token was presented. Delete it and `revokeSession` falls back
+  // to treating that id as its own family, matches no descendant, revokes
+  // nothing, and returns success.
+  //
+  // That is worse than a missed cleanup: the offline revocation queue accepts
+  // the 200 and deletes its pending entry, so the ineffective logout is
+  // permanently forgotten. A root token happens to work, because its id
+  // equals its family id -- which is why testing only a root token misses
+  // this entirely, as ours did.
+  //
+  // So they now go at absolute expiry with everything else. The cost is rows:
+  // a session refreshed every half hour for its seven days leaves a few
+  // hundred, all inert. That is what makes counting only live rows toward
+  // MAX_SESSIONS_PER_USER (see createSession) a requirement rather than a
+  // tidy-up -- the two changes have to land together.
   await env.DB.prepare(
     `DELETE FROM sessions
-     WHERE expires_at < ? OR revoked_at IS NOT NULL OR policy_version <> ?
-        OR (superseded_at IS NOT NULL AND superseded_at < ?)`,
+     WHERE expires_at < ? OR revoked_at IS NOT NULL OR policy_version <> ?`,
   )
-    .bind(now, CURRENT_POLICY_VERSION, now - ROTATION_GRACE_MS)
+    .bind(now, CURRENT_POLICY_VERSION)
     .run();
 }
 
@@ -182,8 +218,10 @@ export async function rotateSession(env: Env, sessionId: string, userId: string)
       return null;
     }
     // Inside the grace: the other tab already rotated this one. Hand back what
-    // it produced.
-    return row.successor_id;
+    // it produced -- but only if it is still usable. A successor that logout
+    // revoked, or that has since been superseded past its own grace, must not
+    // be handed to a caller as a working session (Pass-13 review, P13-01).
+    return usableSuccessor(env, row.successor_id, userId);
   }
 
   const id = newId();
@@ -192,9 +230,21 @@ export async function rotateSession(env: Env, sessionId: string, userId: string)
     // Retired, not revoked: see migration 0041 for why those are different
     // facts. This is also the claim -- `superseded_at IS NULL` means exactly
     // one concurrent caller can win it.
+    // Pass-13 review (P13-01): the claim carries the WHOLE usable-session
+    // predicate, not just `superseded_at IS NULL`.
+    //
+    // The checks above run against a row read before this transaction, and
+    // logout can land in between. With only the supersede guard here, that
+    // logout revoked the family, this claim still won on the now-revoked row,
+    // and the INSERT below created a successor with revoked_at NULL -- an
+    // active session minted after logout had already returned 200. Checking
+    // revocation and expiry at read time is not enough when the thing being
+    // competed for is a write.
     env.DB.prepare(
-      `UPDATE sessions SET superseded_at = ?, successor_id = ? WHERE id = ? AND superseded_at IS NULL`,
-    ).bind(now, id, sessionId),
+      `UPDATE sessions SET superseded_at = ?, successor_id = ?
+       WHERE id = ? AND superseded_at IS NULL
+         AND revoked_at IS NULL AND expires_at > ? AND policy_version = ?`,
+    ).bind(now, id, sessionId, now, CURRENT_POLICY_VERSION),
     // Conditioned on that claim rather than run unconditionally, and in the
     // same batch so the two cannot come apart. A caller that lost the race
     // finds someone else's successor_id on the row and inserts nothing, which
@@ -209,14 +259,26 @@ export async function rotateSession(env: Env, sessionId: string, userId: string)
   ]);
 
   if (claim.meta.changes === 0) {
-    // Lost the race between the read above and the claim. The winner's
-    // successor is the one to use.
+    // The claim did not land. Either another caller won the race, or the
+    // predicate stopped holding between the read and this write -- which is
+    // exactly the logout case P13-01 is about. Both are answered by reading
+    // the row again and validating whatever successor it names: a revoked
+    // family yields nothing usable, and a genuine race yields the winner's.
     const winner = await env.DB.prepare(`SELECT successor_id FROM sessions WHERE id = ?`)
       .bind(sessionId)
       .first<{ successor_id: string | null }>();
-    return winner?.successor_id ?? null;
+    return usableSuccessor(env, winner?.successor_id ?? null, userId);
   }
   return id;
+}
+
+// A successor this function is about to hand back is only worth handing back
+// if it would actually authenticate. Reuses isSessionActive rather than
+// restating its predicate, so the two can never disagree about what "usable"
+// means -- which is the mistake P13-01 was.
+async function usableSuccessor(env: Env, successorId: string | null, userId: string): Promise<string | null> {
+  if (!successorId) return null;
+  return (await isSessionActive(env, successorId, userId)) ? successorId : null;
 }
 
 // Logging out ends the whole chain the session belongs to, not just the row
