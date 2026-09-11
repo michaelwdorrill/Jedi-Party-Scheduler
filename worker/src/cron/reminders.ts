@@ -2203,6 +2203,20 @@ async function resolveMinimumAttendeesDeadline(
     // drains, across as many ticks as it takes. Pre-creating them does not
     // suppress an immediate send: the claim below updates a row in this state
     // rather than skipping it.
+    // Pass-15 review (P15-06) deliberately leaves this writer UNCAPPED, and
+    // says so rather than letting the omission read as another oversight.
+    //
+    // The three user-driven writers now share OVERRIDE_ADMISSION_SQL, because
+    // a person filing requests can be told no. This one is the automatic
+    // minimum-attendees cancellation: the event has already failed to meet its
+    // floor and everyone invited is about to be told it is off. Refusing to
+    // record that at capacity would leave an occurrence that the app has
+    // announced as cancelled still expanding as live on everybody's calendar,
+    // which is a worse failure than the storage it saves -- and the cap is a
+    // backstop against a person's churn, not against the app's own
+    // obligations. A capacity policy that covers automatic cancellations
+    // properly (evicting the oldest override rather than refusing the newest,
+    // say) is a design, not a rider; reviewer A said the same.
     const cancelStatement = occurrenceDate
       ? env.DB.prepare(
           `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled)

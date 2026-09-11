@@ -1,5 +1,5 @@
 import type { Env } from '../env';
-import type { EventRow } from './events';
+import { OVERRIDE_ADMISSION_SQL, type EventRow } from './events';
 import { requireActiveGuildMember } from './db';
 import { chunkIds, placeholders, queryInChunks } from './d1';
 import { addInvitesToEvent, updateEvent } from './eventWrites';
@@ -359,14 +359,38 @@ async function applyChangeRequest(env: Env, event: EventRow, request: ChangeRequ
       // the existing POST /:eventId/occurrences/:date/cancel endpoint's own
       // precedent, not guarded on events.revision: an occurrence override has
       // never been tracked by that column anywhere in the app.
-      await env.DB.prepare(
+      // Pass-15 review (P15-06). Admission travels inside the write rather
+      // than sitting in front of it, so it costs no extra query -- the accept
+      // path's price is measured against the Free-plan ceiling (P13-05) and
+      // must not move -- and so two concurrent acceptances cannot both pass a
+      // preflight that neither of them then honours (the P13-10 lesson).
+      const written = await env.DB.prepare(
         `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled, override_start_at, override_end_at)
-         VALUES (?, ?, ?, 0, ?, ?)
+         SELECT ?, ?, ?, 0, ?, ?
+         WHERE ${OVERRIDE_ADMISSION_SQL}
          ON CONFLICT(event_id, occurrence_date) DO UPDATE SET
            is_cancelled = 0, override_start_at = excluded.override_start_at, override_end_at = excluded.override_end_at`,
       )
-        .bind(newId(), event.id, request.occurrence_date, request.proposed_start_at, request.proposed_end_at)
+        .bind(
+          newId(),
+          event.id,
+          request.occurrence_date,
+          request.proposed_start_at,
+          request.proposed_end_at,
+          event.id,
+          request.occurrence_date,
+          event.id,
+        )
         .run();
+      // Keeping acceptance honest when admission fails, the same way P14-11
+      // made it honest when the invite could not be added: a request that
+      // changed nothing must not be reported as accepted. ConflictError
+      // releases the claim.
+      if (written.meta.changes === 0) {
+        throw new ConflictError(
+          `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`,
+        );
+      }
     } else {
       // The same call PATCH /events/:eventId makes. `revision` is the
       // request's captured event_revision, not a fresh read -- if the event

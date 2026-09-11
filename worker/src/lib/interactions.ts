@@ -6,6 +6,8 @@ import { requireActiveGuildMember } from './db';
 import { recordPollSelection } from './polls';
 import { rsvpButtons } from './dmComponents';
 import { CURRENT_POLICY_VERSION } from './policy';
+import { OVERRIDE_ADMISSION_SQL } from './events';
+import { LIMITS } from './validate';
 
 // Discord interactions (specs/0010). This is the first thing in the app whose
 // caller is not a browser holding one of our JWTs: there is no cookie, no
@@ -473,13 +475,24 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
     }
     // Same primitive POST /events/:eventId/occurrences/:date/cancel already
     // uses -- one occurrence, not the whole series.
-    await env.DB.prepare(
+    // Pass-15 review (P15-06): the same admission the website's cancel route
+    // applies, which this one never did. Inside the write so it is atomic, and
+    // an existing key is admitted at capacity because re-cancelling an
+    // occurrence already overridden adds no row.
+    const written = await env.DB.prepare(
       `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled)
-       VALUES (?, ?, ?, 1)
+       SELECT ?, ?, ?, 1
+       WHERE ${OVERRIDE_ADMISSION_SQL}
        ON CONFLICT(event_id, occurrence_date) DO UPDATE SET is_cancelled = 1`,
     )
-      .bind(newId(), parsed.eventId, parsed.occurrenceDate)
+      .bind(newId(), parsed.eventId, parsed.occurrenceDate, parsed.eventId, parsed.occurrenceDate, parsed.eventId)
       .run();
+    if (written.meta.changes === 0) {
+      return ephemeral(
+        `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences, so this one ` +
+          `could not be cancelled here. ${siteLink(env)}`,
+      );
+    }
     return updateMessage(original, 'this session is cancelled.', []);
   }
 

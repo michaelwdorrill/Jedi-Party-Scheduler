@@ -3,7 +3,7 @@ import { DateTime } from 'luxon';
 import type { AppEnv } from '../lib/authMiddleware';
 import type { Env } from '../env';
 import type { EventRow } from '../lib/events';
-import { loadOverridesForEvents } from '../lib/events';
+import { OVERRIDE_ADMISSION_SQL, loadOverridesForEvents } from '../lib/events';
 import { expandOccurrencesForEvent } from '../lib/recurrence';
 import { requireActiveGuildMember } from '../lib/db';
 import { recordRsvp, type RsvpStatus } from '../lib/attendance';
@@ -426,14 +426,14 @@ eventRoutes.delete('/:eventId', async (c) => {
 // Overrides are loaded and applied for every recurring event on every
 // calendar request, so an unbounded pile of them on one series is a cost
 // every viewer pays. Nothing about the feature needs hundreds.
-async function assertOverrideQuota(env: Env, eventId: string): Promise<void> {
-  const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM event_occurrence_overrides WHERE event_id = ?`)
-    .bind(eventId)
-    .first<{ n: number }>();
-  if ((row?.n ?? 0) >= LIMITS.MAX_OVERRIDES_PER_EVENT) {
-    throw new ValidationError(`This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`);
-  }
-}
+//
+// Pass-15 review (P15-06). This was the only writer that checked at all, and
+// it checked in the wrong place twice over: a preflight two concurrent
+// requests can both pass, and a count that refuses an UPDATE of a key that
+// already exists -- so someone at the cap could not re-cancel an occurrence
+// they had already moved, which adds no row. Both are now handled by
+// OVERRIDE_ADMISSION_SQL travelling inside the write, shared with the two
+// writers that had no check at all.
 
 eventRoutes.post('/:eventId/occurrences/:date/cancel', async (c) => {
   const userId = c.get('userId');
@@ -447,15 +447,19 @@ eventRoutes.post('/:eventId/occurrences/:date/cancel', async (c) => {
   const event = await loadOwnedActiveEvent(c.env, eventId, userId);
   if (!event) return c.text('Not found', 404);
 
-  await assertOverrideQuota(c.env, eventId);
-
-  await c.env.DB.prepare(
+  const written = await c.env.DB.prepare(
     `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled)
-     VALUES (?, ?, ?, 1)
+     SELECT ?, ?, ?, 1
+     WHERE ${OVERRIDE_ADMISSION_SQL}
      ON CONFLICT(event_id, occurrence_date) DO UPDATE SET is_cancelled = 1`,
   )
-    .bind(newId(), eventId, date)
+    .bind(newId(), eventId, date, eventId, date, eventId)
     .run();
+  if (written.meta.changes === 0) {
+    throw new ValidationError(
+      `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`,
+    );
+  }
   return c.json({ ok: true });
 });
 

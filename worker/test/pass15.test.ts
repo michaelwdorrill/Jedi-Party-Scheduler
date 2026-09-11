@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
 import { runReminderSweep } from '../src/cron/reminders';
+import { acceptChangeRequest } from '../src/lib/changeRequests';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
@@ -687,5 +688,122 @@ describe('an organizer who left the server stops receiving RSVP notices (F-43)',
       await countRows(db, 'organizer_rsvp_notice_log', `organizer_id = 'organizer'`),
       'a current organizer stopped hearing about RSVPs to their own event',
     ).toBe(1);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// P15-06
+// ---------------------------------------------------------------------------
+
+// The per-event override cap was enforced by one of its four writers. An
+// accepted change request also stops counting against the open-request quota
+// the moment it is accepted, so nothing bounded the stored exceptions: a
+// single invitee filing requests against distinct real days of a series could
+// accumulate them without limit, and every calendar expansion loads the whole
+// set.
+describe('the override cap binds every writer a person can drive (P15-06)', () => {
+  async function seedSeriesWithOverrides(db: ShimDatabase, count: number): Promise<void> {
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    const start = Date.now() + 3 * DAY_MS;
+    await seedEvent(db, { id: 'ev-1', organizerId: 'organizer', startAt: start, endAt: start + HOUR_MS, isRecurring: 1 });
+
+    const rows = Array.from({ length: count }, (_, i) => `('ovr-${i}', 'ev-1', '2030-01-${String((i % 28) + 1).padStart(2, '0')}-${i}', 1)`);
+    for (const chunk of rows) {
+      await db
+        .prepare(`INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled) VALUES ${chunk}`)
+        .run();
+    }
+  }
+
+  it('refuses a new occurrence key at the cap, through the accept path', async () => {
+    const { db, env } = setup('paid');
+    await seedSeriesWithOverrides(db, 500);
+
+    const event = await db.prepare(`SELECT * FROM events WHERE id = 'ev-1'`).first<Record<string, unknown>>();
+    const request = {
+      id: 'cr-1',
+      event_id: 'ev-1',
+      requester_id: 'organizer',
+      kind: 'time_change',
+      target_user_id: null,
+      occurrence_date: '2030-06-01',
+      status: 'pending',
+      event_revision: (event as { revision?: number }).revision ?? 0,
+      proposed_start_at: Date.now() + 9 * DAY_MS,
+      proposed_end_at: Date.now() + 9 * DAY_MS + HOUR_MS,
+      message: null,
+      decision_note: null,
+    };
+    await db
+      .prepare(
+        `INSERT INTO event_change_requests
+           (id, event_id, requester_id, kind, target_user_id, occurrence_date, status, event_revision,
+            proposed_start_at, proposed_end_at, message, created_at)
+         VALUES (?, ?, ?, ?, NULL, ?, 'pending', ?, ?, ?, NULL, ?)`,
+      )
+      .bind(
+        request.id, request.event_id, request.requester_id, request.kind, request.occurrence_date,
+        request.event_revision, request.proposed_start_at, request.proposed_end_at, Date.now(),
+      )
+      .run();
+
+    await expect(
+      acceptChangeRequest(env, event as never, request as never, 'organizer'),
+      'an accepted change request walked straight past the cap the cancel route enforces',
+    ).rejects.toThrow(/limit of 500/);
+    expect(await countRows(db, 'event_occurrence_overrides', `event_id = 'ev-1'`)).toBe(500);
+    const after = await db
+      .prepare(`SELECT status FROM event_change_requests WHERE id = 'cr-1'`)
+      .first<{ status: string }>();
+    expect(after!.status, 'a request that changed nothing was left reading as accepted').toBe('pending');
+  });
+
+  // An invariant guard, not a reproduction: it passes either way, because the
+  // unfixed code admitted everything. It is here because "an existing key is
+  // an update, not an addition" is the rule that makes a cap-in-the-write
+  // safe, and dropping it would strand people at the cap unable to change what
+  // is already there.
+  it('still admits a change to an occurrence already overridden', async () => {
+    const { db, env } = setup('paid');
+    await seedSeriesWithOverrides(db, 500);
+    const existingDate = await db
+      .prepare(`SELECT occurrence_date FROM event_occurrence_overrides WHERE event_id = 'ev-1' LIMIT 1`)
+      .first<{ occurrence_date: string }>();
+
+    const event = await db.prepare(`SELECT * FROM events WHERE id = 'ev-1'`).first<Record<string, unknown>>();
+    const request = {
+      id: 'cr-2',
+      event_id: 'ev-1',
+      requester_id: 'organizer',
+      kind: 'time_change',
+      target_user_id: null,
+      occurrence_date: existingDate!.occurrence_date,
+      status: 'pending',
+      event_revision: (event as { revision?: number }).revision ?? 0,
+      proposed_start_at: Date.now() + 9 * DAY_MS,
+      proposed_end_at: Date.now() + 9 * DAY_MS + HOUR_MS,
+      message: null,
+      decision_note: null,
+    };
+    await db
+      .prepare(
+        `INSERT INTO event_change_requests
+           (id, event_id, requester_id, kind, target_user_id, occurrence_date, status, event_revision,
+            proposed_start_at, proposed_end_at, message, created_at)
+         VALUES (?, ?, ?, ?, NULL, ?, 'pending', ?, ?, ?, NULL, ?)`,
+      )
+      .bind(
+        request.id, request.event_id, request.requester_id, request.kind, request.occurrence_date,
+        request.event_revision, request.proposed_start_at, request.proposed_end_at, Date.now(),
+      )
+      .run();
+
+    // Updating a key that already exists adds no row, so refusing it would
+    // strand people at the cap with no way to change what is already there.
+    await acceptChangeRequest(env, event as never, request as never, 'organizer');
+    expect(await countRows(db, 'event_occurrence_overrides', `event_id = 'ev-1'`)).toBe(500);
   });
 });

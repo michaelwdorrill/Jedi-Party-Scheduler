@@ -1,5 +1,6 @@
 import type { Env } from '../env';
 import { chunkIds, placeholders } from './d1';
+import { LIMITS } from './validate';
 
 export interface EventRow {
   id: string;
@@ -230,3 +231,33 @@ export async function loadConfirmedOptionsForEvents(
   }
   return map;
 }
+
+// Pass-15 review (P15-06). The per-event override cap was enforced by exactly
+// one of its four writers -- the website's occurrence-cancel route -- while
+// accepted change requests, the Discord cancel button and the automatic
+// minimum-attendees cancellation all wrote the table unguarded. An accepted
+// request also stops counting against the open-request quota the moment it is
+// accepted, so that quota bounds nothing here: 501 sequential requests, each
+// moving a different real day of a series by an hour, produce 501 stored
+// overrides through ordinary authenticated routes with no race and no
+// injected failure. Every calendar expansion loads the whole override set, so
+// the cost is paid by every viewer, forever.
+//
+// Two things this clause gets right that a COUNT(*) preflight does not:
+//
+// 1. It is part of the write, not a check before it (the P13-10 lesson --
+//    a cap enforced only in a preflight is a cap two concurrent writers walk
+//    straight through).
+// 2. An existing key is an UPDATE, not an addition, so it is admitted at
+//    capacity. Cancelling an occurrence you had already moved consumes no new
+//    storage, and refusing it would strand people at the cap with no way to
+//    change what is already there.
+//
+// Expressed as SQL rather than a helper because it has to travel inside each
+// writer's own statement -- and because adding a query to the accept path
+// would move the pricing P13-05 measured against the Free-plan ceiling.
+// Callers bind: occurrence_date, event_id, event_id.
+export const OVERRIDE_ADMISSION_SQL = `(
+  EXISTS (SELECT 1 FROM event_occurrence_overrides WHERE event_id = ? AND occurrence_date = ?)
+  OR (SELECT COUNT(*) FROM event_occurrence_overrides WHERE event_id = ?) < ${LIMITS.MAX_OVERRIDES_PER_EVENT}
+)`;
