@@ -223,19 +223,38 @@ export async function storeConnection(
   const sealedAccess = await seal(accessToken, secret);
 
   // Pass-11 review (F-22). `prompt=consent` mints a brand-new refresh token on
-  // every reconnect, and the one being replaced here stays valid at Google
+  // every reconnect, and the one being replaced stays valid at Google
   // indefinitely -- the user would have to find it themselves under their
   // Google account's third-party access settings. Overwriting our copy is not
   // the same as ending the grant, so the superseded one is revoked before the
   // row is replaced.
   //
-  // Best-effort by construction: a reconnect must not fail because Google's
-  // revoke endpoint is having a bad minute. The new grant is the one that
-  // matters and it is about to be stored either way.
+  // Pass-12 review (P12-02) narrows that to an account *switch*, which is the
+  // only case where it is both safe and necessary.
+  //
+  // Google's revocation is grant-level, not token-level: revoking any token
+  // for a (client, user) pair revokes the authorization grant behind it. A
+  // same-account reconnect issues its replacement under that same grant, so
+  // revoking the superseded token takes the replacement with it -- F-22's fix
+  // was destroying the credential it had just stored, and the connection then
+  // reported itself active and failed on its first refresh with invalid_grant.
+  // Reconnecting is exactly what someone does when their sync has broken, so
+  // this fired on the recovery path.
+  //
+  // Not revoking a superseded same-account token loses nothing: it belongs to
+  // the same single grant the user sees in their Google account, and
+  // disconnecting here revokes that grant and every token under it. Google
+  // also caps refresh tokens per client/user and expires the oldest itself.
+  //
+  // A different Google account is a different grant, so there the old one
+  // really would survive untouched, and revoking it is the point.
+  //
+  // Best-effort by construction either way: a reconnect must not fail because
+  // Google's revoke endpoint is having a bad minute.
   const existing = await loadConnection(env, userId);
   const switchingAccount =
     !!existing && !!existing.google_account_email && existing.google_account_email !== accountEmail;
-  if (existing) {
+  if (switchingAccount) {
     const previous = await readRefreshToken(env, existing);
     if (previous && previous !== refreshToken) await revokeToken(previous);
   }
@@ -294,9 +313,23 @@ export async function storeConnection(
   // something does they keep making that person look busy at times taken from
   // a calendar this app no longer has any connection to.
   if (switchingAccount) {
-    await env.DB.prepare(`DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL`)
-      .bind(userId)
-      .run();
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL`).bind(userId),
+      // Pass-12 review (P12-11). The push half's mappings have to go for the
+      // same reason the pull half's imports do, and leaving them was the more
+      // damaging of the two: google_event_links records that an event was
+      // already synced, and syncOneConnection skips anything whose link says
+      // it is unchanged. So every event already pushed to the *old* account was
+      // skipped forever and the newly connected one received nothing at all --
+      // a connection that reports itself healthy, syncs on schedule, and does
+      // nothing. R17 fixed this for a calendar change through PATCH; the
+      // account switch is the same hazard one path over.
+      //
+      // The entries themselves are left in the old account, which is the same
+      // unavoidable cost R17 accepted: the new grant has no authority over
+      // them, so there is nothing this app can do about them from here.
+      env.DB.prepare(`DELETE FROM google_event_links WHERE user_id = ?`).bind(userId),
+    ]);
   }
 }
 
@@ -526,13 +559,46 @@ export async function accessTokenFor(env: Env, row: GoogleConnectionRow): Promis
 
   const body = (await res.json()) as GoogleTokenResponse;
   const sealedAccess = await seal(body.access_token, secret);
-  await env.DB.prepare(
+  // Pass-12 review (P12-03). Conditioned on the row still holding the refresh
+  // token this refresh was performed with, not on user_id alone.
+  //
+  // `row` is a snapshot taken before a network round trip, and the user can
+  // connect a different Google account during it. Keyed on user_id alone, a
+  // refresh for account A that lands after account B is stored overwrites B's
+  // cached access token with one minted from A's grant: the row then reports
+  // B's email and holds B's refresh token while its access token belongs to A,
+  // and the next sync sends A's bearer token at B's calendar.
+  //
+  // The ciphertext is the version token here -- it changes whenever the
+  // credential is replaced, which is exactly the event that invalidates this
+  // write -- so no schema column is needed to get a compare-and-swap.
+  const { meta } = await env.DB.prepare(
     `UPDATE google_calendar_connections
      SET access_token_ciphertext = ?, access_token_iv = ?, access_token_expires_at = ?, updated_at = ?
-     WHERE user_id = ?`,
+     WHERE user_id = ? AND refresh_token_ciphertext = ?`,
   )
-    .bind(sealedAccess.ciphertext, sealedAccess.iv, Date.now() + body.expires_in * 1000, Date.now(), row.user_id)
+    .bind(
+      sealedAccess.ciphertext,
+      sealedAccess.iv,
+      Date.now() + body.expires_in * 1000,
+      Date.now(),
+      row.user_id,
+      row.refresh_token_ciphertext,
+    )
     .run();
+
+  if (meta.changes === 0) {
+    // The connection was replaced while this was in flight. The token is real
+    // but belongs to an account this row no longer describes, so it must not
+    // be handed back to a caller about to write someone's calendar with it.
+    // Retryable rather than unauthorized: the next tick reads the current row
+    // and refreshes against the credential that is actually stored.
+    return {
+      ok: false,
+      reason: 'retryable',
+      message: 'The Google connection changed while this token refresh was in flight; retrying with the current one.',
+    };
+  }
 
   return { ok: true, accessToken: body.access_token, refreshed: true };
 }

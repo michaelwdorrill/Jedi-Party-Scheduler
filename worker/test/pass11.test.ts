@@ -1497,13 +1497,24 @@ describe('withdrawing Google access actually withdraws it (F-17 / R11, R10, R12,
   // F-22. prompt=consent mints a new refresh token every reconnect and the old
   // one stays live at Google until the user hunts it down in their account
   // settings.
-  it('revokes the superseded grant when reconnecting', async () => {
+  //
+  // Narrowed by the Pass-12 review (P12-02), which is why this now seeds a
+  // *different* account than the one it stores. This test used to reconnect
+  // the same account and assert a revocation, and that expectation was wrong:
+  // Google's revocation is grant-level, so revoking the superseded token of a
+  // same-account reconnect revokes the grant the replacement was just issued
+  // under, destroying the credential F-22's own fix had just stored. The
+  // property F-22 was actually after -- a credential we abandon does not stay
+  // live at Google unnoticed -- only arises on an account switch, because that
+  // is the only case where the old token belongs to a grant nothing else here
+  // will ever revoke. The same-account half is pinned in pass12.test.ts.
+  it('revokes the superseded grant when the account changes', async () => {
     const { db, env: base } = setup();
     const env = googleEnv(base);
     await seedGuild(db);
     await seedUser(db, 'u1');
     await seedMembership(db, 'u1', 'guild-1');
-    await seedConnection(db, 'u1');
+    await seedConnection(db, 'u1', { email: 'old@gmail.com' });
 
     fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
     await storeConnection(env, 'u1', 'a-new-refresh-token', 'a', 3600, 'someone@gmail.com', 'primary');

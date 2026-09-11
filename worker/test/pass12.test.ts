@@ -5,7 +5,8 @@ import { runReminderSweep } from '../src/cron/reminders';
 import { readCursorKey } from '../src/cron/cursor';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
 import { TickBudget } from '../src/cron/budget';
-import { seal } from '../src/lib/crypto';
+import { seal, unseal } from '../src/lib/crypto';
+import { accessTokenFor, type GoogleConnectionRow, storeConnection } from '../src/lib/googleCalendar';
 import { ValidationError } from '../src/lib/validate';
 import type { Env } from '../src/env';
 import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
@@ -578,5 +579,199 @@ describe('one failing Google connection does not starve every later user (P12-07
       .first<{ last_synced_at: number | null; last_error: string | null }>();
     expect(row!.last_synced_at).not.toBeNull();
     expect(row!.last_error).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P12-02 / P12-03 / P12-11
+// ---------------------------------------------------------------------------
+
+async function connectionRow(db: ShimDatabase, userId: string) {
+  return db
+    .prepare(`SELECT * FROM google_calendar_connections WHERE user_id = ?`)
+    .bind(userId)
+    .first<{
+      google_account_email: string;
+      refresh_token_ciphertext: string;
+      access_token_ciphertext: string | null;
+      access_token_iv: string | null;
+    }>();
+}
+
+// F-22 made storeConnection revoke the refresh token it replaces, on the
+// reasoning that overwriting our copy is not the same as ending the grant.
+// That is right for a different Google account and wrong for the same one,
+// because Google's revocation is grant-level: revoking any token for a
+// (client, user) pair revokes the authorization grant, and the replacement
+// `prompt=consent` just minted hangs off that same grant.
+//
+// So the fix introduced its own failure -- reconnecting the same account, which
+// is what someone does when their sync has broken, revoked the credential it
+// had just stored. The connection reports itself active and fails on its first
+// refresh with invalid_grant.
+describe('reconnecting the same Google account keeps the new credential (P12-02)', () => {
+  it('does not revoke a superseded token from the same grant', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUser(db, 'u1');
+    await seedGoogleConnection(db, 'u1');
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    await storeConnection(env, 'u1', 'fresh-refresh-token', 'fresh-access-token', 3600, 'u1@gmail.com', 'primary');
+
+    expect(fetchStub.calls.filter((c) => c.includes('/revoke'))).toHaveLength(0);
+    const row = await connectionRow(db, 'u1');
+    expect(await unseal({ ciphertext: row!.refresh_token_ciphertext, iv: (row as never as { refresh_token_iv: string }).refresh_token_iv }, GOOGLE_ENCRYPTION_KEY)).toBe(
+      'fresh-refresh-token',
+    );
+  });
+
+  // The other half: a genuinely different Google account is a different grant,
+  // so revoking the old one is both safe and the whole point of F-22.
+  it('still revokes when the connection moves to a different account', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUser(db, 'u1');
+    await seedGoogleConnection(db, 'u1');
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    await storeConnection(env, 'u1', 'other-refresh-token', 'other-access-token', 3600, 'someone-else@gmail.com', 'primary');
+
+    const revokes = fetchStub.calls.filter((c) => c.includes('/revoke'));
+    expect(revokes).toHaveLength(1);
+    expect(fetchStub.bodies.join('')).toContain('stored-refresh-token');
+  });
+});
+
+// accessTokenFor reads a connection row, goes to Google, and writes the result
+// back keyed on `WHERE user_id = ?` alone. Nothing checks that the row is still
+// the one the refresh began against -- so a refresh for account A that is still
+// in flight when the user connects account B lands afterwards and overwrites
+// B's cached access token with one minted from A's grant. The row then reports
+// B's email and holds B's refresh token while its access token belongs to A,
+// and the next sync sends A's bearer token at B's calendar.
+describe('an in-flight refresh cannot overwrite a reconnected account (P12-03)', () => {
+  it('discards a refresh whose connection was replaced while it was in flight', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUser(db, 'u1');
+    await seedGoogleConnection(db, 'u1');
+
+    // The snapshot a sweep would be holding: account A, access token expired.
+    const stale = await db
+      .prepare(`SELECT * FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<GoogleConnectionRow>();
+
+    const accountBAccess = await seal('account-b-access-token', GOOGLE_ENCRYPTION_KEY);
+    const accountBRefresh = await seal('account-b-refresh-token', GOOGLE_ENCRYPTION_KEY);
+
+    fetchStub = stubFetch([
+      {
+        match: 'oauth2.googleapis.com/token',
+        status: 200,
+        body: { access_token: 'account-a-access-token', expires_in: 3600 },
+        // While A's refresh is suspended at the network call, the user finishes
+        // connecting account B.
+        before: async () => {
+          await db
+            .prepare(
+              `UPDATE google_calendar_connections
+               SET google_account_email = 'account-b@gmail.com',
+                   refresh_token_ciphertext = ?, refresh_token_iv = ?,
+                   access_token_ciphertext = ?, access_token_iv = ?, access_token_expires_at = ?
+               WHERE user_id = 'u1'`,
+            )
+            .bind(
+              accountBRefresh.ciphertext,
+              accountBRefresh.iv,
+              accountBAccess.ciphertext,
+              accountBAccess.iv,
+              Date.now() + 3600_000,
+            )
+            .run();
+        },
+      },
+    ]);
+
+    const result = await accessTokenFor(env, stale!);
+
+    const row = await connectionRow(db, 'u1');
+    expect(row!.google_account_email).toBe('account-b@gmail.com');
+    expect(
+      await unseal({ ciphertext: row!.access_token_ciphertext!, iv: row!.access_token_iv! }, GOOGLE_ENCRYPTION_KEY),
+      "account A's token was written over account B's row",
+    ).toBe('account-b-access-token');
+    // And the caller is told to stand down rather than handed a credential for
+    // an account this row no longer describes.
+    expect(result.ok).toBe(false);
+  });
+});
+
+// storeConnection clears the previous account's imported personal_events when
+// the connection moves to a different Google account, but left
+// google_event_links alone -- so every event already pushed to the old account
+// still had a link row claiming it was synced. The push half reads those links,
+// finds each event unchanged, and skips it: the newly connected account
+// receives nothing at all, indefinitely. R17 fixed the equivalent case for a
+// calendar change through PATCH; this is the same hazard one path over.
+describe('switching Google account clears the old account mappings (P12-11)', () => {
+  it('drops google_event_links so the new account gets a fresh push', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUser(db, 'u1');
+    await seedGoogleConnection(db, 'u1');
+    await seedGuild(db, 'guild-1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await seedEvent(db, {
+      id: 'ev-1',
+      organizerId: 'u1',
+      startAt: Date.now() + DAY_MS,
+      endAt: Date.now() + DAY_MS + HOUR_MS,
+    });
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO google_event_links
+           (id, user_id, event_id, occurrence_date, google_event_id, synced_title, synced_start_at, synced_end_at, synced_at)
+         VALUES ('link-1', 'u1', 'ev-1', '', 'google-event-1', 'Session', ?, ?, ?)`,
+      )
+      .bind(now + DAY_MS, now + DAY_MS + HOUR_MS, now)
+      .run();
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    await storeConnection(env, 'u1', 'new-refresh-token', 'new-access-token', 3600, 'someone-else@gmail.com', 'primary');
+
+    expect(await countRows(db, 'google_event_links', `user_id = 'u1'`)).toBe(0);
+  });
+
+  it('keeps them when the same account simply reconnects', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUser(db, 'u1');
+    await seedGoogleConnection(db, 'u1');
+    await seedGuild(db, 'guild-1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await seedEvent(db, {
+      id: 'ev-1',
+      organizerId: 'u1',
+      startAt: Date.now() + DAY_MS,
+      endAt: Date.now() + DAY_MS + HOUR_MS,
+    });
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO google_event_links
+           (id, user_id, event_id, occurrence_date, google_event_id, synced_title, synced_start_at, synced_end_at, synced_at)
+         VALUES ('link-1', 'u1', 'ev-1', '', 'google-event-1', 'Session', ?, ?, ?)`,
+      )
+      .bind(now + DAY_MS, now + DAY_MS + HOUR_MS, now)
+      .run();
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    await storeConnection(env, 'u1', 'new-refresh-token', 'new-access-token', 3600, 'u1@gmail.com', 'primary');
+
+    // Same account, same calendar: the entries really are still there and
+    // re-pushing all of them would be duplicate work at best.
+    expect(await countRows(db, 'google_event_links', `user_id = 'u1'`)).toBe(1);
   });
 });
