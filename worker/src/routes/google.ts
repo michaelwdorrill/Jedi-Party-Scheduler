@@ -18,6 +18,7 @@ import { requireAuth, requirePolicyAcceptance } from '../lib/authMiddleware';
 import {
   accessTokenFor,
   accountEmailFrom,
+  fetchPrimaryCalendarId,
   buildAuthorizeUrl,
   exchangeCodeForTokens,
   GOOGLE_CONNECT_PURPOSE,
@@ -214,8 +215,36 @@ googleRoutes.get('/callback', async (c) => {
     // Refusing is the honest failure. Nothing is lost -- the person retries --
     // whereas storing a connection with no identity is what makes every later
     // comparison against it wrong.
-    if (!calendars.ok) return c.redirect(`${settingsUrl}?google=account_unverified`);
-    const email = accountEmailFrom(calendars.value);
+    // Pass-15 review (P15-05) and (F-44), together, because they are the same
+    // moment: this is where an unidentified account has to be turned away, and
+    // where the grant it just issued has to be handed back.
+    //
+    // P14-07 refused a FAILED lookup and stopped there. A lookup that succeeds
+    // and contains no primary entry is a different fact and was not refused:
+    // listWritableCalendars reads one page and discards the continuation
+    // token, and Google documents neither that the primary calendar is on the
+    // first page nor that every account has one on a page of writable
+    // calendars. So a 200 could still produce a NULL email, which finalize
+    // stored -- and `switchingAccount` requires two KNOWN identities, so the
+    // unidentified account inherited the previous one's destination and links
+    // instead of being treated as the different account it may well be.
+    //
+    // The direct `calendarList/primary` lookup below is the answer to that,
+    // and it only runs when the page really had no primary on it.
+    const email = calendars.ok
+      ? (accountEmailFrom(calendars.value) ?? (await fetchPrimaryCalendarId(tokens.access_token)))
+      : null;
+    if (!email) {
+      // F-44: the code has already been exchanged, so a grant exists at Google
+      // for a refresh token this request is about to drop on the floor.
+      // Without this, someone who hits an outage here and never retries keeps
+      // "Uncle Owen" in their Google connected-apps list for a credential
+      // nobody holds. Best-effort, like every other revoke in this file: the
+      // refusal must not fail because the revoke endpoint is having a bad
+      // minute.
+      if (tokens.refresh_token) await revokeToken(tokens.refresh_token);
+      return c.redirect(`${settingsUrl}?google=account_unverified`);
+    }
 
     // Pass-11 review (F-16 / R01): the grant is parked, not attached. Every
     // check reachable from here -- the state signature, the nonce cookie --

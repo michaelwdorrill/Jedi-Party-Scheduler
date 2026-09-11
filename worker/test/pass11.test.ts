@@ -801,6 +801,16 @@ describe('a login can only be completed by the browser that started it (R02)', (
 // the flow; it was any demonstration that the browser belongs to the account
 // being connected. Grants are parked now and claimed through an ordinary
 // authenticated request, which is the one hop that can answer that.
+// An identifiable Google account, which `items: []` used to stand in for.
+//
+// It no longer can (Pass-15 review, P15-05): a calendar list with no primary
+// entry on it now means "this account could not be identified", and the
+// callback refuses to park a grant it cannot attribute. These five fixtures
+// were using an empty list as shorthand for "the list call succeeded" -- none
+// of them is about calendar identity, they are all about who may CLAIM a
+// parked grant -- so they say what they meant now.
+const PRIMARY_CALENDAR = { id: 'someone@gmail.com', summary: 'Personal', accessRole: 'owner', primary: true };
+
 describe('a Google grant attaches only to the account that claims it (F-16 / R01)', () => {
   const app = buildApp();
   const ENCRYPTION_KEY = 'test-google-encryption-key-at-least-32-chars';
@@ -900,7 +910,7 @@ describe('a Google grant attaches only to the account that claims it (F-16 / R01
     }
     fetchStub = stubFetch([
       { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
-      { match: 'users/me/calendarList', status: 200, body: { items: [] } },
+      { match: 'users/me/calendarList', status: 200, body: { items: [PRIMARY_CALENDAR] } },
       { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
     ]);
 
@@ -925,7 +935,7 @@ describe('a Google grant attaches only to the account that claims it (F-16 / R01
     await seedMembership(db, 'alice', 'guild-1');
     fetchStub = stubFetch([
       { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
-      { match: 'users/me/calendarList', status: 200, body: { items: [] } },
+      { match: 'users/me/calendarList', status: 200, body: { items: [PRIMARY_CALENDAR] } },
     ]);
 
     const { pendingId } = await victimConsentsToAttackersLink(env, 'alice');
@@ -948,7 +958,7 @@ describe('a Google grant attaches only to the account that claims it (F-16 / R01
     await seedMembership(db, 'alice', 'guild-1');
     fetchStub = stubFetch([
       { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
-      { match: 'users/me/calendarList', status: 200, body: { items: [] } },
+      { match: 'users/me/calendarList', status: 200, body: { items: [PRIMARY_CALENDAR] } },
     ]);
 
     const { pendingId } = await victimConsentsToAttackersLink(env, 'alice');
@@ -975,7 +985,7 @@ describe('a Google grant attaches only to the account that claims it (F-16 / R01
     await seedMembership(db, 'alice', 'guild-1');
     fetchStub = stubFetch([
       { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
-      { match: 'users/me/calendarList', status: 200, body: { items: [] } },
+      { match: 'users/me/calendarList', status: 200, body: { items: [PRIMARY_CALENDAR] } },
     ]);
 
     await victimConsentsToAttackersLink(env, 'alice');
@@ -1002,7 +1012,7 @@ describe('a Google grant attaches only to the account that claims it (F-16 / R01
     await seedMembership(db, 'alice', 'guild-1');
     fetchStub = stubFetch([
       { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
-      { match: 'users/me/calendarList', status: 200, body: { items: [] } },
+      { match: 'users/me/calendarList', status: 200, body: { items: [PRIMARY_CALENDAR] } },
       { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
     ]);
 

@@ -185,53 +185,58 @@ hand, and not a disclosure. The reasoning above for why it is not a rider on a
 security batch is unchanged, and Pass 14 spent its length on eleven other
 findings.
 
-### 71. Disconnecting revokes the whole Google grant, including a reconnection that arrives mid-sweep
+### 71. A same-account reconnect can still race the tail of a disconnect
 
-From the Pass-14 review (P14-08). The disconnect sweep's *database* half was
-made safe in Pass 13 (P13-07): every DELETE is guarded by the
-`refresh_token_ciphertext` the disconnect began against, so a connection the
-user creates while the sweep is running is not deleted by the tidy-up for the
-one they left. The *network* half has no equivalent, and cannot have one at
-this provider: `revokeToken` sends a token to Google, and Google revokes the
-**grant** it belongs to, not that individual token. There is no documented way
-to revoke one refresh token and leave its siblings alive.
+From the Pass-14 review (P14-08), **narrowed in Pass 15 (P15-07) and no longer
+the design problem this entry originally described.** The history is worth
+keeping, because the reasoning that made it look unfixable was correct at the
+time and stopped being correct for a reason nobody planned.
 
-So: user disconnects, the sweep starts clearing calendar entries (which can
-take several ticks for a large calendar), the user reconnects the same Google
-account before it finishes, and the sweep then revokes -- killing the
-credential the user just created. The rows survive, correctly; what they hold
-is dead, and the user sees a connection that reports `invalid_grant` on its
-first sync and has to connect a third time.
+Revoking a token at Google revokes the **grant** it belongs to, not that token.
+So a same-account reconnect landing inside a running disconnect had its
+brand-new credential revoked along with the one being discarded. The database
+half was never the problem -- it has been compare-and-swap guarded since P13-07
+-- and there is no provider operation that revokes one token and spares its
+siblings.
 
-Not fixed in this pass, and the reviewers agreed it is not a 0.8.x blocker: the
-failure is recoverable by reconnecting, costs no data, and discloses nothing.
-It is written down because the obvious mitigation is only *almost* right, and
-the part that is wrong is not obvious:
+The obvious guard is to re-read the connection immediately before revoking and
+skip when the stored credential has changed. **This entry originally rejected
+that**, because it would be wrong for a connection whose Google account was
+never identified: `storeConnection` does not revoke on that branch either, so
+skipping would leave a live grant that nothing would ever tear down, against
+what the Privacy Policy says in as many words.
 
-- **The cheap narrowing:** re-read the connection immediately before calling
-  `revokeToken` and skip the call if `refresh_token_ciphertext` has changed.
-  That shrinks the window from "the whole sweep, including its outbound
-  Calendar API calls" to "between one query and one fetch". For a same-account
-  reconnect it is exactly right, for the reason `storeConnection` already gives
-  itself: a superseded same-account token belongs to the same single grant, and
-  Google expires the oldest itself. For a genuine account *switch* it is also
-  right, because `storeConnection` revokes the predecessor's grant on that
-  branch already.
-- **Where it goes wrong:** the unidentified-account case that P14-07 created a
-  branch for. When either email is unknown, `storeConnection` deliberately does
-  not revoke -- it cannot tell "same account" from "different account", and
-  guessing is what P14-07 was. Skip the sweep's revoke there too and account
-  A's grant survives with nothing left that will ever revoke it, which breaks a
-  promise the Privacy Policy makes in as many words. Today's unconditional
-  revoke keeps that promise and pays for it with the rare same-account case
-  above.
+**P15-05 removed that branch at the door.** The OAuth callback now refuses to
+park a grant it cannot attribute to a conclusively identified account -- a
+successful calendar list with no primary entry on it is refused and the grant
+revoked, not stored with a NULL email. With that shape gone, the guard is
+correct wherever it applies, and Pass 15 implemented it: the revoke is skipped
+only when a replacement exists AND both sides carry the same known account
+email. No replacement, a different account, or an identity that is not known on
+both sides all still revoke.
 
-So the shape of a real fix is a three-way decision on a value that may be
-unknown, and the honest options are to refuse an OAuth callback while a
-disconnect is still `disconnecting` (tell the user to wait, which needs UI), or
-to let a reconnect *cancel* a pending disconnect (which abandons a half-cleared
-calendar, and F-17/R11 exist because that used to happen by accident). Either
-is a design, not a rider.
+**What is left is genuinely small.** The window is now between that read and
+the revoke request rather than the whole multi-tick disconnect, and closing it
+completely still needs one of the two designs below:
+
+- refuse an OAuth callback while `status = 'disconnecting'` -- the safer of the
+  two, and the one to build if this is ever built. "Let a reconnect cancel a
+  pending disconnect" only works for the same account, and the callback cannot
+  know the account until after the code exchange;
+- serialise the disconnect/finalize lifecycle behind an explicit state, rather
+  than another unguarded read before a network call.
+
+Neither is scheduled. The residual needs a reconnect to land in the
+milliseconds between one read and one HTTPS request, it is recoverable by
+reconnecting, and nothing is lost or disclosed.
+
+**A cousin worth recording while it is in view:** `storePendingConnection`
+deletes expired pending grants (`google_pending_connections`) without revoking
+them, which is the same shape as F-44 -- an abandoned grant at Google that the
+app holds no token for. It is short-lived in practice, since revocation is
+grant-level and any later disconnect of the same account kills it. Closing it
+means decrypting each expired row and making a network call from a request
+path, which is why it was not done as a rider on F-44.
 
 ## Parked until after 1.0
 

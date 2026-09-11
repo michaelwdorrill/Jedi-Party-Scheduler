@@ -337,8 +337,48 @@ async function runDisconnect(
       `${links.length - future.length} past left in place, token revoked, connection dropped.`,
   );
 
-  const refreshToken = await readRefreshToken(env, row);
+  // Pass-15 review (P15-07 / P14-08), and the narrowing IDEAS item 71 said was
+  // unsafe. It was, when item 71 was written; P15-05 is what changed that.
+  //
+  // Revoking at Google kills the GRANT, not the token, so a same-account
+  // reconnect that lands mid-disconnect had its brand-new credential revoked
+  // along with the one being discarded. Item 71 rejected the obvious guard --
+  // re-read and skip when the stored credential has changed -- because it
+  // would be wrong for a connection whose account was never identified: there,
+  // storeConnection does not revoke either, so skipping would leave a live
+  // grant nothing would ever tear down, against what the Privacy Policy says.
+  //
+  // The rule below is that objection made explicit rather than argued away.
+  // Skip ONLY when a replacement exists and both sides are conclusively the
+  // same account -- the one case where the old token shares the new token's
+  // grant and revoking it is purely destructive. Every other shape still
+  // revokes: no replacement (an ordinary disconnect), a different account
+  // (whose predecessor storeConnection already revoked, so this is
+  // belt-and-braces), or any identity that is not known on both sides.
+  //
+  // This is a narrowing, not a fix. The window is now between this read and
+  // the request below rather than the whole multi-tick disconnect, and that
+  // is all it is -- the remaining race is in item 71.
+  const replacement = await env.DB.prepare(
+    `SELECT refresh_token_ciphertext, google_account_email FROM google_calendar_connections WHERE user_id = ?`,
+  )
+    .bind(row.user_id)
+    .first<{ refresh_token_ciphertext: string; google_account_email: string | null }>();
+  const replacedBySameAccount =
+    !!replacement &&
+    replacement.refresh_token_ciphertext !== row.refresh_token_ciphertext &&
+    !!replacement.google_account_email &&
+    !!row.google_account_email &&
+    replacement.google_account_email === row.google_account_email;
+
+  const refreshToken = replacedBySameAccount ? null : await readRefreshToken(env, row);
   const revoked = refreshToken ? await revokeToken(refreshToken) : false;
+  if (replacedBySameAccount) {
+    console.log(
+      `Google disconnect for ${row.user_id}: the same account reconnected while this was running, so the ` +
+        'revocation was skipped -- both credentials share one grant, and revoking would have killed the new one.',
+    );
+  }
 
   // Pass-13 review (P13-07): every statement here is guarded by the refresh
   // token this disconnect began against, so a connection the user created

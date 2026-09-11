@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
+import { buildApp } from '../src/router';
+import { signJwt } from '../src/lib/jwt';
+import { createSession } from '../src/lib/sessions';
 import { TickBudget } from '../src/cron/budget';
 import { seal } from '../src/lib/crypto';
+import { storeConnection } from '../src/lib/googleCalendar';
 import type { Env } from '../src/env';
 import type { ShimDatabase } from './d1shim';
 import {
@@ -11,6 +15,7 @@ import {
   seedGuild,
   seedInvite,
   seedMembership,
+  countRows,
   seedUser,
   setup,
   stubFetch,
@@ -251,5 +256,251 @@ describe('a verified legacy link records what it verified (P15-03)', () => {
       .prepare(`SELECT calendar_id FROM google_event_links WHERE user_id = 'u1'`)
       .first<{ calendar_id: string | null }>();
     expect(link!.calendar_id, 'the verified destination was not recorded').toBe('primary');
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// P15-05 and F-44
+// ---------------------------------------------------------------------------
+
+// P14-07 refused a calendar list that FAILED. A list that succeeds and simply
+// has no primary entry on it is a different fact -- the client reads one page
+// of at most 250 and drops the continuation token -- and it produced a NULL
+// account email that finalize stored. `switchingAccount` needs two known
+// identities, so the unidentified account inherited the previous account's
+// destination and links rather than being treated as a different one.
+const app = buildApp();
+
+async function authFor(env: Env, userId: string): Promise<string> {
+  const { id: sessionId } = await createSession(env, userId);
+  return signJwt(userId, sessionId, env.JWT_SIGNING_KEY);
+}
+
+async function beginConnect(env: Env, userId: string): Promise<{ cookie: string; state: string }> {
+  const auth = await authFor(env, userId);
+  const urlRes = await app.request(
+    'https://worker.test/google/connect-url',
+    { method: 'POST', headers: { Authorization: `Bearer ${auth}` } },
+    env,
+  );
+  const { startUrl } = await urlRes.json<{ startUrl: string }>();
+  const startRes = await app.request(
+    `https://worker.test/google/start${new URL(startUrl).search}`,
+    { redirect: 'manual' },
+    env,
+  );
+  const raw = startRes.headers.get('set-cookie');
+  if (!raw) throw new Error('test fixture: no Set-Cookie on /google/start');
+  return {
+    cookie: raw.split(';')[0],
+    state: new URL(startRes.headers.get('location')!).searchParams.get('state')!,
+  };
+}
+
+const CONNECT_TOKEN_RULE = {
+  match: 'oauth2.googleapis.com/token',
+  status: 200,
+  body: { access_token: 'google-access-token', refresh_token: 'google-refresh-token', expires_in: 3600 },
+};
+const REVOKE_RULE = { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} };
+// A page of writable calendars with no primary on it -- what a continuation
+// token means in practice.
+const PAGE_WITHOUT_PRIMARY = {
+  match: 'users/me/calendarList?',
+  status: 200,
+  body: {
+    nextPageToken: 'page-2',
+    items: [{ id: 'games@group.calendar.google.com', summary: 'Games', accessRole: 'writer' }],
+  },
+};
+
+describe('an account that could not be identified is not connected (P15-05)', () => {
+  async function connectWith(env: Env, rules: Parameters<typeof stubFetch>[0]) {
+    const { cookie, state } = await beginConnect(env, 'u1');
+    fetchStub = stubFetch(rules);
+    return app.request(
+      `https://worker.test/google/callback?code=abc&state=${encodeURIComponent(state)}`,
+      { headers: { Cookie: cookie }, redirect: 'manual' },
+      env,
+    );
+  }
+
+  it('refuses when the calendar page has no primary and the direct lookup fails too', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+
+    const res = await connectWith(env, [
+      CONNECT_TOKEN_RULE,
+      REVOKE_RULE,
+      // Ordered before the page rule: stubFetch matches the first rule whose
+      // string appears in the URL, and the page rule would swallow this too.
+      { match: 'calendarList/primary', status: 503, body: {} },
+      PAGE_WITHOUT_PRIMARY,
+    ]);
+
+    expect(res.headers.get('location'), 'an unidentifiable account was parked as connectable').toContain(
+      'google=account_unverified',
+    );
+    expect(await countRows(db, 'google_pending_connections', `1=1`), 'a grant with no identity was parked').toBe(0);
+  });
+
+  it('identifies the account directly when the first page does not carry it', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+
+    const res = await connectWith(env, [
+      CONNECT_TOKEN_RULE,
+      REVOKE_RULE,
+      { match: 'calendarList/primary', status: 200, body: { id: 'someone@gmail.com', primary: true } },
+      PAGE_WITHOUT_PRIMARY,
+    ]);
+
+    expect(res.headers.get('location'), 'a perfectly identifiable account was turned away').toContain('google=pending');
+    const pending = await db
+      .prepare(`SELECT google_account_email FROM google_pending_connections WHERE user_id = 'u1'`)
+      .first<{ google_account_email: string | null }>();
+    expect(pending!.google_account_email).toBe('someone@gmail.com');
+  });
+
+  // F-44. The code has already been exchanged by the time either refusal runs,
+  // so a grant exists at Google for a refresh token this request is about to
+  // drop. Without the revoke, someone who hits an outage here and never
+  // retries keeps the app in their Google connected-apps list forever, for a
+  // credential nobody holds.
+  it('hands back the grant it just exchanged when it refuses', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+
+    await connectWith(env, [
+      CONNECT_TOKEN_RULE,
+      REVOKE_RULE,
+      { match: 'users/me/calendarList', status: 503, body: {} },
+    ]);
+
+    const revokes = fetchStub!.calls
+      .map((url, i) => ({ url, body: fetchStub!.bodies[i] ?? '' }))
+      .filter((c) => c.url.includes('/revoke'));
+    expect(revokes, 'the refused grant was abandoned at Google rather than revoked').toHaveLength(1);
+    expect(revokes[0].body, 'something other than the abandoned refresh token was revoked').toContain(
+      'google-refresh-token',
+    );
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// P15-07 (the P14-08 narrowing)
+// ---------------------------------------------------------------------------
+
+// Revoking at Google kills the grant, not the token, so a same-account
+// reconnect landing mid-disconnect had its new credential revoked with the old
+// one. IDEAS item 71 called the obvious guard unsafe because of connections
+// whose account was never identified; P15-05 closed that door, so the guard is
+// now correct in every case it applies to -- and it applies to exactly one.
+describe('a same-account reconnect is not revoked by the disconnect it interrupted (P15-07)', () => {
+  async function seedDisconnecting(db: ShimDatabase, email: string | null): Promise<void> {
+    const sealed = await seal('stored-refresh-token', GOOGLE_ENCRYPTION_KEY);
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO google_calendar_connections
+           (user_id, refresh_token_ciphertext, refresh_token_iv, access_token_ciphertext, access_token_iv,
+            access_token_expires_at, google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
+            last_synced_at, disconnect_attempts, connected_at, updated_at)
+         VALUES ('u1', ?, ?, NULL, NULL, NULL, ?, 'primary', NULL, 0, 'disconnecting', NULL, 0, ?, ?)`,
+      )
+      .bind(sealed.ciphertext, sealed.iv, email, now, now)
+      .run();
+  }
+
+  async function runDisconnectWith(
+    db: ShimDatabase,
+    env: Env,
+    reconnectAs: string | null,
+  ): Promise<string[]> {
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await seedDisconnecting(db, 'same@gmail.com');
+
+    // One upcoming entry to clear, so the disconnect has work to do and the
+    // reconnect can land in the middle of it. This is the shape the finding
+    // describes: a multi-tick disconnect, and a reconnect arriving inside it.
+    const start = Date.now() + 3 * DAY_MS;
+    await seedEvent(db, { id: 'ev-1', organizerId: 'u1', startAt: start, endAt: start + HOUR_MS });
+    await seedLink(db, { eventId: 'ev-1', calendarId: 'primary', title: 'Session', startAt: start, endAt: start + HOUR_MS });
+
+    // The reconnect has to land WHILE the disconnect is running, which is the
+    // whole race. Doing it beforehand proves nothing: storeConnection resets
+    // `status` to active, so the sweep would not pick the connection up at all
+    // and every assertion below would hold for the wrong reason. The `before`
+    // hook suspends the sweep inside a real await -- here, the deletion of the
+    // entry it is clearing -- which is where a finalize genuinely can arrive.
+    let reconnected = false;
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
+      {
+        match: '/calendar/v3/calendars/',
+        status: 200,
+        body: {},
+        before: async () => {
+          if (!reconnectAs || reconnected) return;
+          reconnected = true;
+          await storeConnection(env, 'u1', 'replacement-refresh', 'replacement-access', 3600, reconnectAs, 'primary');
+        },
+      },
+    ]);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+    if (reconnectAs) expect(reconnected, 'the sweep never reached the point the reconnect models').toBe(true);
+    return fetchStub.bodies.filter((_, i) => fetchStub!.calls[i].includes('/revoke')).map((b) => b ?? '');
+  }
+
+  it('skips the revoke when the same account has reconnected', async () => {
+    const { db, env: base } = setup('paid');
+    const env = googleEnv(base);
+    const revokes = await runDisconnectWith(db, env, 'same@gmail.com');
+
+    expect(revokes, "the reconnection's own grant was revoked with the one being discarded").toHaveLength(0);
+    const conn = await db
+      .prepare(`SELECT status FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ status: string }>();
+    expect(conn!.status, 'the replacement connection was dropped').toBe('active');
+  });
+
+  // The next two are invariant guards, not reproductions: they pass with and
+  // without the narrowing, because the unfixed code revoked unconditionally
+  // and so satisfied them by accident. They are here because the risk this
+  // change carries is over-skipping -- a grant left alive that the Privacy
+  // Policy promises to tear down -- and these are the two shapes that must
+  // never be skipped.
+  it('still revokes an ordinary disconnect that nobody interrupted', async () => {
+    const { db, env: base } = setup('paid');
+    const env = googleEnv(base);
+    const revokes = await runDisconnectWith(db, env, null);
+
+    expect(revokes, 'an ordinary disconnect stopped revoking').toHaveLength(1);
+    expect(revokes[0]).toContain('stored-refresh-token');
+  });
+
+  it('still revokes when the replacement is a different account', async () => {
+    const { db, env: base } = setup('paid');
+    const env = googleEnv(base);
+    // storeConnection revokes the predecessor itself on an account switch, so
+    // this is belt-and-braces -- but skipping here on an account we cannot
+    // prove is the same one is exactly what item 71 refused to do.
+    const revokes = await runDisconnectWith(db, env, 'someone-else@gmail.com');
+
+    expect(revokes.length, "a different account's grant was left alive").toBeGreaterThanOrEqual(1);
   });
 });

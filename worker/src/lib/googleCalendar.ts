@@ -720,6 +720,27 @@ export function accountEmailFrom(calendars: GoogleCalendarSummary[]): string | n
   return calendars.find((c) => c.primary)?.id ?? null;
 }
 
+// The identity lookup of last resort, for when the calendar list came back
+// fine and simply had no primary entry on it (Pass-15 review, P15-05).
+//
+// listWritableCalendars reads one page of at most 250 and drops the
+// continuation token, and Google does not promise the primary calendar is on
+// the first page -- so `accountEmailFrom` returning null is not the same fact
+// as "this account could not be identified", and treating it as an unknown
+// identity was what let an unidentifiable account be connected anyway.
+//
+// A direct get rather than following pages: `primary` is a documented alias
+// for the signed-in account's own calendar, and one this app already stakes
+// everything on -- it is the default write destination for every connection.
+// One request, no paging, and no additional OAuth scope.
+export async function fetchPrimaryCalendarId(accessToken: string): Promise<string | null> {
+  const result = await callGoogle<{ id?: string }>(
+    accessToken,
+    `${CALENDAR_API}/users/me/calendarList/primary`,
+  );
+  return result.ok ? (result.value.id ?? null) : null;
+}
+
 export interface ImportedCalendarEvent {
   googleEventId: string;
   title: string;
