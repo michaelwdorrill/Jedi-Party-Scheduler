@@ -11,8 +11,9 @@ import { sweepGoogleCalendar } from '../src/cron/googleSync';
 import { TickBudget } from '../src/cron/budget';
 import { seal } from '../src/lib/crypto';
 import { accessTokenFor, type GoogleConnectionRow, storeConnection } from '../src/lib/googleCalendar';
+import { resolvePastDeadlineChangeRequests } from '../src/lib/changeRequests';
 import type { Env } from '../src/env';
-import type { ShimDatabase } from './d1shim';
+import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
 import {
   countRows,
   DAY_MS,
@@ -514,5 +515,138 @@ describe('a same-account reconnect keeps the chosen write calendar (P13-08)', ()
       .prepare(`SELECT calendar_id FROM google_calendar_connections WHERE user_id = 'u1'`)
       .first<{ calendar_id: string }>();
     expect(row!.calendar_id).toBe('primary');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P13-05 / P13-11
+// ---------------------------------------------------------------------------
+
+// The resolver priced every request at three statements. An accepted,
+// date-moving one-off costs six: the tally, the event lookup, the acceptance
+// claim P12-18 added, and updateEvent's own batch of three. Six such requests
+// in one tick measured 65 real statements against a documented Free-plan
+// ceiling of 50, while the ledger reported itself well inside.
+describe('a tick of ordinary accepted change requests stays in budget (P13-05)', () => {
+  const REQUEST_COUNT = 6;
+
+  async function seedDueRequests(db: ShimDatabase, base: number): Promise<void> {
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    for (let v = 0; v < 4; v++) {
+      await seedUser(db, `voter-${v}`);
+      await seedMembership(db, `voter-${v}`, 'guild-1');
+    }
+
+    for (let i = 0; i < REQUEST_COUNT; i++) {
+      const id = `ev-${i}`;
+      await seedEvent(db, {
+        id,
+        organizerId: 'organizer',
+        startAt: base + (i + 2) * DAY_MS,
+        endAt: base + (i + 2) * DAY_MS + 2 * HOUR_MS,
+      });
+      for (let v = 0; v < 4; v++) await seedInvite(db, id, `voter-${v}`);
+
+      const event = await db.prepare(`SELECT revision FROM events WHERE id = ?`).bind(id).first<{ revision: number }>();
+      await db
+        .prepare(
+          `INSERT INTO event_change_requests
+             (id, event_id, requester_id, kind, proposed_start_at, proposed_end_at, occurrence_date,
+              status, event_revision, message, created_at, vote_deadline_at)
+           VALUES (?, ?, 'voter-0', 'time_change', ?, ?, '', 'pending', ?, 'an hour later?', ?, ?)`,
+        )
+        .bind(
+          `cr-${i}`,
+          id,
+          base + (i + 2) * DAY_MS + HOUR_MS,
+          base + (i + 2) * DAY_MS + 3 * HOUR_MS,
+          event!.revision,
+          base - DAY_MS,
+          base - HOUR_MS,
+        )
+        .run();
+      // One yes, no noes: below an open-vote majority but a win at the deadline.
+      await db
+        .prepare(
+          `INSERT INTO event_change_request_votes (request_id, user_id, vote, voted_at) VALUES (?, 'voter-0', 'yes', ?)`,
+        )
+        .bind(`cr-${i}`, base - 2 * HOUR_MS)
+        .run();
+    }
+  }
+
+  it('measures actual statements for six legitimate deadline decisions', async () => {
+    vi.useFakeTimers();
+    const base = Date.UTC(2026, 8, 10, 12, 0, 0);
+    vi.setSystemTime(base);
+
+    const { db, env } = setup();
+    await seedDueRequests(db, base);
+    // Notifications off, so what is measured is the decision work alone.
+    await db.prepare(`UPDATE users SET notifications_enabled = 0`).run();
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    db.resetQueryCount();
+    await runReminderSweep(env);
+    expect(db.queryCount).toBeLessThanOrEqual(D1_FREE_PLAN_QUERY_BUDGET);
+  });
+
+  // P13-11. The claim and the event mutation are separate transactions, and
+  // the compensating release is itself a write -- so a tick that ran out
+  // between them left a request permanently 'accepted' over an event that
+  // never moved, invisible to the resolver because it is no longer pending.
+  //
+  // This is an INVARIANT GUARD, not a reproduction: it passes before the fix
+  // as well as after, and saying so matters more than the green tick.
+  //
+  // The reason is worth recording. updateEvent never consults the WorkBudget
+  // at all, so the ledger cannot strand a claim part-way -- once the claim
+  // lands, the apply runs regardless of what the ledger thinks is left. The
+  // stranding reviewer A demonstrated needs the platform's HARD statement
+  // cutoff, which this adapter does not enforce.
+  //
+  // So the reservation added here does not close P13-11 directly. What it
+  // does is keep the tick inside the documented allowance (P13-05), which is
+  // the thing that would cause the hard cutoff in the first place. The
+  // non-atomicity itself is still there and is recorded as IDEAS item 70.
+  // This guard exists so that if the acceptance path ever does become
+  // budget-gated, the boundary is already being walked.
+  it('never claims an acceptance it cannot afford to finish', async () => {
+    for (let allowance = 0; allowance < 20; allowance++) {
+      vi.useFakeTimers();
+      const base = Date.UTC(2026, 8, 10, 12, 0, 0);
+      vi.setSystemTime(base);
+
+      const { db, env } = setup();
+      await seedDueRequests(db, base);
+
+      let remaining = allowance;
+      await resolvePastDeadlineChangeRequests(env, {
+        trySpend: (n: number) => {
+          if (remaining < n) return false;
+          remaining -= n;
+          return true;
+        },
+      });
+
+      const { results: accepted } = await db
+        .prepare(
+          `SELECT cr.id, cr.proposed_start_at, e.start_at
+           FROM event_change_requests cr JOIN events e ON e.id = cr.event_id
+           WHERE cr.status = 'accepted'`,
+        )
+        .all<{ id: string; proposed_start_at: number; start_at: number }>();
+
+      for (const row of accepted) {
+        expect(
+          row.start_at,
+          `with an allowance of ${allowance}: ${row.id} is accepted but its event never moved`,
+        ).toBe(row.proposed_start_at);
+      }
+      vi.useRealTimers();
+    }
   });
 });

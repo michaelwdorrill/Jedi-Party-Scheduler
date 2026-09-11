@@ -559,7 +559,30 @@ export interface WorkBudget {
   trySpend(queries: number): boolean;
 }
 
-const RESOLUTION_COST_PER_REQUEST = 3;
+// Pass-13 review (P13-05). Priced per branch rather than as one flat number,
+// because the branches differ by a factor of five and the flat number was the
+// cheap one.
+//
+// The old constant was 3. What an accepted, date-moving one-off actually
+// costs: the tally, the event lookup, the acceptance claim P12-18 added, and
+// updateEvent's own batch -- the event row, its attendance rows and its
+// recurrence rule, three statements. Six, charged as three. Six such requests
+// in one tick measured 65 real D1 statements against Cloudflare's documented
+// Free-plan ceiling of 50, with the ledger reporting itself comfortably
+// inside. P12-18's claim made an existing undercount worse by exactly one.
+//
+// Discovery is what every request pays before its branch is known.
+const DISCOVERY_COST_PER_REQUEST = 2;
+
+// Claim, updateEvent's three-statement batch, and the compensating release.
+// The release is reserved up front deliberately (P13-11): it is the statement
+// that undoes a claim whose apply failed, and a release that cannot be paid
+// for is how a request ends up permanently 'accepted' over an event that
+// never moved.
+const ACCEPT_COST_PER_REQUEST = 5;
+
+// The decline path is a single compare-and-set.
+const DECLINE_COST_PER_REQUEST = 1;
 const MAX_CHANGE_REQUESTS_RESOLVED_PER_INVOCATION = 25;
 const CHANGE_REQUEST_RESOLUTION_DEAD_LETTER_AFTER = 3;
 
@@ -580,7 +603,7 @@ export async function resolvePastDeadlineChangeRequests(env: Env, budget?: WorkB
 
   const resolvedIds: string[] = [];
   for (const request of requests) {
-    if (budget && !budget.trySpend(RESOLUTION_COST_PER_REQUEST)) break;
+    if (budget && !budget.trySpend(DISCOVERY_COST_PER_REQUEST)) break;
     try {
       const tally = await getVoteTally(env, request.id);
       let accepted = tally.yes > tally.no;
@@ -588,6 +611,11 @@ export async function resolvePastDeadlineChangeRequests(env: Env, budget?: WorkB
       if (accepted) {
         const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(request.event_id).first<EventRow>();
         if (event) {
+          // Reserved in full before the claim, never part-way through it. A
+          // tick that cannot afford the whole acceptance leaves the request
+          // pending for the next one, which is a state the resolver already
+          // handles -- unlike a claim it could not finish (P13-11).
+          if (budget && !budget.trySpend(ACCEPT_COST_PER_REQUEST)) break;
           try {
             await applyAndAccept(env, event, request, null);
           } catch (err) {
@@ -602,6 +630,7 @@ export async function resolvePastDeadlineChangeRequests(env: Env, budget?: WorkB
       }
 
       if (!accepted) {
+        if (budget && !budget.trySpend(DECLINE_COST_PER_REQUEST)) break;
         await env.DB.prepare(
           `UPDATE event_change_requests SET status = 'declined', decided_at = ? WHERE id = ? AND status = 'pending'`,
         )

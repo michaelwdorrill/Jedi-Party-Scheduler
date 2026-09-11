@@ -144,6 +144,38 @@ recipient selection now does -- is the cleaner shape and costs nothing at write
 time, but it changes resolution behaviour for polls that are mid-flight, so it
 wants doing deliberately rather than as a rider on a security fix.
 
+### 70. Accepting a change request is not atomic with applying it
+
+From the Pass-13 review (P13-11). `applyAndAccept` claims the decision -- moves
+the request from `pending` to `accepted` -- and then mutates the event in a
+separate transaction, with a compensating release if the mutation throws.
+
+Pass 13 closed the budget route into the bad state by reserving the whole
+acceptance before claiming, and corrected the pricing that made a tick exceed
+its allowance in the first place (P13-05). What is left is narrower: if the
+process dies between the claim and the apply, or the apply *and* its
+compensating release both fail, the request reads `accepted` over an event that
+never moved. The resolver will not pick it up again, because it is no longer
+`pending`.
+
+Not fixed in that pass because both honest options are more than a rider on a
+security batch. Either:
+
+- add an `applying` state to `event_change_requests.status`, which SQLite
+  cannot do without a full table rebuild since the column carries a CHECK
+  constraint -- and give the resolver a recovery arm that finalises a stale
+  `applying` row when the event already matches the proposed time and re-applies
+  when it does not; or
+- thread the status compare-and-set into `updateEvent`'s own batch, so the
+  event mutation and the decision commit as one D1 transaction. `updateEvent`
+  batches at a single point, so this is contained -- but it means adding a
+  guard so the event statements do not apply when the CAS matches nothing,
+  which is surgery in the one write path every event edit goes through.
+
+The second is the better end state. Both want doing deliberately: this pass
+spent most of its length fixing regressions introduced by clever changes to
+exactly this kind of code.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
