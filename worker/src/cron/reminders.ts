@@ -2828,6 +2828,22 @@ async function sweepOrganizerRsvpNotices(env: Env, budget: TickBudget): Promise<
      FROM event_attendance ea
      JOIN events e ON e.id = ea.event_id
      JOIN users ou ON ou.id = e.organizer_id
+     -- Pass-15 review (F-43). Every recipient query in this file carries this
+     -- join except the ones whose recipient is the ORGANIZER, which is the one
+     -- id nobody was checking. P12-01 fixed recipient selection, P13-03
+     -- message editing and P14-01 the decision notice; this is the same
+     -- pattern -- an id carried forward without a live access check -- at the
+     -- site those three sweeps did not cover.
+     --
+     -- An organizer who leaves the server is refused by loadOwnedActiveEvent
+     -- and, since P14-02, by the Discord cancel handlers -- but the event
+     -- stayed active, invitees kept answering, and their names and answers
+     -- kept arriving in the DMs of someone who can no longer open the event.
+     -- Lower than P14-01 because the content is about their own event rather
+     -- than someone else's, and the same fix either way.
+     JOIN user_guild_membership om
+       ON om.user_id = e.organizer_id AND om.guild_id = e.guild_id
+          AND om.is_member = 1 AND om.verified_at >= ?
      JOIN users ru ON ru.id = ea.user_id
      LEFT JOIN organizer_rsvp_notice_log l
        ON l.organizer_id = e.organizer_id AND l.event_id = ea.event_id AND l.occurrence_date = ea.occurrence_date
@@ -2835,7 +2851,7 @@ async function sweepOrganizerRsvpNotices(env: Env, budget: TickBudget): Promise<
      WHERE l.id IS NULL AND e.status = 'active' AND ea.user_id != e.organizer_id
      LIMIT ?`,
   )
-    .bind(GLOBAL_SCAN_LIMIT)
+    .bind(membershipCutoff(), GLOBAL_SCAN_LIMIT)
     .all<{
       event_id: string;
       occurrence_date: string;

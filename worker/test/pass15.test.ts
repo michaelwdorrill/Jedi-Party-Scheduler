@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
+import { runReminderSweep } from '../src/cron/reminders';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
@@ -10,7 +11,10 @@ import type { Env } from '../src/env';
 import type { ShimDatabase } from './d1shim';
 import {
   DAY_MS,
+  DM_CHANNEL_RULE,
+  dmSendRule,
   HOUR_MS,
+  membershipRule,
   seedEvent,
   seedGuild,
   seedInvite,
@@ -610,5 +614,78 @@ describe('an import cannot be credited to the account that replaced its source (
       conn!.read_calendar_id,
       "the new account's freshly made choice was cleared by the old account's failure",
     ).toBe('primary');
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// F-43
+// ---------------------------------------------------------------------------
+
+// The fourth instance of one pattern in four passes: an id carried forward to
+// a DM without a live access check. P12-01 was recipient selection, P13-03
+// message editing, P14-01 the decision notice -- and each time the organizer's
+// own sweeps were left alone, because the organizer is the one recipient who
+// is "obviously" entitled to their own event.
+describe('an organizer who left the server stops receiving RSVP notices (F-43)', () => {
+  async function seedAnsweredEvent(db: ShimDatabase): Promise<void> {
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'responder');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'responder', 'guild-1');
+    await db.prepare(`UPDATE users SET dm_channel_id = 'dm-organizer' WHERE id = 'organizer'`).run();
+
+    const start = Date.now() + 3 * DAY_MS;
+    await seedEvent(db, {
+      id: 'ev-1',
+      organizerId: 'organizer',
+      title: 'Thursday Raid -- private',
+      startAt: start,
+      endAt: start + 2 * HOUR_MS,
+    });
+    await seedInvite(db, 'ev-1', 'responder');
+    await db
+      .prepare(
+        `INSERT INTO event_attendance (id, event_id, user_id, occurrence_date, rsvp_status, responded_at)
+         VALUES ('att-1', 'ev-1', 'responder', '', 'accepted', ?)`,
+      )
+      .bind(Date.now())
+      .run();
+  }
+
+  it('sends nothing once their membership is gone', async () => {
+    const { db, env } = setup('paid');
+    await seedAnsweredEvent(db);
+    await db
+      .prepare(`UPDATE user_guild_membership SET is_member = 0 WHERE user_id = 'organizer' AND guild_id = 'guild-1'`)
+      .run();
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    const toOrganizer = fetchStub.calls
+      .map((url, i) => ({ url, body: fetchStub!.bodies[i] ?? '' }))
+      .filter((c) => c.url.includes('dm-organizer'))
+      .map((c) => c.body)
+      .join(' ');
+    expect(
+      toOrganizer,
+      'a departed organizer was told who answered, for an event they can no longer open',
+    ).not.toContain('responder');
+    expect(await countRows(db, 'organizer_rsvp_notice_log', `organizer_id = 'organizer'`)).toBe(0);
+  });
+
+  it('still tells an organizer who is still in the server', async () => {
+    const { db, env } = setup('paid');
+    await seedAnsweredEvent(db);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    expect(
+      await countRows(db, 'organizer_rsvp_notice_log', `organizer_id = 'organizer'`),
+      'a current organizer stopped hearing about RSVPs to their own event',
+    ).toBe(1);
   });
 });
