@@ -312,6 +312,47 @@ async function applyAndAccept(
   request: ChangeRequestRow,
   decidedBy: string | null,
 ): Promise<void> {
+  // Pass-12 review (P12-18). The decision is claimed BEFORE the event is
+  // touched, not recorded after it.
+  //
+  // acceptChangeRequest's `request.status !== 'pending'` check reads a row the
+  // route loaded earlier, so it is a check against a snapshot. A decline
+  // landing in between passed it anyway: the accept went on to move the event,
+  // and only then ran its `WHERE status = 'pending'` update, which matched
+  // nothing. The stored request read 'declined', complete with the organizer's
+  // decline note, while the schedule had already moved -- and nothing in the
+  // app showed the two disagreeing.
+  //
+  // Claiming first makes 'pending' the thing being competed for, so exactly
+  // one of accept and decline can win it, and the winner is the only one that
+  // gets to act.
+  const claim = await env.DB.prepare(
+    `UPDATE event_change_requests SET status = 'accepted', decided_at = ?, decided_by = ?
+     WHERE id = ? AND status = 'pending'`,
+  )
+    .bind(Date.now(), decidedBy, request.id)
+    .run();
+  if (claim.meta.changes === 0) throw new ConflictError('This request has already been decided');
+
+  try {
+    await applyChangeRequest(env, event, request);
+  } catch (err) {
+    // The claim is released rather than left standing over a change that did
+    // not happen. Without this a stale revision -- which updateEvent below
+    // throws for by design -- would leave a request reading 'accepted' beside
+    // an event that never moved, which is the same class of disagreement this
+    // finding is about, just the other way round.
+    await env.DB.prepare(
+      `UPDATE event_change_requests SET status = 'pending', decided_at = NULL, decided_by = NULL
+       WHERE id = ? AND status = 'accepted'`,
+    )
+      .bind(request.id)
+      .run();
+    throw err;
+  }
+}
+
+async function applyChangeRequest(env: Env, event: EventRow, request: ChangeRequestRow): Promise<void> {
   if (request.kind === 'time_change') {
     if (event.is_recurring) {
       // An occurrence override, not a change to the series -- and, following
@@ -358,17 +399,6 @@ async function applyAndAccept(
     // this path passes no group ids anyway.
     await addInvitesToEvent(env, event.id, event.guild_id, [request.target_user_id!], [], event.organizer_id);
   }
-
-  // Best-effort bookkeeping, not a joint transaction with the write above --
-  // the write's own guard (updateEvent's revision check, or the fact that
-  // only one accept path is ever reached per request) is what actually
-  // prevents a double-apply. This step only has to avoid double-recording
-  // it, via the ordinary status='pending' compare-and-set.
-  await env.DB.prepare(
-    `UPDATE event_change_requests SET status = 'accepted', decided_at = ?, decided_by = ? WHERE id = ? AND status = 'pending'`,
-  )
-    .bind(Date.now(), decidedBy, request.id)
-    .run();
 }
 
 export async function acceptChangeRequest(

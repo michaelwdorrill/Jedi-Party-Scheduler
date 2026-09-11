@@ -9,8 +9,12 @@ import { sweepGoogleCalendar } from '../src/cron/googleSync';
 import { TickBudget } from '../src/cron/budget';
 import { seal, unseal } from '../src/lib/crypto';
 import { createSession, isSessionActive, revokeSession, rotateSession } from '../src/lib/sessions';
-import { accessTokenFor, type GoogleConnectionRow, storeConnection } from '../src/lib/googleCalendar';
-import { ValidationError } from '../src/lib/validate';
+import { accessTokenFor, type GoogleConnectionRow, revokeToken, storeConnection } from '../src/lib/googleCalendar';
+import { acceptChangeRequest, declineChangeRequest } from '../src/lib/changeRequests';
+import type { ChangeRequestRow } from '../src/lib/changeRequests';
+import { buildApp } from '../src/router';
+import { signJwt } from '../src/lib/jwt';
+import { ConflictError, ValidationError } from '../src/lib/validate';
 import type { Env } from '../src/env';
 import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
 import {
@@ -1168,5 +1172,165 @@ describe('a long occurrence stays visible in a narrow overlapping window (P12-14
     // occurrence is running across it.
     const narrow = expandOccurrences(longWeekly, 'UTC', Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 2), []);
     expect(narrow.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P12-15 / P12-18 / P12-19 / P12-20
+// ---------------------------------------------------------------------------
+
+// normalizePollModes applies the CREATE-time default `?? 'single_winner'`, and
+// updateEvent called it too -- so a PATCH that does not mention
+// pollResolutionMode silently converted a multi-winner poll into a
+// single-winner one. Every other field in that same UPDATE learned this lesson
+// under F-08-A: "the caller didn't send it" and "the caller wants the default"
+// are different requests.
+describe('a partial poll edit preserves its resolution mode (P12-15)', () => {
+  it('leaves a multi-winner poll multi-winner when the mode is not sent', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+
+    const base = Date.now();
+    const slot = { startAt: base + 3 * DAY_MS, endAt: base + 3 * DAY_MS + 2 * HOUR_MS };
+    const pollId = await createEventWithInvites(env, 'guild-1', 'organizer', {
+      title: 'Which nights?',
+      description: null,
+      game: null,
+      eventType: 'poll',
+      timezone: 'America/New_York',
+      isRecurring: false,
+      pollStrategy: 'threshold',
+      pollThresholdCount: 1,
+      pollDeadlineAt: base + DAY_MS,
+      pollResolutionMode: 'multi_winner',
+      pollOptions: [slot],
+      invites: { userIds: [], groupIds: [] },
+    } as never);
+
+    const stored = await loadEventRow(db, pollId);
+    // A partial edit: same candidates, no mode.
+    await updateEvent(env, pollId, 'guild-1', { pollOptions: [slot], revision: stored.revision } as never, stored);
+
+    const after = await loadEventRow(db, pollId);
+    expect(after.poll_resolution_mode, 'a partial edit downgraded the poll to single-winner').toBe('multi_winner');
+  });
+});
+
+// applyAndAccept moved the event first and recorded the decision afterwards,
+// behind a `WHERE status = 'pending'` compare-and-set. acceptChangeRequest's
+// own pending check reads a snapshot the route loaded earlier, so a decline
+// landing between the two passed it: the accept moved the schedule and then
+// updated nothing, leaving a request that reads 'declined', decline note and
+// all, beside an event that had already moved.
+describe('a declined change request cannot also be applied (P12-18)', () => {
+  it('refuses the accept when a decline got there first', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'asker');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'asker', 'guild-1');
+
+    const start = Date.now() + 5 * DAY_MS;
+    await seedEvent(db, { id: 'ev-1', organizerId: 'organizer', startAt: start, endAt: start + 2 * HOUR_MS });
+    await seedInvite(db, 'ev-1', 'asker');
+
+    const event = await loadEventRow(db, 'ev-1');
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO event_change_requests
+           (id, event_id, occurrence_date, requester_id, kind, status, proposed_start_at, proposed_end_at,
+            event_revision, message, created_at)
+         VALUES ('cr-1', 'ev-1', '', 'asker', 'time_change', 'pending', ?, ?, ?, 'an hour later?', ?)`,
+      )
+      .bind(start + HOUR_MS, start + 3 * HOUR_MS, event.revision, now)
+      .run();
+
+    // The route's snapshot, loaded while the request was still pending.
+    const snapshot = await db
+      .prepare(`SELECT * FROM event_change_requests WHERE id = 'cr-1'`)
+      .first<ChangeRequestRow>();
+
+    // The organizer declines from another tab.
+    await declineChangeRequest(env, snapshot!, 'organizer', 'not this week');
+
+    // The accept, still holding the pending snapshot, must not apply.
+    await expect(acceptChangeRequest(env, event, snapshot!, 'organizer')).rejects.toBeInstanceOf(ConflictError);
+
+    const after = await loadEventRow(db, 'ev-1');
+    expect(after.start_at, 'a declined request still moved the event').toBe(start);
+    const stored = await db
+      .prepare(`SELECT status, decision_note FROM event_change_requests WHERE id = 'cr-1'`)
+      .first<{ status: string; decision_note: string | null }>();
+    expect(stored!.status).toBe('declined');
+    expect(stored!.decision_note).toBe('not this week');
+  });
+});
+
+// R13/F-21 substantially widened the export and still left two things out: the
+// candidate times a poll is made of, and the login-attempt timestamp the
+// Pass-11 commit message claimed it had added.
+describe('the export returns the poll candidates and the login bookkeeping (P12-19)', () => {
+  it('includes both', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await db.prepare(`UPDATE users SET last_login_attempt_at = 1750000000000 WHERE id = 'organizer'`).run();
+
+    const base = Date.now();
+    const slot = { startAt: base + 3 * DAY_MS, endAt: base + 3 * DAY_MS + 2 * HOUR_MS };
+    await createEventWithInvites(env, 'guild-1', 'organizer', {
+      title: 'Which nights?',
+      description: null,
+      game: null,
+      eventType: 'poll',
+      timezone: 'America/New_York',
+      isRecurring: false,
+      pollStrategy: 'threshold',
+      pollThresholdCount: 1,
+      pollDeadlineAt: base + DAY_MS,
+      pollResolutionMode: 'multi_winner',
+      pollOptions: [slot],
+      invites: { userIds: [], groupIds: [] },
+    } as never);
+
+    const app = buildApp();
+    const { id: sessionId } = await createSession(env, 'organizer');
+    const token = await signJwt('organizer', sessionId, env.JWT_SIGNING_KEY);
+    const res = await app.request(
+      'https://worker.test/me/export',
+      { headers: { Authorization: `Bearer ${token}` } },
+      env,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+
+    expect(JSON.stringify(body.pollCandidates), 'the poll candidate times are missing').toContain(String(slot.startAt));
+    expect(JSON.stringify(body.profile)).toContain('1750000000000');
+  });
+});
+
+// revokeToken's comment said "400 with error=invalid_token means the grant is
+// already gone"; its code said "400". Google returns 400 for a malformed or
+// incomplete request too, and those mean the call did not happen -- reporting
+// them as a successful revocation is how a credential this app promised to
+// revoke stays live with nothing left to retry it.
+describe('revocation only treats an already-revoked token as success (P12-20)', () => {
+  it('accepts a 400 that says invalid_token', async () => {
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/revoke', status: 400, body: { error: 'invalid_token' } },
+    ]);
+    expect(await revokeToken('a-token')).toBe(true);
+  });
+
+  it('does not accept a 400 that says anything else', async () => {
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/revoke', status: 400, body: { error: 'invalid_request' } },
+    ]);
+    expect(await revokeToken('a-token'), 'a rejected request was reported as a successful revocation').toBe(false);
   });
 });

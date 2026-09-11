@@ -1447,7 +1447,18 @@ export async function updateEvent(
   }
 
   if (input.pollOptions) {
-    const { pollMode, pollResolutionMode } = normalizePollModes(input);
+    const { pollMode } = normalizePollModes(input);
+    // Pass-12 review (P12-15). normalizePollModes applies the CREATE-time
+    // default -- `?? 'single_winner'` -- which on this path means a PATCH that
+    // does not mention pollResolutionMode silently converts a multi-winner
+    // poll into a single-winner one. Same F-08-A preservation as the four
+    // fields below, and for the same reason: "the caller didn't send a mode"
+    // and "the caller wants the default" are not the same request. The current
+    // form always sends it, so the exposure is a partial API caller rather
+    // than an ordinary save -- but every other field in this UPDATE learned
+    // that lesson already.
+    const pollResolutionMode =
+      input.pollResolutionMode !== undefined ? input.pollResolutionMode : stored.poll_resolution_mode;
 
     // Pass-11 review (R05). This block used to delete every vote on the event
     // and then every candidate row, rebuilding the whole set from the request.

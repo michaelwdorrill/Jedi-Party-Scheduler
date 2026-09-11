@@ -103,7 +103,14 @@ meRoutes.get('/export', async (c) => {
   c.header('Cache-Control', 'no-store, private');
   const userId = c.get('userId');
   const tables: Record<string, string> = {
-    profile: `SELECT ${PROFILE_COLUMNS}, created_at, updated_at, last_login_at FROM users WHERE id = ?`,
+    // last_login_attempt_at alongside last_login_at (Pass-12 review, P12-19).
+    // The Pass-11 commit claimed this returning-user bookkeeping was in the
+    // export and it was not: only the successful-login column was added. It is
+    // a timestamp the app records about the person, including for attempts
+    // that were refused, which makes it exactly the sort of thing an access
+    // request is for.
+    profile: `SELECT ${PROFILE_COLUMNS}, created_at, updated_at, last_login_at, last_login_attempt_at
+              FROM users WHERE id = ?`,
     serverMemberships: `SELECT guild_id, nickname, is_member, verified_at FROM user_guild_membership WHERE user_id = ?`,
     personalEvents: `SELECT * FROM personal_events WHERE user_id = ?`,
     organisedEvents: `SELECT * FROM events WHERE organizer_id = ?`,
@@ -171,6 +178,16 @@ meRoutes.get('/export', async (c) => {
                           JOIN events e ON e.id = o.event_id WHERE e.organizer_id = ?`,
     personalEventOverrides: `SELECT o.* FROM personal_event_overrides o
                              JOIN personal_events p ON p.id = o.personal_event_id WHERE p.user_id = ?`,
+
+    // Pass-12 review (P12-19). A poll exported without its candidates is the
+    // same gap recurrenceRules closes for a recurring event: organisedEvents
+    // returns a row saying event_type = 'poll' and the candidate nights people
+    // actually voted on -- the content of the poll -- were nowhere in the
+    // download. pollVotes above exports the caller's own votes and references
+    // option ids that appeared in no other table, which made those rows
+    // unreadable on their own terms too.
+    pollCandidates: `SELECT o.* FROM event_poll_options o
+                     JOIN events e ON e.id = o.event_id WHERE e.organizer_id = ?`,
   };
 
   const out: Record<string, unknown> = { exportedAt: new Date().toISOString() };

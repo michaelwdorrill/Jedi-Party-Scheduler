@@ -189,7 +189,20 @@ export async function revokeToken(token: string): Promise<boolean> {
     // 400 with error=invalid_token means the grant is already gone -- which is
     // the outcome being asked for, so it counts as success rather than as a
     // failure to retry forever.
-    if (res.status === 400) return true;
+    //
+    // Pass-12 review (P12-20): read the body and check, rather than taking
+    // every 400 as that answer. This comment already said "400 with
+    // error=invalid_token" while the code said "400". Google returns 400 for
+    // other reasons too -- a malformed request, a missing parameter -- and
+    // those mean the call did not happen, not that the grant is gone. Treating
+    // them as success is how a credential this app promised to revoke stays
+    // live at Google with nothing left to retry it.
+    if (res.status === 400) {
+      const body = await res.text().catch(() => '');
+      if (body.includes('invalid_token')) return true;
+      console.warn(`Google token revocation was rejected as a bad request; the grant may still be live.`);
+      return false;
+    }
     console.warn(`Google token revocation returned ${res.status}; the grant may still be live.`);
     return false;
   } catch (err) {
