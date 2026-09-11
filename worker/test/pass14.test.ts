@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runReminderSweep } from '../src/cron/reminders';
 import { handleInteraction } from '../src/lib/interactions';
+import { expandOccurrences } from '../src/lib/recurrence';
 import {
   countRows,
   DAY_MS,
@@ -206,5 +207,113 @@ describe('Discord cancel controls respect current guild membership (P14-02)', ()
     await handleInteraction(env, press('uo:v2:cancel:ev-1', 'organizer'));
 
     expect(await countRows(db, 'events', `id = 'ev-1' AND status = 'cancelled'`)).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P14-15 / F-38, P14-13 / F-39, P14-14
+// ---------------------------------------------------------------------------
+
+const weekly = {
+  freq: 'WEEKLY' as const,
+  interval: 1,
+  byWeekday: '0', // Monday
+  byMonthDay: null,
+  startDate: '2026-09-07',
+  startTime: '19:00',
+  durationMinutes: 120,
+  endType: 'never' as const,
+  endDate: null,
+  endCount: null,
+};
+
+// pushIfInWindow emits at the RULE's position carrying the OVERRIDE's times,
+// and the Pass-13 override pass appends far-moved ones at the end. Nothing
+// sorted. Three callers take results[0] as "the next occurrence".
+describe('expanded occurrences come back in chronological order (P14-15)', () => {
+  it('puts an occurrence moved earlier ahead of the ones it now precedes', () => {
+    const moved = [
+      {
+        occurrence_date: '2026-10-12',
+        is_cancelled: 0,
+        override_start_at: Date.UTC(2026, 8, 16, 19, 0),
+        override_end_at: Date.UTC(2026, 8, 16, 21, 0),
+      },
+    ];
+    const occurrences = expandOccurrences(weekly, 'UTC', Date.UTC(2026, 8, 15), Date.UTC(2026, 9, 20), moved);
+
+    expect(occurrences.length).toBeGreaterThan(1);
+    expect(occurrences[0].date, 'the earliest occurrence was not first').toBe('2026-10-12');
+    expect(occurrences[0].startAt).toBe(Date.UTC(2026, 8, 16, 19, 0));
+
+    const starts = occurrences.map((o) => o.startAt);
+    expect(starts, 'output is not sorted by effective start').toEqual([...starts].sort((a, b) => a - b));
+  });
+
+  it('leaves an ordinary series in order', () => {
+    const occurrences = expandOccurrences(weekly, 'UTC', Date.UTC(2026, 8, 1), Date.UTC(2026, 9, 1), []);
+    const starts = occurrences.map((o) => o.startAt);
+    expect(starts).toEqual([...starts].sort((a, b) => a - b));
+  });
+});
+
+// The override pass checked only seriesStart and endDate, so an override
+// orphaned by a rule edit -- a changed weekday, a shortened count -- came back
+// as a live occurrence with reminders and a busy block.
+describe('the override pass only emits real occurrences of the series (P14-13)', () => {
+  it('drops an override orphaned by a weekday change', () => {
+    // A Monday override, on a series since edited to Tuesdays.
+    const tuesdays = { ...weekly, byWeekday: '1', startDate: '2026-09-08' };
+    const orphan = [
+      {
+        occurrence_date: '2026-09-14', // a Monday
+        is_cancelled: 0,
+        override_start_at: Date.UTC(2026, 8, 30, 19, 0),
+        override_end_at: Date.UTC(2026, 8, 30, 21, 0),
+      },
+    ];
+    const occurrences = expandOccurrences(tuesdays, 'UTC', Date.UTC(2026, 8, 30), Date.UTC(2026, 9, 1), orphan);
+    expect(occurrences.map((o) => o.date), 'a Monday override survived a move to Tuesdays').toEqual([]);
+  });
+
+  it('drops an override past a shortened end_count', () => {
+    const countOne = { ...weekly, endType: 'after_count' as const, endCount: 1 };
+    const orphan = [
+      {
+        occurrence_date: '2026-09-21', // the third Monday, outside a count of one
+        is_cancelled: 0,
+        override_start_at: Date.UTC(2026, 8, 30, 19, 0),
+        override_end_at: Date.UTC(2026, 8, 30, 21, 0),
+      },
+    ];
+    const occurrences = expandOccurrences(countOne, 'UTC', Date.UTC(2026, 8, 30), Date.UTC(2026, 9, 1), orphan);
+    expect(occurrences.map((o) => o.date), 'an override outside end_count was emitted').toEqual([]);
+  });
+
+  it('drops an override on an off-interval date', () => {
+    const fortnightly = { ...weekly, interval: 2 };
+    const orphan = [
+      {
+        occurrence_date: '2026-09-14', // the skipped week
+        is_cancelled: 0,
+        override_start_at: Date.UTC(2026, 8, 30, 19, 0),
+        override_end_at: Date.UTC(2026, 8, 30, 21, 0),
+      },
+    ];
+    const occurrences = expandOccurrences(fortnightly, 'UTC', Date.UTC(2026, 8, 30), Date.UTC(2026, 9, 1), orphan);
+    expect(occurrences.map((o) => o.date)).toEqual([]);
+  });
+
+  it('still emits a move of a genuine occurrence', () => {
+    const moved = [
+      {
+        occurrence_date: '2026-09-14', // a real Monday of this series
+        is_cancelled: 0,
+        override_start_at: Date.UTC(2026, 8, 30, 19, 0),
+        override_end_at: Date.UTC(2026, 8, 30, 21, 0),
+      },
+    ];
+    const occurrences = expandOccurrences(weekly, 'UTC', Date.UTC(2026, 8, 30), Date.UTC(2026, 9, 1), moved);
+    expect(occurrences.map((o) => o.date), 'a legitimate move stopped being visible').toEqual(['2026-09-14']);
   });
 });

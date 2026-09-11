@@ -72,7 +72,26 @@ async function resolveOccurrence(
     const zone = event.timezone;
     const dayStart = DateTime.fromISO(requestedDate, { zone }).startOf('day').toMillis();
     const dayEnd = DateTime.fromISO(requestedDate, { zone }).endOf('day').toMillis();
-    const occurrences = await expandOccurrencesForEvent(env, event, dayStart, dayEnd, overrides);
+
+    // Pass-14 review (P14-14). Widened to cover where the occurrence actually
+    // is, not only where its rule would have put it.
+    //
+    // An occurrence keeps its ORIGINAL date as its key and carries the
+    // override's times, so a session moved to another day has a key inside
+    // this window and a time outside it -- and the overlap filter therefore
+    // never returned it. The calendar links here by that key, so following a
+    // moved occurrence's own link answered 200 with startAt and endAt null,
+    // and the frontend gates its time and RSVP block on exactly those two
+    // fields. The page rendered with no time on it.
+    //
+    // Series membership is still decided by the expander (an override for a
+    // date the rule does not produce is not emitted at all), so widening the
+    // window cannot conjure an occurrence that should not exist.
+    const moved = overrides.find((o) => o.occurrence_date === requestedDate && !o.is_cancelled);
+    const from = Math.min(dayStart, moved?.override_start_at ?? dayStart);
+    const to = Math.max(dayEnd, moved?.override_end_at ?? dayEnd);
+
+    const occurrences = await expandOccurrencesForEvent(env, event, from, to, overrides);
     const occ = occurrences.find((o) => o.date === requestedDate);
     // No match means either a cancelled occurrence (expandOccurrences omits
     // those entirely) or a date the rule never produces -- either way,

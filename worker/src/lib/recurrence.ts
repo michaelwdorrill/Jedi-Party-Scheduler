@@ -68,9 +68,39 @@ function lookbackPeriods(rule: RecurrenceRule, periodMinutes: number): number {
   return 1 + Math.ceil(Math.max(0, rule.durationMinutes) / Math.max(1, periodMinutes));
 }
 
+// Is `dateKey` a date this rule actually produces?
+//
+// Pass-14 review (P14-13 / F-39). The override pass below used to accept any
+// override whose date sat between seriesStart and endDate, which is not the
+// same question: it says nothing about interval, weekday, month-day or
+// end_count. A stored override outside the pattern was therefore emitted as a
+// real occurrence -- reachable by ordinary use, because a rule edit rewrites
+// event_recurrence_rules and never touches event_occurrence_overrides, so
+// changing a Monday series to Tuesdays or shortening its count orphans every
+// override keyed to a date the new rule does not produce.
+//
+// Answered by running the walk itself over a one-day window with NO overrides
+// rather than by re-deriving the pattern arithmetically. That is deliberate:
+// the walk is the one definition of series membership in this codebase, it
+// already handles end_count through its occurrence index -- which arithmetic
+// on the date alone cannot -- and a second implementation would be a second
+// thing to keep in agreement. It is also what routes/events.ts's RSVP path
+// already does to validate an occurrence date.
+//
+// No recursion hazard: the inner call passes an empty override list, so its
+// own override pass iterates nothing.
+export function isSeriesOccurrence(rule: RecurrenceRule, zone: string, dateKey: string): boolean {
+  const day = DateTime.fromISO(dateKey, { zone });
+  if (!day.isValid) return false;
+  const nominal = expandOccurrences(rule, zone, day.startOf('day').toMillis(), day.endOf('day').toMillis(), []);
+  return nominal.some((o) => o.date === dateKey);
+}
+
 // Pure: expands a recurrence rule into concrete occurrences overlapping
 // [windowFromMs, windowToMs]. No DB access, so it's equally usable for guild
 // events, personal events, and unit-style checks.
+//
+// Output is ordered by effective start time (Pass-14 review, P14-15 / F-38).
 export function expandOccurrences(
   rule: RecurrenceRule,
   zone: string,
@@ -273,12 +303,11 @@ export function expandOccurrences(
     if (emitted.has(override.occurrence_date)) continue;
     if (override.override_end_at < windowFromMs || override.override_start_at > windowToMs) continue;
 
-    // Still has to be an occurrence of this series. Without this an override
-    // left behind by an edit that shortened the series would resurrect a night
-    // the rule no longer produces.
-    const originalDate = DateTime.fromISO(override.occurrence_date, { zone });
-    if (!originalDate.isValid || originalDate < seriesStart) continue;
-    if (endDate && originalDate > endDate) continue;
+    // Still has to be an occurrence of this series. The first version of this
+    // checked only seriesStart and endDate, which let an override orphaned by
+    // a rule edit -- a changed weekday, a shortened count -- come back as a
+    // live occurrence (P14-13 / F-39). isSeriesOccurrence asks the walk.
+    if (!isSeriesOccurrence(rule, zone, override.occurrence_date)) continue;
 
     results.push({
       date: override.occurrence_date,
@@ -286,6 +315,24 @@ export function expandOccurrences(
       endAt: override.override_end_at,
     });
   }
+
+  // Pass-14 review (P14-15 / F-38). Sorted by effective start, because
+  // nothing else in this function is.
+  //
+  // pushIfInWindow emits at the RULE's position carrying the OVERRIDE's
+  // times, so a moved occurrence was already out of order before the override
+  // pass existed; that pass then appends the far-moved ones at the very end.
+  // Three callers take results[0] as "the next occurrence" -- the date the
+  // new-invite DM announces, the ladder's activeOccurrence (whose comment
+  // asserts that checking [0] is sufficient, true only if sorted), and event
+  // detail's next occurrence. So pulling an occurrence earlier, the case the
+  // override pass was written to make visible, left the reminder ladder
+  // firing for the wrong slot and the detail page naming the wrong night.
+  //
+  // Safe after the dedupe rather than before it: the dedupe is keyed by date,
+  // and nothing downstream consumes rule order -- freeBusy and noticeboard
+  // sort their own output already.
+  results.sort((a, b) => a.startAt - b.startAt || a.date.localeCompare(b.date));
 
   return results;
 }
