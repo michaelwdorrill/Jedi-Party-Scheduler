@@ -974,3 +974,66 @@ describe('an acceptance that never applied is recovered, not announced (P15-08)'
     expect(row!.applied_at, 'an ordinary acceptance left no record of applying').not.toBeNull();
   });
 });
+
+// The recovery arm's second kind. The resolver's deadline disjunct is
+// `kind = 'time_change'`, but the recovery disjunct deliberately is not: an
+// add_invitee acceptance can strand exactly the same way, and it is decided
+// interactively rather than by deadline, so nothing else would ever revisit
+// it. Checked here rather than left for the next reviewer to find.
+describe('recovery covers an add_invitee acceptance too (P15-08)', () => {
+  async function seedStrandedInvite(db: ShimDatabase): Promise<void> {
+    await seedGuild(db, 'guild-1');
+    for (const id of ['organizer', 'asker', 'newcomer']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    const start = Date.now() + 5 * DAY_MS;
+    await seedEvent(db, { id: 'ev-1', organizerId: 'organizer', startAt: start, endAt: start + 2 * HOUR_MS });
+    await seedInvite(db, 'ev-1', 'asker');
+    await db
+      .prepare(
+        `INSERT INTO event_change_requests
+           (id, event_id, requester_id, kind, target_user_id, occurrence_date, status, event_revision,
+            message, created_at, decided_at, decided_by, applied_at)
+         VALUES ('cr-1', 'ev-1', 'asker', 'add_invitee', 'newcomer', '', 'accepted', 0, NULL, ?, ?, 'organizer', NULL)`,
+      )
+      .bind(Date.now() - DAY_MS, Date.now() - HOUR_MS)
+      .run();
+  }
+
+  it('adds the invitee the acceptance promised', async () => {
+    const { db, env } = setup('paid');
+    await seedStrandedInvite(db);
+
+    await resolvePastDeadlineChangeRequests(env);
+
+    expect(
+      await countRows(db, 'event_invites', `event_id = 'ev-1' AND user_id = 'newcomer'`),
+      'an accepted add_invitee never took effect and nothing went back for it',
+    ).toBe(1);
+    const row = await db
+      .prepare(`SELECT applied_at FROM event_change_requests WHERE id = 'cr-1'`)
+      .first<{ applied_at: number | null }>();
+    expect(row!.applied_at).not.toBeNull();
+  });
+
+  it('is idempotent when the invite had in fact landed', async () => {
+    const { db, env } = setup('paid');
+    await seedStrandedInvite(db);
+    // The apply succeeded and only the stamp was lost -- the likelier half of
+    // the window, and the one where re-applying must be a no-op.
+    await seedInvite(db, 'ev-1', 'newcomer');
+
+    await resolvePastDeadlineChangeRequests(env);
+
+    expect(
+      await countRows(db, 'event_invites', `event_id = 'ev-1' AND user_id = 'newcomer'`),
+      're-applying an invite that had already landed duplicated it',
+    ).toBe(1);
+    const row = await db
+      .prepare(`SELECT status, applied_at FROM event_change_requests WHERE id = 'cr-1'`)
+      .first<{ status: string; applied_at: number | null }>();
+    expect(row!.status).toBe('accepted');
+    expect(row!.applied_at).not.toBeNull();
+  });
+});
