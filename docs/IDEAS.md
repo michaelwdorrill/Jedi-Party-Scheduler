@@ -176,6 +176,63 @@ The second is the better end state. Both want doing deliberately: this pass
 spent most of its length fixing regressions introduced by clever changes to
 exactly this kind of code.
 
+**Pass 14 re-raised this as P14-12 and it is still open, deliberately.** Both
+reviewers looked at it independently and both judged it non-blocking for
+0.8.x: the window needs the isolate to die between the claim and the apply, or
+the apply *and* its compensating release to fail together, and the outcome is a
+request that reads `accepted` over an unmoved event -- visible, correctable by
+hand, and not a disclosure. The reasoning above for why it is not a rider on a
+security batch is unchanged, and Pass 14 spent its length on eleven other
+findings.
+
+### 71. Disconnecting revokes the whole Google grant, including a reconnection that arrives mid-sweep
+
+From the Pass-14 review (P14-08). The disconnect sweep's *database* half was
+made safe in Pass 13 (P13-07): every DELETE is guarded by the
+`refresh_token_ciphertext` the disconnect began against, so a connection the
+user creates while the sweep is running is not deleted by the tidy-up for the
+one they left. The *network* half has no equivalent, and cannot have one at
+this provider: `revokeToken` sends a token to Google, and Google revokes the
+**grant** it belongs to, not that individual token. There is no documented way
+to revoke one refresh token and leave its siblings alive.
+
+So: user disconnects, the sweep starts clearing calendar entries (which can
+take several ticks for a large calendar), the user reconnects the same Google
+account before it finishes, and the sweep then revokes -- killing the
+credential the user just created. The rows survive, correctly; what they hold
+is dead, and the user sees a connection that reports `invalid_grant` on its
+first sync and has to connect a third time.
+
+Not fixed in this pass, and the reviewers agreed it is not a 0.8.x blocker: the
+failure is recoverable by reconnecting, costs no data, and discloses nothing.
+It is written down because the obvious mitigation is only *almost* right, and
+the part that is wrong is not obvious:
+
+- **The cheap narrowing:** re-read the connection immediately before calling
+  `revokeToken` and skip the call if `refresh_token_ciphertext` has changed.
+  That shrinks the window from "the whole sweep, including its outbound
+  Calendar API calls" to "between one query and one fetch". For a same-account
+  reconnect it is exactly right, for the reason `storeConnection` already gives
+  itself: a superseded same-account token belongs to the same single grant, and
+  Google expires the oldest itself. For a genuine account *switch* it is also
+  right, because `storeConnection` revokes the predecessor's grant on that
+  branch already.
+- **Where it goes wrong:** the unidentified-account case that P14-07 created a
+  branch for. When either email is unknown, `storeConnection` deliberately does
+  not revoke -- it cannot tell "same account" from "different account", and
+  guessing is what P14-07 was. Skip the sweep's revoke there too and account
+  A's grant survives with nothing left that will ever revoke it, which breaks a
+  promise the Privacy Policy makes in as many words. Today's unconditional
+  revoke keeps that promise and pays for it with the rare same-account case
+  above.
+
+So the shape of a real fix is a three-way decision on a value that may be
+unknown, and the honest options are to refuse an OAuth callback while a
+disconnect is still `disconnecting` (tell the user to wait, which needs UI), or
+to let a reconnect *cancel* a pending disconnect (which abandons a half-cleared
+calendar, and F-17/R11 exist because that used to happen by accident). Either
+is a design, not a rider.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
