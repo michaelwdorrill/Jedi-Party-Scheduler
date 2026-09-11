@@ -7,6 +7,12 @@ import {
   rotateSession,
 } from '../src/lib/sessions';
 import { runReminderSweep } from '../src/cron/reminders';
+import { sweepGoogleCalendar } from '../src/cron/googleSync';
+import { TickBudget } from '../src/cron/budget';
+import { seal } from '../src/lib/crypto';
+import { accessTokenFor, type GoogleConnectionRow, storeConnection } from '../src/lib/googleCalendar';
+import type { Env } from '../src/env';
+import type { ShimDatabase } from './d1shim';
 import {
   countRows,
   DAY_MS,
@@ -333,5 +339,180 @@ describe('a queued group nudge does not reach a removed member (P13-12)', () => 
       .prepare(`SELECT delivered_at FROM group_nudge_log WHERE id = 'gn-1'`)
       .first<{ delivered_at: number | null }>();
     expect(row!.delivered_at, 'a queued nudge was delivered after the member was removed').toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P13-04 / P13-07 / P13-08
+// ---------------------------------------------------------------------------
+
+const GOOGLE_ENCRYPTION_KEY = 'test-google-encryption-key-at-least-32-chars';
+
+function googleEnv(base: Env): Env {
+  return {
+    ...base,
+    GOOGLE_SYNC_MODE: 'live',
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
+    GOOGLE_TOKEN_ENCRYPTION_KEY: GOOGLE_ENCRYPTION_KEY,
+  };
+}
+
+async function seedGoogleConnection(
+  db: ShimDatabase,
+  userId: string,
+  overrides: { status?: string; calendarId?: string; token?: string } = {},
+): Promise<void> {
+  const sealed = await seal(overrides.token ?? 'stored-refresh-token', GOOGLE_ENCRYPTION_KEY);
+  const now = Date.now();
+  await db
+    .prepare(
+      `INSERT INTO google_calendar_connections
+         (user_id, refresh_token_ciphertext, refresh_token_iv, access_token_ciphertext, access_token_iv,
+          access_token_expires_at, google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
+          last_synced_at, disconnect_attempts, connected_at, updated_at)
+       VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, 1, ?, NULL, 0, ?, ?)`,
+    )
+    .bind(
+      userId,
+      sealed.ciphertext,
+      sealed.iv,
+      `${userId}@gmail.com`,
+      overrides.calendarId ?? 'primary',
+      overrides.status ?? 'active',
+      now,
+      now,
+    )
+    .run();
+}
+
+// runDisconnect's budget exit happened before the attempt counter, and
+// `status = 'disconnecting'` sorts ahead of every active connection. A
+// disconnect whose deletes are refused therefore made no progress, recorded no
+// attempt, and took the single per-tick slot again forever -- never revoking
+// the grant it was supposed to release, and never letting anyone else sync.
+describe('a refused disconnect still makes bookkeeping progress (P13-04)', () => {
+  it('counts attempts and eventually releases the connection', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUser(db, 'stuck');
+    await seedGoogleConnection(db, 'stuck', { status: 'disconnecting' });
+
+    // More mapped future entries than one tick's write allowance, against a
+    // calendar that refuses every delete.
+    const now = Date.now();
+    await seedGuild(db);
+    await seedMembership(db, 'stuck', 'guild-1');
+    for (let i = 0; i < 27; i++) {
+      await seedEvent(db, {
+        id: `ev-${i}`,
+        organizerId: 'stuck',
+        startAt: now + DAY_MS,
+        endAt: now + DAY_MS + HOUR_MS,
+      });
+      await db
+        .prepare(
+          `INSERT INTO google_event_links
+             (id, user_id, event_id, occurrence_date, google_event_id, synced_title, synced_start_at, synced_end_at,
+              synced_at, calendar_id)
+           VALUES (?, 'stuck', ?, '', ?, 'Session', ?, ?, ?, 'primary')`,
+        )
+        .bind(`link-${i}`, `ev-${i}`, `g-${i}`, now + DAY_MS, now + DAY_MS + HOUR_MS, now)
+        .run();
+    }
+
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'at', expires_in: 3600 } },
+      { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
+      { match: '/calendar/v3/calendars/', status: 403, body: { error: { message: 'no access' } } },
+    ]);
+
+    for (let tick = 0; tick < 6; tick++) {
+      await sweepGoogleCalendar(env, new TickBudget('free'));
+    }
+
+    // Either it gave up and dropped the connection, or it is still counting
+    // towards doing so -- what it must never do is sit at zero forever.
+    const row = await db
+      .prepare(`SELECT disconnect_attempts FROM google_calendar_connections WHERE user_id = 'stuck'`)
+      .first<{ disconnect_attempts: number }>();
+    if (row) {
+      expect(row.disconnect_attempts, 'six sweeps recorded no disconnect attempt at all').toBeGreaterThan(0);
+    } else {
+      expect(await countRows(db, 'google_calendar_connections', `user_id = 'stuck'`)).toBe(0);
+    }
+  });
+});
+
+// markUnauthorized keyed on user_id alone, so a stale invalid_grant belonging
+// to the account the user just left disabled the one they just connected.
+describe('a stale Google failure cannot disable the replacement connection (P13-07)', () => {
+  it('leaves a reconnected account enabled when the old grant reports failure', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUser(db, 'u1');
+    await seedGoogleConnection(db, 'u1', { token: 'account-a-refresh' });
+
+    // The snapshot an in-flight sweep holds for account A.
+    const stale = await db
+      .prepare(`SELECT * FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<GoogleConnectionRow>();
+
+    // The user connects account B while that refresh is away.
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    await storeConnection(env, 'u1', 'account-b-refresh', 'account-b-access', 3600, 'b@gmail.com', 'primary');
+    fetchStub.restore();
+
+    // A's refresh comes back dead.
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 400, body: { error: 'invalid_grant' } },
+    ]);
+    const result = await accessTokenFor(env, stale!);
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.reason === 'unauthorized') {
+      await sweepGoogleCalendar(env, new TickBudget('paid'));
+    }
+
+    const row = await db
+      .prepare(`SELECT sync_enabled, google_account_email FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ sync_enabled: number; google_account_email: string }>();
+    expect(row!.google_account_email).toBe('b@gmail.com');
+    expect(row!.sync_enabled, "the old account's failure disabled the new connection").toBe(1);
+  });
+});
+
+// /google/finalize passes the literal 'primary', and storeConnection
+// overwrote calendar_id unconditionally -- so reconnecting the same account
+// silently moved the write destination back to primary while every existing
+// mapping still pointed at the calendar the user had chosen.
+describe('a same-account reconnect keeps the chosen write calendar (P13-08)', () => {
+  it('does not silently reset the destination to primary', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUser(db, 'u1');
+    await seedGoogleConnection(db, 'u1', { calendarId: 'games@group.calendar.google.com' });
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    await storeConnection(env, 'u1', 'new-refresh', 'new-access', 3600, 'u1@gmail.com', 'primary');
+
+    const row = await db
+      .prepare(`SELECT calendar_id FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ calendar_id: string }>();
+    expect(row!.calendar_id, 'reconnecting reset the write calendar').toBe('games@group.calendar.google.com');
+  });
+
+  it('still moves the destination when the account actually changes', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUser(db, 'u1');
+    await seedGoogleConnection(db, 'u1', { calendarId: 'games@group.calendar.google.com' });
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    await storeConnection(env, 'u1', 'new-refresh', 'new-access', 3600, 'someone-else@gmail.com', 'primary');
+
+    const row = await db
+      .prepare(`SELECT calendar_id FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ calendar_id: string }>();
+    expect(row!.calendar_id).toBe('primary');
   });
 });

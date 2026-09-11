@@ -135,6 +135,10 @@ interface LinkRow {
   synced_title: string | null;
   synced_start_at: number | null;
   synced_end_at: number | null;
+  // Which calendar this entry was actually written to (migration 0043).
+  // NULL for rows predating it whose connection has since gone -- treated as
+  // "destination unknown", which fails safe.
+  calendar_id: string | null;
 }
 
 interface DesiredOccurrence {
@@ -215,7 +219,8 @@ export async function desiredOccurrencesFor(
 
 async function loadLinks(env: Env, userId: string): Promise<LinkRow[]> {
   const { results } = await env.DB.prepare(
-    `SELECT id, event_id, occurrence_date, google_event_id, synced_title, synced_start_at, synced_end_at
+    `SELECT id, event_id, occurrence_date, google_event_id, synced_title, synced_start_at, synced_end_at,
+            calendar_id
      FROM google_event_links WHERE user_id = ?`,
   )
     .bind(userId)
@@ -223,14 +228,20 @@ async function loadLinks(env: Env, userId: string): Promise<LinkRow[]> {
   return results;
 }
 
-async function markUnauthorized(env: Env, userId: string, message: string): Promise<void> {
+// Pass-13 review (P13-07): takes the row rather than the id, so the write can
+// be guarded by the credential the failure actually belongs to. Keyed on
+// user_id alone, a stale `invalid_grant` from the old account's in-flight
+// refresh disabled the account the user had just connected -- the same defect
+// P12-03 fixed for the success path and left on the failure path.
+async function markUnauthorized(env: Env, row: GoogleConnectionRow, message: string): Promise<void> {
   // sync_enabled = 0, not just an error message: a dead grant cannot recover
   // on its own, and leaving it enabled means every future tick spends part of
   // its allowance rediscovering that. The user reconnects, which resets both.
   await env.DB.prepare(
-    `UPDATE google_calendar_connections SET sync_enabled = 0, last_error = ?, updated_at = ? WHERE user_id = ?`,
+    `UPDATE google_calendar_connections SET sync_enabled = 0, last_error = ?, updated_at = ?
+     WHERE user_id = ? AND refresh_token_ciphertext = ?`,
   )
-    .bind(message, Date.now(), userId)
+    .bind(message, Date.now(), row.user_id, row.refresh_token_ciphertext)
     .run();
 }
 
@@ -244,6 +255,21 @@ async function runDisconnect(
   budget: TickBudget,
 ): Promise<void> {
   const now = Date.now();
+  // Pass-13 review (P13-04). Reserved before any work, exactly as
+  // syncOneConnection reserves its close-out: tryCalendarWrite draws on the
+  // same pool, so a tick that has drained it cannot afford to record that it
+  // tried.
+  //
+  // Without that record this path could not terminate. A disconnect whose
+  // deletes are refused makes no progress AND never reached the attempt
+  // counter, because the budget return below happened first -- and
+  // `status = 'disconnecting'` sorts ahead of every active connection in the
+  // candidate query, so it took the single per-tick slot again on every tick,
+  // forever. Measured in review: 27 mapped events against a calendar
+  // returning 403, six sweeps, 156 refused deletions, zero attempts recorded,
+  // zero revocations, and no other user's connection serviced at all.
+  if (!budget.trySpend(1)) return;
+
   const links = await loadLinks(env, row.user_id);
   // Past entries are left alone deliberately. They are a record of something
   // that actually happened, and reaching into someone's calendar history to
@@ -252,14 +278,19 @@ async function runDisconnect(
 
   let allCleared = true;
   let removed = 0;
+  let outOfBudget = false;
   if (accessToken) {
     for (const link of future) {
       if (!budget.tryCalendarWrite()) {
-        // Out of allowance, not out of options: the row stays 'disconnecting'
-        // and the next tick picks up where this stopped.
-        return;
+        // Out of allowance, not out of options -- but the bookkeeping below
+        // still has to run, so this breaks rather than returning.
+        outOfBudget = true;
+        break;
       }
-      const result = await deleteCalendarEvent(accessToken, row.calendar_id, link.google_event_id);
+      // Deleted from the calendar the LINK names, not the connection's current
+      // one (P13-08): after a destination change those differ, and deleting
+      // from the current calendar simply misses.
+      const result = await deleteCalendarEvent(accessToken, link.calendar_id ?? row.calendar_id, link.google_event_id);
       if (result.ok) {
         await env.DB.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(link.id).run();
         removed += 1;
@@ -272,7 +303,14 @@ async function runDisconnect(
     allCleared = false;
   }
 
-  const attempts = row.disconnect_attempts + 1;
+  if (outOfBudget) allCleared = false;
+
+  // A tick that removed something is making progress and should not spend an
+  // attempt -- a large disconnect legitimately takes several. One that removed
+  // nothing must spend one, or a permanently refused delete loops forever.
+  // That is the distinction the old unconditional increment could not make,
+  // because it was unreachable in exactly the case that needed it.
+  const attempts = removed > 0 ? row.disconnect_attempts : row.disconnect_attempts + 1;
   if (!allCleared && attempts < MAX_DISCONNECT_ATTEMPTS) {
     await env.DB.prepare(
       `UPDATE google_calendar_connections SET disconnect_attempts = ?, updated_at = ? WHERE user_id = ?`,
@@ -302,14 +340,29 @@ async function runDisconnect(
   const refreshToken = await readRefreshToken(env, row);
   const revoked = refreshToken ? await revokeToken(refreshToken) : false;
 
+  // Pass-13 review (P13-07): every statement here is guarded by the refresh
+  // token this disconnect began against, so a connection the user created
+  // while the revocation was in flight is not deleted by the tidy-up for the
+  // one they were leaving. Same compare-and-swap discipline, and the same
+  // version token, as accessTokenFor's write.
   await env.DB.batch([
-    env.DB.prepare(`DELETE FROM google_event_links WHERE user_id = ?`).bind(row.user_id),
+    env.DB.prepare(
+      `DELETE FROM google_event_links WHERE user_id = ?
+       AND EXISTS (SELECT 1 FROM google_calendar_connections
+                   WHERE user_id = ? AND refresh_token_ciphertext = ?)`,
+    ).bind(row.user_id, row.user_id, row.refresh_token_ciphertext),
     // Belt for F-17 / R11: DELETE /google already nulls read_calendar_id and
     // drops these, so a row imported between the request and this sweep should
     // not exist. One statement in a rare path is worth not having to be right
     // about that.
-    env.DB.prepare(`DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL`).bind(row.user_id),
-    env.DB.prepare(`DELETE FROM google_calendar_connections WHERE user_id = ?`).bind(row.user_id),
+    env.DB.prepare(
+      `DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL
+       AND EXISTS (SELECT 1 FROM google_calendar_connections
+                   WHERE user_id = ? AND refresh_token_ciphertext = ?)`,
+    ).bind(row.user_id, row.user_id, row.refresh_token_ciphertext),
+    env.DB.prepare(
+      `DELETE FROM google_calendar_connections WHERE user_id = ? AND refresh_token_ciphertext = ?`,
+    ).bind(row.user_id, row.refresh_token_ciphertext),
   ]);
 
   // Said separately from the line above, and only when it is true (R12). The
@@ -463,7 +516,7 @@ async function syncOneConnection(
         await env.DB.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(existing.id).run();
         counts.relinked += 1;
       } else if (result.kind === 'unauthorized') {
-        await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
+        await markUnauthorized(env, row, 'Google access was revoked. Reconnect to resume syncing.');
         return;
       } else {
         noteWriteFailure(result.message);
@@ -478,22 +531,49 @@ async function syncOneConnection(
     const result = await insertCalendarEvent(accessToken, row.calendar_id, payload);
     if (result.ok) {
       await env.DB.prepare(
+        // Pass-13 review (P13-08). Records the destination this entry was
+        // actually written to, and refuses to record it at all if that
+        // destination is no longer the connection's -- the R10 `stillCurrent`
+        // idiom from the import half, applied to the push half.
+        //
+        // Without the guard, a push already in flight when the destination
+        // changed returned afterwards and reinstated a mapping for an event id
+        // living in the OLD calendar, defeating the cleanup that had just run.
+        // Nothing on the row said which calendar it belonged to, so nothing
+        // could tell it was stale.
         `INSERT INTO google_event_links
-           (id, user_id, event_id, occurrence_date, google_event_id, synced_title, synced_start_at, synced_end_at, synced_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, user_id, event_id, occurrence_date, google_event_id, synced_title, synced_start_at, synced_end_at,
+            synced_at, calendar_id)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (SELECT 1 FROM google_calendar_connections
+                       WHERE user_id = ? AND calendar_id = ? AND status = 'active')
          ON CONFLICT(user_id, event_id, occurrence_date) DO UPDATE SET
            google_event_id = excluded.google_event_id,
            synced_title = excluded.synced_title,
            synced_start_at = excluded.synced_start_at,
            synced_end_at = excluded.synced_end_at,
-           synced_at = excluded.synced_at`,
+           synced_at = excluded.synced_at,
+           calendar_id = excluded.calendar_id`,
       )
-        .bind(newId(), row.user_id, occ.eventId, occ.occurrenceDate, result.value.id, occ.title, occ.startAt, occ.endAt, now)
+        .bind(
+          newId(),
+          row.user_id,
+          occ.eventId,
+          occ.occurrenceDate,
+          result.value.id,
+          occ.title,
+          occ.startAt,
+          occ.endAt,
+          now,
+          row.calendar_id,
+          row.user_id,
+          row.calendar_id,
+        )
         .run();
       counts.inserted += 1;
       pushedGoogleEventIds.add(result.value.id);
     } else if (result.kind === 'unauthorized') {
-      await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
+      await markUnauthorized(env, row, 'Google access was revoked. Reconnect to resume syncing.');
       return;
     } else {
       noteWriteFailure(result.message);
@@ -519,7 +599,7 @@ async function syncOneConnection(
       await env.DB.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(orphan.id).run();
       counts.deleted += 1;
     } else if (result.kind === 'unauthorized') {
-      await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
+      await markUnauthorized(env, row, 'Google access was revoked. Reconnect to resume syncing.');
       return;
     } else {
       noteWriteFailure(result.message);
@@ -641,7 +721,7 @@ async function syncImportedPersonalEvents(
 
   if (!result.ok) {
     if (result.kind === 'unauthorized') {
-      await markUnauthorized(env, row.user_id, 'Google access was revoked. Reconnect to resume syncing.');
+      await markUnauthorized(env, row, 'Google access was revoked. Reconnect to resume syncing.');
       return;
     }
     if (result.kind === 'missing') {
@@ -918,7 +998,7 @@ export async function sweepGoogleCalendar(env: Env, budget: TickBudget): Promise
 
     if (!token.ok) {
       if (token.reason === 'unauthorized') {
-        await markUnauthorized(env, row.user_id, token.message);
+        await markUnauthorized(env, row, token.message);
       } else {
         // Transient. Left enabled and untouched: last_synced_at has not moved,
         // so this connection stays at the front of the queue and is retried

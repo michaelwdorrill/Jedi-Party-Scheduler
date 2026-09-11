@@ -289,7 +289,17 @@ export async function storeConnection(
        access_token_iv = excluded.access_token_iv,
        access_token_expires_at = excluded.access_token_expires_at,
        google_account_email = excluded.google_account_email,
-       calendar_id = excluded.calendar_id,
+       -- Pass-13 review (P13-08): the write destination is preserved on a
+       -- same-account reconnect, for the same reason read_calendar_id below
+       -- is. /google/finalize has no idea which calendar was selected -- it
+       -- passes the literal 'primary' -- so overwriting unconditionally meant
+       -- reconnecting silently moved the destination back to primary while
+       -- every existing google_event_links row still pointed at the calendar
+       -- the user had chosen. Those entries are then skipped as unchanged and
+       -- the new destination never receives them: a connection that reports
+       -- itself healthy, syncs on schedule, and writes nothing. No
+       -- concurrency needed -- an ordinary reconnect does it.
+       calendar_id = CASE WHEN ? THEN excluded.calendar_id ELSE calendar_id END,
        sync_enabled = 1,
        status = 'active',
        last_error = NULL,
@@ -315,6 +325,9 @@ export async function storeConnection(
       calendarId,
       now,
       now,
+      // The two CASE flags, in the order their clauses appear in the SET list:
+      // calendar_id first, then read_calendar_id.
+      switchingAccount ? 1 : 0,
       switchingAccount ? 1 : 0,
     )
     .run();
