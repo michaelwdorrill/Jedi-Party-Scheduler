@@ -326,6 +326,15 @@ describe('group nudges through the outbox', () => {
     )
       .bind('grp-1', 'Group', 'u1', Date.now())
       .run();
+    // Migration 0017: the creator is always a member of their own group, so a
+    // group without this row is a state the app cannot produce. Left out, the
+    // membership predicate sweepDueNudgeRetries gained in Pass 13 (P13-12)
+    // would have nothing to trip over here -- the same gap Pass 11 fixed in
+    // pass6/pass7/d1limits and missed in this file.
+    await ctx.db
+      .prepare(`INSERT OR IGNORE INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`)
+      .bind('grp-1', 'u1', Date.now())
+      .run();
     return ctx;
   }
 

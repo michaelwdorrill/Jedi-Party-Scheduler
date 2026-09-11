@@ -1371,17 +1371,47 @@ async function editSettledPollDms(
   // message id are skipped in the query rather than fetched and discarded:
   // every delivery predating migration 0022 has none, and there is nothing to
   // do about those.
+  // Pass-13 review (P13-03). Restricted to people who still have access to
+  // this event, which this query did not check at all.
+  //
+  // P12-01 put a current-access predicate into getConfirmedAttendeeIds'
+  // recipient selection, and this path does not use it. Editing is not a
+  // resend, so it looked harmless -- but the edit rewrites the message body
+  // with the poll's CURRENT title and its settled time. Remove someone from a
+  // private poll, rename it, let it settle, and the sweep PATCHes new private
+  // content into the DM of a person who can no longer open the event at all.
+  // Disclosure of something new, not retention of something old.
+  //
+  // A removed invitee's message is simply left as it was. They already
+  // received it, so nothing further is disclosed, and the stale vote controls
+  // it still carries are inert: recordPollVote re-derives invite-or-organizer
+  // on every press.
+  //
+  // Guild membership is required on the same terms every other recipient
+  // query uses, grace window included, so someone who left the server is
+  // treated the same way.
   const { results: rows } = await env.DB.prepare(
     `SELECT nl.id, nl.message_id, u.id AS user_id, u.dm_channel_id, u.timezone
      FROM notification_log nl
      JOIN users u ON u.id = nl.user_id
+     JOIN user_guild_membership m
+       ON m.user_id = u.id AND m.guild_id = ? AND m.is_member = 1 AND m.verified_at >= ?
+     JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
      WHERE nl.event_id = ? AND nl.notification_type = 'invite'
        AND nl.message_id IS NOT NULL AND nl.message_edited_at IS NULL
        AND u.dm_channel_id IS NOT NULL
+       AND (u.id = ? OR EXISTS (SELECT 1 FROM event_invites ei
+                                WHERE ei.event_id = nl.event_id AND ei.user_id = u.id))
      ORDER BY nl.id
      LIMIT ?`,
   )
-    .bind(event.id, Math.max(0, budget.deliveriesAffordable))
+    .bind(
+      event.guild_id,
+      membershipCutoff(),
+      event.id,
+      event.organizer_id,
+      Math.max(0, budget.deliveriesAffordable),
+    )
     .all<{ id: string; message_id: string; user_id: string; dm_channel_id: string; timezone: string }>();
 
   for (const row of rows) {
@@ -3140,6 +3170,18 @@ async function sweepDueNudgeRetries(env: Env, budget: TickBudget, cursors: Curso
     // specs/0011 / IDEAS item 36: no single guild left to join on -- see
     // sweepIdleGroups' comment just above for why group membership alone is
     // enough here too.
+    //
+    // Pass-13 review (P13-12 / F-35). That comment said membership was the
+    // check and the query never made it, so a queued nudge was delivered to
+    // someone who had since been removed from the group -- the exact sibling
+    // of R09's notification_log gap, in the other retry consumer. It was named
+    // in Pass 12 as F-30 and lost when the two reports were reconciled into
+    // one list, which is why it is being fixed a pass later than it should
+    // have been.
+    //
+    // The content is the group's name rather than event detail, so this is a
+    // smaller disclosure than R09's -- but it is still a private message about
+    // a group the recipient has been removed from, arriving after the removal.
     `SELECT gnl.id, gnl.user_id AS id, gnl.group_id, gnl.last_event_at, gnl.content,
             u.notifications_enabled, u.dm_channel_id, u.timezone, g.name AS group_name
      FROM group_nudge_log gnl
@@ -3148,7 +3190,9 @@ async function sweepDueNudgeRetries(env: Env, budget: TickBudget, cursors: Curso
      WHERE gnl.delivered_at IS NULL AND gnl.failed_at IS NULL
        AND gnl.next_attempt_at IS NOT NULL AND gnl.next_attempt_at <= ?
        AND (gnl.claimed_until IS NULL OR gnl.claimed_until < ?)
-       AND gnl.content IS NOT NULL`,
+       AND gnl.content IS NOT NULL
+       AND EXISTS (SELECT 1 FROM group_members gm
+                   WHERE gm.group_id = gnl.group_id AND gm.user_id = gnl.user_id)`,
     [Date.now(), Date.now()],
     async (row) => {
       if (budget.exhausted) return 'incomplete';
