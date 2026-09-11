@@ -718,12 +718,29 @@ describe('the sync sweep', () => {
     await sweepGoogleCalendar(env, new TickBudget('paid'));
 
     const row = await db
-      .prepare(`SELECT sync_enabled, last_synced_at FROM google_calendar_connections WHERE user_id = 'u1'`)
-      .first<{ sync_enabled: number; last_synced_at: number | null }>();
+      .prepare(
+        `SELECT sync_enabled, last_synced_at, last_error FROM google_calendar_connections WHERE user_id = 'u1'`,
+      )
+      .first<{ sync_enabled: number; last_synced_at: number | null; last_error: string | null }>();
+
+    // Still enabled: a transient failure is not a dead grant, and only
+    // reconnecting fixes a dead one, so switching sync off here would be
+    // wrong.
     expect(row!.sync_enabled).toBe(1);
-    // last_synced_at deliberately untouched, which is what keeps this
-    // connection at the front of the next tick's queue.
-    expect(row!.last_synced_at).toBeNull();
+
+    // Pass-14 review (P14-10) reversed the second half of this test, and the
+    // reason is worth keeping. It used to assert last_synced_at stayed null,
+    // "which is what keeps this connection at the front of the next tick's
+    // queue" -- the same reasoning P12-07 had already had to undo on the write
+    // path. With MAX_CONNECTIONS_PER_TICK at 1, front is *only*: a connection
+    // whose token endpoint keeps answering 503 took the single slot on every
+    // tick while other due users got no calendar calls at all.
+    //
+    // So the attempt is recorded. This connection costs itself its turn, the
+    // next one gets theirs, and the error says the freshness is not the whole
+    // story.
+    expect(row!.last_synced_at, 'a failed attempt was not recorded, so it keeps the slot').not.toBeNull();
+    expect(row!.last_error).toBeTruthy();
   });
 
   // The regression that made this feature not work at all on the sandbox.

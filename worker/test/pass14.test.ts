@@ -5,6 +5,7 @@ import { expandOccurrences } from '../src/lib/recurrence';
 import { acceptChangeRequest, type ChangeRequestRow } from '../src/lib/changeRequests';
 import { createSession, isSessionActive, revokeSession, rotateSession } from '../src/lib/sessions';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
+import { storeConnection } from '../src/lib/googleCalendar';
 import { TickBudget } from '../src/cron/budget';
 import { seal } from '../src/lib/crypto';
 import type { Env } from '../src/env';
@@ -563,5 +564,121 @@ describe('hammering refresh does not grow the session table (P14-05)', () => {
     await revokeSession(env, root);
 
     expect(await isSessionActive(env, successor!, 'u1'), 'coalescing broke family revocation').toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P14-07 / P14-06 / P14-10
+// ---------------------------------------------------------------------------
+
+// The calendar-list call doubles as the account-email lookup, and a failure
+// fell through as a null identity that was still parked as a finalizable
+// connection. storeConnection then compared that null against the existing
+// connection's known email and read it as proof of a DIFFERENT account --
+// revoking the grant of the account being kept and running the destructive
+// switch cleanup.
+describe('an unidentified Google account is not treated as a different one (P14-07)', () => {
+  it('does not revoke or wipe when the identity lookup failed', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUser(db, 'u1');
+    await seedGoogleConnection(db, 'u1', { readCalendarId: 'primary' });
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO personal_events
+           (id, user_id, title, description, timezone, start_at, end_at, status, availability, is_recurring,
+            google_event_id, created_at, updated_at)
+         VALUES ('pe-1', 'u1', 'Imported', NULL, 'UTC', ?, ?, 'active', 'busy', 0, 'g-1', ?, ?)`,
+      )
+      .bind(now + DAY_MS, now + DAY_MS + HOUR_MS, now, now)
+      .run();
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    // The same account reconnecting, but its identity could not be read.
+    await storeConnection(env, 'u1', 'fresh-refresh', 'fresh-access', 3600, null, 'primary');
+
+    expect(fetchStub.calls.filter((c) => c.includes('/revoke')), 'an unknown identity triggered a revocation').toHaveLength(0);
+    expect(await countRows(db, 'personal_events', `id = 'pe-1'`), 'imports were wiped on an unknown identity').toBe(1);
+  });
+
+  it('still treats a genuinely different account as a switch', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUser(db, 'u1');
+    await seedGoogleConnection(db, 'u1');
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    await storeConnection(env, 'u1', 'fresh-refresh', 'fresh-access', 3600, 'someone-else@gmail.com', 'primary');
+
+    expect(fetchStub.calls.filter((c) => c.includes('/revoke'))).toHaveLength(1);
+  });
+});
+
+// The link-insert guard checked the calendar string and active status but not
+// the credential that owns it. Every Google account has a calendar aliased
+// 'primary', so two accounts' destinations compare equal.
+describe('a link cannot be accepted under the wrong account (P14-06)', () => {
+  it('rejects a late insert once the connection has been replaced', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await seedGoogleConnection(db, 'u1');
+    await db.prepare(`UPDATE users SET accepted_policy_version = 99 WHERE id = 'u1'`).run();
+
+    const now = Date.now();
+    await seedEvent(db, { id: 'ev-1', organizerId: 'u1', startAt: now + DAY_MS, endAt: now + DAY_MS + HOUR_MS });
+    await seedInvite(db, 'ev-1', 'u1');
+
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'at', expires_in: 3600 } },
+      { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
+      {
+        match: '/calendar/v3/calendars/',
+        status: 200,
+        body: { id: 'google-event-1' },
+        // Account B is connected while account A's insert is in flight. Both
+        // write to a calendar called 'primary'.
+        before: async () => {
+          await storeConnection(env, 'u1', 'account-b-refresh', 'account-b-access', 3600, 'b@gmail.com', 'primary');
+        },
+      },
+    ]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(
+      await countRows(db, 'google_event_links', `user_id = 'u1'`),
+      "account A's late insert was recorded under account B",
+    ).toBe(0);
+  });
+});
+
+// "Stays at the front of the queue and is retried first next tick" is only
+// fair when the queue serves more than one connection per tick. It serves one.
+describe('a failing token does not monopolize the sync slot (P14-10)', () => {
+  it('lets a second due user run after a transient token failure', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db, 'guild-1');
+    for (const uid of ['a-user', 'b-user']) {
+      await seedUser(db, uid);
+      await seedMembership(db, uid, 'guild-1');
+      await seedGoogleConnection(db, uid);
+    }
+    await db.prepare(`UPDATE users SET accepted_policy_version = 99 WHERE id IN ('a-user','b-user')`).run();
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/token', status: 503, body: {} }]);
+
+    for (let tick = 0; tick < 4; tick++) {
+      await sweepGoogleCalendar(env, new TickBudget('free'));
+    }
+
+    const second = await db
+      .prepare(`SELECT last_synced_at FROM google_calendar_connections WHERE user_id = 'b-user'`)
+      .first<{ last_synced_at: number | null }>();
+    expect(second!.last_synced_at, 'the second user never got a turn').not.toBeNull();
   });
 });

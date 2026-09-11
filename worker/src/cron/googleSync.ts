@@ -488,7 +488,13 @@ async function syncOneConnection(
     };
 
     if (existing) {
+      // Pass-14 review (P14-06). A link is only evidence of "already synced"
+      // if it names the calendar currently being written to. A NULL
+      // destination is a legacy row whose provenance is unknown -- migration
+      // 0043 says such a row should be re-verified rather than trusted, and
+      // trusting it here was the one place that did not.
       const unchanged =
+        existing.calendar_id === row.calendar_id &&
         existing.synced_title === occ.title &&
         existing.synced_start_at === occ.startAt &&
         existing.synced_end_at === occ.endAt;
@@ -500,7 +506,16 @@ async function syncOneConnection(
         outOfBudget = true;
         break;
       }
-      const result = await patchCalendarEvent(accessToken, row.calendar_id, existing.google_event_id, payload);
+      // Patched against the calendar the link names, falling back to the
+      // connection's only for a legacy row with no destination recorded. An
+      // entry that is not there answers 404, classifies as missing, and is
+      // re-inserted fresh against the current destination.
+      const result = await patchCalendarEvent(
+        accessToken,
+        existing.calendar_id ?? row.calendar_id,
+        existing.google_event_id,
+        payload,
+      );
       if (result.ok) {
         await env.DB.prepare(
           `UPDATE google_event_links SET synced_title = ?, synced_start_at = ?, synced_end_at = ?, synced_at = ?
@@ -546,7 +561,8 @@ async function syncOneConnection(
             synced_at, calendar_id)
          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
          WHERE EXISTS (SELECT 1 FROM google_calendar_connections
-                       WHERE user_id = ? AND calendar_id = ? AND status = 'active')
+                       WHERE user_id = ? AND calendar_id = ? AND refresh_token_ciphertext = ?
+                         AND status = 'active')
          ON CONFLICT(user_id, event_id, occurrence_date) DO UPDATE SET
            google_event_id = excluded.google_event_id,
            synced_title = excluded.synced_title,
@@ -568,6 +584,13 @@ async function syncOneConnection(
           row.calendar_id,
           row.user_id,
           row.calendar_id,
+          // Pass-14 review (P14-06): the CREDENTIAL as well as the calendar
+          // string. "primary" is an alias every Google account has, so two
+          // accounts' destinations compare equal -- an insert already in
+          // flight when the connection was replaced was accepted under the
+          // new account because both were called primary. The refresh token
+          // is what actually distinguishes them.
+          row.refresh_token_ciphertext,
         )
         .run();
       counts.inserted += 1;
@@ -1019,10 +1042,29 @@ export async function sweepGoogleCalendar(env: Env, budget: TickBudget): Promise
       if (token.reason === 'unauthorized') {
         await markUnauthorized(env, row, token.message);
       } else {
-        // Transient. Left enabled and untouched: last_synced_at has not moved,
-        // so this connection stays at the front of the queue and is retried
-        // first next tick.
+        // Pass-14 review (P14-10). Transient, and now recorded rather than
+        // left untouched.
+        //
+        // "Stays at the front of the queue and is retried first next tick" was
+        // the same reasoning P12-07 had to undo on the write path: with
+        // MAX_CONNECTIONS_PER_TICK at 1, first is *only*. A connection whose
+        // token endpoint keeps answering 503 therefore took the single slot on
+        // every tick while other due users -- holding perfectly good cached
+        // tokens -- got no calendar calls at all.
+        //
+        // Stamping last_synced_at costs this connection its turn and gives the
+        // next one theirs; the error says the freshness is not the whole
+        // story. Charged, and skipped if the tick cannot afford it, in which
+        // case the old behaviour applies for one more tick.
         console.warn(`Google sync deferred for ${row.user_id}: ${token.message}`);
+        if (budget.trySpend(1)) {
+          await env.DB.prepare(
+            `UPDATE google_calendar_connections SET last_synced_at = ?, last_error = ?, updated_at = ?
+             WHERE user_id = ? AND refresh_token_ciphertext = ?`,
+          )
+            .bind(Date.now(), token.message, Date.now(), row.user_id, row.refresh_token_ciphertext)
+            .run();
+        }
       }
       continue;
     }

@@ -202,7 +202,20 @@ googleRoutes.get('/callback', async (c) => {
     // the account's email address, so this saves requesting an `email` scope
     // purely to display which account got connected.
     const calendars = await listWritableCalendars(tokens.access_token);
-    const email = calendars.ok ? accountEmailFrom(calendars.value) : null;
+    // Pass-14 review (P14-07). An unknown account is not a connectable one.
+    //
+    // This lookup doubles as the account-email lookup, and a failure used to
+    // fall through as `email = null` -- which storeConnection then compared
+    // against the existing connection's known email and read as proof of a
+    // DIFFERENT account. So a Google outage during a same-account reconnect
+    // revoked the grant the replacement was issued under and ran the
+    // destructive account-switch cleanup: imports deleted, links dropped.
+    //
+    // Refusing is the honest failure. Nothing is lost -- the person retries --
+    // whereas storing a connection with no identity is what makes every later
+    // comparison against it wrong.
+    if (!calendars.ok) return c.redirect(`${settingsUrl}?google=account_unverified`);
+    const email = accountEmailFrom(calendars.value);
 
     // Pass-11 review (F-16 / R01): the grant is parked, not attached. Every
     // check reachable from here -- the state signature, the nonce cookie --

@@ -265,8 +265,15 @@ export async function storeConnection(
   // Best-effort by construction either way: a reconnect must not fail because
   // Google's revoke endpoint is having a bad minute.
   const existing = await loadConnection(env, userId);
+  // Both sides have to be KNOWN for this to mean "a different account"
+  // (Pass-14 review, P14-07). A null on either side is an unidentified
+  // connection, and treating unknown as different is what turned a failed
+  // identity lookup into a revocation of the account the user was keeping.
   const switchingAccount =
-    !!existing && !!existing.google_account_email && existing.google_account_email !== accountEmail;
+    !!existing &&
+    !!existing.google_account_email &&
+    !!accountEmail &&
+    existing.google_account_email !== accountEmail;
   if (switchingAccount) {
     const previous = await readRefreshToken(env, existing);
     if (previous && previous !== refreshToken) await revokeToken(previous);
