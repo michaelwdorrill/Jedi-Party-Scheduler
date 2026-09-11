@@ -3208,12 +3208,24 @@ async function sweepDueNudgeRetries(env: Env, budget: TickBudget, cursors: Curso
      JOIN groups g ON g.id = gnl.group_id
      JOIN users u ON u.id = gnl.user_id
      WHERE gnl.delivered_at IS NULL AND gnl.failed_at IS NULL
-       AND gnl.next_attempt_at IS NOT NULL AND gnl.next_attempt_at <= ?
+       -- The same two ways of being due as sweepDueNotificationRetries above
+       -- (Pass-13 review, P13-13). That finding named the notification
+       -- consumer; this is its sibling, and it claims through the identical
+       -- outbox helper, so an interruption between the claim and the failure
+       -- bookkeeping strands a queued nudge here in exactly the same way.
+       --
+       -- Fixed at the same time rather than a pass later, because this
+       -- consumer has now been the missed sibling three times running: R09's
+       -- invitation check, P13-12's group-membership check, and this.
+       AND (
+         (gnl.next_attempt_at IS NOT NULL AND gnl.next_attempt_at <= ?)
+         OR (gnl.next_attempt_at IS NULL AND gnl.claimed_until IS NOT NULL AND gnl.claimed_until < ?)
+       )
        AND (gnl.claimed_until IS NULL OR gnl.claimed_until < ?)
        AND gnl.content IS NOT NULL
        AND EXISTS (SELECT 1 FROM group_members gm
                    WHERE gm.group_id = gnl.group_id AND gm.user_id = gnl.user_id)`,
-    [Date.now(), Date.now()],
+    [Date.now(), Date.now(), Date.now()],
     async (row) => {
       if (budget.exhausted) return 'incomplete';
       await deliverThroughOutbox(

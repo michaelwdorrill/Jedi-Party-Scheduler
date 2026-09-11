@@ -831,6 +831,52 @@ describe('an abandoned outbox claim is picked up again (P13-13)', () => {
       'the stranded obligation was neither delivered nor rescheduled',
     ).not.toBeNull();
   });
+
+  // The sibling consumer, fixed in the same commit rather than a pass later.
+  // sweepDueNudgeRetries claims through the identical outbox helper and had
+  // the identical non-null requirement -- and this consumer has now been the
+  // missed sibling three times running (R09's invitation check, P13-12's
+  // group-membership check, and this), which is reason enough to stop
+  // discovering it one finding at a time.
+  it('retries an abandoned group-nudge claim too', async () => {
+    vi.useFakeTimers();
+    const base = Date.UTC(2026, 8, 10, 12, 0, 0);
+    vi.setSystemTime(base);
+
+    const { db, env } = setup('paid');
+    await seedGuild(db);
+    await seedUser(db, 'owner');
+    await seedMembership(db, 'owner', 'guild-1');
+    await db.prepare(`UPDATE users SET dm_channel_id = 'dm-owner' WHERE id = 'owner'`).run();
+    await db
+      .prepare(`INSERT INTO groups (id, name, idle_reminder_days, created_by, created_at) VALUES ('grp-1', 'The Crew', 2, 'owner', ?)`)
+      .bind(base)
+      .run();
+    await db
+      .prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES ('grp-1', 'owner', ?)`)
+      .bind(base)
+      .run();
+
+    await db
+      .prepare(
+        `INSERT INTO group_nudge_log (id, group_id, user_id, last_event_at, sent_at, attempt_count,
+           claim_token, claimed_until, next_attempt_at, content)
+         VALUES ('gn-1', 'grp-1', 'owner', 1000, ?, 1, 'tok', ?, NULL, 'The Crew has not played in a while')`,
+      )
+      .bind(base - HOUR_MS, base - 10 * 60 * 1000)
+      .run();
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    const row = await db
+      .prepare(`SELECT delivered_at, next_attempt_at FROM group_nudge_log WHERE id = 'gn-1'`)
+      .first<{ delivered_at: number | null; next_attempt_at: number | null }>();
+    expect(
+      row!.delivered_at ?? row!.next_attempt_at,
+      'the stranded nudge was neither delivered nor rescheduled',
+    ).not.toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

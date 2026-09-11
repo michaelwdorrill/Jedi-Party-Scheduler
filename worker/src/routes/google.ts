@@ -73,11 +73,27 @@ function notConfigured(c: Context<AppEnv>) {
 // reconnecting fixes this) and last_error set to what Google actually said,
 // so Settings shows why rather than a stale "Last synced: ..." nobody can
 // explain.
-async function markCalendarUnauthorized(env: Env, userId: string, message: string): Promise<void> {
+//
+// Pass-13 review (P13-07) named this alongside cron/googleSync.ts's
+// markUnauthorized, and only that one was fixed in the first pass at the
+// finding -- so this is the same guard, in the sibling the fix missed.
+//
+// Keyed on user_id alone, a failure belonging to the account the user has
+// just left disables the one they have just connected: the row is read, the
+// Google call goes out, the user finishes reconnecting while it is away, and
+// the answer lands on whatever row now has that user_id. Guarded by the
+// refresh token the failure actually belongs to, a stale answer writes
+// nothing.
+async function markCalendarUnauthorized(
+  env: Env,
+  row: { user_id: string; refresh_token_ciphertext: string },
+  message: string,
+): Promise<void> {
   await env.DB.prepare(
-    `UPDATE google_calendar_connections SET sync_enabled = 0, last_error = ?, updated_at = ? WHERE user_id = ?`,
+    `UPDATE google_calendar_connections SET sync_enabled = 0, last_error = ?, updated_at = ?
+     WHERE user_id = ? AND refresh_token_ciphertext = ?`,
   )
-    .bind(message, Date.now(), userId)
+    .bind(message, Date.now(), row.user_id, row.refresh_token_ciphertext)
     .run();
 }
 
@@ -309,7 +325,7 @@ googleRoutes.get('/calendars', requireAuth, requirePolicyAcceptance, async (c) =
     // A dead grant surfaced here as well as by the sweep, so someone who opens
     // Settings finds out why it stopped instead of watching an empty calendar.
     if (token.reason === 'unauthorized') {
-      await markCalendarUnauthorized(c.env, row.user_id, token.message);
+      await markCalendarUnauthorized(c.env, row, token.message);
       return c.text(token.message, 409);
     }
     // Retryable -- a network blip, Google briefly unhappy -- so this is worth
@@ -338,7 +354,7 @@ googleRoutes.get('/calendars', requireAuth, requirePolicyAcceptance, async (c) =
     // unauthorized outcome `accessTokenFor`'s own pre-flight check handles a
     // few lines up, just discovered one call later.
     if (calendars.kind === 'unauthorized') {
-      await markCalendarUnauthorized(c.env, row.user_id, calendars.message);
+      await markCalendarUnauthorized(c.env, row, calendars.message);
       return c.text(calendars.message, 409);
     }
     return c.text('Could not list your Google calendars.', 503);
