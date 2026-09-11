@@ -487,12 +487,65 @@ async function syncOneConnection(
       occurrenceDate: occ.occurrenceDate,
     };
 
-    if (existing) {
+    // Pass-15 review (P15-01). The entry is in a calendar this connection no
+    // longer writes to, because the user picked a different destination since.
+    // It has to MOVE: removed from where it actually is, then created where
+    // the user asked for it.
+    //
+    // Pass 14 got half of this right and broke the other half in the same
+    // three lines. Before it, a destination change with unchanged details was
+    // silently skipped; a destination change WITH edits patched the new
+    // calendar using the old entry's id, took the 404, dropped the link and
+    // re-inserted into the right place on the next tick. That migration worked
+    // by accident, and P14-06 removed the accident while fixing the skip:
+    // patching `existing.calendar_id` maintains the entry, with new titles and
+    // times, in the calendar the user stopped using -- forever, because the
+    // success path never repaired the provenance either. Meanwhile the orphan
+    // sweep below still addressed the connection's CURRENT calendar, so
+    // cancelling sent a delete to one calendar for an entry living in another,
+    // took the 404 as success and dropped the link -- leaving the event in the
+    // old calendar with nothing left pointing at it. If that calendar is
+    // shared more widely than the new one, edits keep reaching its viewers.
+    //
+    // Removal first, insertion second, deliberately: if the insert then fails,
+    // the occurrence is missing for one tick and the next tick re-creates it
+    // from a link row that is gone. Inserting first and failing to delete
+    // would strand a duplicate in the old calendar with nothing naming it.
+    if (existing && existing.calendar_id && existing.calendar_id !== row.calendar_id) {
+      if (!budget.tryCalendarWrite()) {
+        outOfBudget = true;
+        break;
+      }
+      // Addressed by the calendar the LINK names -- migration 0043's whole
+      // purpose. `deleteCalendarEvent` already folds "already gone" into
+      // success, which is the outcome a removal wanted anyway.
+      const removal = await deleteCalendarEvent(accessToken, existing.calendar_id, existing.google_event_id);
+      if (!removal.ok) {
+        if (removal.kind === 'unauthorized') {
+          await markUnauthorized(env, row, 'Google access was revoked. Reconnect to resume syncing.');
+          return;
+        }
+        // Leave the link pointing at the old entry so the next tick tries the
+        // removal again. Re-creating it elsewhere while the original may still
+        // exist is how someone ends up with two of everything.
+        noteWriteFailure(removal.message);
+        continue;
+      }
+      await env.DB.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(existing.id).run();
+      counts.relinked += 1;
+      // Deliberately NOT `continue`: control falls through to the insert path
+      // below, which writes the occurrence to the connection's current
+      // calendar and records that destination under the P13-08 guard.
+    } else if (existing) {
       // Pass-14 review (P14-06). A link is only evidence of "already synced"
       // if it names the calendar currently being written to. A NULL
       // destination is a legacy row whose provenance is unknown -- migration
       // 0043 says such a row should be re-verified rather than trusted, and
       // trusting it here was the one place that did not.
+      //
+      // Past this point `existing.calendar_id` is either the current
+      // destination or NULL, because the branch above handles every other
+      // case -- which is what makes patching `row.calendar_id` correct again.
       const unchanged =
         existing.calendar_id === row.calendar_id &&
         existing.synced_title === occ.title &&
@@ -510,18 +563,39 @@ async function syncOneConnection(
       // connection's only for a legacy row with no destination recorded. An
       // entry that is not there answers 404, classifies as missing, and is
       // re-inserted fresh against the current destination.
-      const result = await patchCalendarEvent(
-        accessToken,
-        existing.calendar_id ?? row.calendar_id,
-        existing.google_event_id,
-        payload,
-      );
+      const result = await patchCalendarEvent(accessToken, row.calendar_id, existing.google_event_id, payload);
       if (result.ok) {
+        // Pass-15 review (P15-03). `calendar_id` is written here, not just the
+        // title and times, and that is the whole finding: a legacy row with a
+        // NULL destination can never satisfy the `unchanged` test above, so
+        // leaving the provenance NULL after a SUCCESSFUL verification meant
+        // verifying it again on every tick, forever, spending a calendar write
+        // each time. Sixteen such rows spent every write a Free-plan tick had
+        // and no genuinely new event was ever created. Recording what we just
+        // verified is what lets the row go quiet.
+        //
+        // Guarded like the insert below, and for the same reason: this is a
+        // provenance write, so it must not credit a connection that replaced
+        // the one this patch was issued under (P13-08, P14-06).
         await env.DB.prepare(
-          `UPDATE google_event_links SET synced_title = ?, synced_start_at = ?, synced_end_at = ?, synced_at = ?
-           WHERE id = ?`,
+          `UPDATE google_event_links
+             SET synced_title = ?, synced_start_at = ?, synced_end_at = ?, synced_at = ?, calendar_id = ?
+           WHERE id = ?
+             AND EXISTS (SELECT 1 FROM google_calendar_connections
+                         WHERE user_id = ? AND calendar_id = ? AND refresh_token_ciphertext = ?
+                           AND status = 'active')`,
         )
-          .bind(occ.title, occ.startAt, occ.endAt, now, existing.id)
+          .bind(
+            occ.title,
+            occ.startAt,
+            occ.endAt,
+            now,
+            row.calendar_id,
+            existing.id,
+            row.user_id,
+            row.calendar_id,
+            row.refresh_token_ciphertext,
+          )
           .run();
         counts.patched += 1;
       } else if (result.kind === 'missing') {
@@ -617,7 +691,15 @@ async function syncOneConnection(
       outOfBudget = true;
       break;
     }
-    const result = await deleteCalendarEvent(accessToken, row.calendar_id, orphan.google_event_id);
+    // Pass-15 review (P15-01), the other half: addressed by the calendar the
+    // link records, not the connection's current one. An orphan created before
+    // a destination change lives in the old calendar, and sending its deletion
+    // to the new one answers 404 -- which this path reads as "already gone"
+    // and drops the link for, leaving the entry in Google with nothing left
+    // pointing at it. NULL means a legacy row whose provenance was never
+    // recorded; the connection's calendar is the only available guess, and the
+    // patch path above now repairs those on first verification.
+    const result = await deleteCalendarEvent(accessToken, orphan.calendar_id ?? row.calendar_id, orphan.google_event_id);
     if (result.ok) {
       await env.DB.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(orphan.id).run();
       counts.deleted += 1;
