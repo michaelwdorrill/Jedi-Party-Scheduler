@@ -1,4 +1,4 @@
-// Tests for the push-to-main PreToolUse hook. Run from the repo root:
+// Tests for the push-to-main PreToolUse hook. Run it from anywhere:
 //
 //   node .claude/hooks/block-push-to-main.test.mjs
 //
@@ -8,8 +8,27 @@
 //
 // Assumes the checkout is NOT on main (the last case checks that a bare
 // `git push` is allowed off main).
+//
+// Two things this file used to get wrong, found while running it during the
+// Pass-14 review:
+//
+// - The hook was spawned by a path relative to the *caller's* cwd, so running
+//   it from `worker/` -- the working directory nearly every other command in
+//   this repo wants -- died with a MODULE_NOT_FOUND stack rather than a test
+//   result. It is resolved from this file's own location now.
+// - A failing case printed FAIL and exited 0, which for a guardrail's own test
+//   is the worst of both worlds: a CI step or a `&&` chain reports success
+//   while the hook is broken. The two checks below the loop did not even count
+//   into `fail`.
 
 import { execFileSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const HOOK = join(dirname(fileURLToPath(import.meta.url)), 'block-push-to-main.mjs');
+// The hook reads the branch from this directory, so it has to be inside the
+// repo regardless of where the test was invoked from.
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 const cases = [
   // [command, shouldAsk]
@@ -39,10 +58,10 @@ for (const [command, shouldAsk] of cases) {
   const payload = JSON.stringify({
     hook_event_name: 'PreToolUse',
     tool_name: 'Bash',
-    cwd: process.cwd(),
+    cwd: REPO_ROOT,
     tool_input: { command },
   });
-  const out = execFileSync('node', ['.claude/hooks/block-push-to-main.mjs'], {
+  const out = execFileSync('node', [HOOK], {
     input: payload,
     encoding: 'utf8',
   });
@@ -53,18 +72,24 @@ for (const [command, shouldAsk] of cases) {
 }
 
 // current branch is not main, so a bare `git push` should pass
-const bare = execFileSync('node', ['.claude/hooks/block-push-to-main.mjs'], {
-  input: JSON.stringify({ cwd: process.cwd(), tool_input: { command: 'git push' } }),
+const bare = execFileSync('node', [HOOK], {
+  input: JSON.stringify({ cwd: REPO_ROOT, tool_input: { command: 'git push' } }),
   encoding: 'utf8',
 });
+if (bare.includes('"ask"')) fail++;
 console.log(`${bare.includes('"ask"') ? 'FAIL' : 'ok  '}  bare 'git push' off main`);
 
 // escape hatch
-const escaped = execFileSync('node', ['.claude/hooks/block-push-to-main.mjs'], {
-  input: JSON.stringify({ cwd: process.cwd(), tool_input: { command: 'git push origin main' } }),
+const escaped = execFileSync('node', [HOOK], {
+  input: JSON.stringify({ cwd: REPO_ROOT, tool_input: { command: 'git push origin main' } }),
   encoding: 'utf8',
   env: { ...process.env, UO_ALLOW_MAIN_PUSH: '1' },
 });
+if (escaped.includes('"ask"')) fail++;
 console.log(`${escaped.includes('"ask"') ? 'FAIL' : 'ok  '}  UO_ALLOW_MAIN_PUSH=1 escape hatch`);
 
 console.log(fail === 0 ? '\nall refspec cases passed' : `\n${fail} FAILURES`);
+// Non-zero on failure, so a caller that chains this with `&&` -- or runs it in
+// CI -- finds out. Printing FAIL and exiting 0 is how a broken guardrail
+// passes for months.
+process.exitCode = fail === 0 ? 0 : 1;

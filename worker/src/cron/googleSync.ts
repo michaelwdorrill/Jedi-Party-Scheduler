@@ -683,10 +683,22 @@ async function syncOneConnection(
   // query, so stamping it unconditionally is what makes scheduling fair
   // independently of whether the work succeeded -- one connection's bad hour
   // costs it its turn, not everybody else's.
+  //
+  // Guarded on refresh_token_ciphertext for the same reason markUnauthorized
+  // above is (P13-07), which this statement was left out of: if the user
+  // disconnects and reconnects -- possibly as a different Google account --
+  // while this sync is in flight, keying on user_id alone stamps the
+  // replacement's row with the predecessor's outcome. A stale "3 entries could
+  // not be written" on a connection that has written nothing yet is cosmetic
+  // and clears on the replacement's own first sweep, but it is still a message
+  // about a credential the row no longer holds. Not stamping is the right
+  // failure here: the row it would have stamped is a new connection, which
+  // carries its own last_synced_at from connect and is scheduled on that.
   await env.DB.prepare(
-    `UPDATE google_calendar_connections SET last_synced_at = ?, last_error = ?, updated_at = ? WHERE user_id = ?`,
+    `UPDATE google_calendar_connections SET last_synced_at = ?, last_error = ?, updated_at = ?
+     WHERE user_id = ? AND refresh_token_ciphertext = ?`,
   )
-    .bind(now, pushError, now, row.user_id)
+    .bind(now, pushError, now, row.user_id, row.refresh_token_ciphertext)
     .run();
 
   // Nothing left to read Google with -- the pull half would spend its own

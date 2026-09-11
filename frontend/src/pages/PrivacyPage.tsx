@@ -39,10 +39,15 @@ export default function PrivacyPage() {
           the bot (so it isn't re-created on every notification), and a log of which notifications
           have already been sent to you, which exists solely to stop the service from messaging you
           twice about the same thing — including the two-week and one-week inactivity notices
-          described under "How long it is kept" below. Also a record of your active login sessions —
+          described under "How long it is kept" below. Also a record of your login sessions —
           creation time, last-used time, and expiry — which is what lets a session be revoked
           immediately (by you logging out, or by deleting your account) rather than staying valid
-          until it naturally expires.
+          until it naturally expires. Staying signed in periodically replaces the session behind the
+          scenes, and the replaced one is kept, marked as replaced, until it would have expired
+          anyway: that is what lets the service notice a replaced session being used again, which is
+          a sign it was copied. Your data export shows both, so a single login that has been open a
+          while appears as the session you are using plus the ones it replaced, rather than as
+          several separate sign-ins.
         </p>
         <p>
           <strong>If you ask to add the bot to a server.</strong> The server's ID and name, your

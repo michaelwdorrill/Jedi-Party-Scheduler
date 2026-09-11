@@ -4,6 +4,8 @@ import { handleInteraction } from '../src/lib/interactions';
 import { expandOccurrences } from '../src/lib/recurrence';
 import { acceptChangeRequest, type ChangeRequestRow } from '../src/lib/changeRequests';
 import { createSession, isSessionActive, revokeSession, rotateSession } from '../src/lib/sessions';
+import { buildApp } from '../src/router';
+import { signJwt } from '../src/lib/jwt';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
 import { storeConnection } from '../src/lib/googleCalendar';
 import { TickBudget } from '../src/cron/budget';
@@ -680,5 +682,113 @@ describe('a failing token does not monopolize the sync slot (P14-10)', () => {
       .prepare(`SELECT last_synced_at FROM google_calendar_connections WHERE user_id = 'b-user'`)
       .first<{ last_synced_at: number | null }>();
     expect(second!.last_synced_at, 'the second user never got a turn').not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-41 and the P13-07 residual
+// ---------------------------------------------------------------------------
+
+// The export's sessions projection predated rotation. Refresh replaces the
+// session and keeps the predecessor until it expires (0041/0042), so a single
+// login open for a week exports as dozens of rows that differ only in their
+// timestamps -- read against a policy sentence that promised "your active
+// login sessions". All of them are genuinely held, so the correction is to
+// say which is which, not to hide them.
+describe('the export distinguishes a live session from the ones it replaced (F-41)', () => {
+  it('carries superseded_at and family_id on rotation history', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'u1');
+
+    const { id: root } = await createSession(env, 'u1');
+    await ageSession(db, root);
+    const successor = await rotateSession(env, root, 'u1');
+
+    const token = await signJwt('u1', successor!, env.JWT_SIGNING_KEY);
+    const res = await buildApp().request(
+      'https://worker.test/me/export',
+      { headers: { Authorization: `Bearer ${token}` } },
+      env,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: { superseded_at: number | null; family_id: string | null }[];
+    };
+
+    expect(body.sessions, 'the rotation predecessor is not in the export at all').toHaveLength(2);
+    const live = body.sessions.filter((s) => s.superseded_at == null);
+    const retired = body.sessions.filter((s) => s.superseded_at != null);
+    expect(live, 'more than one row reads as the session in use').toHaveLength(1);
+    expect(retired, 'the replaced session is indistinguishable from the live one').toHaveLength(1);
+    // One login, not two: the family is what says so.
+    expect(new Set(body.sessions.map((s) => s.family_id)).size, 'one login exported as several').toBe(1);
+  });
+
+  // An invariant guard, not a reproduction: it passes with and without the
+  // projection change. It exists because widening this particular SELECT is
+  // exactly the move that puts a secret in a file the user downloads, and the
+  // googleCalendar line above says so in a comment that nothing enforces.
+  it('exports no credential material with them', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'u1');
+    const { id: sessionId } = await createSession(env, 'u1');
+
+    const token = await signJwt('u1', sessionId, env.JWT_SIGNING_KEY);
+    const res = await buildApp().request(
+      'https://worker.test/me/export',
+      { headers: { Authorization: `Bearer ${token}` } },
+      env,
+    );
+    const body = (await res.json()) as Record<string, unknown>;
+
+    // family_id is the id of the login that started the chain, which for a
+    // fresh session is its own id -- inert without the signing key, and the
+    // key itself must never appear whatever else this projection grows.
+    expect(JSON.stringify(body)).not.toContain(env.JWT_SIGNING_KEY);
+  });
+});
+
+// Reviewer B's note on P13-07: markUnauthorized was given the credential guard
+// and this close-out stamp was not. If the user reconnects mid-sync, the
+// predecessor's outcome lands on the replacement's row.
+describe('a finished sync does not stamp a connection it no longer owns (P13-07 residual)', () => {
+  it('leaves the replacement connection unmarked', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await seedGoogleConnection(db, 'u1');
+    await db.prepare(`UPDATE users SET accepted_policy_version = 99 WHERE id = 'u1'`).run();
+
+    const now = Date.now();
+    await seedEvent(db, { id: 'ev-1', organizerId: 'u1', startAt: now + DAY_MS, endAt: now + DAY_MS + HOUR_MS });
+    await seedInvite(db, 'ev-1', 'u1');
+
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'at', expires_in: 3600 } },
+      { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
+      {
+        // The write Google refuses -- what puts a message in last_error -- and
+        // the moment the user reconnects as somebody else.
+        match: '/calendar/v3/calendars/',
+        status: 500,
+        body: { error: { message: 'backend error' } },
+        before: async () => {
+          await storeConnection(env, 'u1', 'account-b-refresh', 'account-b-access', 3600, 'b@gmail.com', 'primary');
+        },
+      },
+    ]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    const conn = await db
+      .prepare(`SELECT last_error, google_account_email FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ last_error: string | null; google_account_email: string }>();
+    expect(conn!.google_account_email, 'the test never reached the replacement connection').toBe('b@gmail.com');
+    expect(
+      conn!.last_error,
+      "the predecessor's failure was stamped on the account the user had just connected",
+    ).toBeNull();
   });
 });

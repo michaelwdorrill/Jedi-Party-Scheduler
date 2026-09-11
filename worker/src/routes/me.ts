@@ -149,7 +149,23 @@ meRoutes.get('/export', async (c) => {
     // to authenticate with -- the id is meaningless without a JWT signed by a
     // key that is never exported -- but the policy discloses that these rows
     // exist, so their subject can see them.
-    sessions: `SELECT created_at, last_used_at, expires_at, revoked_at FROM sessions WHERE user_id = ?`,
+    //
+    // Pass-14 review (F-41). Refresh rotates a session (F-20) and retains the
+    // predecessor until it expires, so that reuse of a replaced token can be
+    // detected (0041/0042). The projection predated rotation and carried
+    // nothing to tell a retired row from a live one -- so a single login that
+    // had been open a week came back as dozens of identical-looking rows, read
+    // against a policy sentence promising "your active login sessions". They
+    // ARE all held, so filtering them out would be the wrong correction; what
+    // was missing is the two columns that say which is which.
+    //
+    // superseded_at: null on the session you are actually using, set on every
+    // predecessor it rotated out of. family_id: the login that started the
+    // chain, so one login's rotations group together instead of reading as
+    // separate sign-ins. Both are as inert as the id -- no key, no
+    // credential -- and the privacy page now says the predecessors are kept.
+    sessions: `SELECT created_at, last_used_at, expires_at, revoked_at, superseded_at, family_id
+               FROM sessions WHERE user_id = ?`,
 
     // The free-text `message` on a change request is the person's own writing,
     // which is exactly the sort of thing an access request is for.
