@@ -238,6 +238,41 @@ grant-level and any later disconnect of the same account kills it. Closing it
 means decrypting each expired row and making a network call from a request
 path, which is why it was not done as a rider on F-44.
 
+### 72. Cross-tab login identity is unenforceable when localStorage refuses a write
+
+From the Pass-15 review (P15-02). The auth identity marker moved into
+`localStorage` in Pass 14 so that two tabs agree on who is signed in, with an
+in-memory fallback for browsers that refuse storage (private mode, blocked site
+data, a full quota). Pass 15 fixed the half of that which was simply wrong --
+the fallback was consulted when the read *threw* and not when it succeeded and
+found nothing, which is the case that actually happens, so the guard compared
+null to null and every refresh looked like the same identity.
+
+What remains cannot be fixed by reading more carefully: **when the marker
+cannot be persisted, the fallback is per-tab**, so one tab has no way to see
+that another has adopted a different account. Shared state cannot be faked
+without shared storage.
+
+The options, neither taken:
+
+- **Fail the refresh closed** when the marker could not be persisted. Correct,
+  and it logs out every full-storage or private-mode browser on every refresh
+  cycle -- a large, certain cost imposed on ordinary single-account use to
+  close a case that needs two accounts in one browser *and* a storage area that
+  refuses writes.
+- **Serialise auth mutations behind the Web Locks API** (`navigator.locks`),
+  which would also close the smaller check-then-write race that P15-02's first
+  half describes -- the epoch is read and the token written as two operations,
+  and nothing makes them one. Locks are widely supported and this is the
+  honest end state, but it is a rewrite of the auth client's control flow
+  rather than a rider on a review batch, and it wants doing when someone can
+  give the whole file their attention.
+
+Worth knowing that neither the residual race nor the storage case is an
+anonymous-takeover route: both need two legitimate sessions in the same
+browser, and the stale refresh can only install a credential its own account
+already had.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.

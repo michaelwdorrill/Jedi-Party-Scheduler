@@ -39,9 +39,20 @@ function newIdentity(): string {
   }
 }
 
+// Pass-15 review (P15-02). The fallback is consulted when the read FAILS and
+// also when it succeeds and finds nothing, which is not the same condition and
+// is the one that bit: `moveIdentity` swallows a failed write (a full storage
+// area rejects the new key while still permitting a shorter replacement token),
+// so the marker lives only in memory -- and `getItem` then returns null
+// perfectly successfully, never throwing, so this returned null instead of the
+// identity it was holding. Two tabs both reading null compare equal, which is
+// exactly the "same identity" answer that lets a stale refresh commit.
+//
+// Reading `??` rather than `try/catch` alone means an in-memory identity is
+// used whenever the shared one is absent, however it came to be absent.
 export function authEpoch(): string | null {
   try {
-    return localStorage.getItem(IDENTITY_KEY);
+    return localStorage.getItem(IDENTITY_KEY) ?? fallbackIdentity;
   } catch {
     return fallbackIdentity;
   }

@@ -271,3 +271,81 @@ describe('an obsolete retry does not log out the current account (P14-04)', () =
     expect(window.location.hash, 'the current account was bounced to login').not.toBe('#/login');
   });
 });
+
+// P15-02 from the Pass-15 review. The identity marker's in-memory fallback was
+// consulted when the localStorage READ threw, and not when the read succeeded
+// and found nothing -- which is the case that actually occurs. A storage area
+// at its quota rejects the new marker key while still accepting a shorter
+// replacement token, so `moveIdentity` swallows the failure and holds the
+// identity in memory only; `getItem` then returns null without throwing, the
+// guard compares null to null, and every refresh looks like the same identity.
+//
+// What that costs is the P12-05 property: a logout during an in-flight refresh
+// stops being detected at all, and the successor token is written back for the
+// account the user just left.
+//
+// THE LIMIT, stated because the fix does not reach it: when the marker cannot
+// be persisted, the fallback is per-tab, so a SECOND tab adopting a different
+// account is undetectable -- the two tabs hold different in-memory values and
+// neither can see the other's. Shared state cannot be faked without shared
+// storage. Failing the refresh closed in that state was considered and not
+// done: it would log out every full-storage browser on every refresh to
+// protect a two-accounts-in-one-browser-with-full-storage case. Recorded in
+// IDEAS as item 72 rather than left as a comment nobody finds.
+describe('a full storage area does not disable the identity guard (P15-02)', () => {
+  it('still discards a refresh that lands after logout', async () => {
+    vi.resetModules();
+    const { api } = await import('../src/api/client');
+    const { adoptSession, clearToken } = await import('../src/auth/tokenStorage');
+
+    // A storage area with room for the token it is already carrying, and none
+    // for the additional identity key. Modelled as "the marker write fails,
+    // the token write does not", which is the asymmetry that matters -- a
+    // size-based model would also reject re-writing the token after logout
+    // removed it, and that is not the state being described.
+    storage.setItem(TOKEN_KEY, 'alice-token');
+    const realSet = storage.setItem.bind(storage);
+    storage.setItem = (k: string, v: string) => {
+      if (k === 'jps_identity') throw new DOMException('QuotaExceededError');
+      realSet(k, v);
+    };
+
+    adoptSession('alice-token-2');
+    expect(storage.getItem('jps_identity'), 'the fixture did not model a full storage area').toBeNull();
+
+    // The retry after refreshing has to SUCCEED, or the client bounces to
+    // login and clears the token on its way out -- which would make this pass
+    // for a reason that has nothing to do with the guard. The P12-05 test
+    // above says so in as many words; this fixture was written without it and
+    // passed on the unfixed tree until that was noticed.
+    let dataCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/auth/refresh')) {
+          // The user hits Log out with the refresh genuinely in flight.
+          clearToken();
+          return new Response(JSON.stringify({ token: 'alice-successor' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        dataCalls += 1;
+        return dataCalls === 1
+          ? new Response('', { status: 401 })
+          : new Response(JSON.stringify({ id: 'u1' }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            });
+      }),
+    );
+
+    await api.get('/me').catch(() => undefined);
+
+    expect(
+      storage.getItem(TOKEN_KEY),
+      'a live token was put back for an account the user had logged out of, because a full storage area left the guard reading null on both sides',
+    ).toBeNull();
+  });
+});

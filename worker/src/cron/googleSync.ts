@@ -908,17 +908,25 @@ async function syncImportedPersonalEvents(
       // The DELETE runs FIRST so both statements see the pre-null value; a
       // batch is one transaction, so the order inside it is the only thing
       // that decides what the second one can still match on.
+      //
+      // Pass-15 review (P15-04): the CREDENTIAL as well as the calendar
+      // string, for the reason P14-06 gave on the push half and this half did
+      // not adopt. A read calendar is a name, and `primary` is a name every
+      // Google account has -- so a replacement connection that reselects the
+      // same string satisfies a guard that only compares strings, and this
+      // failure, belonging to an account that is gone, clears the new
+      // account's freshly made choice and deletes what it imported.
       await env.DB.batch([
         env.DB.prepare(
           `DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL
            AND EXISTS (SELECT 1 FROM google_calendar_connections
-                       WHERE user_id = ? AND read_calendar_id = ?)`,
-        ).bind(row.user_id, row.user_id, row.read_calendar_id),
+                       WHERE user_id = ? AND read_calendar_id = ? AND refresh_token_ciphertext = ?)`,
+        ).bind(row.user_id, row.user_id, row.read_calendar_id, row.refresh_token_ciphertext),
         env.DB.prepare(
           `UPDATE google_calendar_connections
            SET read_calendar_id = NULL, last_error = ?, updated_at = ?
-           WHERE user_id = ? AND read_calendar_id = ?`,
-        ).bind(result.message, now, row.user_id, row.read_calendar_id),
+           WHERE user_id = ? AND read_calendar_id = ? AND refresh_token_ciphertext = ?`,
+        ).bind(result.message, now, row.user_id, row.read_calendar_id, row.refresh_token_ciphertext),
       ]);
       console.warn(`Google personal-time import disabled for ${row.user_id}: ${result.message}`);
       return;
@@ -968,9 +976,18 @@ async function syncImportedPersonalEvents(
   // Re-reading the row before the batch would not fix it -- there is still a
   // gap between that read and the write. The guard has to be inside the
   // statements, where D1's batch transaction makes it atomic with them.
+  //
+  // Pass-15 review (P15-04). `refresh_token_ciphertext` is part of the guard
+  // for the same reason it is part of the push half's (P14-06): the calendar
+  // string alone does not identify a source. Two Google accounts both have a
+  // `primary`, and one shared calendar can legitimately be selected by either
+  // -- so without the credential, an import fetched under the account the user
+  // just left lands in the account they just connected, and its titles sit
+  // there as that person's busy time.
   const stillCurrent = `EXISTS (SELECT 1 FROM google_calendar_connections
-       WHERE user_id = ? AND status = 'active' AND sync_enabled = 1 AND read_calendar_id = ?)`;
-  const guardBinds = [row.user_id, row.read_calendar_id];
+       WHERE user_id = ? AND status = 'active' AND sync_enabled = 1 AND read_calendar_id = ?
+         AND refresh_token_ciphertext = ?)`;
+  const guardBinds = [row.user_id, row.read_calendar_id, row.refresh_token_ciphertext];
 
   // Anything previously imported that fell inside this window and did not
   // come back this time -- deleted, cancelled, or moved outside the window
@@ -1067,9 +1084,11 @@ async function syncImportedPersonalEvents(
     : null;
   statements.push(
     env.DB.prepare(
+      // P15-04 again: a note about what one account's calendar contained must
+      // not be stamped on another account's connection.
       `UPDATE google_calendar_connections SET updated_at = ?, last_error = COALESCE(?, last_error)
-       WHERE user_id = ? AND read_calendar_id = ?`,
-    ).bind(now, truncationNotice, row.user_id, row.read_calendar_id),
+       WHERE user_id = ? AND read_calendar_id = ? AND refresh_token_ciphertext = ?`,
+    ).bind(now, truncationNotice, row.user_id, row.read_calendar_id, row.refresh_token_ciphertext),
   );
 
   await env.DB.batch(statements);

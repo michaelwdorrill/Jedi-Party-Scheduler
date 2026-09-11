@@ -504,3 +504,111 @@ describe('a same-account reconnect is not revoked by the disconnect it interrupt
     expect(revokes.length, "a different account's grant was left alive").toBeGreaterThanOrEqual(1);
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// P15-04
+// ---------------------------------------------------------------------------
+
+// P14-06 taught the push half that a calendar name does not identify a source:
+// every Google account has a `primary`, so two accounts' destinations compare
+// equal and only the credential tells them apart. The pull half, two hundred
+// lines below in the same file and touched in the same commit, kept comparing
+// only the name.
+describe('an import cannot be credited to the account that replaced its source (P15-04)', () => {
+  async function seedReadingConnection(db: ShimDatabase, calendarId: string): Promise<void> {
+    const sealed = await seal('stored-refresh-token', GOOGLE_ENCRYPTION_KEY);
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO google_calendar_connections
+           (user_id, refresh_token_ciphertext, refresh_token_iv, access_token_ciphertext, access_token_iv,
+            access_token_expires_at, google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
+            last_synced_at, disconnect_attempts, connected_at, updated_at)
+         VALUES ('u1', ?, ?, NULL, NULL, NULL, 'a@gmail.com', 'primary', ?, 1, 'active', NULL, 0, ?, ?)`,
+      )
+      .bind(sealed.ciphertext, sealed.iv, calendarId, now, now)
+      .run();
+  }
+
+  async function seedUserWithGuild(db: ShimDatabase): Promise<void> {
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await db.prepare(`UPDATE users SET accepted_policy_version = 99 WHERE id = 'u1'`).run();
+  }
+
+  it("does not import one account's events under the account that replaced it", async () => {
+    const { db, env: base } = setup('paid');
+    const env = googleEnv(base);
+    await seedUserWithGuild(db);
+    await seedReadingConnection(db, 'primary');
+
+    const start = Date.now() + 2 * DAY_MS;
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
+      {
+        // The read of account A's calendar. Account B is connected while it is
+        // in flight and picks the same calendar name -- which it genuinely
+        // might, since `primary` is whatever account you are signed in as.
+        match: '/events?',
+        status: 200,
+        body: {
+          timeZone: 'UTC',
+          items: [
+            {
+              id: 'g-private-1',
+              summary: 'Account A private meeting',
+              start: { dateTime: new Date(start).toISOString() },
+              end: { dateTime: new Date(start + HOUR_MS).toISOString() },
+            },
+          ],
+        },
+        before: async () => {
+          await storeConnection(env, 'u1', 'account-b-refresh', 'account-b-access', 3600, 'b@gmail.com', 'primary');
+          await db.prepare(`UPDATE google_calendar_connections SET read_calendar_id = 'primary' WHERE user_id = 'u1'`).run();
+        },
+      },
+    ]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(
+      await countRows(db, 'personal_events', `user_id = 'u1' AND google_event_id = 'g-private-1'`),
+      "an event read from the account the user left was imported under the account they connected",
+    ).toBe(0);
+  });
+
+  it("does not let one account's read failure clear the account that replaced it", async () => {
+    const { db, env: base } = setup('paid');
+    const env = googleEnv(base);
+    await seedUserWithGuild(db);
+    await seedReadingConnection(db, 'primary');
+
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      { match: 'oauth2.googleapis.com/revoke', status: 200, body: {} },
+      {
+        match: '/events?',
+        status: 404,
+        body: { error: { message: 'Not Found' } },
+        before: async () => {
+          await storeConnection(env, 'u1', 'account-b-refresh', 'account-b-access', 3600, 'b@gmail.com', 'primary');
+          await db.prepare(`UPDATE google_calendar_connections SET read_calendar_id = 'primary' WHERE user_id = 'u1'`).run();
+        },
+      },
+    ]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    const conn = await db
+      .prepare(`SELECT read_calendar_id, google_account_email FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ read_calendar_id: string | null; google_account_email: string }>();
+    expect(conn!.google_account_email, 'the test never reached the replacement connection').toBe('b@gmail.com');
+    expect(
+      conn!.read_calendar_id,
+      "the new account's freshly made choice was cleared by the old account's failure",
+    ).toBe('primary');
+  });
+});
