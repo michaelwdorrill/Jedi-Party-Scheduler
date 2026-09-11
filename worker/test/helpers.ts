@@ -274,6 +274,19 @@ export async function loadEventRow(db: ShimDatabase, eventId: string): Promise<E
 // refreshes in the same millisecond is the hammering case that window exists
 // to bound, so tests about ROTATION have to age the session the way the
 // passage of time would.
+// THE RULE, learned the expensive way (Pass-15 review, F-42): any test that
+// calls `rotateSession` more than once must move the clock between the calls
+// -- with this, or with fake timers -- or it is testing the coalescing floor
+// and nothing else.
+//
+// `MIN_ROTATION_INTERVAL_MS` hands the same session back when it is younger
+// than a minute, so an un-aged rotation loop returns the id it was given,
+// every time. Five tests were written before that floor existed. The four that
+// started FAILING were noticed and backdated; the five that kept PASSING were
+// not -- and they were the ones asserting the family-revocation and
+// session-cap properties, over tables that by then contained a single row.
+// A test that cannot fail is worse than a missing one, because it reads as
+// coverage.
 export async function ageSession(db: ShimDatabase, sessionId: string, byMs = 5 * 60 * 1000): Promise<void> {
   await db
     .prepare(`UPDATE sessions SET created_at = created_at - ? WHERE id = ?`)

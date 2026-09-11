@@ -124,12 +124,19 @@ describe('logout still revokes the family after pruning (P13-02)', () => {
     const { db, env } = setup();
     await seedUser(db, 'u1');
     const { id: root } = await createSession(env, 'u1');
+    // Pass-15 review (F-42). The clock has to move between rotations or the
+    // 60-second coalescing floor hands the same id back and this test proves
+    // nothing: one row, no successors, and a logout that revokes the only
+    // session there is.
+    vi.setSystemTime(base + 61 * 1000);
     const intermediate = await rotateSession(env, root, 'u1');
+    vi.setSystemTime(base + 122 * 1000);
     const current = await rotateSession(env, intermediate!, 'u1');
     expect(current).not.toBeNull();
+    expect(new Set([root, intermediate, current]).size, 'the lineage collapsed into one row').toBe(3);
 
-    // Two minutes on, well past the 60-second rotation grace, and a prune runs.
-    vi.setSystemTime(base + 2 * 60 * 1000);
+    // Well past the 60-second rotation grace, and a prune runs.
+    vi.setSystemTime(base + 5 * 60 * 1000);
     await pruneStaleSessions(env);
 
     // The user logs out from the tab still holding the intermediate token.
@@ -146,9 +153,13 @@ describe('logout still revokes the family after pruning (P13-02)', () => {
     const { db, env } = setup();
     await seedUser(db, 'u1');
     const { id: root } = await createSession(env, 'u1');
-    await rotateSession(env, root, 'u1');
+    vi.setSystemTime(base + 61 * 1000);
+    const successor = await rotateSession(env, root, 'u1');
+    // F-42: without the clock move there is no successor and nothing was
+    // superseded, so "the mapping survives pruning" has no mapping to survive.
+    expect(successor, 'nothing was rotated, so nothing could be pruned').not.toBe(root);
 
-    vi.setSystemTime(base + 2 * 60 * 1000);
+    vi.setSystemTime(base + 5 * 60 * 1000);
     await pruneStaleSessions(env);
 
     expect(await countRows(db, 'sessions', `id = ?`, root)).toBe(1);
@@ -162,7 +173,9 @@ describe('logout still revokes the family after pruning (P13-02)', () => {
     const { db, env } = setup();
     await seedUser(db, 'u1');
     const { id: root } = await createSession(env, 'u1');
-    await rotateSession(env, root, 'u1');
+    vi.setSystemTime(base + 61 * 1000);
+    const successor = await rotateSession(env, root, 'u1');
+    expect(successor, 'nothing was rotated, so there was no superseded row to remove').not.toBe(root);
 
     // Past the absolute seven-day session lifetime.
     vi.setSystemTime(base + 8 * 24 * 60 * 60 * 1000);
@@ -182,23 +195,58 @@ describe('logout still revokes the family after pruning (P13-02)', () => {
 // devices open can push live successors out of that window, so logging in
 // somewhere new silently logs them out somewhere else.
 describe('the session cap counts sign-ins, not rotation rows (F-36)', () => {
-  it('does not evict a live session because another device refreshed a lot', async () => {
+  // Rewritten by the Pass-15 review (F-42), and further than the clock fix
+  // that finding asked for. Two things were wrong with it.
+  //
+  // The coalescing floor meant the refresh loop rotated nothing, so the cap
+  // was never shown the rotation rows it is supposed to ignore. That is F-42.
+  //
+  // Underneath that, it asserted on the WRONG SESSION. The victim of the bug
+  // is not the device doing the refreshing -- its newest successor is the
+  // newest row in the table and survives any `ORDER BY created_at DESC` cap.
+  // It is the OTHER device, whose live session is old and gets crowded out of
+  // the twenty newest by a pile of rotation rows. Asserting on the refresher
+  // is why this passed on a tree whose cap counted rotation rows.
+  //
+  // Fake timers rather than backdating, because the reproduction turns on
+  // created_at ORDER, and a real-time test creates thirty rows inside the same
+  // millisecond where that order is arbitrary.
+  it('does not evict another device because this one refreshed a lot', async () => {
+    vi.useFakeTimers();
+    const base = Date.UTC(2026, 8, 10, 12, 0, 0);
+    vi.setSystemTime(base);
+
     const { db, env } = setup();
     await seedUser(db, 'u1');
 
-    // One device, signed in and refreshing steadily.
+    // The laptop signs in first and then sits there, logged in and idle.
+    const { id: laptop } = await createSession(env, 'u1');
+
+    // The phone signs in and refreshes steadily for half an hour.
+    vi.setSystemTime(base + 60 * 1000);
     const { id: phone } = await createSession(env, 'u1');
     let current = phone;
     for (let i = 0; i < 30; i++) {
+      vi.setSystemTime(base + (2 + i) * 60 * 1000);
       const next = await rotateSession(env, current, 'u1');
       expect(next).not.toBeNull();
+      expect(next, 'the loop coalesced instead of rotating').not.toBe(current);
       current = next!;
     }
+    expect(
+      await countRows(db, 'sessions', `user_id = 'u1' AND superseded_at IS NOT NULL`),
+      'the rotation rows the cap must ignore were never created',
+    ).toBe(30);
 
-    // A second device signs in, which is what runs the cap.
+    // A third device signs in, which is what runs the cap.
+    vi.setSystemTime(base + 40 * 60 * 1000);
     await createSession(env, 'u1');
 
-    expect(await isSessionActive(env, current, 'u1'), 'the first device was silently logged out').toBe(true);
+    expect(
+      await isSessionActive(env, laptop, 'u1'),
+      "the idle device was silently logged out by another device's refreshes",
+    ).toBe(true);
+    expect(await isSessionActive(env, current, 'u1'), 'the refreshing device lost its own session').toBe(true);
   });
 
   it('still caps the number of live sign-ins', async () => {

@@ -916,13 +916,24 @@ describe('rotation converges instead of forking, and a family revokes together (
     await seedUser(db, 'u1');
     let current = (await createSession(env, 'u1')).id;
     for (let i = 0; i < 25; i++) {
+      // Pass-15 review (F-42). Without this the coalescing floor returns the
+      // same id twenty-five times and the loop rotates nothing, so "every
+      // predecessor is superseded" is asserted over a table that has no
+      // predecessors -- true on any tree, including one with no family
+      // mechanism at all.
+      await ageSession(db, current);
       const next = await rotateSession(env, current, 'u1');
       expect(next).not.toBeNull();
+      expect(next, 'the loop coalesced instead of rotating').not.toBe(current);
       current = next!;
     }
 
     // Every predecessor is superseded; only the newest authenticates.
     expect(await countRows(db, 'sessions', `user_id = 'u1' AND superseded_at IS NULL AND revoked_at IS NULL`)).toBe(1);
+    expect(
+      await countRows(db, 'sessions', `user_id = 'u1' AND superseded_at IS NOT NULL`),
+      'the rotation history this is about was never created',
+    ).toBe(25);
     expect(await isSessionActive(env, current, 'u1')).toBe(true);
   });
 
@@ -930,8 +941,15 @@ describe('rotation converges instead of forking, and a family revokes together (
     const { db, env } = setup();
     await seedUser(db, 'u1');
     const { id: original } = await createSession(env, 'u1');
+    // Pass-15 review (F-42): without the backdating both calls return
+    // `original`, so this revoked one id and asserted that same id was
+    // inactive three times -- the P13-02 property, tested by a test that
+    // could not fail.
+    await ageSession(db, original);
     const second = await rotateSession(env, original, 'u1');
+    await ageSession(db, second!);
     const third = await rotateSession(env, second!, 'u1');
+    expect(new Set([original, second, third]).size, 'the lineage collapsed into one row').toBe(3);
 
     await revokeSession(env, third!);
 
