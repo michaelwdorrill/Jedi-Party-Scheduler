@@ -15,6 +15,7 @@ import { resolvePastDeadlineChangeRequests } from '../src/lib/changeRequests';
 import { addInvitesToEvent } from '../src/lib/eventWrites';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
+import { expandOccurrences } from '../src/lib/recurrence';
 import type { Env } from '../src/env';
 import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
 import {
@@ -829,5 +830,127 @@ describe('an abandoned outbox claim is picked up again (P13-13)', () => {
       row!.delivered_at ?? row!.next_attempt_at,
       'the stranded obligation was neither delivered nor rescheduled',
     ).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P13-14 / F-34
+// ---------------------------------------------------------------------------
+
+// P12-14 widened the fast-forward so a long occurrence starting before the
+// window is generated, and the Pass-12 summary described what was left as
+// "an override that moves an occurrence later can fall outside the span".
+// Both reviewers pointed out that understates it: the walk is driven by
+// NOMINAL dates, pushIfInWindow stops the forward walk before it reads an
+// override, and an accepted time_change validates only that the proposed time
+// is a sane future range. So the gap is both directions and any distance --
+// moving next Monday's game three weeks out is an ordinary use of the feature.
+describe('a moved occurrence appears at the time it was moved to (P13-14)', () => {
+  const daily = {
+    freq: 'DAILY' as const,
+    interval: 1,
+    byWeekday: null,
+    byMonthDay: null,
+    startDate: '2026-09-01',
+    startTime: '19:00',
+    durationMinutes: 120,
+    endType: 'after_count' as const,
+    endDate: null,
+    endCount: 1,
+  };
+
+  const movedForward = [
+    {
+      occurrence_date: '2026-09-01',
+      is_cancelled: 0,
+      override_start_at: Date.UTC(2026, 8, 20, 19, 0),
+      override_end_at: Date.UTC(2026, 8, 20, 21, 0),
+    },
+  ];
+
+  it('is found when the window covers its new time, far past the original', () => {
+    const occurrences = expandOccurrences(
+      daily,
+      'UTC',
+      Date.UTC(2026, 8, 20, 0, 0),
+      Date.UTC(2026, 8, 21, 0, 0),
+      movedForward,
+    );
+    expect(occurrences.map((o) => o.startAt)).toEqual([Date.UTC(2026, 8, 20, 19, 0)]);
+  });
+
+  it('is not reported at its original time any more', () => {
+    const occurrences = expandOccurrences(
+      daily,
+      'UTC',
+      Date.UTC(2026, 8, 1, 0, 0),
+      Date.UTC(2026, 8, 2, 0, 0),
+      movedForward,
+    );
+    expect(occurrences).toEqual([]);
+  });
+
+  it('is found when the move is backwards, before the rule would reach it', () => {
+    const later = { ...daily, startDate: '2026-09-28' };
+    const movedBack = [
+      {
+        occurrence_date: '2026-09-28',
+        is_cancelled: 0,
+        override_start_at: Date.UTC(2026, 8, 2, 19, 0),
+        override_end_at: Date.UTC(2026, 8, 2, 21, 0),
+      },
+    ];
+    const occurrences = expandOccurrences(
+      later,
+      'UTC',
+      Date.UTC(2026, 8, 2, 0, 0),
+      Date.UTC(2026, 8, 3, 0, 0),
+      movedBack,
+    );
+    expect(occurrences.map((o) => o.startAt)).toEqual([Date.UTC(2026, 8, 2, 19, 0)]);
+  });
+
+  it('emits a moved occurrence exactly once when the walk also reaches it', () => {
+    // A small move that stays inside the same window the walk covers -- the
+    // override pass must not duplicate what pushIfInWindow already emitted.
+    const nudged = [
+      {
+        occurrence_date: '2026-09-01',
+        is_cancelled: 0,
+        override_start_at: Date.UTC(2026, 8, 1, 21, 0),
+        override_end_at: Date.UTC(2026, 8, 1, 23, 0),
+      },
+    ];
+    const occurrences = expandOccurrences(
+      daily,
+      'UTC',
+      Date.UTC(2026, 8, 1, 0, 0),
+      Date.UTC(2026, 8, 2, 0, 0),
+      nudged,
+    );
+    expect(occurrences).toHaveLength(1);
+    expect(occurrences[0].startAt).toBe(Date.UTC(2026, 8, 1, 21, 0));
+  });
+
+  it('does not resurrect an occurrence the series no longer produces', () => {
+    // An override left behind by an edit that ended the series earlier. Its
+    // original date is outside the series, so it is not an occurrence at all.
+    const ended = { ...daily, endType: 'on_date' as const, endDate: '2026-09-05', endCount: null };
+    const orphan = [
+      {
+        occurrence_date: '2026-09-30',
+        is_cancelled: 0,
+        override_start_at: Date.UTC(2026, 8, 20, 19, 0),
+        override_end_at: Date.UTC(2026, 8, 20, 21, 0),
+      },
+    ];
+    const occurrences = expandOccurrences(
+      ended,
+      'UTC',
+      Date.UTC(2026, 8, 20, 0, 0),
+      Date.UTC(2026, 8, 21, 0, 0),
+      orphan,
+    );
+    expect(occurrences).toEqual([]);
   });
 });

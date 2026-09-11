@@ -59,11 +59,11 @@ const MINUTES_PER_DAY = 24 * 60;
 // One period of the original rounding slack, plus however many periods the
 // duration itself spans. MAX_ITERATIONS still bounds the walk.
 //
-// What this does not cover: an override that *moves* an occurrence later, out
-// of the span its rule implies. Overrides are keyed by the pre-override date,
-// so the candidate has to be generated before its override can be read, and a
-// move of arbitrary size cannot be predicted from the rule alone. That is a
-// narrower and separate problem from the one this fixes.
+// What this does not cover -- and what Pass 12 wrongly described as a narrower
+// separate problem -- is an override that MOVES an occurrence away from its
+// nominal date. No lookback can, in either direction: the move is unbounded
+// and unrelated to the rule. That is handled after the walk instead, by the
+// override pass at the end of expandOccurrences (P13-14 / F-34).
 function lookbackPeriods(rule: RecurrenceRule, periodMinutes: number): number {
   return 1 + Math.ceil(Math.max(0, rule.durationMinutes) / Math.max(1, periodMinutes));
 }
@@ -240,6 +240,51 @@ export function expandOccurrences(
       }
       monthIndex++;
     }
+  }
+
+  // Pass-13 review (P13-14 / F-34). A second, window-driven pass over the
+  // overrides, because the walk above is driven by NOMINAL dates and an
+  // override can move an occurrence arbitrarily far from its own.
+  //
+  // P12-14 widened the fast-forward so a LONG occurrence starting before the
+  // window is still generated. That was the smaller half. The general problem
+  // is that a moved occurrence is only ever considered if the walk happens to
+  // reach its original date -- and pushIfInWindow returns `false` (stop) for a
+  // candidate past windowEnd *before* it looks the override up, so the forward
+  // walk cannot reach a rule date beyond the window whose override pulls the
+  // occurrence back into it. Both directions, any distance: an accepted
+  // time_change validates only that the proposed time is a sane future range,
+  // so moving next Monday's game three weeks out is an ordinary use of the
+  // feature and three weeks is far outside any lookback.
+  //
+  // Everything downstream reads this function -- the reminder sweeps,
+  // free/busy, the calendar, the noticeboard, the Google push -- so a moved
+  // night got no reminder, showed its people as free, and was missing from the
+  // calendar for any window that did not span its original date.
+  //
+  // Cheap, because loadOverridesForEvents already hands over every override
+  // for the event: no query, no dependence on the window, and the walk above
+  // stays as the fast path for the ordinary case. Emitted only for overrides
+  // the walk did not already produce, so a moved occurrence appears once.
+  const emitted = new Set(results.map((r) => r.date));
+  for (const override of overrides) {
+    if (override.is_cancelled) continue;
+    if (override.override_start_at == null || override.override_end_at == null) continue;
+    if (emitted.has(override.occurrence_date)) continue;
+    if (override.override_end_at < windowFromMs || override.override_start_at > windowToMs) continue;
+
+    // Still has to be an occurrence of this series. Without this an override
+    // left behind by an edit that shortened the series would resurrect a night
+    // the rule no longer produces.
+    const originalDate = DateTime.fromISO(override.occurrence_date, { zone });
+    if (!originalDate.isValid || originalDate < seriesStart) continue;
+    if (endDate && originalDate > endDate) continue;
+
+    results.push({
+      date: override.occurrence_date,
+      startAt: override.override_start_at,
+      endAt: override.override_end_at,
+    });
   }
 
   return results;
