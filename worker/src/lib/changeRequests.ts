@@ -397,7 +397,29 @@ async function applyChangeRequest(env: Env, event: EventRow, request: ChangeRequ
     }
     // The organizer is the actor: accepting a request is their decision, and
     // this path passes no group ids anyway.
-    await addInvitesToEvent(env, event.id, event.guild_id, [request.target_user_id!], [], event.organizer_id);
+    //
+    // Pass-14 review (P14-11 / F-40). notAdded is read rather than discarded.
+    // P13-09 gave addInvitesToEvent an honest answer about who the capacity
+    // guard actually admitted and taught the additive route to surface it;
+    // this caller kept ignoring it. So two organizer accepts racing at the
+    // cap both returned 200 and both requests committed as accepted while
+    // only one person was invited -- a decision recorded for an effect that
+    // never happened.
+    //
+    // ConflictError rather than a silent partial: it travels the release path
+    // applyAndAccept already has, so the claim goes back to pending and the
+    // request stays actionable instead of being closed over nothing.
+    const { notAdded } = await addInvitesToEvent(
+      env,
+      event.id,
+      event.guild_id,
+      [request.target_user_id!],
+      [],
+      event.organizer_id,
+    );
+    if (notAdded.length > 0) {
+      throw new ConflictError('This event filled up before the request could be accepted');
+    }
   }
 }
 

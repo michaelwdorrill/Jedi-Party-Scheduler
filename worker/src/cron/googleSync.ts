@@ -734,15 +734,34 @@ async function syncImportedPersonalEvents(
       // failed): a rare, terminal, once-per-disappearance cost, the same
       // category runDisconnect's own cleanup already sits outside the ledger
       // for.
+      // Pass-14 review (P14-09 / F-37). Both statements are guarded by the
+      // read calendar this failure actually came from -- the stillCurrent
+      // idiom the stale-delete and upsert further down this same function
+      // already use through guardBinds, and which this terminal branch was
+      // written without.
+      //
+      // Scoped by user_id alone, a 404 for a calendar the user had just
+      // switched away from landed on their NEW selection: it nulled the
+      // calendar they had just chosen, wrote "calendar A not found" as the
+      // error against it, and deleted the imports the new one had produced.
+      // The window is one events.list round trip, but the outcome is the
+      // person's fresh choice silently reverted with an error naming a
+      // calendar they no longer have.
+      //
+      // The DELETE runs FIRST so both statements see the pre-null value; a
+      // batch is one transaction, so the order inside it is the only thing
+      // that decides what the second one can still match on.
       await env.DB.batch([
+        env.DB.prepare(
+          `DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL
+           AND EXISTS (SELECT 1 FROM google_calendar_connections
+                       WHERE user_id = ? AND read_calendar_id = ?)`,
+        ).bind(row.user_id, row.user_id, row.read_calendar_id),
         env.DB.prepare(
           `UPDATE google_calendar_connections
            SET read_calendar_id = NULL, last_error = ?, updated_at = ?
-           WHERE user_id = ?`,
-        ).bind(result.message, now, row.user_id),
-        env.DB.prepare(`DELETE FROM personal_events WHERE user_id = ? AND google_event_id IS NOT NULL`).bind(
-          row.user_id,
-        ),
+           WHERE user_id = ? AND read_calendar_id = ?`,
+        ).bind(result.message, now, row.user_id, row.read_calendar_id),
       ]);
       console.warn(`Google personal-time import disabled for ${row.user_id}: ${result.message}`);
       return;

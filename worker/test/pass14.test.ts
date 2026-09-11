@@ -2,6 +2,43 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runReminderSweep } from '../src/cron/reminders';
 import { handleInteraction } from '../src/lib/interactions';
 import { expandOccurrences } from '../src/lib/recurrence';
+import { acceptChangeRequest, type ChangeRequestRow } from '../src/lib/changeRequests';
+import { sweepGoogleCalendar } from '../src/cron/googleSync';
+import { TickBudget } from '../src/cron/budget';
+import { seal } from '../src/lib/crypto';
+import type { Env } from '../src/env';
+import type { ShimDatabase } from './d1shim';
+
+const GOOGLE_ENCRYPTION_KEY = 'test-google-encryption-key-at-least-32-chars';
+
+function googleEnv(base: Env): Env {
+  return {
+    ...base,
+    GOOGLE_SYNC_MODE: 'live',
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
+    GOOGLE_TOKEN_ENCRYPTION_KEY: GOOGLE_ENCRYPTION_KEY,
+  };
+}
+
+async function seedGoogleConnection(
+  db: ShimDatabase,
+  userId: string,
+  overrides: { readCalendarId?: string | null } = {},
+): Promise<void> {
+  const sealed = await seal('stored-refresh-token', GOOGLE_ENCRYPTION_KEY);
+  const now = Date.now();
+  await db
+    .prepare(
+      `INSERT INTO google_calendar_connections
+         (user_id, refresh_token_ciphertext, refresh_token_iv, access_token_ciphertext, access_token_iv,
+          access_token_expires_at, google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
+          last_synced_at, disconnect_attempts, connected_at, updated_at)
+       VALUES (?, ?, ?, NULL, NULL, NULL, ?, 'primary', ?, 1, 'active', NULL, 0, ?, ?)`,
+    )
+    .bind(userId, sealed.ciphertext, sealed.iv, `${userId}@gmail.com`, overrides.readCalendarId ?? null, now, now)
+    .run();
+}
 import {
   countRows,
   DAY_MS,
@@ -13,6 +50,7 @@ import {
   seedGuild,
   seedInvite,
   seedMembership,
+  loadEventRow,
   seedUser,
   setup,
   stubFetch,
@@ -315,5 +353,157 @@ describe('the override pass only emits real occurrences of the series (P14-13)',
     ];
     const occurrences = expandOccurrences(weekly, 'UTC', Date.UTC(2026, 8, 30), Date.UTC(2026, 9, 1), moved);
     expect(occurrences.map((o) => o.date), 'a legitimate move stopped being visible').toEqual(['2026-09-14']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P14-09 / F-37
+// ---------------------------------------------------------------------------
+
+// A third P13-07-shaped sibling, missed even after last pass went looking for
+// siblings of exactly this guard. syncImportedPersonalEvents' terminal branch
+// nulls read_calendar_id and deletes every imported row scoped by user_id
+// alone -- while the stale-delete and upsert a few lines further down the same
+// function use guardBinds = [user_id, read_calendar_id] for precisely this
+// reason.
+describe('a stale import failure cannot revert a new read calendar (P14-09)', () => {
+  async function seedReader(db: ShimDatabase, env: Env): Promise<void> {
+    await seedGuild(db);
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+    await seedGoogleConnection(db, 'u1', { readCalendarId: 'calendar-a' });
+    await db.prepare(`UPDATE users SET accepted_policy_version = 99 WHERE id = 'u1'`).run();
+    void env;
+  }
+
+  it('leaves the newly selected calendar and its imports alone', async () => {
+    const { db, env: base } = setup('paid');
+    const env = googleEnv(base);
+    await seedReader(db, env);
+
+    const now = Date.now();
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'at', expires_in: 3600 } },
+      {
+        match: '/calendars/calendar-a/events',
+        status: 404,
+        body: { error: { message: 'not found' } },
+        // The switch happens with calendar A's read genuinely in flight --
+        // the request is away and its answer has not arrived.
+        before: async () => {
+          await db
+            .prepare(`UPDATE google_calendar_connections SET read_calendar_id = 'calendar-b' WHERE user_id = 'u1'`)
+            .run();
+          await db
+            .prepare(
+              `INSERT INTO personal_events
+                 (id, user_id, title, description, timezone, start_at, end_at, status, availability, is_recurring,
+                  google_event_id, created_at, updated_at)
+               VALUES ('pe-b', 'u1', 'From calendar B', NULL, 'UTC', ?, ?, 'active', 'busy', 0, 'g-b', ?, ?)`,
+            )
+            .bind(now + DAY_MS, now + DAY_MS + HOUR_MS, now, now)
+            .run();
+        },
+      },
+    ]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    const row = await db
+      .prepare(`SELECT read_calendar_id FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ read_calendar_id: string | null }>();
+    expect(row!.read_calendar_id, "a stale 404 reverted the user's new calendar choice").toBe('calendar-b');
+    expect(await countRows(db, 'personal_events', `id = 'pe-b'`), "the new calendar's imports were deleted").toBe(1);
+  });
+
+  it('still switches reading off when the current calendar is the one that is gone', async () => {
+    const { db, env: base } = setup('paid');
+    const env = googleEnv(base);
+    await seedReader(db, env);
+
+    fetchStub = stubFetch([
+      { match: 'oauth2.googleapis.com/token', status: 200, body: { access_token: 'at', expires_in: 3600 } },
+      { match: '/calendars/calendar-a/events', status: 404, body: { error: { message: 'not found' } } },
+    ]);
+
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    const after = await db
+      .prepare(`SELECT read_calendar_id FROM google_calendar_connections WHERE user_id = 'u1'`)
+      .first<{ read_calendar_id: string | null }>();
+    expect(after!.read_calendar_id, 'a genuinely missing calendar was left switched on').toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P14-11 / F-40
+// ---------------------------------------------------------------------------
+
+// P13-09 gave addInvitesToEvent an honest answer about who the capacity guard
+// actually admitted, and taught the additive route to surface it. This caller
+// kept discarding it, so a racing truncation committed the request as accepted
+// with nobody added -- a decision recorded for an effect that never happened.
+describe('accepting an add-invitee request honours notAdded (P14-11)', () => {
+  it('does not record an acceptance whose invitation was truncated', async () => {
+    const { db, env } = setup('paid');
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedEvent(db, { id: 'ev-1', organizerId: 'organizer' });
+
+    const guests: string[] = [];
+    for (let i = 0; i < 27; i++) {
+      const uid = `guest-${String(i).padStart(2, '0')}`;
+      await seedUser(db, uid);
+      await seedMembership(db, uid, 'guild-1');
+      guests.push(uid);
+    }
+    // 24 of 25 seats taken, so this acceptance's preflight passes.
+    for (const uid of guests.slice(0, 24)) await seedInvite(db, 'ev-1', uid);
+
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO event_change_requests
+           (id, event_id, requester_id, kind, target_user_id, occurrence_date, status, event_revision, message, created_at)
+         VALUES ('cr-a', 'ev-1', ?, 'add_invitee', ?, '', 'pending', 0, 'can they come?', ?)`,
+      )
+      .bind(guests[24], guests[24], now)
+      .run();
+
+    // The real interleaving: another request takes the last seat between this
+    // acceptance's preflight count and its invite write. That is the state
+    // P13-09's LIMIT exists to handle -- it truncates rather than overshoot --
+    // and the question is what the acceptance does about it.
+    let filled = false;
+    const racing = {
+      ...db,
+      prepare: (sql: string) => db.prepare(sql),
+      batch: async (statements: unknown[]) => {
+        if (!filled) {
+          filled = true;
+          await seedInvite(db, 'ev-1', guests[25]);
+        }
+        return db.batch(statements as never);
+      },
+    };
+
+    const event = await loadEventRow(db, 'ev-1');
+    const request = await db
+      .prepare(`SELECT * FROM event_change_requests WHERE id = 'cr-a'`)
+      .first<ChangeRequestRow>();
+
+    await acceptChangeRequest({ ...env, DB: racing } as never, event, request!, 'organizer').catch(() => undefined);
+
+    expect(filled, 'the test never reached the invite write').toBe(true);
+    expect(await countRows(db, 'event_invites', `event_id = 'ev-1'`), 'the cap did not hold').toBeLessThanOrEqual(25);
+    expect(
+      await countRows(db, 'event_invites', `event_id = 'ev-1' AND user_id = ?`, guests[24]),
+      'the request target was not invited',
+    ).toBe(0);
+    expect(
+      await countRows(db, 'event_change_requests', `id = 'cr-a' AND status = 'accepted'`),
+      'the request was recorded as accepted without its person being invited',
+    ).toBe(0);
   });
 });
