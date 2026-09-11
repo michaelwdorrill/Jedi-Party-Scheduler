@@ -265,3 +265,18 @@ export async function loadEventRow(db: ShimDatabase, eventId: string): Promise<E
   if (!row) throw new Error(`test fixture: no event ${eventId}`);
   return row;
 }
+
+// Backdates a session so a refresh is past MIN_ROTATION_INTERVAL_MS and
+// actually rotates (Pass-14 review, P14-05).
+//
+// A real client refreshes when its thirty-minute access token expires, which
+// is far outside the one-minute coalescing window. A test that logs in and
+// refreshes in the same millisecond is the hammering case that window exists
+// to bound, so tests about ROTATION have to age the session the way the
+// passage of time would.
+export async function ageSession(db: ShimDatabase, sessionId: string, byMs = 5 * 60 * 1000): Promise<void> {
+  await db
+    .prepare(`UPDATE sessions SET created_at = created_at - ? WHERE id = ?`)
+    .bind(byMs, sessionId)
+    .run();
+}

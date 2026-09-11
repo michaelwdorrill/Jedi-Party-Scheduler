@@ -21,6 +21,7 @@ import type { Env } from '../src/env';
 import type { EventWriteInput } from '../src/lib/eventWrites';
 import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
 import {
+  ageSession,
   countRows,
   DAY_MS,
   DM_CHANNEL_RULE,
@@ -2598,6 +2599,7 @@ describe('refreshing rotates the session rather than reissuing it (F-20)', () =>
     await seedMembership(db, 'alice', 'guild-1');
 
     const { id: sessionId } = await createSession(env, 'alice');
+    await ageSession(db, sessionId);
     const original = await signJwt('alice', sessionId, env.JWT_SIGNING_KEY);
 
     const res = await refresh(env, original);
@@ -2626,6 +2628,7 @@ describe('refreshing rotates the session rather than reissuing it (F-20)', () =>
     await seedMembership(db, 'alice', 'guild-1');
 
     const { id: sessionId } = await createSession(env, 'alice');
+    await ageSession(db, sessionId);
     const captured = await signJwt('alice', sessionId, env.JWT_SIGNING_KEY);
 
     // The legitimate holder refreshes.

@@ -25,6 +25,29 @@ const MAX_SESSIONS_PER_USER = 20;
 // extend what a captured token is worth.
 const ROTATION_GRACE_MS = 60 * 1000;
 
+// How new a session has to be before a refresh declines to rotate it and hands
+// the same one back (Pass-14 review, P14-05).
+//
+// P13-02 made superseded rows survive to absolute expiry, because they carry
+// the id-to-family mapping logout and replay detection resolve through. What
+// that exposed is that nothing bounds how often rotation can run: /auth/refresh
+// accepts a token it issued a moment ago and mints another session for it, so
+// a thousand immediate requests leave a thousand retained rows. The live-session
+// cap does not count them, deliberately, so it is no bound either. An
+// authenticated caller could grow storage by request count.
+//
+// Deleting them again is not available -- that is precisely the fix P13-02
+// undid. So the issuance side is bounded instead: a refresh inside this window
+// returns the session presented rather than a successor, which creates no row.
+//
+// Safe against what F-20 built rotation for. A captured token can still be
+// exchanged without rotating, but only for this long after its session was
+// issued, not for the seven days F-20 closed -- and one minute is far inside
+// the thirty-minute access-token lifetime, so a legitimate client refreshing
+// when its token expires never reaches this path at all. It is the hammering
+// caller, and only the hammering caller, that gets coalesced.
+const MIN_ROTATION_INTERVAL_MS = 60 * 1000;
+
 export async function createSession(env: Env, userId: string): Promise<{ id: string }> {
   const id = newId();
   const now = Date.now();
@@ -189,12 +212,13 @@ export async function isSessionActive(env: Env, sessionId: string, userId: strin
 // Returns the new session id, or null if the presented one is not usable.
 export async function rotateSession(env: Env, sessionId: string, userId: string): Promise<string | null> {
   const row = await env.DB.prepare(
-    `SELECT user_id, expires_at, revoked_at, policy_version, superseded_at, successor_id, family_id
+    `SELECT user_id, created_at, expires_at, revoked_at, policy_version, superseded_at, successor_id, family_id
      FROM sessions WHERE id = ?`,
   )
     .bind(sessionId)
     .first<{
       user_id: string;
+      created_at: number;
       expires_at: number;
       revoked_at: number | null;
       policy_version: number;
@@ -223,6 +247,11 @@ export async function rotateSession(env: Env, sessionId: string, userId: string)
     // be handed to a caller as a working session (Pass-13 review, P13-01).
     return usableSuccessor(env, row.successor_id, userId);
   }
+
+  // Too new to be worth rotating: hand back what was presented, writing
+  // nothing (P14-05). See MIN_ROTATION_INTERVAL_MS for why this is the bound
+  // rather than deleting the rows again.
+  if (now - row.created_at < MIN_ROTATION_INTERVAL_MS) return sessionId;
 
   const id = newId();
   const family = row.family_id ?? sessionId;

@@ -3,6 +3,7 @@ import { runReminderSweep } from '../src/cron/reminders';
 import { handleInteraction } from '../src/lib/interactions';
 import { expandOccurrences } from '../src/lib/recurrence';
 import { acceptChangeRequest, type ChangeRequestRow } from '../src/lib/changeRequests';
+import { createSession, isSessionActive, revokeSession, rotateSession } from '../src/lib/sessions';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
 import { TickBudget } from '../src/cron/budget';
 import { seal } from '../src/lib/crypto';
@@ -40,6 +41,7 @@ async function seedGoogleConnection(
     .run();
 }
 import {
+  ageSession,
   countRows,
   DAY_MS,
   DM_CHANNEL_RULE,
@@ -505,5 +507,61 @@ describe('accepting an add-invitee request honours notAdded (P14-11)', () => {
       await countRows(db, 'event_change_requests', `id = 'cr-a' AND status = 'accepted'`),
       'the request was recorded as accepted without its person being invited',
     ).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P14-05
+// ---------------------------------------------------------------------------
+
+// P13-02 made superseded rows survive to absolute expiry, because they carry
+// the id-to-family mapping logout and replay detection resolve through. What
+// that exposed: nothing bounds how often rotation runs. /auth/refresh accepts
+// a token it issued a moment ago and mints another session for it, and the
+// live-session cap deliberately does not count the retained rows -- so an
+// authenticated caller could grow stored rows by request count.
+//
+// Deleting them again is the fix P13-02 undid, so the issuance side is bounded
+// instead.
+describe('hammering refresh does not grow the session table (P14-05)', () => {
+  it('coalesces refreshes of a session that was just issued', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'u1');
+    const { id: original } = await createSession(env, 'u1');
+
+    let current = original;
+    for (let i = 0; i < 50; i++) {
+      const next = await rotateSession(env, current, 'u1');
+      expect(next).not.toBeNull();
+      current = next!;
+    }
+
+    expect(current, 'a hammering caller was handed new sessions').toBe(original);
+    expect(await countRows(db, 'sessions', `user_id = 'u1'`), 'fifty immediate refreshes created rows').toBe(1);
+    expect(await isSessionActive(env, current, 'u1')).toBe(true);
+  });
+
+  it('still rotates once the session has aged past the window', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'u1');
+    const { id: original } = await createSession(env, 'u1');
+    await ageSession(db, original);
+
+    const next = await rotateSession(env, original, 'u1');
+
+    expect(next, 'an aged session stopped rotating').not.toBe(original);
+    expect(await countRows(db, 'sessions', `user_id = 'u1'`)).toBe(2);
+  });
+
+  it('leaves delayed logout working, which is what the retention is for', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'u1');
+    const { id: root } = await createSession(env, 'u1');
+    await ageSession(db, root);
+    const successor = await rotateSession(env, root, 'u1');
+
+    await revokeSession(env, root);
+
+    expect(await isSessionActive(env, successor!, 'u1'), 'coalescing broke family revocation').toBe(false);
   });
 });

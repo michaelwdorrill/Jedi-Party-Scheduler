@@ -18,6 +18,7 @@ import { ConflictError, ValidationError } from '../src/lib/validate';
 import type { Env } from '../src/env';
 import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
 import {
+  ageSession,
   countRows,
   DAY_MS,
   DM_CHANNEL_RULE,
@@ -947,6 +948,7 @@ describe('rotation converges instead of forking, and a family revokes together (
     const { db, env } = setup();
     await seedUser(db, 'u1');
     const { id: original } = await createSession(env, 'u1');
+    await ageSession(db, original);
     const stolen = original;
     const legitimate = await rotateSession(env, original, 'u1');
     expect(legitimate).not.toBeNull();

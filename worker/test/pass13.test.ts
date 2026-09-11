@@ -19,6 +19,7 @@ import { expandOccurrences } from '../src/lib/recurrence';
 import type { Env } from '../src/env';
 import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
 import {
+  ageSession,
   countRows,
   DAY_MS,
   DM_CHANNEL_RULE,
@@ -61,6 +62,7 @@ describe('rotation cannot mint a successor after logout has completed (P13-01)',
     const { db, env } = setup();
     await seedUser(db, 'u1');
     const { id: original } = await createSession(env, 'u1');
+    await ageSession(db, original);
 
     // The real interleaving. rotateSession reads the row, then runs its claim
     // as a batch; logout completing in that window is exactly the case the
