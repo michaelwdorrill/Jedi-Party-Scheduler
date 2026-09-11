@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { acceptChangeRequest, resolvePastDeadlineChangeRequests } from '../src/lib/changeRequests';
+import { runReminderSweep } from '../src/cron/reminders';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
@@ -8,6 +9,9 @@ import type { EventRow } from '../src/lib/events';
 import type { ShimDatabase } from './d1shim';
 import {
   countRows,
+  DM_CHANNEL_RULE,
+  dmSendRule,
+  membershipRule,
   DAY_MS,
   HOUR_MS,
   seedEvent,
@@ -303,5 +307,102 @@ describe('a refused reconnect does not revoke the connection the user already ha
       fetchStub.calls.filter((u) => u.includes('/revoke')),
       "the refusal revoked a grant that the user's existing connection may share",
     ).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P16-08
+// ---------------------------------------------------------------------------
+
+// The organizer notice query selected rows with no log row AT ALL. The outbox
+// writes a log row even when a send fails -- that is where the attempt count
+// and the backoff live -- so the first transient Discord error created a row
+// this query then excluded forever, and nothing else drains that table. The
+// recorded retry time passed and was read by nothing.
+describe('a failed organizer RSVP notice is retried (P16-08)', () => {
+  async function seedAnsweredEvent(db: ShimDatabase): Promise<void> {
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'responder');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'responder', 'guild-1');
+    await db.prepare(`UPDATE users SET dm_channel_id = 'dm-organizer' WHERE id = 'organizer'`).run();
+
+    const start = Date.now() + 3 * DAY_MS;
+    await seedEvent(db, { id: 'ev-1', organizerId: 'organizer', startAt: start, endAt: start + 2 * HOUR_MS });
+    await seedInvite(db, 'ev-1', 'responder');
+    await db
+      .prepare(
+        `INSERT INTO event_attendance (id, event_id, user_id, occurrence_date, rsvp_status, responded_at)
+         VALUES ('att-1', 'ev-1', 'responder', '', 'accepted', ?)`,
+      )
+      .bind(Date.now())
+      .run();
+  }
+
+  it('delivers on a later sweep after a transient failure', async () => {
+    const { db, env } = setup('paid');
+    await seedAnsweredEvent(db);
+
+    // Sweep one: Discord is having a bad minute.
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(503), membershipRule(200)]);
+    await runReminderSweep(env);
+    fetchStub.restore();
+
+    const afterFailure = await db
+      .prepare(`SELECT attempt_count, delivered_at, next_attempt_at FROM organizer_rsvp_notice_log WHERE organizer_id = 'organizer'`)
+      .first<{ attempt_count: number; delivered_at: number | null; next_attempt_at: number | null }>();
+    expect(afterFailure, 'the first attempt left no outbox row, so this test is not about what it claims').toBeTruthy();
+    expect(afterFailure!.delivered_at).toBeNull();
+    // Make the backoff due, the way fifteen minutes of wall clock would.
+    await db
+      .prepare(`UPDATE organizer_rsvp_notice_log SET next_attempt_at = ? WHERE organizer_id = 'organizer'`)
+      .bind(Date.now() - 60 * 1000)
+      .run();
+
+    // Sweep two: Discord is healthy again.
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    const afterRetry = await db
+      .prepare(`SELECT delivered_at FROM organizer_rsvp_notice_log WHERE organizer_id = 'organizer'`)
+      .first<{ delivered_at: number | null }>();
+    expect(
+      afterRetry!.delivered_at,
+      'a transient Discord failure lost the notice permanently -- nothing ever looked at that row again',
+    ).not.toBeNull();
+  });
+
+  // An invariant guard, not a reproduction: it passes either way, because the
+  // unfixed query never retried at all. It is here because widening a
+  // recipient query is exactly how a membership predicate gets left behind,
+  // and F-43 is one pass old.
+  it('does not retry it to an organizer who has since left the server', async () => {
+    const { db, env } = setup('paid');
+    await seedAnsweredEvent(db);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(503), membershipRule(200)]);
+    await runReminderSweep(env);
+    fetchStub.restore();
+    await db
+      .prepare(`UPDATE organizer_rsvp_notice_log SET next_attempt_at = ? WHERE organizer_id = 'organizer'`)
+      .bind(Date.now() - 60 * 1000)
+      .run();
+
+    // F-43's predicate has to survive the widening: a retry is still a send.
+    await db
+      .prepare(`UPDATE user_guild_membership SET is_member = 0 WHERE user_id = 'organizer' AND guild_id = 'guild-1'`)
+      .run();
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    const row = await db
+      .prepare(`SELECT delivered_at FROM organizer_rsvp_notice_log WHERE organizer_id = 'organizer'`)
+      .first<{ delivered_at: number | null }>();
+    expect(
+      row!.delivered_at,
+      'the retry path delivered to a departed organizer, which is F-43 reopened through the back door',
+    ).toBeNull();
   });
 });

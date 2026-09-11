@@ -92,8 +92,15 @@ describe('rotation cannot mint a successor after logout has completed (P13-01)',
     const { db, env } = setup();
     await seedUser(db, 'u1');
     const { id: original } = await createSession(env, 'u1');
+    // Pass-16 review. Without the backdating the rotation coalesces, so
+    // `successor` IS `original` -- and the revocation below then revokes the
+    // presented session itself. rotateSession returned null because of the
+    // read-time revocation check, never reaching the grace branch this test
+    // says it is about. The comment below was already claiming otherwise.
+    await ageSession(db, original);
     const successor = await rotateSession(env, original, 'u1');
     expect(successor).not.toBeNull();
+    expect(successor, 'the rotation coalesced, so there is no separate successor to revoke').not.toBe(original);
 
     // Only the successor row, so the predecessor stays usable and the grace
     // branch is the thing under test rather than the read-time check.

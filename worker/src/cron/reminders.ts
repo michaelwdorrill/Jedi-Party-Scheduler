@@ -2870,10 +2870,38 @@ async function sweepOrganizerRsvpNotices(env: Env, budget: TickBudget): Promise<
      LEFT JOIN organizer_rsvp_notice_log l
        ON l.organizer_id = e.organizer_id AND l.event_id = ea.event_id AND l.occurrence_date = ea.occurrence_date
           AND l.responder_id = ea.user_id AND l.responded_at = ea.responded_at
-     WHERE l.id IS NULL AND e.status = 'active' AND ea.user_id != e.organizer_id
+     WHERE e.status = 'active' AND ea.user_id != e.organizer_id
+       -- Pass-16 review (P16-08). This used to be l.id IS NULL alone: a
+       -- notice with no log row at all. But the outbox writes a log row even
+       -- when a send FAILS -- that is where the attempt count and the backoff
+       -- live -- so the first transient Discord error created a row that this
+       -- query then excluded forever. Nothing else drains this table, so the
+       -- recorded next_attempt_at passed and was never read by anything: one
+       -- 503 and the organizer simply never heard about that RSVP.
+       --
+       -- The second arm is the shape sweepDueNotificationRetries and the group
+       -- nudge consumer already use, including P13-13's abandoned-claim case
+       -- (a claim whose lease expired without ever writing a retry time).
+       -- claim re-checks all of it before sending, so a row that is not
+       -- genuinely due costs one refused statement and nothing else.
+       --
+       -- Widening this query rather than adding a third retry consumer is
+       -- deliberate: a new consumer is a new FIXED per-tick query, which is
+       -- the cost cron/budget.ts records three incidents of, and which the
+       -- Pass-15 recovery arm tripped over as well.
+       AND (
+         l.id IS NULL
+         OR (
+           l.delivered_at IS NULL AND l.failed_at IS NULL
+           AND (
+             (l.next_attempt_at IS NOT NULL AND l.next_attempt_at <= ?)
+             OR (l.next_attempt_at IS NULL AND l.claimed_until IS NOT NULL AND l.claimed_until < ?)
+           )
+         )
+       )
      LIMIT ?`,
   )
-    .bind(membershipCutoff(), GLOBAL_SCAN_LIMIT)
+    .bind(membershipCutoff(), Date.now(), Date.now(), GLOBAL_SCAN_LIMIT)
     .all<{
       event_id: string;
       occurrence_date: string;

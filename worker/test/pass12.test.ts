@@ -901,6 +901,13 @@ describe('rotation converges instead of forking, and a family revokes together (
     const { db, env } = setup();
     await seedUser(db, 'u1');
     const { id: original } = await createSession(env, 'u1');
+    // Pass-16 review. Without the backdating both calls fall inside the
+    // coalescing floor and return `original`, so "the same successor" held
+    // because there was no successor -- the test checked the floor, not
+    // convergence. F-42 fixed five tests of this shape and this one was not
+    // among them; it is the same defect, found by the same reviewer one pass
+    // later.
+    await ageSession(db, original);
 
     const [a, b] = await Promise.all([
       rotateSession(env, original, 'u1'),
@@ -908,7 +915,8 @@ describe('rotation converges instead of forking, and a family revokes together (
     ]);
 
     expect(a).not.toBeNull();
-    expect(b).toBe(a);
+    expect(a, 'the pair coalesced instead of rotating, so convergence was never tested').not.toBe(original);
+    expect(b, 'two concurrent refreshes of one session forked into two').toBe(a);
   });
 
   it('leaves exactly one live session behind after many refreshes', async () => {
