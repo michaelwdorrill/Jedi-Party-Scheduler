@@ -116,6 +116,34 @@ the piece of infrastructure this app does not have yet; `lib/sessions.ts`'s
 `MAX_SESSIONS_PER_USER` comment records the same reasoning for the storage
 consequence it caps instead.
 
+### 69. A removed invitee's poll vote still counts toward the tally
+
+Found while fixing P12-01 in the Pass-12 review. Removing someone from an event
+deletes their `event_invites` and `event_attendance` rows and nothing else --
+their `event_poll_votes` and `event_window_availability` rows survive, on both
+removal paths (`DELETE /events/:id/invites/:userId` and the bulk replace in
+`replaceInviteStatements`).
+
+The privacy half of that is closed: `membershipJoin` in `lib/attendance.ts` now
+requires a current invite before anyone is selected as a DM recipient, so a
+removed person receives nothing regardless of what historical rows they left
+behind. This item is the half that is left.
+
+A poll's tallies still count the departed vote. So a threshold poll can resolve
+on a night that only reaches its bar because someone no longer on the event
+voted for it, and the organizer sees a count they cannot reconcile against the
+invite list. Nobody is harmed and nothing leaks -- it is a wrong number, not an
+exposure, which is why it is here rather than fixed in that pass.
+
+Not fixed on the spot because deleting the votes is not obviously right either:
+re-inviting someone would silently lose an answer they did give, and the bulk
+replace path would need two more statements per chunk, which is the part of
+`inviteStatements` already sitting closest to D1's per-statement parameter
+ceiling. The alternative -- having the tally join `event_invites` the way
+recipient selection now does -- is the cleaner shape and costs nothing at write
+time, but it changes resolution behaviour for polls that are mid-flight, so it
+wants doing deliberately rather than as a rider on a security fix.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.

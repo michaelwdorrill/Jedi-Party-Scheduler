@@ -33,6 +33,31 @@ export interface PendingFor {
 // deactivated) since the event was created, including the organizer, who
 // isn't exempt from having left. The background revalidation sweep is what
 // keeps rows inside that window.
+// Pass-12 review (P12-01) adds the second half of that: still authorized on
+// this *event*, not merely still in its server.
+//
+// Removing someone from an event deletes their event_invites and
+// event_attendance rows and nothing else -- their poll votes and window
+// submissions stay, which is right in itself, but the two poll branches below
+// select recipients straight out of those historical records. So a removed
+// invitee stayed "confirmed" for a poll they had been dropped from, and
+// sweepVoiceChannelInvites sent them a new DM carrying a private event's
+// title, its start time and a link into its voice channel.
+//
+// R09 closed exactly this on the retry consumer, and its comment names this
+// same removal route as the cause; the initial send was left open, which is
+// the worse half -- a retry re-delivers something already sent, this leaks
+// something new.
+//
+// Applied here rather than in each branch so every recipient query gets it,
+// including the fixed-time one where it is currently redundant (attendance
+// rows are deleted on removal). Redundant is the point: it makes the
+// guarantee structural instead of dependent on every future removal path
+// remembering to clear the right tables.
+//
+// The organizer is exempt by id, not assumed to hold an invite row. Idea 26
+// gives them one, but they are the event's owner either way and a missing row
+// must not silently stop their own event's DMs.
 function membershipJoin(idsSubquery: string): string {
   return `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
           FROM users u
@@ -41,6 +66,9 @@ function membershipJoin(idsSubquery: string): string {
           JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
           ${PENDING_NOTIFICATION_JOIN}
           WHERE u.id IN (${idsSubquery})
+            AND (u.id = ? OR EXISTS (
+              SELECT 1 FROM event_invites ei WHERE ei.event_id = ? AND ei.user_id = u.id
+            ))
             AND ${PENDING_NOTIFICATION_WHERE}
           ORDER BY u.id
           LIMIT ?`;
@@ -48,7 +76,8 @@ function membershipJoin(idsSubquery: string): string {
 
 // Bind order matches the SQL text above: guild/cutoff for the membership
 // join, then the notification key for the pending join, then the caller's own
-// id-subquery parameters, then the pending predicate's, then the limit.
+// id-subquery parameters, then the event-access pair, then the pending
+// predicate's, then the limit.
 function attendeeBinds(
   event: EventRow,
   pending: PendingFor,
@@ -59,6 +88,8 @@ function attendeeBinds(
     membershipCutoff(),
     ...pendingNotificationJoinBinds(event.id, pending.notificationType, pending.occurrenceDate),
     ...subqueryBinds,
+    event.organizer_id,
+    event.id,
     ...pendingNotificationWhereBinds(),
     pending.limit,
   ];

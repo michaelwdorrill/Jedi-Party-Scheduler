@@ -775,3 +775,103 @@ describe('switching Google account clears the old account mappings (P12-11)', ()
     expect(await countRows(db, 'google_event_links', `user_id = 'u1'`)).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// P12-01
+// ---------------------------------------------------------------------------
+
+// Removing someone from an event deletes their event_invites and
+// event_attendance rows -- and nothing else. Their poll votes and window
+// submissions stay, which is reasonable in itself, but getConfirmedAttendeeIds'
+// two poll branches select recipients straight out of those historical records
+// and the membership join around them checked only that the person is still in
+// the guild. So a removed invitee remained "confirmed" for a poll they were
+// dropped from, and sweepVoiceChannelInvites sent them a brand-new DM carrying
+// a private event's title, its start time and a link into its voice channel.
+//
+// R09 closed this for the retry consumer, whose comment names the same
+// invite-removal route as the cause. It did not close it for the initial send,
+// which is the path that leaks new information rather than re-delivering old.
+describe('a removed invitee gets no further DMs about the event (P12-01)', () => {
+  async function seedResolvedPoll(db: ShimDatabase): Promise<void> {
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'dropped');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'dropped', 'guild-1');
+
+    const start = Date.now() + 10 * 60 * 1000;
+    await seedEvent(db, {
+      id: 'poll-1',
+      organizerId: 'organizer',
+      title: 'Secret Ops Night',
+      eventType: 'poll',
+      startAt: start,
+      endAt: start + 2 * HOUR_MS,
+      status: 'resolved',
+    });
+    await db
+      .prepare(
+        `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order)
+         VALUES ('opt-1', 'poll-1', ?, ?, 0)`,
+      )
+      .bind(start, start + 2 * HOUR_MS)
+      .run();
+    await db
+      .prepare(
+        `UPDATE events SET resolved_option_id = 'opt-1', voice_channel_id = 'vc-1',
+           voice_channel_name = 'The Cantina' WHERE id = 'poll-1'`,
+      )
+      .run();
+
+    // Both were invited and both voted yes on the night that won.
+    for (const uid of ['organizer', 'dropped']) {
+      await seedInvite(db, 'poll-1', uid);
+      await db
+        .prepare(
+          `INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES ('opt-1', ?, 'yes', ?)`,
+        )
+        .bind(uid, Date.now())
+        .run();
+    }
+  }
+
+  it('sends no voice-channel invite to someone dropped from a poll', async () => {
+    const { db, env } = setup('paid');
+    await seedResolvedPoll(db);
+
+    // The organizer removes them, through the real route.
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM event_invites WHERE event_id = 'poll-1' AND user_id = 'dropped'`),
+      env.DB.prepare(`DELETE FROM event_attendance WHERE event_id = 'poll-1' AND user_id = 'dropped'`),
+    ]);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    expect(
+      await countRows(db, 'notification_log', `user_id = 'dropped' AND notification_type = 'voice_channel_invite'`),
+      'a removed invitee was sent the voice channel link',
+    ).toBe(0);
+    // The organizer, still on the event, is told as normal -- the guard has to
+    // be about current access, not about switching the sweep off.
+    expect(
+      await countRows(db, 'notification_log', `user_id = 'organizer' AND notification_type = 'voice_channel_invite'`),
+    ).toBe(1);
+  });
+
+  it('still reaches an invitee who is only a voter, never an RSVPer', async () => {
+    const { db, env } = setup('paid');
+    await seedResolvedPoll(db);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    // Nobody was removed here, and a yes vote with no RSVP row is exactly how
+    // poll attendance is expressed -- so the new check must not quietly
+    // require an event_attendance row that polls never create.
+    expect(
+      await countRows(db, 'notification_log', `user_id = 'dropped' AND notification_type = 'voice_channel_invite'`),
+    ).toBe(1);
+  });
+});
