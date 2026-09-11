@@ -6,6 +6,7 @@ import { readCursorKey } from '../src/cron/cursor';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
 import { TickBudget } from '../src/cron/budget';
 import { seal, unseal } from '../src/lib/crypto';
+import { createSession, isSessionActive, revokeSession, rotateSession } from '../src/lib/sessions';
 import { accessTokenFor, type GoogleConnectionRow, storeConnection } from '../src/lib/googleCalendar';
 import { ValidationError } from '../src/lib/validate';
 import type { Env } from '../src/env';
@@ -873,5 +874,84 @@ describe('a removed invitee gets no further DMs about the event (P12-01)', () =>
     expect(
       await countRows(db, 'notification_log', `user_id = 'dropped' AND notification_type = 'voice_channel_invite'`),
     ).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P12-04 / F-27
+// ---------------------------------------------------------------------------
+
+// F-20's rotation retires the session presented and mints a successor, so a
+// stolen token and the real one cannot both keep working. Its
+// `superseded_at IS NULL` guard stops a second concurrent rotation moving the
+// grace window -- but not from inserting a second successor. One session
+// therefore forked into two independent chains, each free to rotate on for the
+// rest of the seven days, with nothing linking them: logging out of one left
+// the other running, and a captured token simply refreshed into a branch of
+// its own rather than dying at the next refresh.
+describe('rotation converges instead of forking, and a family revokes together (P12-04)', () => {
+  it('hands two refreshes of the same session the same successor', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'u1');
+    const { id: original } = await createSession(env, 'u1');
+
+    const [a, b] = await Promise.all([
+      rotateSession(env, original, 'u1'),
+      rotateSession(env, original, 'u1'),
+    ]);
+
+    expect(a).not.toBeNull();
+    expect(b).toBe(a);
+  });
+
+  it('leaves exactly one live session behind after many refreshes', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'u1');
+    let current = (await createSession(env, 'u1')).id;
+    for (let i = 0; i < 25; i++) {
+      const next = await rotateSession(env, current, 'u1');
+      expect(next).not.toBeNull();
+      current = next!;
+    }
+
+    // Every predecessor is superseded; only the newest authenticates.
+    expect(await countRows(db, 'sessions', `user_id = 'u1' AND superseded_at IS NULL AND revoked_at IS NULL`)).toBe(1);
+    expect(await isSessionActive(env, current, 'u1')).toBe(true);
+  });
+
+  it('revokes the whole lineage on logout, not just the row presented', async () => {
+    const { db, env } = setup();
+    await seedUser(db, 'u1');
+    const { id: original } = await createSession(env, 'u1');
+    const second = await rotateSession(env, original, 'u1');
+    const third = await rotateSession(env, second!, 'u1');
+
+    await revokeSession(env, third!);
+
+    expect(await isSessionActive(env, third!, 'u1')).toBe(false);
+    expect(await isSessionActive(env, second!, 'u1')).toBe(false);
+    expect(await isSessionActive(env, original, 'u1')).toBe(false);
+  });
+
+  it('revokes the family when a retired session is replayed after the grace', async () => {
+    vi.useFakeTimers();
+    const base = Date.UTC(2026, 8, 10, 12, 0, 0);
+    vi.setSystemTime(base);
+
+    const { db, env } = setup();
+    await seedUser(db, 'u1');
+    const { id: original } = await createSession(env, 'u1');
+    const stolen = original;
+    const legitimate = await rotateSession(env, original, 'u1');
+    expect(legitimate).not.toBeNull();
+
+    // Well past the 60-second grace: this can no longer be a slow second tab.
+    vi.setSystemTime(base + 10 * 60 * 1000);
+    expect(await rotateSession(env, stolen, 'u1')).toBeNull();
+
+    // The legitimate holder is logged out too. That is the intended outcome --
+    // by this point one of the two holders is an attacker and nothing here can
+    // tell which.
+    expect(await isSessionActive(env, legitimate!, 'u1')).toBe(false);
   });
 });

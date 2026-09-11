@@ -28,11 +28,13 @@ const ROTATION_GRACE_MS = 60 * 1000;
 export async function createSession(env: Env, userId: string): Promise<{ id: string }> {
   const id = newId();
   const now = Date.now();
+  // A fresh login starts its own family, so family_id is its own id
+  // (migration 0042). Every successor rotation produces inherits it unchanged.
   await env.DB.prepare(
-    `INSERT INTO sessions (id, user_id, created_at, last_used_at, expires_at, revoked_at, policy_version)
-     VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+    `INSERT INTO sessions (id, user_id, family_id, created_at, last_used_at, expires_at, revoked_at, policy_version)
+     VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
   )
-    .bind(id, userId, now, now, now + SESSION_TTL_MS, CURRENT_POLICY_VERSION)
+    .bind(id, userId, id, now, now, now + SESSION_TTL_MS, CURRENT_POLICY_VERSION)
     .run();
 
   await env.DB.prepare(
@@ -118,37 +120,126 @@ export async function isSessionActive(env: Env, sessionId: string, userId: strin
 // cannot extend a session past the original Discord login's seven days, and
 // a policy-version bump still invalidates the whole chain at once.
 //
+// Pass-12 review (P12-04) fixes what 0041's guard did not cover. That guard
+// stopped a concurrent second rotation moving the grace window; it did not stop
+// it inserting a second successor, so one session forked into two independent
+// chains that could each rotate on for the rest of the seven days, with nothing
+// linking them and logout reaching only the one presented. Rotation that forks
+// is not rotation: the thief just refreshes into a branch of their own.
+//
+// Three things make it real, all resting on migration 0042:
+//
+//   * The retiring UPDATE is now the *claim*, taken before the successor
+//     exists, and the successor is inserted in the same batch conditioned on
+//     that claim having landed. Exactly one writer can move superseded_at from
+//     NULL, so exactly one successor is ever created.
+//   * A refresh that arrives inside the grace for an already-retired session is
+//     handed the SAME successor rather than a new one, so two tabs converge on
+//     one chain. Failing the loser instead is not an option -- 0041 records
+//     why: the frontend treats a 401 from refresh as terminal and discards the
+//     good token the winning tab just stored.
+//   * A refresh that arrives AFTER the grace cannot be a slow tab. It is a
+//     retired token being replayed, and the whole family is revoked on the
+//     spot. That logs the legitimate holder out too, which is correct: by then
+//     one of the two holders is an attacker and nothing here can tell which.
+//
+// The 20-session cap needs no separate enforcement once the fork is gone. A
+// login starts one family, a family has exactly one live session at a time --
+// every predecessor is superseded, and pruneStaleSessions removes those once
+// the grace has passed -- so createSession's cap still bounds what a user can
+// accumulate. It was bypassable before only because forking manufactured live
+// sessions that no login had authorised.
+//
 // Returns the new session id, or null if the presented one is not usable.
 export async function rotateSession(env: Env, sessionId: string, userId: string): Promise<string | null> {
-  const active = await isSessionActive(env, sessionId, userId);
-  if (!active) return null;
-
-  const row = await env.DB.prepare(`SELECT expires_at, policy_version FROM sessions WHERE id = ?`)
+  const row = await env.DB.prepare(
+    `SELECT user_id, expires_at, revoked_at, policy_version, superseded_at, successor_id, family_id
+     FROM sessions WHERE id = ?`,
+  )
     .bind(sessionId)
-    .first<{ expires_at: number; policy_version: number }>();
-  if (!row) return null;
+    .first<{
+      user_id: string;
+      expires_at: number;
+      revoked_at: number | null;
+      policy_version: number;
+      superseded_at: number | null;
+      successor_id: string | null;
+      family_id: string | null;
+    }>();
+
+  const now = Date.now();
+  if (!row || row.user_id !== userId || row.revoked_at != null) return null;
+  if (row.policy_version !== CURRENT_POLICY_VERSION) return null;
+  if (row.expires_at <= now) return null;
+
+  if (row.superseded_at != null) {
+    if (row.superseded_at < now - ROTATION_GRACE_MS) {
+      // Replay of a retired token. Revoking the family is the whole point of
+      // rotating in the first place -- without it a captured token simply
+      // rotates into its own branch and outlives the theft it was supposed to
+      // end.
+      await revokeSessionFamily(env, row.family_id ?? sessionId);
+      return null;
+    }
+    // Inside the grace: the other tab already rotated this one. Hand back what
+    // it produced.
+    return row.successor_id;
+  }
 
   const id = newId();
-  const now = Date.now();
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO sessions (id, user_id, created_at, last_used_at, expires_at, revoked_at, policy_version)
-       VALUES (?, ?, ?, ?, ?, NULL, ?)`,
-    ).bind(id, userId, now, now, row.expires_at, row.policy_version),
+  const family = row.family_id ?? sessionId;
+  const [claim] = await env.DB.batch([
     // Retired, not revoked: see migration 0041 for why those are different
-    // facts. `superseded_at IS NULL` makes a concurrent second rotation of the
-    // same row a no-op on the marker rather than pushing the grace window
-    // forward each time.
-    env.DB.prepare(`UPDATE sessions SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL`).bind(
-      now,
-      sessionId,
-    ),
+    // facts. This is also the claim -- `superseded_at IS NULL` means exactly
+    // one concurrent caller can win it.
+    env.DB.prepare(
+      `UPDATE sessions SET superseded_at = ?, successor_id = ? WHERE id = ? AND superseded_at IS NULL`,
+    ).bind(now, id, sessionId),
+    // Conditioned on that claim rather than run unconditionally, and in the
+    // same batch so the two cannot come apart. A caller that lost the race
+    // finds someone else's successor_id on the row and inserts nothing, which
+    // is what stops the fork; a batch is one transaction, so a failure here
+    // takes the claim with it rather than retiring a session whose successor
+    // does not exist.
+    env.DB.prepare(
+      `INSERT INTO sessions (id, user_id, family_id, created_at, last_used_at, expires_at, revoked_at, policy_version)
+       SELECT ?, ?, ?, ?, ?, ?, NULL, ?
+       WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ? AND successor_id = ?)`,
+    ).bind(id, userId, family, now, now, row.expires_at, row.policy_version, sessionId, id),
   ]);
+
+  if (claim.meta.changes === 0) {
+    // Lost the race between the read above and the claim. The winner's
+    // successor is the one to use.
+    const winner = await env.DB.prepare(`SELECT successor_id FROM sessions WHERE id = ?`)
+      .bind(sessionId)
+      .first<{ successor_id: string | null }>();
+    return winner?.successor_id ?? null;
+  }
   return id;
 }
 
+// Logging out ends the whole chain the session belongs to, not just the row
+// whose token happened to be presented (Pass-12 review, P12-04). Before
+// families existed there was nothing else it could mean; now that a session
+// has predecessors and a successor, revoking one row would leave the rest of
+// the lineage authenticating perfectly well.
 export async function revokeSession(env: Env, sessionId: string): Promise<void> {
-  await env.DB.prepare(`UPDATE sessions SET revoked_at = ? WHERE id = ?`).bind(Date.now(), sessionId).run();
+  const row = await env.DB.prepare(`SELECT family_id FROM sessions WHERE id = ?`)
+    .bind(sessionId)
+    .first<{ family_id: string | null }>();
+  await revokeSessionFamily(env, row?.family_id ?? sessionId);
+}
+
+// Revokes every session in a lineage. Used by logout and by reuse detection.
+// Matches the family's own root row too, for rows predating migration 0042
+// whose family_id was backfilled to their own id.
+export async function revokeSessionFamily(env: Env, familyId: string): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE sessions SET revoked_at = ? WHERE (family_id = ? OR id = ?) AND revoked_at IS NULL`,
+  )
+    .bind(Date.now(), familyId, familyId)
+    .run();
 }
 
 // Called first thing during account deletion, so auth is cut off immediately

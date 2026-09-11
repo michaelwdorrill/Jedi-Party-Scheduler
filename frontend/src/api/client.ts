@@ -1,4 +1,4 @@
-import { getToken, setToken, clearToken } from '../auth/tokenStorage';
+import { authEpoch, getToken, setToken, clearToken } from '../auth/tokenStorage';
 
 // Set at build time via GitHub Actions (VITE_API_BASE_URL repo variable);
 // falls back to a placeholder for local dev against `wrangler dev`.
@@ -21,6 +21,17 @@ export class ApiError extends Error {
 let refreshPromise: Promise<boolean> | null = null;
 
 async function tryRefresh(): Promise<boolean> {
+  // Pass-12 review (P12-05). The epoch this refresh belongs to, captured
+  // before the await, so a response that arrives after the user has logged out
+  // -- or logged in as someone else -- can be recognised as belonging to an
+  // identity that is no longer current and dropped instead of installed.
+  //
+  // Without this the late response reinstated a live token in localStorage for
+  // an account the user had just left, and logout's revocation could not have
+  // covered it: the session being revoked was this successor's predecessor.
+  // Rotation is what made the successor outlive it, so the two halves of
+  // P12-04 and this fix belong together.
+  const startedAt = authEpoch();
   const token = getToken();
   if (!token) return false;
   try {
@@ -30,6 +41,7 @@ async function tryRefresh(): Promise<boolean> {
     });
     if (!res.ok) return false;
     const { token: newToken } = (await res.json()) as { token: string };
+    if (authEpoch() !== startedAt) return false;
     setToken(newToken);
     return true;
   } catch {
