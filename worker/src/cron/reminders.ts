@@ -3108,7 +3108,27 @@ async function sweepDueNotificationRetries(env: Env, budget: TickBudget, cursors
      JOIN user_guild_membership m ON m.user_id = u.id AND m.guild_id = e.guild_id AND m.is_member = 1 AND m.verified_at >= ?
      JOIN guilds g ON g.id = e.guild_id AND g.is_active = 1
      WHERE nl.delivered_at IS NULL AND nl.failed_at IS NULL
-       AND nl.next_attempt_at IS NOT NULL AND nl.next_attempt_at <= ?
+       -- Pass-13 review (P13-13). Two ways a row can be due, not one.
+       --
+       -- The ordinary way is a recorded retry time that has arrived. The
+       -- other is an ABANDONED CLAIM: deliverThroughOutbox sets
+       -- next_attempt_at to NULL when it claims a row, and a failed delivery
+       -- is what writes the real retry time back. If execution is interrupted
+       -- between those two -- the invocation is cut off, the process dies --
+       -- the lease expires with no retry timestamp at all, and a consumer
+       -- that requires a non-null one can never see the row again. Neither
+       -- can the producer, once the source event has left its notification
+       -- window. One notification, stranded permanently, with its content
+       -- sitting right there on the row.
+       --
+       -- The second arm is deliberately narrow: claimed at some point
+       -- (claimed_until is set), that lease has expired, and no retry time
+       -- was ever recorded. A row that has simply never been claimed has
+       -- claimed_until NULL and is not picked up here.
+       AND (
+         (nl.next_attempt_at IS NOT NULL AND nl.next_attempt_at <= ?)
+         OR (nl.next_attempt_at IS NULL AND nl.claimed_until IS NOT NULL AND nl.claimed_until < ?)
+       )
        AND (nl.claimed_until IS NULL OR nl.claimed_until < ?)
        AND nl.content IS NOT NULL
        -- Pass-11 review (R09): still authorized on the *event*, not merely
@@ -3124,7 +3144,7 @@ async function sweepDueNotificationRetries(env: Env, budget: TickBudget, cursors
        AND (e.organizer_id = nl.user_id
             OR EXISTS (SELECT 1 FROM event_invites ei
                        WHERE ei.event_id = nl.event_id AND ei.user_id = nl.user_id))`,
-    [membershipCutoff(), Date.now(), Date.now()],
+    [membershipCutoff(), Date.now(), Date.now(), Date.now()],
     async (row) => {
       if (budget.exhausted) return 'incomplete';
       await deliverThroughOutbox(

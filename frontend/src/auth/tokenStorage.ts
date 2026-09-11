@@ -22,7 +22,18 @@ export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
 
+// Replaces the token for the SAME identity -- what a refresh does. The epoch
+// deliberately does not move: refreshing is the session continuing, and
+// bumping here made every successful refresh look to the API client like
+// somebody else had logged in (Pass-13 review, P13-06).
 export function setToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+// Adopts a token as a NEW identity -- what logging in does. This is the write
+// that moves the epoch, so work started for whoever was signed in before can
+// tell that it no longer speaks for the current session.
+export function adoptSession(token: string): void {
   epoch += 1;
   localStorage.setItem(TOKEN_KEY, token);
 }

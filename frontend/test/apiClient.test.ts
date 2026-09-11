@@ -116,3 +116,44 @@ describe('a refresh that lands after logout is discarded (P12-05)', () => {
     expect(storage.getItem(TOKEN_KEY)).toBe('successor-token');
   });
 });
+
+// P13-06 from the Pass-13 review, and a regression the P12-05 fix introduced.
+//
+// tryRefresh returns false both when authentication has genuinely failed and
+// when the epoch guard discards a response belonging to an identity that is no
+// longer current. The caller treated both the same way: clear the stored token
+// and bounce to login. So a refresh begun as account A, correctly discarded
+// once account B was installed, then logged account B out.
+describe('a discarded stale refresh does not log out the new account (P13-06)', () => {
+  it('leaves the newly installed token alone', async () => {
+    const { api } = await import('../src/api/client');
+    const { adoptSession } = await import('../src/auth/tokenStorage');
+
+    storage.setItem(TOKEN_KEY, 'account-a-token');
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/auth/refresh')) {
+          // While account A's refresh is in flight, the user signs in as
+          // account B -- a real identity change, not a logout.
+          adoptSession('account-b-token');
+          return new Response(JSON.stringify({ token: 'account-a-successor' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('', { status: 401 });
+      }),
+    );
+
+    await api.get('/me').catch(() => undefined);
+
+    expect(
+      storage.getItem(TOKEN_KEY),
+      "account A's dead refresh logged account B out",
+    ).toBe('account-b-token');
+    expect(window.location.hash, 'the new account was bounced to login').not.toBe('#/login');
+  });
+});

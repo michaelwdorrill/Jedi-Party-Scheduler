@@ -20,6 +20,18 @@ export class ApiError extends Error {
 // each racing their own.
 let refreshPromise: Promise<boolean> | null = null;
 
+// Pass-13 review (P13-06). `false` from tryRefresh used to mean two different
+// things -- "this authentication is dead" and "this work belongs to an
+// identity that is no longer current" -- and the caller treated both as the
+// first, clearing the stored token and bouncing to login. So the epoch guard
+// added for P12-05 turned a silent re-login into a silent logout: a refresh
+// begun as account A, discarded correctly when account B was installed,
+// then took B's token with it on the way out.
+//
+// The distinction is drawn in `request` rather than here, by comparing the
+// epoch it started in against the one it returns to. That also covers a
+// request that attached to an in-flight refresh belonging to a previous
+// epoch, which a return value from tryRefresh alone could not.
 async function tryRefresh(): Promise<boolean> {
   // Pass-12 review (P12-05). The epoch this refresh belongs to, captured
   // before the await, so a response that arrives after the user has logged out
@@ -56,6 +68,7 @@ function bounceToLogin(): never {
 }
 
 async function request<T>(path: string, init: RequestInit = {}, isRetry = false): Promise<T> {
+  const startedEpoch = authEpoch();
   const token = getToken();
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'application/json');
@@ -67,7 +80,13 @@ async function request<T>(path: string, init: RequestInit = {}, isRetry = false)
     refreshPromise ??= tryRefresh().finally(() => {
       refreshPromise = null;
     });
-    if (await refreshPromise) return request<T>(path, init, true);
+    const refreshed = await refreshPromise;
+    // Whoever is logged in now is not who this request was for. Fail it, and
+    // leave their session completely alone -- no token clearing, no redirect.
+    if (authEpoch() !== startedEpoch) {
+      throw new ApiError(401, 'That session has ended.');
+    }
+    if (refreshed) return request<T>(path, init, true);
     bounceToLogin();
   }
 

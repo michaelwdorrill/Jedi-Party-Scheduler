@@ -770,3 +770,64 @@ describe('the group roster cap holds in the write (P13-10)', () => {
     expect(await countRows(db, 'group_members', `group_id = 'g1'`), 'the roster went past its cap').toBeLessThanOrEqual(25);
   });
 });
+
+// ---------------------------------------------------------------------------
+// P13-13
+// ---------------------------------------------------------------------------
+
+// deliverThroughOutbox sets next_attempt_at to NULL when it claims a row, and
+// a failed delivery is what writes the real retry time back. Interrupt
+// execution between those two and the lease expires with no retry timestamp at
+// all -- and the retry consumer required a non-null one, so the row became
+// invisible to it. Once the source event leaves its notification window the
+// producer cannot recreate it either. One notification, stranded permanently,
+// with its content sitting right there on the row.
+describe('an abandoned outbox claim is picked up again (P13-13)', () => {
+  it('retries a row whose lease expired before its retry time was recorded', async () => {
+    vi.useFakeTimers();
+    const base = Date.UTC(2026, 8, 10, 12, 0, 0);
+    vi.setSystemTime(base);
+
+    const { db, env } = setup('paid');
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'guest');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'guest', 'guild-1');
+    await db.prepare(`UPDATE users SET dm_channel_id = 'dm-guest' WHERE id = 'guest'`).run();
+
+    // An event whose own notification window is long past, so nothing will
+    // ever re-derive this obligation.
+    await seedEvent(db, {
+      id: 'ev-1',
+      organizerId: 'organizer',
+      startAt: base - 10 * DAY_MS,
+      endAt: base - 10 * DAY_MS + HOUR_MS,
+    });
+    await seedInvite(db, 'ev-1', 'guest');
+
+    // Exactly the state an interrupted delivery leaves: claimed, lease long
+    // expired, attempt recorded, content captured -- and no retry time,
+    // because the write that would have set one never ran.
+    await db
+      .prepare(
+        `INSERT INTO notification_log
+           (id, user_id, event_id, notification_type, occurrence_date, sent_at, attempt_count,
+            claim_token, claimed_until, next_attempt_at, content)
+         VALUES ('nl-1', 'guest', 'ev-1', 'reminder_1h', '', ?, 1, 'tok', ?, NULL, 'your session is soon')`,
+      )
+      .bind(base - HOUR_MS, base - 10 * 60 * 1000)
+      .run();
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    const row = await db
+      .prepare(`SELECT delivered_at, next_attempt_at FROM notification_log WHERE id = 'nl-1'`)
+      .first<{ delivered_at: number | null; next_attempt_at: number | null }>();
+    expect(
+      row!.delivered_at ?? row!.next_attempt_at,
+      'the stranded obligation was neither delivered nor rescheduled',
+    ).not.toBeNull();
+  });
+});
