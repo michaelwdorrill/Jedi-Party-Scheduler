@@ -2893,6 +2893,23 @@ async function sweepOrganizerRsvpNotices(env: Env, budget: TickBudget): Promise<
          l.id IS NULL
          OR (
            l.delivered_at IS NULL AND l.failed_at IS NULL
+           -- Pass-17 review (P17-01). The widening that fixed P16-08 selected
+           -- undelivered rows without asking whether they had any attempts
+           -- LEFT. claim() refuses a row at MAX_DELIVERY_ATTEMPTS, and this
+           -- table is deliberately outside the terminal-cleanup sweep, so an
+           -- exhausted row is undelivered and unfailed forever -- selected
+           -- every tick, refused every tick at the cost of one statement, and
+           -- occupying a slot under the candidate LIMIT and the delivery
+           -- budget. Forty of them on the Free plan were enough that a later
+           -- healthy notice was never attempted at all across three sweeps:
+           -- the fix for one lost notification could lose all of them.
+           --
+           -- The lesson, since this is the second time in two passes: a
+           -- candidate query that feeds claim() has to apply claim()'s OWN
+           -- eligibility rules, not a subset of them, or the difference is
+           -- paid for in refused work before the interesting rows are reached.
+           AND l.attempt_count < ?
+           AND (l.claimed_until IS NULL OR l.claimed_until < ?)
            AND (
              (l.next_attempt_at IS NOT NULL AND l.next_attempt_at <= ?)
              OR (l.next_attempt_at IS NULL AND l.claimed_until IS NOT NULL AND l.claimed_until < ?)
@@ -2901,7 +2918,7 @@ async function sweepOrganizerRsvpNotices(env: Env, budget: TickBudget): Promise<
        )
      LIMIT ?`,
   )
-    .bind(membershipCutoff(), Date.now(), Date.now(), GLOBAL_SCAN_LIMIT)
+    .bind(membershipCutoff(), MAX_DELIVERY_ATTEMPTS, Date.now(), Date.now(), Date.now(), GLOBAL_SCAN_LIMIT)
     .all<{
       event_id: string;
       occurrence_date: string;

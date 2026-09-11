@@ -201,12 +201,23 @@ alone: accepted, unstamped, silent, and visible to anyone who looks.
   do not.
 - Never a blind re-apply of an invitation or an occurrence override.
 
-**Also open, from the same pass:** the migration's backfill stamps every
-historical accepted row as applied, which for a legacy row that never applied
-is a completion it has not earned. With nothing replaying effects that is
-harmless for correctness -- it only feeds the notice gate -- but it means
-historical reconciliation is unsolved, not solved. There is no evidence left in
-the database of whether a 2026 acceptance took effect.
+**The backfill, and a claim made here that was wrong.** This entry previously
+said the migration's backfill was "harmless for correctness because it only
+feeds the notice gate". The Pass-17 review showed that plainly false: the
+notice is a message telling the requester their change was ACCEPTED, so
+stamping a row whose effect never landed makes the app assert a success that
+did not happen, to the one person who will act on it. The reviewer demonstrated
+the outgoing payload.
+
+The backfill is therefore gone (migration 0044 no longer writes `applied_at`),
+which was still possible because 0044 had reached the sandbox and never `main`.
+Legacy accepted rows keep a NULL stamp, the gate reads that as unconfirmed, and
+they stay quiet. The bounded cost is that an accepted-but-not-yet-announced
+request at deploy time never gets its DM -- a handful of rows, once.
+
+What remains open is the same thing: there is no evidence left in the database
+of whether a 2026 acceptance took effect, so historical reconciliation is
+unsolved. What is no longer true is that the app pretends otherwise.
 
 **And a failure adjacent to it, fixed in Pass 16:** the stamp originally sat
 inside the same `try` as the mutation, so failing to RECORD an application was
@@ -382,6 +393,86 @@ slipped in before a review package, and it was reverted on that basis. Worth
 doing deliberately: run the fix, resolve the typing changes, and check that
 `wrangler deploy` still works on the sandbox before trusting it -- the sandbox
 deploy is the only thing in this project that exercises Wrangler for real.
+
+### 77. The demo seed plants events that DM the operator, on some days
+
+Found while preparing the Pass-17 package, by a test that had started failing
+with nothing relevant changed. `test/googleDemoSeed.test.ts` asserted that a
+full reminder sweep over the seeded fixture sends **no DMs at all**. It passes
+or fails depending on the day of the week: the seed plants a weekly session
+whose times are computed from SQLite's own `now`, so whether that session sits
+inside a reminder rung's window depends on when the suite runs. The DM it was
+failing on was an ordinary "Weekly Session is coming up" reminder -- correct
+behaviour for an event that exists.
+
+Pinning the clock cannot fix it, because the fixture writes its timestamps
+through the same clock the app reads. The assertion was narrowed to what the
+test is named for -- no invite DM, and no invite row added beyond the two the
+seed plants to suppress -- which is deterministic.
+
+The product question is left open: should the demo seed plant events that DM a
+real operator at all? Options are to suppress reminders the way it already
+suppresses invites (a `notification_log` row per rung, which is brittle), or to
+place the seeded sessions far enough out that no rung is due (which weakens the
+fixture's usefulness for testing reminders). Worth deciding rather than
+rediscovering.
+
+### 78. A stranded acceptance is presented as a plain success
+
+From the Pass-17 review (P17-03), the presentation half of item 70. With replay
+removed, a request whose claim committed and whose effect did not stays
+`accepted` with a NULL `applied_at`. The review walked the consequence through
+the real router and the shipped React component:
+
+- the requester sees a bare **accepted**, with no uncertainty and no way to
+  withdraw;
+- the organizer's API response contains the request, but the rendered section
+  omits the accepted row and offers no reconciliation action;
+- retrying the acceptance returns 409, because it is no longer pending.
+
+The event page still shows the real original time and the organizer saw the
+original 500, so the failure is not invisible -- but nothing afterwards says
+"this may not have applied".
+
+The fix is a state, not a stamp: expose completion uncertainty in the API
+projection and both views, and give the organizer an explicit way to reconcile.
+That is the same design item 70 needs, approached from the UI end, and it
+should be built with item 70 rather than before it.
+
+### 79. Recurring series with no occurrence in range can empty the noticeboard
+
+From the Pass-17 review (P17-07), pre-existing and newly demonstrated. The
+noticeboard's candidate SQL selects every active recurring series *before*
+testing whether it has an occurrence in the requested range. A recurring event
+has a NULL `start_at`, so those rows sort as the window's beginning, and the
+100-event candidate limit is applied before expansion. A hundred irrelevant
+series can therefore consume the whole limit, expand to zero occurrences, and
+keep a real in-range event from ever being considered.
+
+The review built all 101 events through real signed routes, within the existing
+per-guild limits, and observed: the noticeboard returns 200 with an empty array
+while the same user's personal calendar shows the event, and cancelling any one
+irrelevant series makes it appear. There is no cursor and no truncation
+indicator, and the frontend renders an empty array as "nothing scheduled" -- so
+the failure looks like an empty calendar rather than a limit.
+
+The later expanded-occurrence overflow check cannot catch this, because the
+event was excluded before expansion.
+
+**The fix is not raising the limit** -- that moves the threshold and weakens the
+bound the limit exists for. It is to spend the display limit on events that
+actually have an in-range occurrence: either narrow the candidate query so a
+recurring series must plausibly produce one (its rule's start/end bracketing the
+window, which is checkable in SQL), or page through bounded candidate batches
+until enough eligible results are found, and return an explicit overflow
+condition when the budget cannot establish completeness.
+
+Not done in Pass 17: the candidate query and the expansion are load-bearing for
+every calendar read in the app, and this is the kind of change that wants its
+own pass rather than a rider on a review batch. It is the highest-value open
+item here, because unlike the lifecycle races it needs no concurrency, no
+interruption and no second account -- just a guild with a hundred recurring
+series.
 
 ## Parked until after 1.0
 

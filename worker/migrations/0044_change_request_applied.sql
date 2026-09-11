@@ -30,26 +30,38 @@
 -- Nullable, no CHECK, no rebuild.
 ALTER TABLE event_change_requests ADD COLUMN applied_at INTEGER;
 
--- Backfill, and an admission about what it means (Pass-16 review, P16-09).
+-- NO BACKFILL, and this is the third version of this comment (Pass-17 review,
+-- P17-02). The first two got it wrong in opposite directions.
 --
--- This originally justified itself by claiming that rows accepted before this
--- column existed "were applied by the code path that had no other outcome".
--- That is false, and it contradicts the finding this migration was written
--- for: P13-11/P15-08 is precisely the case where an acceptance committed and
--- its effect did not. A legacy row in that state gets a completion stamp here
--- that it has not earned.
+-- Version one copied `decided_at` into `applied_at` for every accepted row and
+-- justified it by asserting that legacy accepted rows "were applied by the code
+-- path that had no other outcome". That is false, and it contradicts the
+-- finding this migration exists for: P13-11/P15-08 is exactly the case where a
+-- decision committed and its effect did not.
 --
--- The backfill stays, for a narrower reason than the one first given: with
--- nothing replaying effects any more (the recovery arm is gone -- see P16-01),
--- `applied_at` feeds only the decision-notice gate, and an unstamped legacy
--- row would simply never be announced. Stamping them keeps notices flowing for
--- the overwhelming majority that did apply.
+-- Version two kept the backfill and re-justified it as harmless because
+-- `applied_at` now only feeds the decision-notice gate. That is also false, and
+-- the Pass-17 review demonstrated why: the notice is a message saying the
+-- change was ACCEPTED. Stamping a row whose effect never landed makes the app
+-- state a success that did not happen -- to the person who asked for it, who
+-- then plans around a time nobody else agreed to.
 --
--- What it cannot do is tell the two apart retrospectively. There is no
--- evidence left in the database of whether a 2026 acceptance took effect.
--- Historical reconciliation is therefore OPEN, not solved, and IDEAS item 70
--- says so.
-UPDATE event_change_requests SET applied_at = decided_at WHERE status = 'accepted' AND applied_at IS NULL;
+-- There is no evidence left in the database to tell the two apart. So this
+-- migration does not guess. Accepted rows that predate it keep a NULL
+-- `applied_at`, which the notice gate reads as "not confirmed" and stays quiet
+-- about.
+--
+-- The cost is real and bounded: an accepted request that exists when this
+-- deploys and has not yet been notified never gets its DM. A request is
+-- normally accepted and announced within a tick or two, so that is a handful of
+-- rows at most, once -- against permanently asserting success for changes
+-- nobody can verify. Already-announced requests are unaffected: the notice arm
+-- excludes anything with a `change_request_log` row, whatever `applied_at`
+-- says.
+--
+-- Nothing replays these rows (the recovery arm is gone -- P16-01), so an
+-- unstamped legacy row is inert and visible rather than dangerous. Historical
+-- reconciliation stays open; IDEAS item 70 carries it.
 
 -- The recovery arm's predicate, which runs on every resolver tick and must not
 -- scan the table. Partial, so the index holds only the rows that can ever

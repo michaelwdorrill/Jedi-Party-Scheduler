@@ -120,8 +120,44 @@ describe('seed-google-demo.sql', () => {
     const fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
     try {
       await runReminderSweep(makeEnv(db));
-      const dms = fetchStub.calls.filter((u) => u.includes('/messages'));
-      expect(dms).toHaveLength(0);
+
+      // Scoped to INVITE messages, which is what this test is named for and
+      // what the live incident was.
+      //
+      // It used to assert zero DMs of any kind, and that made it a test that
+      // fails on some days of the week and passes on others -- found while
+      // preparing the Pass-17 package, when it started failing with nothing
+      // relevant changed. The seed plants a WEEKLY session at a fixed time,
+      // and every date in it is computed from `strftime('now')`, so whether
+      // that session is inside a reminder rung's window depends on what day it
+      // is when the suite runs. The DM it was failing on was an ordinary
+      // "Weekly Session is coming up" reminder, which is correct behaviour for
+      // an event that exists.
+      //
+      // Pinning the clock does not fix it: the seed writes its timestamps
+      // through SQLite's own `now`, so the app's clock and the fixture's
+      // cannot be moved apart. Asserting what the test is actually about can.
+      // Whether the seed should plant events that DM the operator at all is a
+      // separate question -- IDEAS item 77.
+      const bodies = fetchStub.bodies.filter((b): b is string => !!b);
+      expect(
+        bodies.filter((b) => b.includes('invited')),
+        'the seed DMed the operator about an invite it planted',
+      ).toHaveLength(0);
+      // And the durable record, because the message text alone is a weak
+      // signal: a reminder legitimately carries an RSVP button of its own, so
+      // matching on button shape flags correct behaviour as a failure (it did,
+      // on the first attempt at this).
+      //
+      // The count is 2, not 0, and that is the mechanism rather than a leak:
+      // the seed PRE-PLANTS two delivered invite rows whose content reads
+      // "suppressed by scripts/seed-google-demo.sql", and their existence is
+      // what stops sweepNewInvites sending anything. So the property is that
+      // nothing was ADDED to them.
+      const invites = db.raw
+        .prepare(`SELECT COUNT(*) AS n FROM notification_log WHERE notification_type = 'invite'`)
+        .get() as { n: number };
+      expect(invites.n, 'an invite notification was created beyond the two the seed plants to suppress').toBe(2);
     } finally {
       fetchStub.restore();
     }
