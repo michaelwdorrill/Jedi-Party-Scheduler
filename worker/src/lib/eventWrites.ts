@@ -964,7 +964,7 @@ export async function addInvitesToEvent(
   // row is not written here -- the group ids still have to be checked against
   // somebody, and this path was previously the one with no actor at all.
   actorId: string,
-): Promise<void> {
+): Promise<{ notAdded: string[] }> {
   assertStringArray(userIds, 'userIds', LIMITS.MAX_INVITEES, 64);
   assertStringArray(groupIds, 'groupIds', LIMITS.MAX_GROUP_IDS, 64);
   // `null`: additive-only, and the organizer's row was written at creation.
@@ -972,7 +972,7 @@ export async function addInvitesToEvent(
   // also mean this path silently invites the organizer to an event they might
   // deliberately have been removed from -- so it stays out of it.
   const invitees = await resolveInviteeUserIds(env, guildId, userIds, groupIds, null, actorId);
-  if (invitees.length === 0) return;
+  if (invitees.length === 0) return { notAdded: [] };
 
   // Pass-11 review (R21). resolveInviteeUserIds caps the set *this request*
   // resolves, and nothing anywhere checked the existing-plus-new union -- so
@@ -993,7 +993,8 @@ export async function addInvitesToEvent(
   )
     .bind(eventId)
     .all<{ user_id: string }>();
-  const union = new Set(existing.map((r) => r.user_id));
+  const alreadyInvited = new Set(existing.map((r) => r.user_id));
+  const union = new Set(alreadyInvited);
   for (const invitee of invitees) union.add(invitee.userId);
   if (union.size > LIMITS.MAX_RESOLVED_INVITEES) {
     throw new ValidationError(
@@ -1001,7 +1002,36 @@ export async function addInvitesToEvent(
     );
   }
 
-  await env.DB.batch(inviteStatements(env, eventId, invitees, false, null, LIMITS.MAX_RESOLVED_INVITEES));
+  // Pass-13 review (P13-09). People already on the event are removed BEFORE
+  // the capacity guard sees them, which is the regression P12-12's fix
+  // introduced.
+  //
+  // That guard is `LIMIT MAX(0, cap - count)` on an INSERT ... SELECT, and
+  // SQLite applies a LIMIT to the SELECT -- before ON CONFLICT gets to
+  // discard anything. So with 24 of 25 seats taken and a request naming one
+  // existing invitee and one new person, the single available row went to the
+  // existing one, the conflict clause dropped it, and the new person was never
+  // considered. Response 200, nobody added. No concurrency needed: inviting a
+  // group that overlaps the current invite list does it, which is an ordinary
+  // thing to do.
+  const genuinelyNew = invitees.filter((i) => !alreadyInvited.has(i.userId));
+  if (genuinelyNew.length === 0) return { notAdded: [] };
+
+  // And the outcome is inspected rather than assumed. Under two concurrent
+  // additions the guard can still admit fewer than asked -- that is what it is
+  // for -- but the caller was being told it had succeeded. Returning who did
+  // not make it is the honest answer, and cheap: meta.changes per statement.
+  const results = await env.DB.batch(
+    inviteStatements(env, eventId, genuinelyNew, false, null, LIMITS.MAX_RESOLVED_INVITEES),
+  );
+  const admitted = results.reduce((total, r) => total + r.meta.changes, 0);
+  if (admitted >= genuinelyNew.length) return { notAdded: [] };
+
+  const { results: nowInvited } = await env.DB.prepare(`SELECT user_id FROM event_invites WHERE event_id = ?`)
+    .bind(eventId)
+    .all<{ user_id: string }>();
+  const present = new Set(nowInvited.map((r) => r.user_id));
+  return { notAdded: genuinelyNew.filter((i) => !present.has(i.userId)).map((i) => i.userId) };
 }
 
 export async function createEventWithInvites(

@@ -455,8 +455,11 @@ eventRoutes.post('/:eventId/invites', async (c) => {
   // loadOwnedActiveEvent above already established this caller is the
   // organizer, which is what makes them the actor for the group-scoping check
   // inside (F-25 / R08).
-  await addInvitesToEvent(c.env, eventId, event.guild_id, userIds, groupIds, userId);
-  return c.json({ ok: true });
+  // notAdded is surfaced rather than swallowed (Pass-13 review, P13-09): the
+  // capacity guard can admit fewer people than were named, and answering a
+  // bare { ok: true } told the organizer everyone got in when some had not.
+  const { notAdded } = await addInvitesToEvent(c.env, eventId, event.guild_id, userIds, groupIds, userId);
+  return c.json({ ok: true, notAdded });
 });
 
 eventRoutes.delete('/:eventId/invites/:userId', async (c) => {

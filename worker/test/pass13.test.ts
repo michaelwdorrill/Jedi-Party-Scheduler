@@ -12,6 +12,9 @@ import { TickBudget } from '../src/cron/budget';
 import { seal } from '../src/lib/crypto';
 import { accessTokenFor, type GoogleConnectionRow, storeConnection } from '../src/lib/googleCalendar';
 import { resolvePastDeadlineChangeRequests } from '../src/lib/changeRequests';
+import { addInvitesToEvent } from '../src/lib/eventWrites';
+import { buildApp } from '../src/router';
+import { signJwt } from '../src/lib/jwt';
 import type { Env } from '../src/env';
 import { D1_FREE_PLAN_QUERY_BUDGET, type ShimDatabase } from './d1shim';
 import {
@@ -648,5 +651,122 @@ describe('a tick of ordinary accepted change requests stays in budget (P13-05)',
       }
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P13-09 / P13-10
+// ---------------------------------------------------------------------------
+
+// P12-12 bounded the invite cap with `LIMIT MAX(0, cap - count)` on an
+// INSERT ... SELECT. SQLite applies a LIMIT to the SELECT, before ON CONFLICT
+// discards anything -- so an already-invited candidate consumed the one
+// available row and was then dropped, and the genuinely new person was never
+// considered. 200 returned, nobody added, no concurrency involved.
+describe('an invite request near the cap still admits the new people (P13-09)', () => {
+  async function seedNearCap(db: ShimDatabase, existingCount: number): Promise<void> {
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedEvent(db, { id: 'ev-1', organizerId: 'organizer' });
+    for (let i = 0; i < 30; i++) {
+      const uid = `guest-${String(i).padStart(2, '0')}`;
+      await seedUser(db, uid);
+      await seedMembership(db, uid, 'guild-1');
+    }
+    for (let i = 0; i < existingCount; i++) await seedInvite(db, 'ev-1', `guest-${String(i).padStart(2, '0')}`);
+  }
+
+  it('adds the new invitee when the request also names an existing one', async () => {
+    const { db, env } = setup();
+    await seedNearCap(db, 24);
+
+    // 24 of 25 taken. The request names one person already on the event and
+    // one who is not -- the deduplicated union is exactly 25, so it fits.
+    const result = await addInvitesToEvent(
+      env,
+      'ev-1',
+      'guild-1',
+      ['guest-00', 'guest-24'],
+      [],
+      'organizer',
+    );
+
+    expect(await countRows(db, 'event_invites', `event_id = 'ev-1' AND user_id = 'guest-24'`), 'the new invitee was silently dropped').toBe(1);
+    expect(await countRows(db, 'event_invites', `event_id = 'ev-1'`)).toBe(25);
+    expect(result.notAdded).toEqual([]);
+  });
+
+  it('reports who did not make it rather than claiming success', async () => {
+    const { db, env } = setup();
+    await seedNearCap(db, 23);
+
+    // Two concurrent additions at the boundary. The cap must hold, and
+    // whichever request loses capacity has to say so.
+    const [a, b] = await Promise.all([
+      addInvitesToEvent(env, 'ev-1', 'guild-1', ['guest-23'], [], 'organizer').catch(() => null),
+      addInvitesToEvent(env, 'ev-1', 'guild-1', ['guest-24', 'guest-25'], [], 'organizer').catch(() => null),
+    ]);
+
+    const total = await countRows(db, 'event_invites', `event_id = 'ev-1'`);
+    expect(total).toBeLessThanOrEqual(25);
+
+    const requested = 3;
+    const admitted = total - 23;
+    const reported = (a?.notAdded.length ?? 0) + (b?.notAdded.length ?? 0);
+    expect(reported, 'people were dropped without the caller being told').toBe(requested - admitted);
+  });
+});
+
+// The group cap was a read-then-act check, so two additions in flight together
+// both validated the same 24-member roster and both inserted.
+//
+// INVARIANT GUARD, not a reproduction, and worth saying so. Under this
+// adapter the two requests serialise -- SQLite is synchronous behind the
+// async wrapper, so the second one's preflight already sees the first one's
+// insert and refuses at 400. The test therefore passes with or without the
+// fix. It is kept because the property it asserts (the roster never exceeds
+// its cap, whatever the interleaving) is the one that matters, and because
+// the guard now lives in the write where a real interleaving cannot get past
+// it. Reviewer A reproduced the 26-member outcome with genuine concurrency.
+describe('the group roster cap holds in the write (P13-10)', () => {
+  it('never exceeds the cap however the additions interleave', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'owner');
+    await seedMembership(db, 'owner', 'guild-1');
+    const now = Date.now();
+    await db
+      .prepare(`INSERT INTO groups (id, name, idle_reminder_days, created_by, created_at) VALUES ('g1', 'Crew', 2, 'owner', ?)`)
+      .bind(now)
+      .run();
+    await db.prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES ('g1', 'owner', ?)`).bind(now).run();
+    for (let i = 0; i < 23; i++) {
+      const uid = `m-${String(i).padStart(2, '0')}`;
+      await seedUser(db, uid);
+      await seedMembership(db, uid, 'guild-1');
+      await db.prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES ('g1', ?, ?)`).bind(uid, now).run();
+    }
+    for (const uid of ['late-a', 'late-b']) {
+      await seedUser(db, uid);
+      await seedMembership(db, uid, 'guild-1');
+    }
+
+    const app = buildApp();
+    const token = await signJwt('owner', (await createSession(env, 'owner')).id, env.JWT_SIGNING_KEY);
+    const add = (uid: string) =>
+      app.request(
+        'https://worker.test/groups/g1/members',
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: uid }),
+        },
+        env,
+      );
+
+    await Promise.all([add('late-a'), add('late-b')]);
+
+    expect(await countRows(db, 'group_members', `group_id = 'g1'`), 'the roster went past its cap').toBeLessThanOrEqual(25);
   });
 });

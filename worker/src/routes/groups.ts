@@ -268,11 +268,26 @@ groupRoutes.post('/:groupId/members', async (c) => {
     : [...existing.map((m) => m.id), targetId];
   await assertValidRoster(c.env, proposedRoster);
 
-  await c.env.DB.prepare(
-    `INSERT OR IGNORE INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`,
+  // Pass-13 review (P13-10). The cap is enforced in the write as well as in
+  // assertValidRoster above, because the check above is a read-then-act: two
+  // additions in flight together both validate the same 24-member roster and
+  // both insert, reaching 26. Owner-only means that is one person
+  // double-submitting rather than two racing, which bounds the overshoot --
+  // but a cap every downstream fan-out is sized against should not depend on
+  // nobody double-clicking.
+  const inserted = await c.env.DB.prepare(
+    `INSERT OR IGNORE INTO group_members (group_id, user_id, added_at)
+     SELECT ?, ?, ?
+     WHERE (SELECT COUNT(*) FROM group_members WHERE group_id = ?) < ?`,
   )
-    .bind(groupId, targetId, Date.now())
+    .bind(groupId, targetId, Date.now(), groupId, LIMITS.MAX_GROUP_MEMBERS)
     .run();
+
+  if (inserted.meta.changes === 0 && !existing.map((m) => m.id).includes(targetId)) {
+    throw new ValidationError(
+      `A group can have at most ${LIMITS.MAX_GROUP_MEMBERS} members, including you`,
+    );
+  }
   return c.json({ ok: true });
 });
 
