@@ -1467,6 +1467,33 @@ export async function updateEvent(
     const removedIds = existingOptions
       .filter((row) => !desiredKeys.has(slotKey(row.start_at, row.end_at)))
       .map((row) => row.id);
+
+    // Pass-12 review (P12-16 / F-29). Once sweepConfirmedMultiWinnerOptions
+    // has turned a confirmed candidate into a real event, that event points
+    // back at the candidate through migration 0027's created_from_option_id,
+    // which has no ON DELETE action -- so deleting the candidate fails the
+    // foreign key, the batch rolls back, and an edit the UI offered comes back
+    // as "Internal error". Retiming reaches it the same way: (start_at,
+    // end_at) is the identity here, so a moved slot is a removal plus an add.
+    //
+    // Refused rather than cascaded. The generated event is a real session that
+    // has been DMed about, may be on Google calendars, and may already have
+    // RSVPs against it; deleting it as a side effect of editing the poll it
+    // came from would be a far worse answer than declining the edit. The
+    // organizer can cancel that session directly if that is what they meant.
+    if (removedIds.length > 0) {
+      const materialized = await env.DB.prepare(
+        `SELECT 1 FROM events WHERE created_from_option_id IN (${placeholders(removedIds.length)}) LIMIT 1`,
+      )
+        .bind(...removedIds)
+        .first();
+      if (materialized) {
+        throw new ValidationError(
+          'One of the times you removed has already been confirmed and scheduled as its own session, so it can no longer be changed here. Cancel that session if it is not going ahead.',
+        );
+      }
+    }
+
     // Reserving the two binds guardedStatement appends, the same way
     // chunkRows' callers reserve theirs.
     for (const chunk of chunkIds(removedIds, guardBinds.length)) {

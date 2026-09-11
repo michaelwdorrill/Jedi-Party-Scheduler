@@ -463,6 +463,34 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
       `DELETE FROM event_poll_votes WHERE option_id IN
          (SELECT id FROM event_poll_options WHERE event_id IN (${organisedEvents}))`,
     ).bind(userId),
+    // Pass-12 review (P12-06). Migration 0027's created_from_option_id is a
+    // fanned-out event's pointer back to the multi-winner poll candidate it
+    // came from, and it carries no ON DELETE action. The options delete below
+    // is its own statement, and SQLite checks an immediate foreign key at the
+    // conclusion of each statement -- so at that point the generated event is
+    // still present, still pointing at a candidate that has just gone, and the
+    // whole batch fails on a bare "FOREIGN KEY constraint failed".
+    //
+    // That made DELETE /me a 500 for any organizer who had ever run a
+    // multi-winner poll to its ordinary conclusion -- and a 500 *after*
+    // revokeAllSessionsForUser above, so the person was logged out of an
+    // account that still existed and that they could no longer reach the
+    // delete button for. sweepPurgeTerminalHistory has cleared this pointer
+    // since IDEAS item 56; this path never learned the same lesson.
+    //
+    // Only this pointer, not created_from_poll_id as well, which is the one
+    // asymmetry with the purge path and is deliberate: created_from_poll_id
+    // references events(id), and a fanned-out event always carries its poll's
+    // organizer, so both rows leave in the single `DELETE FROM events WHERE
+    // organizer_id = ?` below -- one statement, so nothing is dangling when it
+    // concludes. The purge path clears both because there the parent poll can
+    // be terminal while its generated event is still live, and so not in the
+    // same delete at all.
+    env.DB.prepare(
+      `UPDATE events SET created_from_option_id = NULL
+       WHERE created_from_option_id IN
+         (SELECT id FROM event_poll_options WHERE event_id IN (${organisedEvents}))`,
+    ).bind(userId),
     env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id IN (${organisedEvents})`).bind(userId),
     env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id IN (${organisedEvents})`).bind(userId),
     env.DB.prepare(`DELETE FROM event_invites WHERE event_id IN (${organisedEvents})`).bind(userId),
