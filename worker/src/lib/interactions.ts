@@ -2,6 +2,7 @@ import type { Env } from '../env';
 import { boundContent } from './discord';
 import { newId } from './ids';
 import { recordRsvp, type RsvpStatus } from './attendance';
+import { requireActiveGuildMember } from './db';
 import { recordPollSelection } from './polls';
 import { rsvpButtons } from './dmComponents';
 import { CURRENT_POLICY_VERSION } from './policy';
@@ -411,9 +412,9 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
   }
 
   if (parsed.kind === 'cancel') {
-    const event = await env.DB.prepare(`SELECT organizer_id, status FROM events WHERE id = ?`)
+    const event = await env.DB.prepare(`SELECT organizer_id, status, guild_id FROM events WHERE id = ?`)
       .bind(parsed.eventId)
-      .first<{ organizer_id: string; status: string }>();
+      .first<{ organizer_id: string; status: string; guild_id: string }>();
     if (!event) return ephemeral(`That event no longer exists. ${siteLink(env)}`);
     // Re-checked from the database rather than trusted from the fact that
     // this DM was only ever sent to the organizer -- the presser is the
@@ -422,6 +423,18 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
     // message was addressed to.
     if (event.organizer_id !== userId) {
       return ephemeral(`Only the organizer can cancel this one. ${siteLink(env)}`);
+    }
+    // Pass-14 review (P14-02). Identity is not the whole of the website's
+    // rule, and this is the same action: loadOwnedActiveEvent requires the
+    // organizer to still be a current active member of the event's guild,
+    // "leaving/removal revokes control too, not just visibility". Without it
+    // the two surfaces disagree -- the website answers 404 while a control
+    // still sitting in an old DM cancels the session for everyone.
+    //
+    // A Discord press being authentic says who pressed it, not that they may
+    // still act. The signature proves the former; this proves the latter.
+    if (!(await requireActiveGuildMember(env, userId, event.guild_id))) {
+      return ephemeral(`You're no longer in that server, so you can't change this one. ${siteLink(env)}`);
     }
     if (event.status !== 'active') {
       return ephemeral(`That session isn't active any more. ${siteLink(env)}`);
@@ -438,12 +451,20 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
   }
 
   if (parsed.kind === 'cancel_occurrence') {
-    const event = await env.DB.prepare(`SELECT organizer_id, status, is_recurring FROM events WHERE id = ?`)
+    const event = await env.DB.prepare(
+      `SELECT organizer_id, status, is_recurring, guild_id FROM events WHERE id = ?`,
+    )
       .bind(parsed.eventId)
-      .first<{ organizer_id: string; status: string; is_recurring: number }>();
+      .first<{ organizer_id: string; status: string; is_recurring: number; guild_id: string }>();
     if (!event) return ephemeral(`That event no longer exists. ${siteLink(env)}`);
     if (event.organizer_id !== userId) {
       return ephemeral(`Only the organizer can cancel this one. ${siteLink(env)}`);
+    }
+    // The sibling of the guard above, and the reason P14-02 named two
+    // handlers: cancelling one occurrence is the same authority as cancelling
+    // the series, and was checked the same incomplete way.
+    if (!(await requireActiveGuildMember(env, userId, event.guild_id))) {
+      return ephemeral(`You're no longer in that server, so you can't change this one. ${siteLink(env)}`);
     }
     // The series itself has to still be active; an individual occurrence's
     // own cancelled-ness lives in event_occurrence_overrides; see below.

@@ -897,6 +897,25 @@ async function sweepChangeRequestNotifications(env: Env, budget: TickBudget): Pr
      LEFT JOIN change_request_log crl
        ON crl.request_id = ecr.id AND crl.user_id = ecr.requester_id AND crl.notification_type = 'change_request_decision'
      WHERE ecr.status IN ('accepted','declined')
+       -- Pass-14 review (P14-01). Still has access to the event, not merely
+       -- still in its server.
+       --
+       -- This arm keys on ecr.requester_id and selects the event's CURRENT
+       -- title and the organizer's CURRENT decision note, so a requester
+       -- removed from the event after filing received a first DM carrying
+       -- both -- private content written after their access ended, which is
+       -- the same shape as P12-01 and P13-03 in the third path of the three.
+       --
+       -- The opened arm above needs no such clause: it derives its
+       -- recipients from a live event_invites join, so a removal drops them
+       -- from the set on the next tick by construction. Only this arm carries
+       -- a user id forward from the request row.
+       --
+       -- The organizer is exempt by id, for membershipJoin's reason: they own
+       -- the event whether or not an invite row happens to exist for them.
+       AND (ecr.requester_id = e.organizer_id
+            OR EXISTS (SELECT 1 FROM event_invites ei
+                       WHERE ei.event_id = ecr.event_id AND ei.user_id = ecr.requester_id))
        AND (
          crl.id IS NULL
          OR (crl.delivered_at IS NULL AND crl.failed_at IS NULL AND crl.attempt_count < ?
