@@ -6,6 +6,7 @@ import { acceptChangeRequest, type ChangeRequestRow } from '../src/lib/changeReq
 import { createSession, isSessionActive, revokeSession, rotateSession } from '../src/lib/sessions';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
+import { createEventWithInvites } from '../src/lib/eventWrites';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
 import { storeConnection } from '../src/lib/googleCalendar';
 import { TickBudget } from '../src/cron/budget';
@@ -790,5 +791,111 @@ describe('a finished sync does not stamp a connection it no longer owns (P13-07 
       conn!.last_error,
       "the predecessor's failure was stamped on the account the user had just connected",
     ).toBeNull();
+  });
+});
+
+// P14-14, added after the fix: the fix shipped in cc5d09d with the two
+// expander findings and no test of its own, which is the gap this closes.
+//
+// An occurrence keeps its ORIGINAL date as its key and carries the override's
+// times. `resolveOccurrence` built a window from the key -- one day, in the
+// event's zone -- and `expandOccurrences` filters by millisecond overlap, so
+// an occurrence moved to another day had a key inside the window and a time
+// outside it, and was never returned. The calendar links by that key, so
+// following a moved occurrence's own link answered 200 with startAt and endAt
+// null, and the frontend gates its time and RSVP block on exactly those.
+describe('an occurrence moved out of its own day is still addressable (P14-14)', () => {
+  async function seedWeekly(env: Env): Promise<string> {
+    return createEventWithInvites(env, 'guild-1', 'organizer', {
+      title: 'Weekly game night',
+      description: null,
+      game: null,
+      eventType: 'single',
+      timezone: 'America/New_York',
+      isRecurring: true,
+      recurrence: {
+        freq: 'WEEKLY',
+        interval: 1,
+        byWeekday: [new Date().getUTCDay() === 0 ? 6 : new Date().getUTCDay() - 1],
+        byMonthDay: null,
+        startDate: new Date().toISOString().slice(0, 10),
+        startTime: '19:00',
+        durationMinutes: 120,
+        endType: 'never',
+        endDate: null,
+        endCount: null,
+      },
+      invites: { userIds: [], groupIds: [] },
+    } as never);
+  }
+
+  it('answers with the time it was moved to, not with nulls', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    fetchStub = stubFetch([membershipRule(200)]);
+    const app = buildApp();
+    const { id: sessionId } = await createSession(env, 'organizer');
+    const headers = { Authorization: `Bearer ${await signJwt('organizer', sessionId, env.JWT_SIGNING_KEY)}` };
+
+    const eventId = await seedWeekly(env);
+    const first = (await (await app.request(`/events/${eventId}`, { method: 'GET', headers }, env)).json()) as {
+      occurrenceDate: string;
+      startAt: number;
+      endAt: number;
+    };
+
+    // Moved two days later -- far enough that the moved time cannot overlap
+    // the original day's window in any timezone.
+    const movedStart = first.startAt + 2 * DAY_MS;
+    await db
+      .prepare(
+        `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled, override_start_at, override_end_at)
+         VALUES ('ovr-1', ?, ?, 0, ?, ?)`,
+      )
+      .bind(eventId, first.occurrenceDate, movedStart, movedStart + 2 * HOUR_MS)
+      .run();
+
+    // The link the calendar renders is still keyed on the ORIGINAL date.
+    const res = await app.request(`/events/${eventId}?occurrence=${first.occurrenceDate}`, { method: 'GET', headers }, env);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { occurrenceDate: string; startAt: number | null; endAt: number | null };
+
+    expect(body.occurrenceDate).toBe(first.occurrenceDate);
+    expect(body.startAt, 'a moved occurrence resolved to no time at all').not.toBeNull();
+    expect(body.startAt, 'the original time was returned instead of the moved one').toBe(movedStart);
+  });
+
+  // An invariant guard, not a reproduction: it passes with and without the
+  // widening, because the expander omits cancelled occurrences before the
+  // window ever matters. It is here because widening a window is exactly the
+  // move that makes something appear which should not, and this is the thing
+  // that must not appear.
+  it('still answers nothing for an occurrence that was cancelled', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    fetchStub = stubFetch([membershipRule(200)]);
+    const app = buildApp();
+    const { id: sessionId } = await createSession(env, 'organizer');
+    const headers = { Authorization: `Bearer ${await signJwt('organizer', sessionId, env.JWT_SIGNING_KEY)}` };
+
+    const eventId = await seedWeekly(env);
+    const first = (await (await app.request(`/events/${eventId}`, { method: 'GET', headers }, env)).json()) as {
+      occurrenceDate: string;
+    };
+
+    await db
+      .prepare(
+        `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled) VALUES ('ovr-1', ?, ?, 1)`,
+      )
+      .bind(eventId, first.occurrenceDate)
+      .run();
+
+    const res = await app.request(`/events/${eventId}?occurrence=${first.occurrenceDate}`, { method: 'GET', headers }, env);
+    const body = (await res.json()) as { startAt: number | null };
+    expect(body.startAt, 'widening the window conjured a time for a cancelled occurrence').toBeNull();
   });
 });
