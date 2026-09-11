@@ -144,57 +144,76 @@ recipient selection now does -- is the cleaner shape and costs nothing at write
 time, but it changes resolution behaviour for polls that are mid-flight, so it
 wants doing deliberately rather than as a rider on a security fix.
 
-### 70. Accepting a change request is not atomic with applying it -- closed in Pass 15
+### 70. Accepting a change request is not atomic with applying it -- REOPENED after Pass 16
 
-From the Pass-13 review (P13-11), re-raised as P14-12 and P15-08. **Fixed in
-Pass 15 by a third option neither this entry nor either reviewer's first
-suggestion had proposed, and kept here because the two rejected designs are the
-valuable part of the record.**
+From the Pass-13 review (P13-11), re-raised as P14-12 and P15-08, "closed" in
+Pass 15, **and reopened by Pass 16, which found that the Pass-15 fix introduced
+a P1 privacy failure.** The whole arc is kept because the mistake is more
+instructive than the finding.
 
-`applyAndAccept` claims the decision -- moves the request from `pending` to
-`accepted` -- and then mutates the event in a separate transaction, with a
-compensating release if the mutation throws. Pass 13 closed the budget route
-into the bad state by reserving the whole acceptance before claiming (P13-05).
-What remained: if the process dies between the claim and the apply, or the
-apply *and* its compensating release both fail, the request reads `accepted`
-over an event that never moved, and the resolver will not pick it up again
-because it is no longer `pending`.
+`applyAndAccept` claims the decision and then applies it. If the process dies
+between the two, or the apply and its compensating release both fail, the
+request reads `accepted` over an event that never moved.
 
-The two options recorded here for two passes were both heavier than the
-problem:
+**What Pass 15 built, and why it was wrong.** Migration 0044 added a nullable
+`applied_at`, the apply path stamped it, and the resolver grew an arm that
+re-applied any accepted row left unstamped for ten minutes. The idempotence
+argument was that the override write is an upsert and `updateEvent` is
+revision-guarded, so replaying an identical change is a no-op.
 
-- add an `applying` state to `event_change_requests.status`, which SQLite
-  cannot do without a full table rebuild since the column carries a CHECK
-  constraint;
-- thread the status compare-and-set into `updateEvent`'s own batch, which means
-  surgery in the one write path every event edit goes through.
+That argument is true and beside the point. **Replay is not idempotent against
+a world that has changed its mind.** Pass 16 demonstrated:
 
-**What was actually built (migration 0044) is detection rather than a new
-state**: a nullable `applied_at` column, no CHECK, no rebuild. The apply path
-stamps it; the resolver gains a recovery arm for rows that are `accepted` with
-`applied_at IS NULL` past a ten-minute threshold, and re-runs the apply, which
-is idempotent because the override write is an upsert and `updateEvent` is
-revision-guarded. A change that can no longer be applied is released to
-`pending` for the ordinary deadline path to decline, rather than sitting
-accepted forever.
+- an `add_invitee` acceptance replayed after the organizer had REMOVED that
+  person re-admitted them -- to an event whose private title and description
+  had been edited in between, so it handed back access the organizer had
+  deliberately revoked. That is the only P1 in five passes, and it was
+  introduced by a fix for a finding two independent reviewers had both called
+  non-blocking;
+- a recurring `time_change` replayed after the organizer had CANCELLED that
+  occurrence set `is_cancelled` back to 0;
+- a replay that errored (an invite acceptance at the 25-invite cap) escaped
+  the resolver and starved unrelated deadline work, with no failure counter
+  advancing.
 
-Two details worth keeping, because both were nearly got wrong:
+The test written to justify the idempotence claim asserted that re-applying an
+invite which had already landed was a no-op. It was. It proved idempotence
+against an unchanged world and was read as safety.
 
-- **The recovery arm rides in the resolver's existing discovery read.** Written
-  as its own SELECT it added a fixed per-tick query, and the fixed-reserve test
-  caught it immediately -- `cron/budget.ts` records three separate incidents of
-  exactly that starving `sweepPurgeTerminalHistory`. It is now a second
-  disjunct on a query the sweep was already paying for.
-- **The decision notice gates on `applied_at`.** The worst version of this
-  finding was never the row, it was the DM: the requester is told "accepted",
-  plans around a time the invitees never saw, and finds out by turning up.
-  `runReminderSweep` runs the resolver before the notice arm, so the exposed
-  window is a request whose apply died in the last ten minutes -- narrow, and
-  exactly what the gate covers.
+**What is kept.** The `applied_at` column and its stamp, and the decision-notice
+gate that only announces an accepted request once it is stamped. That gate is
+the half of Pass 15's work that was worth having: the worst consequence of this
+finding was never the stranded row, it was the DM telling the requester
+"accepted" for a change that had not happened. It carries no replay risk.
 
-The backfill in the migration is load-bearing: without it every
-already-accepted request reads as unapplied on the first tick after deploy and
-the recovery arm re-applies all of them.
+**What is removed.** The recovery arm. A stranded row is now left strictly
+alone: accepted, unstamped, silent, and visible to anyone who looks.
+
+**What a real fix needs**, and why it is still not a rider:
+
+- Durable evidence of what the effect DID, not just that a decision was made --
+  enough to distinguish "never applied" from "applied and since superseded by
+  an authorized decision". Comparing the current value against the request is
+  not enough, because a mismatch is equally evidence of a NEWER correct
+  decision.
+- Effect and completion recorded in one transaction where the tables allow it,
+  and an explicit operation state with conditional reconciliation where they
+  do not.
+- Never a blind re-apply of an invitation or an occurrence override.
+
+**Also open, from the same pass:** the migration's backfill stamps every
+historical accepted row as applied, which for a legacy row that never applied
+is a completion it has not earned. With nothing replaying effects that is
+harmless for correctness -- it only feeds the notice gate -- but it means
+historical reconciliation is unsolved, not solved. There is no evidence left in
+the database of whether a 2026 acceptance took effect.
+
+**And a failure adjacent to it, fixed in Pass 16:** the stamp originally sat
+inside the same `try` as the mutation, so failing to RECORD an application was
+handled as failing to apply -- the compensating release ran, the request went
+back to pending over an event that had already moved, and the next deadline
+pass declined it on a stale revision. The stamp's failure is now contained; the
+cost is a row that applied and does not say so, which the gate keeps quiet.
 
 ### 71. A same-account reconnect can still race the tail of a disconnect
 
@@ -249,40 +268,99 @@ grant-level and any later disconnect of the same account kills it. Closing it
 means decrypting each expired row and making a network call from a request
 path, which is why it was not done as a rider on F-44.
 
-### 72. Cross-tab login identity is unenforceable when localStorage refuses a write
+### 72. Cross-tab login identity is not enforceable without a shared lock
 
-From the Pass-15 review (P15-02). The auth identity marker moved into
-`localStorage` in Pass 14 so that two tabs agree on who is signed in, with an
-in-memory fallback for browsers that refuse storage (private mode, blocked site
-data, a full quota). Pass 15 fixed the half of that which was simply wrong --
-the fallback was consulted when the read *threw* and not when it succeeded and
-found nothing, which is the case that actually happens, so the guard compared
-null to null and every refresh looked like the same identity.
+From the Pass-15 review (P15-02) and **corrected in scope by Pass 16 (P16-05),
+which showed the description here was too narrow.**
 
-What remains cannot be fixed by reading more carefully: **when the marker
-cannot be persisted, the fallback is per-tab**, so one tab has no way to see
-that another has adopted a different account. Shared state cannot be faked
-without shared storage.
+The auth identity marker moved into `localStorage` in Pass 14 so two tabs agree
+on who is signed in, with an in-memory fallback for browsers that refuse
+storage. Pass 15 fixed the half that was simply wrong: the fallback was
+consulted when the read *threw* and not when it succeeded and found nothing,
+so the guard compared null to null and every refresh looked like the same
+identity.
 
-The options, neither taken:
+This entry then claimed the remainder was confined to storage refusing writes.
+**That was wrong.** Pass 16 reproduced the overwrite with *fully writable*
+shared storage: the identity read and the token write are two separate
+operations, and another tab can adopt a different account between them. The
+request-level check afterwards correctly rejects the stale request, but by then
+the shared credential has already been replaced, and a subsequent `/me` with
+what is in storage authenticates the wrong account.
 
-- **Fail the refresh closed** when the marker could not be persisted. Correct,
-  and it logs out every full-storage or private-mode browser on every refresh
-  cycle -- a large, certain cost imposed on ordinary single-account use to
-  close a case that needs two accounts in one browser *and* a storage area that
-  refuses writes.
-- **Serialise auth mutations behind the Web Locks API** (`navigator.locks`),
-  which would also close the smaller check-then-write race that P15-02's first
-  half describes -- the epoch is read and the token written as two operations,
-  and nothing makes them one. Locks are widely supported and this is the
-  honest end state, but it is a rewrite of the auth client's control flow
-  rather than a rider on a review batch, and it wants doing when someone can
-  give the whole file their attention.
+So there are two residuals, not one:
 
-Worth knowing that neither the residual race nor the storage case is an
-anonymous-takeover route: both need two legitimate sessions in the same
-browser, and the stale refresh can only install a credential its own account
-already had.
+1. **The check/write race**, on any storage. Narrow -- microseconds between two
+   operations -- and it needs two legitimate sessions in one browser.
+2. **The per-tab fallback**, when the marker cannot be persisted at all. Two
+   tabs then hold different in-memory values and neither can see the other's.
+
+Neither is an anonymous-takeover route: both need two real sessions in the same
+browser, and a stale refresh can only install a credential its own account
+already held.
+
+**The fix for both is the same and is not a rider:** serialise auth mutations
+behind `navigator.locks`, so the identity check and the credential replacement
+are one critical section, and handle a failed identity write explicitly rather
+than proceeding. That is a rewrite of the auth client's control flow and wants
+doing when someone can give the whole file their attention.
+
+Rejected: failing the refresh closed whenever the marker is unavailable. It
+would log out every private-mode and full-storage browser on every refresh
+cycle, which is a large certain cost against a small conditional one.
+
+### 73. An in-flight Google revoke can still outrun a reconnect
+
+From the Pass-16 review (P16-06), the residue of item 71 after Pass 15 narrowed
+it. The disconnect sweep now re-reads the connection immediately before
+revoking and skips when a known same-account replacement is already stored --
+which covers a replacement finalized before that read. It cannot cover one
+finalized *after* the read while the revoke request is in flight, and an OAuth
+flow already open in another tab supplies exactly that overlap.
+
+Nothing local can undo a remote grant-level revocation, so more checks after
+the fact do not help. The fix is the one item 71 already names as the safer of
+its two: refuse a finalize while the connection's status is `disconnecting`, so
+the lifecycle is serialised rather than raced. Recoverable by reconnecting,
+nothing lost or disclosed, and it needs the reconnect to land inside one
+in-flight HTTPS request.
+
+### 74. A failed organizer RSVP notice is never retried
+
+From the Pass-16 review (P16-08), and unrelated to F-43's membership fix in
+everything but the query it lives in. `sweepOrganizerRsvpNotices` selects
+candidates with `l.id IS NULL` -- no log row at all -- but the outbox writes a
+log row even when a send FAILS, recording the attempt and a retry time. So a
+transient Discord failure creates the row, and this consumer never selects it
+again; no other consumer retries that table. The recorded retry time passes and
+nothing reads it.
+
+Demonstrated: one 503 on the organizer's message, then three healthy sweeps
+fifteen minutes apart, no second attempt, row still at attempt 1 undelivered.
+
+The fix is to select due pending and expired-lease rows as well as absent ones
+-- the shape `sweepDueNotificationRetries` already uses for the notification
+outbox (P13-13) -- keeping the membership and eligibility predicates, the
+per-tick bound, an attempt limit and backoff. Worth doing; it is a lost
+notification rather than a wrong one, which is why it is not ahead of the
+lifecycle items above.
+
+### 75. A successful Google insert whose mapping is refused is duplicated
+
+From the Pass-16 review (P16-07), pre-existing and newly reachable through the
+Pass-15 destination-move path. The push half creates the remote event and then
+writes its mapping under a credential guard. When a same-account reconnect
+replaces the credential while the create is in flight, the create succeeds and
+the mapping is correctly refused -- leaving a real calendar entry with nothing
+in the database pointing at it. The next sweep creates a second copy and maps
+only that one, so the first is orphaned and invisible to later edits and
+cancellation.
+
+Both copies are the same account and the same calendar, so this is duplication
+and orphaning rather than disclosure. The honest fix is provider-side
+idempotency (a stable client-supplied id) or durable reconciliation of creates
+whose mapping was rejected. A re-read before creating narrows nothing that
+matters, because the create is already away.
 
 ## Parked until after 1.0
 

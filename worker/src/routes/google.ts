@@ -235,14 +235,25 @@ googleRoutes.get('/callback', async (c) => {
       ? (accountEmailFrom(calendars.value) ?? (await fetchPrimaryCalendarId(tokens.access_token)))
       : null;
     if (!email) {
-      // F-44: the code has already been exchanged, so a grant exists at Google
-      // for a refresh token this request is about to drop on the floor.
-      // Without this, someone who hits an outage here and never retries keeps
-      // "Uncle Owen" in their Google connected-apps list for a credential
-      // nobody holds. Best-effort, like every other revoke in this file: the
-      // refusal must not fail because the revoke endpoint is having a bad
-      // minute.
-      if (tokens.refresh_token) await revokeToken(tokens.refresh_token);
+      // Pass-16 review (P16-04). This refusal deliberately does NOT revoke the
+      // token it just exchanged, and F-44 -- which asked it to -- is reopened
+      // rather than closed.
+      //
+      // Revocation at Google is grant-level, not token-level. This app already
+      // knows that: it is the entire content of IDEAS item 71, written one
+      // commit before this code. Applying it here anyway meant that when a
+      // user with a WORKING connection reconnects the same account and the
+      // identity lookup has an outage, the refusal revoked the grant that
+      // working connection depends on -- so a transient failure during a
+      // voluntary reconnect broke the connection the user already had. That is
+      // strictly worse than the untidiness F-44 was about, and it needs no
+      // concurrency at all: one outage at the wrong moment does it.
+      //
+      // So the abandoned token is left to expire. It belongs to the same grant
+      // the user can see and remove in their own Google settings, and any
+      // later disconnect of that account tears it down. The real fix is the
+      // lifecycle work item 71 describes -- knowing whether this token's grant
+      // is the stored connection's before touching it.
       return c.redirect(`${settingsUrl}?google=account_unverified`);
     }
 

@@ -30,12 +30,25 @@
 -- Nullable, no CHECK, no rebuild.
 ALTER TABLE event_change_requests ADD COLUMN applied_at INTEGER;
 
--- Backfill is load-bearing, not tidiness. Without it every request accepted
--- before this migration reads as "accepted but never applied" on the first
--- tick after deploy, and the recovery arm re-applies all of them -- moving
--- events that have long since been moved, or declining them as stale. Rows
--- accepted before this column existed were applied by the code path that had
--- no other outcome, so their decision time is the honest stamp.
+-- Backfill, and an admission about what it means (Pass-16 review, P16-09).
+--
+-- This originally justified itself by claiming that rows accepted before this
+-- column existed "were applied by the code path that had no other outcome".
+-- That is false, and it contradicts the finding this migration was written
+-- for: P13-11/P15-08 is precisely the case where an acceptance committed and
+-- its effect did not. A legacy row in that state gets a completion stamp here
+-- that it has not earned.
+--
+-- The backfill stays, for a narrower reason than the one first given: with
+-- nothing replaying effects any more (the recovery arm is gone -- see P16-01),
+-- `applied_at` feeds only the decision-notice gate, and an unstamped legacy
+-- row would simply never be announced. Stamping them keeps notices flowing for
+-- the overwhelming majority that did apply.
+--
+-- What it cannot do is tell the two apart retrospectively. There is no
+-- evidence left in the database of whether a 2026 acceptance took effect.
+-- Historical reconciliation is therefore OPEN, not solved, and IDEAS item 70
+-- says so.
 UPDATE event_change_requests SET applied_at = decided_at WHERE status = 'accepted' AND applied_at IS NULL;
 
 -- The recovery arm's predicate, which runs on every resolver tick and must not

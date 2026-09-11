@@ -374,32 +374,13 @@ describe('an account that could not be identified is not connected (P15-05)', ()
     expect(pending!.google_account_email).toBe('someone@gmail.com');
   });
 
-  // F-44. The code has already been exchanged by the time either refusal runs,
-  // so a grant exists at Google for a refresh token this request is about to
-  // drop. Without the revoke, someone who hits an outage here and never
-  // retries keeps the app in their Google connected-apps list forever, for a
-  // credential nobody holds.
-  it('hands back the grant it just exchanged when it refuses', async () => {
-    const { db, env: base } = setup();
-    const env = googleEnv(base);
-    await seedGuild(db, 'guild-1');
-    await seedUser(db, 'u1');
-    await seedMembership(db, 'u1', 'guild-1');
-
-    await connectWith(env, [
-      CONNECT_TOKEN_RULE,
-      REVOKE_RULE,
-      { match: 'users/me/calendarList', status: 503, body: {} },
-    ]);
-
-    const revokes = fetchStub!.calls
-      .map((url, i) => ({ url, body: fetchStub!.bodies[i] ?? '' }))
-      .filter((c) => c.url.includes('/revoke'));
-    expect(revokes, 'the refused grant was abandoned at Google rather than revoked').toHaveLength(1);
-    expect(revokes[0].body, 'something other than the abandoned refresh token was revoked').toContain(
-      'google-refresh-token',
-    );
-  });
+  // F-44's revoke case USED to be here, asserting that the refusal revoked the
+  // token it had just exchanged. The Pass-16 review reversed that expectation
+  // (P16-04): revocation at Google is grant-level, so for a user reconnecting
+  // an account they already have connected, a transient identity outage
+  // revoked the grant their WORKING connection depends on. The replacement --
+  // that the refusal touches no grant at all -- is in test/pass16.test.ts, and
+  // F-44 is reopened rather than closed.
 });
 
 
@@ -868,41 +849,16 @@ describe('an acceptance that never applied is recovered, not announced (P15-08)'
     return { start };
   }
 
-  it('re-applies the change the acceptance promised', async () => {
-    const { db, env } = setup('paid');
-    const { start } = await seedStranded(db, { recurring: true });
-
-    await resolvePastDeadlineChangeRequests(env);
-
-    const override = await db
-      .prepare(`SELECT override_start_at FROM event_occurrence_overrides WHERE event_id = 'ev-1'`)
-      .first<{ override_start_at: number }>();
-    expect(override, 'the accepted change was never applied, and nothing went back for it').toBeTruthy();
-    expect(override!.override_start_at).toBe(start + 3 * HOUR_MS);
-
-    const row = await db
-      .prepare(`SELECT status, applied_at FROM event_change_requests WHERE id = 'cr-1'`)
-      .first<{ status: string; applied_at: number | null }>();
-    expect(row!.status).toBe('accepted');
-    expect(row!.applied_at, 'the recovered row was left unstamped, so it recovers again forever').not.toBeNull();
-  });
-
-  it('releases the row when the event has moved on since', async () => {
-    const { db, env } = setup('paid');
-    await seedStranded(db, { recurring: false, revision: 0 });
-    // The organizer edited the event in the meantime, so the proposed time was
-    // computed against a schedule that no longer exists.
-    await db.prepare(`UPDATE events SET revision = 7 WHERE id = 'ev-1'`).run();
-
-    await resolvePastDeadlineChangeRequests(env);
-
-    const row = await db
-      .prepare(`SELECT status, decided_at, applied_at FROM event_change_requests WHERE id = 'cr-1'`)
-      .first<{ status: string; decided_at: number | null; applied_at: number | null }>();
-    expect(row!.status, 'a change that can no longer be applied was left reading as accepted').toBe('pending');
-    expect(row!.decided_at).toBeNull();
-    expect(row!.applied_at).toBeNull();
-  });
+  // Two cases USED to be here: that recovery re-applied a stranded change, and
+  // that it released one whose event had moved on. The Pass-16 review found
+  // that replay to be a P1 -- it re-admitted guests the organizer had removed
+  // and un-cancelled occurrences the organizer had cancelled -- so the
+  // recovery arm is gone and those assertions with it. What replaced them is
+  // in test/pass16.test.ts: a stranded row is left strictly alone.
+  //
+  // The notice gate below survives, and is the half of P15-08 that was worth
+  // having: it stops "accepted" being announced for a change that has not
+  // happened.
 
   // The window this gate exists for is a narrow one, and the test has to sit
   // inside it: `runReminderSweep` runs the resolver BEFORE the notice arm, so
@@ -975,65 +931,10 @@ describe('an acceptance that never applied is recovered, not announced (P15-08)'
   });
 });
 
-// The recovery arm's second kind. The resolver's deadline disjunct is
-// `kind = 'time_change'`, but the recovery disjunct deliberately is not: an
-// add_invitee acceptance can strand exactly the same way, and it is decided
-// interactively rather than by deadline, so nothing else would ever revisit
-// it. Checked here rather than left for the next reviewer to find.
-describe('recovery covers an add_invitee acceptance too (P15-08)', () => {
-  async function seedStrandedInvite(db: ShimDatabase): Promise<void> {
-    await seedGuild(db, 'guild-1');
-    for (const id of ['organizer', 'asker', 'newcomer']) {
-      await seedUser(db, id);
-      await seedMembership(db, id, 'guild-1');
-    }
-    const start = Date.now() + 5 * DAY_MS;
-    await seedEvent(db, { id: 'ev-1', organizerId: 'organizer', startAt: start, endAt: start + 2 * HOUR_MS });
-    await seedInvite(db, 'ev-1', 'asker');
-    await db
-      .prepare(
-        `INSERT INTO event_change_requests
-           (id, event_id, requester_id, kind, target_user_id, occurrence_date, status, event_revision,
-            message, created_at, decided_at, decided_by, applied_at)
-         VALUES ('cr-1', 'ev-1', 'asker', 'add_invitee', 'newcomer', '', 'accepted', 0, NULL, ?, ?, 'organizer', NULL)`,
-      )
-      .bind(Date.now() - DAY_MS, Date.now() - HOUR_MS)
-      .run();
-  }
-
-  it('adds the invitee the acceptance promised', async () => {
-    const { db, env } = setup('paid');
-    await seedStrandedInvite(db);
-
-    await resolvePastDeadlineChangeRequests(env);
-
-    expect(
-      await countRows(db, 'event_invites', `event_id = 'ev-1' AND user_id = 'newcomer'`),
-      'an accepted add_invitee never took effect and nothing went back for it',
-    ).toBe(1);
-    const row = await db
-      .prepare(`SELECT applied_at FROM event_change_requests WHERE id = 'cr-1'`)
-      .first<{ applied_at: number | null }>();
-    expect(row!.applied_at).not.toBeNull();
-  });
-
-  it('is idempotent when the invite had in fact landed', async () => {
-    const { db, env } = setup('paid');
-    await seedStrandedInvite(db);
-    // The apply succeeded and only the stamp was lost -- the likelier half of
-    // the window, and the one where re-applying must be a no-op.
-    await seedInvite(db, 'ev-1', 'newcomer');
-
-    await resolvePastDeadlineChangeRequests(env);
-
-    expect(
-      await countRows(db, 'event_invites', `event_id = 'ev-1' AND user_id = 'newcomer'`),
-      're-applying an invite that had already landed duplicated it',
-    ).toBe(1);
-    const row = await db
-      .prepare(`SELECT status, applied_at FROM event_change_requests WHERE id = 'cr-1'`)
-      .first<{ status: string; applied_at: number | null }>();
-    expect(row!.status).toBe('accepted');
-    expect(row!.applied_at).not.toBeNull();
-  });
-});
+// The add_invitee recovery describe USED to be here, and it is the sharpest
+// lesson of this cycle. It asserted that re-applying an invite which had
+// already landed was a no-op -- which is TRUE, and was read as proof that
+// replay was safe. It proved idempotence against a world that had not changed.
+// The Pass-16 review changed the world: the organizer removed the guest first,
+// and replay re-admitted them to an event whose private title had been edited
+// since. The replacement assertions are in test/pass16.test.ts.

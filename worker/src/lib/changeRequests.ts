@@ -336,17 +336,6 @@ async function applyAndAccept(
 
   try {
     await applyChangeRequest(env, event, request);
-    // Pass-15 review (P15-08). The change has landed; say so, so that a row
-    // reading 'accepted' with no stamp is recognisable as one whose apply did
-    // not finish. This write is deliberately NOT required to be atomic with
-    // the apply -- it cannot be, across two statements -- and it does not need
-    // to be, because the recovery arm reconciles by looking at the EVENT
-    // rather than by trusting the stamp: an unstamped row whose event already
-    // matches is stamped, and one whose event does not is applied again.
-    // Detection instead of a new state (migration 0044).
-    await env.DB.prepare(`UPDATE event_change_requests SET applied_at = ? WHERE id = ?`)
-      .bind(Date.now(), request.id)
-      .run();
   } catch (err) {
     // The claim is released rather than left standing over a change that did
     // not happen. Without this a stale revision -- which updateEvent below
@@ -360,6 +349,29 @@ async function applyAndAccept(
       .bind(request.id)
       .run();
     throw err;
+  }
+
+  // Pass-16 review (P16-02). OUTSIDE the try, and that placement is the whole
+  // finding. Pass 15 put this write inside it, so a failure to RECORD the
+  // application was handled as a failure OF the application: the compensating
+  // release ran, the request went back to pending over an event that had
+  // already moved, and the next deadline pass declined it on a stale revision
+  // while the schedule kept the new time. Record and effect disagreed, and the
+  // decline was announceable.
+  //
+  // Its own failure is contained instead. What that costs is a row that
+  // applied and does not say so, which the notice gate reads as "not applied
+  // yet" and stays quiet about -- a missing notification rather than a false
+  // one, and no replay. IDEAS item 70 carries what closing it properly needs.
+  try {
+    await env.DB.prepare(`UPDATE event_change_requests SET applied_at = ? WHERE id = ?`)
+      .bind(Date.now(), request.id)
+      .run();
+  } catch (err) {
+    console.warn(
+      `Change request ${request.id} applied but its completion record failed to write, so it will not be ` +
+        `announced until that is reconciled (P16-02): ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
@@ -647,14 +659,7 @@ const DISCOVERY_COST_PER_REQUEST = 2;
 // cap comes down first.
 const ACCEPT_COST_PER_REQUEST = 6;
 
-// How long an 'accepted' row may sit unstamped before the resolver treats it
-// as an apply that never finished. Comfortably longer than any healthy
-// acceptance, which completes inside one invocation.
-const UNAPPLIED_RECOVERY_AFTER_MS = 10 * 60 * 1000;
 
-// No separate cap: recovery rows share the discovery read's own LIMIT and the
-// same per-tick budget, so a backlog of them competes with deadline work
-// rather than being additional to it.
 
 // The decline path is a single compare-and-set.
 const DECLINE_COST_PER_REQUEST = 1;
@@ -667,69 +672,32 @@ const CHANGE_REQUEST_RESOLUTION_DEAD_LETTER_AFTER = 3;
 // the page ahead of healthy ones, bounded per invocation, per-row try/catch.
 export async function resolvePastDeadlineChangeRequests(env: Env, budget?: WorkBudget): Promise<string[]> {
   const now = Date.now();
-  // Two jobs, ONE query, and that is not a micro-optimisation.
+  // Pass-16 review (P16-01): this selects pending rows and ONLY pending rows.
   //
-  // The Pass-15 recovery arm (P15-08) began as its own SELECT and the
-  // fixed-reserve test caught it immediately: a query that runs on every tick
-  // whether or not it matches anything is a fixed cost, and cron/budget.ts
-  // records three separate incidents of exactly that starving
-  // sweepPurgeTerminalHistory outright. So the recovery rows ride along in the
-  // discovery read this sweep was already paying for, and the loop below
-  // dispatches on which kind of row it got.
+  // Pass 15 added a second disjunct for accepted rows with no `applied_at` and
+  // re-ran their effects. That was wrong, and the way it was wrong belongs in
+  // front of whoever reads this next: replaying an effect is not idempotent
+  // against a world that has since changed its mind. An `add_invitee`
+  // acceptance replayed after the organizer removed that person re-admitted
+  // them -- to an event whose title and description had been edited in the
+  // meantime, so it handed back access the organizer had deliberately revoked.
+  // A recurring `time_change` replayed after the organizer cancelled that
+  // occurrence set `is_cancelled` back to 0.
   //
-  // Second disjunct: an acceptance that claimed the decision and never
-  // recorded applying it (migration 0044). In a healthy database it matches
-  // nothing, and the partial index means asking costs nothing.
+  // "Re-applying an identical change is a no-op" was true and beside the
+  // point. The test written for it proved idempotence against an UNCHANGED
+  // world, and that was read as safety.
   const { results: requests } = await env.DB.prepare(
     `SELECT * FROM event_change_requests
-     WHERE (status = 'pending' AND kind = 'time_change' AND vote_deadline_at <= ?)
-        OR (status = 'accepted' AND applied_at IS NULL AND decided_at < ?)
+     WHERE status = 'pending' AND kind = 'time_change' AND vote_deadline_at <= ?
      ORDER BY vote_resolution_failures, vote_deadline_at, id
      LIMIT ?`,
   )
-    .bind(now, now - UNAPPLIED_RECOVERY_AFTER_MS, MAX_CHANGE_REQUESTS_RESOLVED_PER_INVOCATION)
+    .bind(now, MAX_CHANGE_REQUESTS_RESOLVED_PER_INVOCATION)
     .all<ChangeRequestRow>();
 
   const resolvedIds: string[] = [];
   for (const request of requests) {
-    // P15-08's recovery path: an acceptance whose apply left no record.
-    //
-    // Idempotent by construction, which is what lets it re-run the apply
-    // without checking the event first: the recurring path's override write is
-    // an upsert, and the non-recurring path goes through `updateEvent`'s
-    // revision guard, which throws ConflictError once the event has moved on.
-    // So the outcomes are "applied, stamp it", "already correct, stamp it"
-    // (the same statement -- re-applying an identical change is a no-op), and
-    // "the world moved on", which releases the row to 'pending' for the
-    // ordinary deadline path to decline rather than leaving it accepted
-    // forever.
-    if (request.status === 'accepted') {
-      if (budget && !budget.trySpend(ACCEPT_COST_PER_REQUEST)) break;
-      console.warn(
-        `Change request ${request.id} was accepted with no record of being applied; re-applying (P15-08).`,
-      );
-      const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`)
-        .bind(request.event_id)
-        .first<EventRow>();
-      try {
-        // A vanished event has nothing to apply and nothing to announce;
-        // stamping stops the row being revisited on every tick forever.
-        if (event) await applyChangeRequest(env, event, request);
-        await env.DB.prepare(`UPDATE event_change_requests SET applied_at = ? WHERE id = ?`)
-          .bind(now, request.id)
-          .run();
-      } catch (err) {
-        if (!(err instanceof ConflictError)) throw err;
-        await env.DB.prepare(
-          `UPDATE event_change_requests SET status = 'pending', decided_at = NULL, decided_by = NULL
-           WHERE id = ? AND status = 'accepted' AND applied_at IS NULL`,
-        )
-          .bind(request.id)
-          .run();
-      }
-      continue;
-    }
-
     if (budget && !budget.trySpend(DISCOVERY_COST_PER_REQUEST)) break;
     try {
       const tally = await getVoteTally(env, request.id);

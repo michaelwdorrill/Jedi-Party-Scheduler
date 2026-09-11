@@ -256,7 +256,14 @@ export async function loadConfirmedOptionsForEvents(
 // Expressed as SQL rather than a helper because it has to travel inside each
 // writer's own statement -- and because adding a query to the accept path
 // would move the pricing P13-05 measured against the Free-plan ceiling.
-// Callers bind: occurrence_date, event_id, event_id.
+// Callers bind, in this order: event_id, occurrence_date, event_id.
+//
+// That order is written down twice because it was written down WRONG the first
+// time (Pass-16 review): this comment said occurrence_date first while the
+// predicate below reads event_id first. No caller was affected -- all three
+// bind correctly -- but the Pass-15 brief called this fragment the most
+// dangerous thing in the pass and then documented its contract incorrectly,
+// which is the kind of error that makes the fourth caller wrong.
 export const OVERRIDE_ADMISSION_SQL = `(
   EXISTS (SELECT 1 FROM event_occurrence_overrides WHERE event_id = ? AND occurrence_date = ?)
   OR (SELECT COUNT(*) FROM event_occurrence_overrides WHERE event_id = ?) < ${LIMITS.MAX_OVERRIDES_PER_EVENT}
