@@ -2036,8 +2036,18 @@ async function sweepMinimumAttendeesDeadlines(
       if (budget.exhausted) return;
       cursors.set('minimum_attendees_recurring', event.id);
     }
-    if (recurringCandidates.length < GLOBAL_SCAN_LIMIT) cursors.set('minimum_attendees_recurring', null);
   }
+  // Outside the `length > 0` block above (Pass-12 review, P12-10). Nested
+  // inside it, a page of *zero* rows could never reach the reset -- and zero
+  // is exactly what this query returns once nothing sorts after the saved
+  // cursor any more, which is the ordinary consequence of the tail events it
+  // points past being cancelled, having their deadline switched off, or being
+  // deleted. From that tick on the predicate is `id > <stuck>` forever and
+  // every recurring deadline with a lower id is never evaluated again. The
+  // cursor is durable, so it outlives both the events that caused it and any
+  // number of restarts. The single arm above resets on any short page, zero
+  // included; this is the same rule, and the same one forEachGlobalRow keeps.
+  if (recurringCandidates.length < GLOBAL_SCAN_LIMIT) cursors.set('minimum_attendees_recurring', null);
 }
 
 // One occurrence (or the whole event, for the non-recurring case --
@@ -2062,71 +2072,33 @@ async function resolveMinimumAttendeesDeadline(
     // does not perform it -- leaving the occurrence for the next tick, rather
     // than cancelling it and then discovering it cannot pay for the notices
     // that are supposed to accompany it.
-    if (!budget.trySpend(1)) return;
-    let changed: number;
-    if (occurrenceDate) {
-      // One occurrence, not the series -- same primitive
-      // POST /events/:eventId/occurrences/:date/cancel already uses. The
-      // WHERE on the DO UPDATE branch is this sweep's own dedupe: a second
-      // tick finding the same already-cancelled occurrence changes nothing
-      // and sends no second notice.
-      const res = await env.DB.prepare(
-        `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled)
-         VALUES (?, ?, ?, 1)
-         ON CONFLICT(event_id, occurrence_date) DO UPDATE SET is_cancelled = 1
-         WHERE event_occurrence_overrides.is_cancelled = 0`,
-      )
-        .bind(newId(), event.id, occurrenceDate)
-        .run();
-      changed = res.meta.changes;
-    } else {
-      const res = await env.DB.prepare(
-        `UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'active'`,
-      )
-        .bind(Date.now(), event.id)
-        .run();
-      changed = res.meta.changes;
-    }
-    if (changed === 0) return; // already cancelled by an earlier tick
-
-    // The recipient lookup itself is a query, and was not charged for either.
-    if (!budget.trySpend(1)) return;
-
-    // Pass-11 review (R23). The whole recipient set, not just the slice this
-    // tick can afford to DM.
+    // Pass-12 review (P12-09). Everything this cancellation owes is now
+    // reserved, built and committed *with* it, rather than after it.
     //
-    // The old code took `budget.deliveriesAffordable` as the query's LIMIT,
-    // which quietly made the tick's remaining allowance decide who would ever
-    // be told. Everyone past that cut had no notification_log row written at
-    // all -- and once this occurrence is marked cancelled, expandOccurrences
-    // stops returning it, so resolveMinimumAttendeesDeadline is never called
-    // for it again and the general cancellation sweep deliberately skips
-    // recurring events. The source-independent retry consumer cannot help
-    // either: it scans for rows that exist, and these never existed. Measured
-    // in the review: 20 attendees, 11 notified, the other 9 never told their
-    // session was cancelled, on that tick or any later one.
+    // R23 made the notice durable for everyone instead of only the slice a
+    // tick could afford to DM, but recorded that obligation behind two further
+    // budget reservations that ran after the cancellation was already
+    // committed. Either failing returned from a function that had already
+    // cancelled the session, leaving no notification_log rows at all -- and
+    // the comment below this one explains exactly why nothing recovers that:
+    // a cancelled occurrence stops coming back from expandOccurrences, so this
+    // function is never called for it again; the general cancellation sweep
+    // skips recurring events; and the retry consumer scans for rows that
+    // exist, which these never did. Cancelled, and nobody ever told.
     //
-    // MAX_RESOLVED_INVITEES bounds an event's invite list, so this is the
-    // complete set by construction rather than another disguised cap.
+    // The recipient lookup moves above the write because it is a read that
+    // does not depend on the cancellation having happened -- attendance and
+    // votes are unaffected by the override row -- so doing it first costs
+    // nothing and is what makes the obligation set knowable before anything
+    // is committed.
+    if (!budget.trySpend(1)) return;
     const recipients = await getConfirmedAttendeeIds(env, event, null, occurrenceDate, {
       notificationType: 'event_cancelled_below_minimum',
       occurrenceDate,
       limit: LIMITS.MAX_RESOLVED_INVITEES,
     });
-    if (recipients.length === 0) return;
 
     const cancelMessage = `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`;
-
-    // The obligation is recorded for everyone before anything is delivered, so
-    // it survives this tick running out. These rows are pending outbox entries
-    // in the ordinary sense -- next_attempt_at due now, no claim held -- which
-    // is exactly what sweepDueNotificationRetries drains, at whatever pace the
-    // budget allows, across as many ticks as it takes. Pre-creating them does
-    // not suppress an immediate send: the claim below updates a row in this
-    // state rather than skipping it.
-    //
-    // ON CONFLICT DO NOTHING so a row from an earlier attempt keeps its own
-    // attempt count and backoff.
     const cancelledAt = Date.now();
     const rows = recipients.map((r) => [
       newId(),
@@ -2138,6 +2110,8 @@ async function resolveMinimumAttendeesDeadline(
       cancelledAt,
       cancelMessage,
     ]);
+    // ON CONFLICT DO NOTHING so a row from an earlier attempt keeps its own
+    // attempt count and backoff.
     const obligationStatements = chunkRows(rows, 8).map((chunk) =>
       env.DB.prepare(
         `INSERT INTO notification_log
@@ -2146,8 +2120,55 @@ async function resolveMinimumAttendeesDeadline(
          ON CONFLICT(user_id, event_id, notification_type, occurrence_date) DO NOTHING`,
       ).bind(...chunk.flat()),
     );
-    if (!budget.trySpend(obligationStatements.length)) return;
-    await env.DB.batch(obligationStatements);
+
+    // One reservation covering the cancellation and every notice it obliges,
+    // so a tick that cannot pay for all of it performs none of it and leaves
+    // the occurrence for the next tick to resolve intact. Charged before the
+    // write for R06's reason, which still applies: a write the ledger does not
+    // know about is how a tick sails past the Free-plan ceiling.
+    if (!budget.trySpend(1 + obligationStatements.length)) return;
+
+    // The cancellation and every notice it obliges, in one batch -- D1 runs a
+    // batch as a single transaction, so the occurrence is cancelled if and
+    // only if the obligation to tell people about it is recorded too. That
+    // equivalence is the whole point: a partial outcome here is unrecoverable
+    // in both directions, and this makes both halves impossible to lose
+    // separately.
+    //
+    // The cancellation statement goes first so its meta.changes is this
+    // sweep's own dedupe: a second tick finding the same already-cancelled
+    // occurrence changes nothing, and the notices' ON CONFLICT DO NOTHING
+    // makes them no-ops on that pass rather than a second announcement.
+    //
+    // Pass-11 review (R23) is preserved intact within it: the obligation is
+    // the whole recipient set, not the slice this tick can afford to DM. The
+    // old code took budget.deliveriesAffordable as the query's LIMIT, which
+    // quietly made the tick's remaining allowance decide who would ever be
+    // told -- measured in that review: 20 attendees, 11 notified, 9 never told
+    // their session was cancelled, on that tick or any later one.
+    // MAX_RESOLVED_INVITEES bounds an event's invite list, so the set above is
+    // complete by construction rather than another disguised cap.
+    //
+    // These rows are ordinary pending outbox entries -- next_attempt_at due
+    // now, no claim held -- which is exactly what sweepDueNotificationRetries
+    // drains, across as many ticks as it takes. Pre-creating them does not
+    // suppress an immediate send: the claim below updates a row in this state
+    // rather than skipping it.
+    const cancelStatement = occurrenceDate
+      ? env.DB.prepare(
+          `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled)
+           VALUES (?, ?, ?, 1)
+           ON CONFLICT(event_id, occurrence_date) DO UPDATE SET is_cancelled = 1
+           WHERE event_occurrence_overrides.is_cancelled = 0`,
+        ).bind(newId(), event.id, occurrenceDate)
+      : env.DB.prepare(`UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'active'`).bind(
+          Date.now(),
+          event.id,
+        );
+
+    const [cancelResult] = await env.DB.batch([cancelStatement, ...obligationStatements]);
+    if (cancelResult.meta.changes === 0) return; // already cancelled by an earlier tick
+    if (recipients.length === 0) return;
 
     // Then deliver as much of it as this tick can pay for. Whatever is left
     // is already durable above.
@@ -2206,18 +2227,40 @@ async function resolveMinimumAttendeesDeadline(
 // is worth knowing about either way. Scoped to the same deadline-opted-in
 // events sweepMinimumAttendeesDeadlines covers, and shares its shape for the
 // same reason: no cursor, uncharged discovery, per RESERVED_QUERIES.
-async function sweepMinimumAttendeesDeadlineWarnings(env: Env, budget: TickBudget): Promise<void> {
+// Pass-12 review (P12-08). This sweep is sweepMinimumAttendeesDeadlines'
+// sibling in every respect that matters -- same events, same two arms, same
+// recurrence expansion -- and R06 fixed only the one the finding named. So
+// everything R06 corrected for the day the deadline lands was still wrong here
+// for the day before it: the overrides lookup ran per candidate event, so did
+// the recurrence-rule query expandOccurrencesForEvent falls back to issuing
+// when it is not handed a rule, the organizer lookup was uncharged, and
+// neither page had a cursor or even an ORDER BY.
+//
+// Measured on the identical thirty-event workload R06 used: 105 real D1
+// statements against Cloudflare's documented Free-plan ceiling of 50, with
+// TickBudget reporting itself comfortably inside its allowance -- and, once
+// the ledger was made honest, nineteen of thirty events reached across twelve
+// ticks with the remaining eleven unreachable. Both halves of R06's fix, in
+// the place R06 did not look.
+async function sweepMinimumAttendeesDeadlineWarnings(
+  env: Env,
+  budget: TickBudget,
+  cursors: CursorStore,
+): Promise<void> {
   const now = Date.now();
   const warningWindowEnd = now + DAY_MS;
 
+  const afterSingle = cursors.get('minimum_attendees_warning_single');
   const { results: dueNonRecurring } = await env.DB.prepare(
     `SELECT * FROM events
      WHERE status = 'active' AND event_type = 'single' AND is_recurring = 0
        AND minimum_attendees IS NOT NULL AND minimum_attendees_deadline_at IS NOT NULL
        AND minimum_attendees_deadline_at > ? AND minimum_attendees_deadline_at <= ?
+       AND (? IS NULL OR id > ?)
+     ORDER BY id
      LIMIT ?`,
   )
-    .bind(now, warningWindowEnd, GLOBAL_SCAN_LIMIT)
+    .bind(now, warningWindowEnd, afterSingle, afterSingle ?? '', GLOBAL_SCAN_LIMIT)
     .all<EventRow & { minimum_attendees: number }>();
 
   for (const event of dueNonRecurring) {
@@ -2227,33 +2270,65 @@ async function sweepMinimumAttendeesDeadlineWarnings(env: Env, budget: TickBudge
     } catch (err) {
       console.error(`sweepMinimumAttendeesDeadlineWarnings failed for event ${event.id}:`, err);
     }
+    // Never advanced past an event the tick ran out on, the same rule both
+    // arms of sweepMinimumAttendeesDeadlines and forEachGlobalRow follow.
+    if (budget.exhausted) return;
+    cursors.set('minimum_attendees_warning_single', event.id);
   }
+  if (dueNonRecurring.length < GLOBAL_SCAN_LIMIT) cursors.set('minimum_attendees_warning_single', null);
 
+  const afterRecurring = cursors.get('minimum_attendees_warning_recurring');
   const { results: recurringCandidates } = await env.DB.prepare(
     `SELECT * FROM events
      WHERE status = 'active' AND event_type = 'single' AND is_recurring = 1
        AND minimum_attendees IS NOT NULL AND minimum_attendees_deadline_hours_before IS NOT NULL
+       AND (? IS NULL OR id > ?)
+     ORDER BY id
      LIMIT ?`,
   )
-    .bind(GLOBAL_SCAN_LIMIT)
+    .bind(afterRecurring, afterRecurring ?? '', GLOBAL_SCAN_LIMIT)
     .all<EventRow & { minimum_attendees: number; minimum_attendees_deadline_hours_before: number }>();
 
-  for (const event of recurringCandidates) {
-    if (budget.exhausted) return;
-    try {
-      const hoursBeforeMs = event.minimum_attendees_deadline_hours_before * HOUR_MS;
-      const overrides = (await loadOverridesForEvents(env, [event.id])).get(event.id) ?? [];
-      const occurrences = await expandOccurrencesForEvent(env, event, now, now + hoursBeforeMs + DAY_MS, overrides);
-      for (const occ of occurrences) {
-        if (budget.exhausted) return;
-        const deadline = occ.startAt - hoursBeforeMs;
-        if (deadline <= now || deadline > warningWindowEnd) continue;
-        await sendMinimumAttendeesDeadlineWarning(env, budget, event, occ.date);
+  if (recurringCandidates.length > 0) {
+    // Bulk-loaded once for the admitted set and charged for what it costs,
+    // exactly as the deadline sweep does it: both loaders chunk their ids
+    // identically, so the chunk count is the query count for each.
+    const recurringIds = recurringCandidates.map((e) => e.id);
+    const bulkLoadCost = chunkIds(recurringIds).length * 2;
+    if (!budget.trySpend(bulkLoadCost)) return;
+
+    const overridesByEvent = await loadOverridesForEvents(env, recurringIds);
+    const rulesByEvent = await loadRecurrenceRulesForEvents(env, recurringIds);
+
+    for (const event of recurringCandidates) {
+      if (budget.exhausted) return;
+      try {
+        const hoursBeforeMs = event.minimum_attendees_deadline_hours_before * HOUR_MS;
+        const occurrences = await expandOccurrencesForEvent(
+          env,
+          event,
+          now,
+          now + hoursBeforeMs + DAY_MS,
+          overridesByEvent.get(event.id) ?? [],
+          rulesByEvent.get(event.id),
+        );
+        for (const occ of occurrences) {
+          if (budget.exhausted) return;
+          const deadline = occ.startAt - hoursBeforeMs;
+          if (deadline <= now || deadline > warningWindowEnd) continue;
+          await sendMinimumAttendeesDeadlineWarning(env, budget, event, occ.date);
+        }
+      } catch (err) {
+        console.error(`sweepMinimumAttendeesDeadlineWarnings failed for recurring event ${event.id}:`, err);
       }
-    } catch (err) {
-      console.error(`sweepMinimumAttendeesDeadlineWarnings failed for recurring event ${event.id}:`, err);
+      if (budget.exhausted) return;
+      cursors.set('minimum_attendees_warning_recurring', event.id);
     }
   }
+  // Outside the block, for P12-10's reason applied here before it can become
+  // the same bug: a zero-row page is the ordinary end of a pass, and a reset
+  // it cannot reach is a cursor that sticks forever.
+  if (recurringCandidates.length < GLOBAL_SCAN_LIMIT) cursors.set('minimum_attendees_warning_recurring', null);
 }
 
 async function sendMinimumAttendeesDeadlineWarning(
@@ -2267,6 +2342,12 @@ async function sendMinimumAttendeesDeadlineWarning(
   if (confirmed >= event.minimum_attendees) return;
 
   const now = Date.now();
+  // Pass-12 review (P12-08): charged, like the identical organizer lookup in
+  // resolveMinimumAttendeesDeadline's prompt arm. It runs for every candidate
+  // occurrence below its minimum whether or not a DM ends up going anywhere,
+  // so leaving it off the ledger understated the sweep's cost by one query per
+  // occurrence examined -- which is most of them.
+  if (!budget.trySpend(1)) return;
   const recipient = await env.DB.prepare(
     `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
      FROM users u
@@ -3262,7 +3343,9 @@ export async function runReminderSweep(env: Env): Promise<void> {
   await runIsolated('confirmedMultiWinnerOptions', () => sweepConfirmedMultiWinnerOptions(env, budget, cursors));
   await runIsolated('cancellationCascade', () => sweepCancellationCascade(env, budget));
   await runIsolated('minimumAttendeesDeadlines', () => sweepMinimumAttendeesDeadlines(env, budget, cursors));
-  await runIsolated('minimumAttendeesDeadlineWarnings', () => sweepMinimumAttendeesDeadlineWarnings(env, budget));
+  await runIsolated('minimumAttendeesDeadlineWarnings', () =>
+    sweepMinimumAttendeesDeadlineWarnings(env, budget, cursors),
+  );
   await runIsolated('newInvites', () => sweepNewInvites(env, budget));
   await runIsolated('changeRequestNotifications', () => sweepChangeRequestNotifications(env, budget));
   await runIsolated('reminders', () => sweepReminders(env, budget, cursors));

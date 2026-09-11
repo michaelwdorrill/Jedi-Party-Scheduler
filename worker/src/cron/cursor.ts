@@ -44,7 +44,15 @@ export type CursorName =
   // consecutive ticks reached nine of thirty events, and would never have
   // reached the other twenty-one.
   | 'minimum_attendees_single'
-  | 'minimum_attendees_recurring';
+  | 'minimum_attendees_recurring'
+  // Pass-12 review (P12-08). R06 gave the deadline sweep above its cursors and
+  // left its sibling -- the T-24h warning for the same events, same shape --
+  // selecting both its pages with a bare LIMIT and no ORDER BY, so it had the
+  // identical fairness bug forty lines further down the same file. Measured
+  // before this: nineteen of thirty events warned across twelve ticks, with
+  // the other eleven unreachable.
+  | 'minimum_attendees_warning_single'
+  | 'minimum_attendees_warning_recurring';
 
 // The single-event scan orders by (start_at, id), so its key is both.
 export interface EventKey {
