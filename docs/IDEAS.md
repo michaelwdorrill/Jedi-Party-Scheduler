@@ -325,25 +325,22 @@ the lifecycle is serialised rather than raced. Recoverable by reconnecting,
 nothing lost or disclosed, and it needs the reconnect to land inside one
 in-flight HTTPS request.
 
-### 74. A failed organizer RSVP notice is never retried
+### 74. A failed organizer RSVP notice is never retried -- fixed in Pass 16
 
-From the Pass-16 review (P16-08), and unrelated to F-43's membership fix in
-everything but the query it lives in. `sweepOrganizerRsvpNotices` selects
+From the Pass-16 review (P16-08). `sweepOrganizerRsvpNotices` selected
 candidates with `l.id IS NULL` -- no log row at all -- but the outbox writes a
-log row even when a send FAILS, recording the attempt and a retry time. So a
-transient Discord failure creates the row, and this consumer never selects it
-again; no other consumer retries that table. The recorded retry time passes and
-nothing reads it.
+log row even when a send FAILS, because that is where the attempt count and the
+backoff live. So one transient Discord error created a row the query then
+excluded forever, and nothing else drains that table: the recorded
+`next_attempt_at` passed and was read by nothing.
 
-Demonstrated: one 503 on the organizer's message, then three healthy sweeps
-fifteen minutes apart, no second attempt, row still at attempt 1 undelivered.
-
-The fix is to select due pending and expired-lease rows as well as absent ones
--- the shape `sweepDueNotificationRetries` already uses for the notification
-outbox (P13-13) -- keeping the membership and eligibility predicates, the
-per-tick bound, an attempt limit and backoff. Worth doing; it is a lost
-notification rather than a wrong one, which is why it is not ahead of the
-lifecycle items above.
+Fixed by widening the candidate query to also select undelivered, unfailed rows
+that are due, including P13-13's abandoned-claim arm -- the shape the
+notification and group-nudge consumers already use. Kept here because of the
+reasoning about HOW: widening the existing query rather than adding a third
+retry consumer avoids a new fixed per-tick query, which is the cost
+`cron/budget.ts` records three incidents of, and which the Pass-15 recovery arm
+tripped over as well.
 
 ### 75. A successful Google insert whose mapping is refused is duplicated
 
@@ -361,6 +358,30 @@ and orphaning rather than disclosure. The honest fix is provider-side
 idempotency (a stable client-supplied id) or durable reconciliation of creates
 whose mapping was rejected. A re-read before creating narrows nothing that
 matters, because the create is already away.
+
+### 76. The development-dependency audit cannot be cleared by `npm audit fix` alone
+
+From the Pass-16 review's dependency table, and an attempt at it in the same
+pass. Production dependencies are clean in both packages. The development
+tooling is not: seven affected entries in the worker (five high, two moderate)
+and one in the frontend, through Vitest/mocker, the Wrangler/Miniflare chain
+(sharp, undici), nanoid, and js-yaml. No exploit or affected deployed request
+path has been established for any of them -- the worker tests run in Node with
+no public mocker server, and the frontend has no runtime YAML parser -- but
+Wrangler and Miniflare are the real deploy toolchain and warrant maintenance.
+
+**What was tried:** plain `npm audit fix` in `worker/`. It resolves the five
+high entries, touches only the lockfile (no declared version changes), and the
+whole test suite still passes -- but it moves `@cloudflare/workers-types` and
+the **test** typecheck then fails with `TS2554` in `test/stage3.test.ts`, where
+a `.toString('hex')` on a crypto signature stops type-checking. The remaining
+two moderate entries need `--force` regardless.
+
+So this is a real piece of work with type fallout to resolve, not a rider to be
+slipped in before a review package, and it was reverted on that basis. Worth
+doing deliberately: run the fix, resolve the typing changes, and check that
+`wrangler deploy` still works on the sandbox before trusting it -- the sandbox
+deploy is the only thing in this project that exercises Wrangler for real.
 
 ## Parked until after 1.0
 
