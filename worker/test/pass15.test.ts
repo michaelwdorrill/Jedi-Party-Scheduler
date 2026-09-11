@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
 import { runReminderSweep } from '../src/cron/reminders';
-import { acceptChangeRequest } from '../src/lib/changeRequests';
+import { acceptChangeRequest, resolvePastDeadlineChangeRequests } from '../src/lib/changeRequests';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
@@ -805,5 +805,172 @@ describe('the override cap binds every writer a person can drive (P15-06)', () =
     // strand people at the cap with no way to change what is already there.
     await acceptChangeRequest(env, event as never, request as never, 'organizer');
     expect(await countRows(db, 'event_occurrence_overrides', `event_id = 'ev-1'`)).toBe(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P15-08
+// ---------------------------------------------------------------------------
+
+// P13-11 and P14-12 under a third number, and the one both reviewers called
+// non-blocking two passes running. `applyAndAccept` claims the decision and
+// then applies it; if the isolate dies in between, or the apply and its
+// compensating release both fail, the request reads 'accepted' over an event
+// that never moved and the resolver cannot see it again -- its query looks for
+// 'pending'.
+//
+// What makes it worse than a stuck row is the DM: the decision arm tells the
+// requester "accepted", so they plan around a time the invitees never saw and
+// find out by turning up.
+//
+// Migration 0044 adds `applied_at`, which is what makes those rows nameable.
+describe('an acceptance that never applied is recovered, not announced (P15-08)', () => {
+  async function seedStranded(
+    db: ShimDatabase,
+    opts: { recurring: boolean; revision?: number },
+  ): Promise<{ start: number }> {
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'asker');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'asker', 'guild-1');
+    await db.prepare(`UPDATE users SET dm_channel_id = 'dm-asker' WHERE id = 'asker'`).run();
+
+    const start = Date.now() + 5 * DAY_MS;
+    await seedEvent(db, {
+      id: 'ev-1',
+      organizerId: 'organizer',
+      title: 'Thursday Game',
+      startAt: opts.recurring ? null : start,
+      endAt: opts.recurring ? null : start + 2 * HOUR_MS,
+      isRecurring: opts.recurring ? 1 : 0,
+    });
+    await seedInvite(db, 'ev-1', 'asker');
+
+    // The stranded state: claimed, decided, never applied. Exactly what the
+    // isolate dying between two statements leaves behind.
+    await db
+      .prepare(
+        `INSERT INTO event_change_requests
+           (id, event_id, requester_id, kind, target_user_id, occurrence_date, status, event_revision,
+            proposed_start_at, proposed_end_at, message, created_at, decided_at, decided_by, applied_at)
+         VALUES ('cr-1', 'ev-1', 'asker', 'time_change', NULL, ?, 'accepted', ?, ?, ?, NULL, ?, ?, 'organizer', NULL)`,
+      )
+      .bind(
+        opts.recurring ? '2030-03-14' : '',
+        opts.revision ?? 0,
+        start + 3 * HOUR_MS,
+        start + 5 * HOUR_MS,
+        Date.now() - DAY_MS,
+        Date.now() - HOUR_MS,
+      )
+      .run();
+    return { start };
+  }
+
+  it('re-applies the change the acceptance promised', async () => {
+    const { db, env } = setup('paid');
+    const { start } = await seedStranded(db, { recurring: true });
+
+    await resolvePastDeadlineChangeRequests(env);
+
+    const override = await db
+      .prepare(`SELECT override_start_at FROM event_occurrence_overrides WHERE event_id = 'ev-1'`)
+      .first<{ override_start_at: number }>();
+    expect(override, 'the accepted change was never applied, and nothing went back for it').toBeTruthy();
+    expect(override!.override_start_at).toBe(start + 3 * HOUR_MS);
+
+    const row = await db
+      .prepare(`SELECT status, applied_at FROM event_change_requests WHERE id = 'cr-1'`)
+      .first<{ status: string; applied_at: number | null }>();
+    expect(row!.status).toBe('accepted');
+    expect(row!.applied_at, 'the recovered row was left unstamped, so it recovers again forever').not.toBeNull();
+  });
+
+  it('releases the row when the event has moved on since', async () => {
+    const { db, env } = setup('paid');
+    await seedStranded(db, { recurring: false, revision: 0 });
+    // The organizer edited the event in the meantime, so the proposed time was
+    // computed against a schedule that no longer exists.
+    await db.prepare(`UPDATE events SET revision = 7 WHERE id = 'ev-1'`).run();
+
+    await resolvePastDeadlineChangeRequests(env);
+
+    const row = await db
+      .prepare(`SELECT status, decided_at, applied_at FROM event_change_requests WHERE id = 'cr-1'`)
+      .first<{ status: string; decided_at: number | null; applied_at: number | null }>();
+    expect(row!.status, 'a change that can no longer be applied was left reading as accepted').toBe('pending');
+    expect(row!.decided_at).toBeNull();
+    expect(row!.applied_at).toBeNull();
+  });
+
+  // The window this gate exists for is a narrow one, and the test has to sit
+  // inside it: `runReminderSweep` runs the resolver BEFORE the notice arm, so
+  // a row old enough to recover is recovered and then announced -- correctly.
+  // The gap is a request whose apply died moments ago: too recent for the
+  // ten-minute recovery threshold, and already visible to a notice arm that
+  // runs every tick.
+  it('does not tell the requester it was accepted before it has been', async () => {
+    const { db, env } = setup('paid');
+    await seedStranded(db, { recurring: true });
+    await db
+      .prepare(`UPDATE event_change_requests SET decided_at = ? WHERE id = 'cr-1'`)
+      .bind(Date.now() - 60 * 1000)
+      .run();
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    expect(
+      await countRows(db, 'change_request_log', `user_id = 'asker' AND notification_type = 'change_request_decision'`),
+      'the requester was told "accepted" for a change that had not happened',
+    ).toBe(0);
+  });
+
+  // An invariant guard, not a reproduction: it passes either way, because the
+  // unfixed code announced everything. It is here because the gate's risk is
+  // over-blocking -- an acceptance that never gets announced at all is a worse
+  // outcome than one announced early.
+  it('still tells them once it has actually been applied', async () => {
+    const { db, env } = setup('paid');
+    await seedStranded(db, { recurring: true });
+    await db.prepare(`UPDATE event_change_requests SET applied_at = ? WHERE id = 'cr-1'`).bind(Date.now()).run();
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    expect(
+      await countRows(db, 'change_request_log', `user_id = 'asker' AND notification_type = 'change_request_decision'`),
+      'an applied acceptance stopped being announced at all',
+    ).toBe(1);
+  });
+
+  it('stamps a healthy acceptance as it happens', async () => {
+    const { db, env } = setup('paid');
+    await seedStranded(db, { recurring: true });
+    // Put it back to the state a real vote resolution starts from.
+    await db
+      .prepare(
+        `UPDATE event_change_requests
+         SET status = 'pending', decided_at = NULL, decided_by = NULL, vote_deadline_at = ?
+         WHERE id = 'cr-1'`,
+      )
+      .bind(Date.now() - HOUR_MS)
+      .run();
+    // The tally is `yes > no`, so a request nobody voted on is declined.
+    await db
+      .prepare(
+        `INSERT INTO event_change_request_votes (request_id, user_id, vote, voted_at) VALUES ('cr-1', 'asker', 'yes', ?)`,
+      )
+      .bind(Date.now())
+      .run();
+
+    await resolvePastDeadlineChangeRequests(env);
+
+    const row = await db
+      .prepare(`SELECT status, applied_at FROM event_change_requests WHERE id = 'cr-1'`)
+      .first<{ status: string; applied_at: number | null }>();
+    expect(row!.status).toBe('accepted');
+    expect(row!.applied_at, 'an ordinary acceptance left no record of applying').not.toBeNull();
   });
 });

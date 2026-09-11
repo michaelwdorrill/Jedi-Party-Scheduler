@@ -897,6 +897,14 @@ async function sweepChangeRequestNotifications(env: Env, budget: TickBudget): Pr
      LEFT JOIN change_request_log crl
        ON crl.request_id = ecr.id AND crl.user_id = ecr.requester_id AND crl.notification_type = 'change_request_decision'
      WHERE ecr.status IN ('accepted','declined')
+       -- Pass-15 review (P15-08). An acceptance is only announceable once the
+       -- change it accepted has actually landed. The stamp is migration
+       -- 0044's; without this clause the worst version of that finding is the
+       -- notice, not the row -- the requester is DMed "accepted", plans around
+       -- a time the invitees never saw, and finds out by turning up to an
+       -- event that never moved. A declined request has nothing to apply and
+       -- is unaffected.
+       AND (ecr.status = 'declined' OR ecr.applied_at IS NOT NULL)
        -- Pass-14 review (P14-01). Still has access to the event, not merely
        -- still in its server.
        --

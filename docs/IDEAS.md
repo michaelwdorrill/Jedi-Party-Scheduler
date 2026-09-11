@@ -144,46 +144,57 @@ recipient selection now does -- is the cleaner shape and costs nothing at write
 time, but it changes resolution behaviour for polls that are mid-flight, so it
 wants doing deliberately rather than as a rider on a security fix.
 
-### 70. Accepting a change request is not atomic with applying it
+### 70. Accepting a change request is not atomic with applying it -- closed in Pass 15
 
-From the Pass-13 review (P13-11). `applyAndAccept` claims the decision -- moves
-the request from `pending` to `accepted` -- and then mutates the event in a
-separate transaction, with a compensating release if the mutation throws.
+From the Pass-13 review (P13-11), re-raised as P14-12 and P15-08. **Fixed in
+Pass 15 by a third option neither this entry nor either reviewer's first
+suggestion had proposed, and kept here because the two rejected designs are the
+valuable part of the record.**
 
-Pass 13 closed the budget route into the bad state by reserving the whole
-acceptance before claiming, and corrected the pricing that made a tick exceed
-its allowance in the first place (P13-05). What is left is narrower: if the
-process dies between the claim and the apply, or the apply *and* its
-compensating release both fail, the request reads `accepted` over an event that
-never moved. The resolver will not pick it up again, because it is no longer
-`pending`.
+`applyAndAccept` claims the decision -- moves the request from `pending` to
+`accepted` -- and then mutates the event in a separate transaction, with a
+compensating release if the mutation throws. Pass 13 closed the budget route
+into the bad state by reserving the whole acceptance before claiming (P13-05).
+What remained: if the process dies between the claim and the apply, or the
+apply *and* its compensating release both fail, the request reads `accepted`
+over an event that never moved, and the resolver will not pick it up again
+because it is no longer `pending`.
 
-Not fixed in that pass because both honest options are more than a rider on a
-security batch. Either:
+The two options recorded here for two passes were both heavier than the
+problem:
 
 - add an `applying` state to `event_change_requests.status`, which SQLite
   cannot do without a full table rebuild since the column carries a CHECK
-  constraint -- and give the resolver a recovery arm that finalises a stale
-  `applying` row when the event already matches the proposed time and re-applies
-  when it does not; or
-- thread the status compare-and-set into `updateEvent`'s own batch, so the
-  event mutation and the decision commit as one D1 transaction. `updateEvent`
-  batches at a single point, so this is contained -- but it means adding a
-  guard so the event statements do not apply when the CAS matches nothing,
-  which is surgery in the one write path every event edit goes through.
+  constraint;
+- thread the status compare-and-set into `updateEvent`'s own batch, which means
+  surgery in the one write path every event edit goes through.
 
-The second is the better end state. Both want doing deliberately: this pass
-spent most of its length fixing regressions introduced by clever changes to
-exactly this kind of code.
+**What was actually built (migration 0044) is detection rather than a new
+state**: a nullable `applied_at` column, no CHECK, no rebuild. The apply path
+stamps it; the resolver gains a recovery arm for rows that are `accepted` with
+`applied_at IS NULL` past a ten-minute threshold, and re-runs the apply, which
+is idempotent because the override write is an upsert and `updateEvent` is
+revision-guarded. A change that can no longer be applied is released to
+`pending` for the ordinary deadline path to decline, rather than sitting
+accepted forever.
 
-**Pass 14 re-raised this as P14-12 and it is still open, deliberately.** Both
-reviewers looked at it independently and both judged it non-blocking for
-0.8.x: the window needs the isolate to die between the claim and the apply, or
-the apply *and* its compensating release to fail together, and the outcome is a
-request that reads `accepted` over an unmoved event -- visible, correctable by
-hand, and not a disclosure. The reasoning above for why it is not a rider on a
-security batch is unchanged, and Pass 14 spent its length on eleven other
-findings.
+Two details worth keeping, because both were nearly got wrong:
+
+- **The recovery arm rides in the resolver's existing discovery read.** Written
+  as its own SELECT it added a fixed per-tick query, and the fixed-reserve test
+  caught it immediately -- `cron/budget.ts` records three separate incidents of
+  exactly that starving `sweepPurgeTerminalHistory`. It is now a second
+  disjunct on a query the sweep was already paying for.
+- **The decision notice gates on `applied_at`.** The worst version of this
+  finding was never the row, it was the DM: the requester is told "accepted",
+  plans around a time the invitees never saw, and finds out by turning up.
+  `runReminderSweep` runs the resolver before the notice arm, so the exposed
+  window is a request whose apply died in the last ten minutes -- narrow, and
+  exactly what the gate covers.
+
+The backfill in the migration is load-bearing: without it every
+already-accepted request reads as unapplied on the first tick after deploy and
+the recovery arm re-applies all of them.
 
 ### 71. A same-account reconnect can still race the tail of a disconnect
 

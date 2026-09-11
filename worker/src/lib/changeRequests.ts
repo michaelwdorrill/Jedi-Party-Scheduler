@@ -336,6 +336,17 @@ async function applyAndAccept(
 
   try {
     await applyChangeRequest(env, event, request);
+    // Pass-15 review (P15-08). The change has landed; say so, so that a row
+    // reading 'accepted' with no stamp is recognisable as one whose apply did
+    // not finish. This write is deliberately NOT required to be atomic with
+    // the apply -- it cannot be, across two statements -- and it does not need
+    // to be, because the recovery arm reconciles by looking at the EVENT
+    // rather than by trusting the stamp: an unstamped row whose event already
+    // matches is stamped, and one whose event does not is applied again.
+    // Detection instead of a new state (migration 0044).
+    await env.DB.prepare(`UPDATE event_change_requests SET applied_at = ? WHERE id = ?`)
+      .bind(Date.now(), request.id)
+      .run();
   } catch (err) {
     // The claim is released rather than left standing over a change that did
     // not happen. Without this a stale revision -- which updateEvent below
@@ -620,12 +631,30 @@ export interface WorkBudget {
 // Discovery is what every request pays before its branch is known.
 const DISCOVERY_COST_PER_REQUEST = 2;
 
-// Claim, updateEvent's three-statement batch, and the compensating release.
+// Claim, updateEvent's three-statement batch, the compensating release, and
+// (Pass-15 review, P15-08) the applied_at stamp.
 // The release is reserved up front deliberately (P13-11): it is the statement
 // that undoes a claim whose apply failed, and a release that cannot be paid
 // for is how a request ends up permanently 'accepted' over an event that
 // never moved.
-const ACCEPT_COST_PER_REQUEST = 5;
+//
+// The sixth query is the stamp, and it is priced rather than absorbed: this
+// pass's own P15-06 declined to add a query to this path for exactly this
+// reason, and the difference is that the stamp is what makes the failure this
+// number exists to prevent RECOVERABLE rather than merely less likely. Six
+// healthy decisions reserve 48 against the Free plan's 50, which is the
+// tightest this tick has ever been -- if it needs to grow again, the per-tick
+// cap comes down first.
+const ACCEPT_COST_PER_REQUEST = 6;
+
+// How long an 'accepted' row may sit unstamped before the resolver treats it
+// as an apply that never finished. Comfortably longer than any healthy
+// acceptance, which completes inside one invocation.
+const UNAPPLIED_RECOVERY_AFTER_MS = 10 * 60 * 1000;
+
+// No separate cap: recovery rows share the discovery read's own LIMIT and the
+// same per-tick budget, so a backlog of them competes with deadline work
+// rather than being additional to it.
 
 // The decline path is a single compare-and-set.
 const DECLINE_COST_PER_REQUEST = 1;
@@ -638,17 +667,69 @@ const CHANGE_REQUEST_RESOLUTION_DEAD_LETTER_AFTER = 3;
 // the page ahead of healthy ones, bounded per invocation, per-row try/catch.
 export async function resolvePastDeadlineChangeRequests(env: Env, budget?: WorkBudget): Promise<string[]> {
   const now = Date.now();
+  // Two jobs, ONE query, and that is not a micro-optimisation.
+  //
+  // The Pass-15 recovery arm (P15-08) began as its own SELECT and the
+  // fixed-reserve test caught it immediately: a query that runs on every tick
+  // whether or not it matches anything is a fixed cost, and cron/budget.ts
+  // records three separate incidents of exactly that starving
+  // sweepPurgeTerminalHistory outright. So the recovery rows ride along in the
+  // discovery read this sweep was already paying for, and the loop below
+  // dispatches on which kind of row it got.
+  //
+  // Second disjunct: an acceptance that claimed the decision and never
+  // recorded applying it (migration 0044). In a healthy database it matches
+  // nothing, and the partial index means asking costs nothing.
   const { results: requests } = await env.DB.prepare(
     `SELECT * FROM event_change_requests
-     WHERE status = 'pending' AND kind = 'time_change' AND vote_deadline_at <= ?
+     WHERE (status = 'pending' AND kind = 'time_change' AND vote_deadline_at <= ?)
+        OR (status = 'accepted' AND applied_at IS NULL AND decided_at < ?)
      ORDER BY vote_resolution_failures, vote_deadline_at, id
      LIMIT ?`,
   )
-    .bind(now, MAX_CHANGE_REQUESTS_RESOLVED_PER_INVOCATION)
+    .bind(now, now - UNAPPLIED_RECOVERY_AFTER_MS, MAX_CHANGE_REQUESTS_RESOLVED_PER_INVOCATION)
     .all<ChangeRequestRow>();
 
   const resolvedIds: string[] = [];
   for (const request of requests) {
+    // P15-08's recovery path: an acceptance whose apply left no record.
+    //
+    // Idempotent by construction, which is what lets it re-run the apply
+    // without checking the event first: the recurring path's override write is
+    // an upsert, and the non-recurring path goes through `updateEvent`'s
+    // revision guard, which throws ConflictError once the event has moved on.
+    // So the outcomes are "applied, stamp it", "already correct, stamp it"
+    // (the same statement -- re-applying an identical change is a no-op), and
+    // "the world moved on", which releases the row to 'pending' for the
+    // ordinary deadline path to decline rather than leaving it accepted
+    // forever.
+    if (request.status === 'accepted') {
+      if (budget && !budget.trySpend(ACCEPT_COST_PER_REQUEST)) break;
+      console.warn(
+        `Change request ${request.id} was accepted with no record of being applied; re-applying (P15-08).`,
+      );
+      const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`)
+        .bind(request.event_id)
+        .first<EventRow>();
+      try {
+        // A vanished event has nothing to apply and nothing to announce;
+        // stamping stops the row being revisited on every tick forever.
+        if (event) await applyChangeRequest(env, event, request);
+        await env.DB.prepare(`UPDATE event_change_requests SET applied_at = ? WHERE id = ?`)
+          .bind(now, request.id)
+          .run();
+      } catch (err) {
+        if (!(err instanceof ConflictError)) throw err;
+        await env.DB.prepare(
+          `UPDATE event_change_requests SET status = 'pending', decided_at = NULL, decided_by = NULL
+           WHERE id = ? AND status = 'accepted' AND applied_at IS NULL`,
+        )
+          .bind(request.id)
+          .run();
+      }
+      continue;
+    }
+
     if (budget && !budget.trySpend(DISCOVERY_COST_PER_REQUEST)) break;
     try {
       const tally = await getVoteTally(env, request.id);
