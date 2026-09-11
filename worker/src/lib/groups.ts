@@ -1,6 +1,6 @@
 import type { Env } from '../env';
 import { MEMBERSHIP_GRACE_MS } from './db';
-import { ValidationError } from './validate';
+import { LIMITS, ValidationError } from './validate';
 
 export interface CommonServer {
   id: string;
@@ -45,6 +45,26 @@ export async function commonServerSet(env: Env, userIds: readonly string[]): Pro
 // wording -- every caller (group create, whole-roster PATCH, add-member)
 // wants the same refusal.
 export async function assertValidRoster(env: Env, userIds: readonly string[]): Promise<void> {
+  // Pass-12 review (P12-17). This function is the one thing all three roster
+  // paths agree to call, and it checked only the shared-server rule -- so the
+  // size cap was enforced by each caller separately, and none of them got it
+  // right for the roster that actually gets written.
+  //
+  // POST /:groupId/members had no size check of any kind: an owner could add a
+  // 26th, 50th, 200th member to a 25-member group and get a 200 every time.
+  // Create and whole-roster PATCH both cap the *submitted* array at
+  // MAX_GROUP_MEMBERS and then prepend the owner if the list omitted them, so
+  // a full 25 that leaves the owner out becomes a roster of 26.
+  //
+  // Counted after deduplication, because the deduplicated set is what gets
+  // written and what every fan-out over a group is sized against -- the
+  // invite expansion this feeds into is bounded on the assumption it holds.
+  const unique = new Set(userIds);
+  if (unique.size > LIMITS.MAX_GROUP_MEMBERS) {
+    throw new ValidationError(
+      `A group can have at most ${LIMITS.MAX_GROUP_MEMBERS} members, including you`,
+    );
+  }
   const servers = await commonServerSet(env, userIds);
   if (servers.length === 0) {
     throw new ValidationError(

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deleteUserCompletely } from '../src/lib/db';
-import { createEventWithInvites, updateEvent } from '../src/lib/eventWrites';
+import { addInvitesToEvent, createEventWithInvites, updateEvent } from '../src/lib/eventWrites';
+import { assertValidRoster } from '../src/lib/groups';
 import { runReminderSweep } from '../src/cron/reminders';
 import { readCursorKey } from '../src/cron/cursor';
 import { sweepGoogleCalendar } from '../src/cron/googleSync';
@@ -953,5 +954,113 @@ describe('rotation converges instead of forking, and a family revokes together (
     // by this point one of the two holders is an attacker and nothing here can
     // tell which.
     expect(await isSessionActive(env, legitimate!, 'u1')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P12-12 / P12-17
+// ---------------------------------------------------------------------------
+
+// R21 gave the additive invite path two layers: a read-then-check preflight
+// for a message the organizer can act on, and a guard inside each INSERT for
+// the concurrent case where both preflights pass. The guard was a threshold,
+// not a reservation -- SQLite evaluates `WHERE (SELECT COUNT(*)...) < cap`
+// once for the whole statement, so a count one below the cap admitted the
+// entire chunk behind it, however many rows that was.
+describe('the invite cap reserves capacity rather than checking a threshold (P12-12)', () => {
+  it('holds at the cap when two additions race', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedEvent(db, { id: 'ev-1', organizerId: 'organizer' });
+
+    // 23 already on the event, against MAX_RESOLVED_INVITEES of 25.
+    const guests: string[] = [];
+    for (let i = 0; i < 26; i++) {
+      const uid = `guest-${String(i).padStart(2, '0')}`;
+      await seedUser(db, uid);
+      await seedMembership(db, uid, 'guild-1');
+      guests.push(uid);
+    }
+    for (const uid of guests.slice(0, 23)) await seedInvite(db, 'ev-1', uid);
+
+    // One request adds one person, another adds two. Both preflights see 23.
+    await Promise.all([
+      addInvitesToEvent(env, 'ev-1', 'guild-1', [guests[23]], [], 'organizer').catch(() => undefined),
+      addInvitesToEvent(env, 'ev-1', 'guild-1', [guests[24], guests[25]], [], 'organizer').catch(() => undefined),
+    ]);
+
+    const total = await countRows(db, 'event_invites', `event_id = 'ev-1'`);
+    expect(total, 'the event went past its invitee cap').toBeLessThanOrEqual(25);
+  });
+});
+
+// assertValidRoster is the one thing all three roster paths call, and it
+// checked only the shared-server rule. POST /:groupId/members had no size
+// check at all, and the two whole-roster paths cap the submitted array and
+// then prepend the owner if it omitted them -- so a full 25 that leaves the
+// owner out becomes 26.
+describe('a group roster cannot exceed its cap (P12-17)', () => {
+  async function seedFullGroup(db: ShimDatabase): Promise<void> {
+    await seedGuild(db);
+    await seedUser(db, 'owner');
+    await seedMembership(db, 'owner', 'guild-1');
+    await db
+      .prepare(`INSERT INTO groups (id, name, idle_reminder_days, created_by, created_at) VALUES ('g1', 'Crew', 2, 'owner', ?)`)
+      .bind(Date.now())
+      .run();
+    await db
+      .prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES ('g1', 'owner', ?)`)
+      .bind(Date.now())
+      .run();
+    // 24 more, for 25 in total.
+    for (let i = 0; i < 24; i++) {
+      const uid = `m-${String(i).padStart(2, '0')}`;
+      await seedUser(db, uid);
+      await seedMembership(db, uid, 'guild-1');
+      await db
+        .prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES ('g1', ?, ?)`)
+        .bind(uid, Date.now())
+        .run();
+    }
+    await seedUser(db, 'one-too-many');
+    await seedMembership(db, 'one-too-many', 'guild-1');
+  }
+
+  it('refuses a 26th member on the additive route', async () => {
+    const { db, env } = setup();
+    await seedFullGroup(db);
+
+    await expect(
+      assertValidRoster(env, [
+        'owner',
+        ...Array.from({ length: 24 }, (_, i) => `m-${String(i).padStart(2, '0')}`),
+        'one-too-many',
+      ]),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('counts the owner that whole-roster paths prepend', async () => {
+    const { db, env } = setup();
+    await seedFullGroup(db);
+
+    // What POST /groups and PATCH /groups/:id build: a submitted list of 25
+    // that passes assertStringArray's cap, plus the owner prepended because it
+    // did not include them.
+    const submitted = [
+      ...Array.from({ length: 24 }, (_, i) => `m-${String(i).padStart(2, '0')}`),
+      'one-too-many',
+    ];
+    await expect(assertValidRoster(env, ['owner', ...submitted])).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('still accepts a roster exactly at the cap', async () => {
+    const { db, env } = setup();
+    await seedFullGroup(db);
+
+    await expect(
+      assertValidRoster(env, ['owner', ...Array.from({ length: 24 }, (_, i) => `m-${String(i).padStart(2, '0')}`)]),
+    ).resolves.toBeUndefined();
   });
 });

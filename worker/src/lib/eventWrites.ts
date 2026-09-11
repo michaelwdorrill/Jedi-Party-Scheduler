@@ -800,12 +800,28 @@ export function inviteStatements(
               : `SELECT ${INVITE_COLUMNS.map(() => '?').join(', ')}`,
           )
           .join(' UNION ALL ');
+        // Pass-12 review (P12-12). The WHERE alone is a threshold, not a
+        // reservation: SQLite evaluates it once for the whole statement, so a
+        // count one below the cap admitted the ENTIRE chunk. Two concurrent
+        // additions to a 23-invitee event, one adding a person and the other
+        // adding two, both passed their preflight and both passed this guard,
+        // and the event ended with 26 against a cap of 25.
+        //
+        // The LIMIT is the reservation: at most the remaining capacity is
+        // taken, whatever the chunk holds. MAX(0, ...) because a negative
+        // LIMIT means "no limit" in SQLite, which would turn an over-capacity
+        // event into an unbounded insert -- the exact opposite of the guard.
+        //
+        // The WHERE stays. It is redundant against the LIMIT for correctness,
+        // but an INSERT ... SELECT followed directly by ON CONFLICT is
+        // ambiguous to SQLite's parser unless a WHERE separates them.
         return env.DB.prepare(
           `INSERT INTO event_invites (${INVITE_COLUMNS.join(', ')})
            SELECT * FROM (${arms})
            WHERE (SELECT COUNT(*) FROM event_invites WHERE event_id = ?) < ?
+           LIMIT MAX(0, ? - (SELECT COUNT(*) FROM event_invites WHERE event_id = ?))
            ${conflict}`,
-        ).bind(...values, eventId, totalCap);
+        ).bind(...values, eventId, totalCap, totalCap, eventId);
       }
       return env.DB.prepare(
         `INSERT INTO event_invites (${INVITE_COLUMNS.join(', ')})
