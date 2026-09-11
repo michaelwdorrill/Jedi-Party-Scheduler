@@ -90,7 +90,20 @@ async function request<T>(path: string, init: RequestInit = {}, isRetry = false)
     bounceToLogin();
   }
 
-  if (res.status === 401) bounceToLogin();
+  // Pass-14 review (P14-04). The same identity check as the branch above, on
+  // the branch that actually clears credentials.
+  //
+  // The P13-06 guard was put only on the first 401, so a request RETRIED with
+  // isRetry=true skipped it entirely and its own terminal 401 cleared the
+  // token and redirected unconditionally. The sequence: an expired request
+  // refreshes successfully, and while its retry is in flight the user logs out
+  // and signs in as someone else -- the retry's correct 401 for the old
+  // session then logged the new one out. An obsolete request must be abandoned
+  // without touching whoever is signed in now.
+  if (res.status === 401) {
+    if (authEpoch() !== startedEpoch) throw new ApiError(401, 'That session has ended.');
+    bounceToLogin();
+  }
 
   if (!res.ok) {
     const body = await res.text();

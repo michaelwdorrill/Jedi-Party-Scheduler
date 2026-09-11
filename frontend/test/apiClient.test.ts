@@ -157,3 +157,117 @@ describe('a discarded stale refresh does not log out the new account (P13-06)', 
     expect(window.location.hash, 'the new account was bounced to login').not.toBe('#/login');
   });
 });
+
+// P14-03 from the Pass-14 review. The token lives in localStorage, which every
+// tab shares; the identity marker guarding it used to live in each tab's
+// module state. So adopting a second account in one tab left another tab's
+// pending refresh believing its own era was current, and its late response
+// overwrote the shared token -- putting the first account back under the
+// second account's session.
+describe('a refresh in another tab cannot replace a newly adopted account (P14-03)', () => {
+  it('discards the old tab’s late refresh once a second tab adopts someone else', async () => {
+    // Two module instances, one storage: that is what two tabs are.
+    vi.resetModules();
+    const tabOne = await import('../src/api/client');
+    const tabOneStorage = await import('../src/auth/tokenStorage');
+    vi.resetModules();
+    const tabTwoStorage = await import('../src/auth/tokenStorage');
+
+    tabOneStorage.adoptSession('alice-token');
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/auth/refresh')) {
+          // The *other* tab signs in as Bob while Alice's refresh is away.
+          tabTwoStorage.adoptSession('bob-token');
+          return new Response(JSON.stringify({ token: 'alice-successor' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('', { status: 401 });
+      }),
+    );
+
+    await tabOne.api.get('/me').catch(() => undefined);
+
+    expect(
+      storage.getItem(TOKEN_KEY),
+      "the other tab's stale refresh replaced the newly adopted account",
+    ).toBe('bob-token');
+  });
+
+  it('still lets two tabs refresh the same session', async () => {
+    vi.resetModules();
+    const tabOne = await import('../src/api/client');
+    const tabOneStorage = await import('../src/auth/tokenStorage');
+
+    tabOneStorage.adoptSession('shared-token');
+
+    let call = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/auth/refresh')) {
+          return new Response(JSON.stringify({ token: 'shared-successor' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        call += 1;
+        return call === 1
+          ? new Response('', { status: 401 })
+          : new Response(JSON.stringify({ id: 'u1' }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            });
+      }),
+    );
+
+    // A refresh is the same identity continuing, so it must commit -- two tabs
+    // racing a refresh of one session is ordinary, and neither is a login.
+    await expect(tabOne.api.get('/me')).resolves.toEqual({ id: 'u1' });
+    expect(storage.getItem(TOKEN_KEY)).toBe('shared-successor');
+  });
+});
+
+// P14-04. The identity check added for P13-06 sat only on the first 401. A
+// request retried with isRetry=true skipped it, so its own terminal 401 --
+// correct, for a session that has since ended -- cleared whatever credential
+// was in storage by then and redirected to login.
+describe('an obsolete retry does not log out the current account (P14-04)', () => {
+  it('abandons the retry without touching the newly adopted session', async () => {
+    const { api } = await import('../src/api/client');
+    const { adoptSession } = await import('../src/auth/tokenStorage');
+
+    adoptSession('alice-token');
+
+    let dataCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/auth/refresh')) {
+          return new Response(JSON.stringify({ token: 'alice-successor' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        dataCalls += 1;
+        if (dataCalls === 1) return new Response('', { status: 401 });
+        // The retry. Alice's session has ended and Bob has signed in while it
+        // was in flight, so this 401 is correct -- and must not be acted on.
+        adoptSession('bob-token');
+        return new Response('', { status: 401 });
+      }),
+    );
+
+    await api.get('/me').catch(() => undefined);
+
+    expect(storage.getItem(TOKEN_KEY), "an obsolete retry logged out the current account").toBe('bob-token');
+    expect(window.location.hash, 'the current account was bounced to login').not.toBe('#/login');
+  });
+});
