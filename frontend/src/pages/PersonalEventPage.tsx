@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { DateTime } from 'luxon';
 import { scheduleFieldsFromRecurrence } from '../lib/recurrenceFields';
@@ -7,12 +7,25 @@ import { useAuth } from '../auth/AuthContext';
 import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceForm';
 import TimezoneSelect from '../components/TimezoneSelect';
 import type { PersonalEvent, PersonalAvailability } from '../types';
-import { describeError } from '../lib/async';
+import { describeError, editTargetReady, latestOnly } from '../lib/async';
 import { ErrorState, InlineError, Loading, buttonClass, cardClass, controlClass } from '../components/ui';
 
 // Personal time: private to you, never shown to anyone else, and (unless you
 // untick "show me as busy") it makes you look unavailable in other people's
 // scheduling assistant without revealing what it is.
+// Hoisted out of useState so the loader can restore it (P21-01). A fixed block
+// loaded after a recurring one has to put this back, or it inherits the
+// previous block's rule and gets saved with it.
+const DEFAULT_RECURRENCE: RecurrenceFormValue = {
+  freq: 'WEEKLY',
+  interval: 1,
+  byWeekday: [],
+  byMonthDay: null,
+  endType: 'never',
+  endDate: '',
+  endCount: 10,
+};
+
 export default function PersonalEventPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -29,15 +42,7 @@ export default function PersonalEventPage() {
   const [startTime, setStartTime] = useState('09:00');
   const [endTime, setEndTime] = useState('17:00');
   const [isRecurring, setIsRecurring] = useState(false);
-  const [recurrence, setRecurrence] = useState<RecurrenceFormValue>({
-    freq: 'WEEKLY',
-    interval: 1,
-    byWeekday: [],
-    byMonthDay: null,
-    endType: 'never',
-    endDate: '',
-    endCount: 10,
-  });
+  const [recurrence, setRecurrence] = useState<RecurrenceFormValue>(DEFAULT_RECURRENCE);
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -53,13 +58,39 @@ export default function PersonalEventPage() {
   // in.
   const [importedFromGoogle, setImportedFromGoogle] = useState(false);
 
+  // Pass-21 review (P21-01). Two defects in one loader, and the first is the
+  // worse of the two because it needs no race at all.
+  //
+  // `if (pe.recurrence) { setIsRecurring(true); ... }` had no else. Load a
+  // recurring block, then load a fixed one, and Repeats stayed ticked with the
+  // PREVIOUS block's rule still in state -- so renaming the fixed block saved
+  // it as recurring. Measured: a one-off became three daily occurrences on the
+  // owner's own calendar, from an ordinary sequence with nothing held back and
+  // nothing failing.
+  //
+  // The rule this file was missing: a loader must write EVERY field it owns,
+  // for every record, including the fields the new record does not have. A
+  // conditional set leaves the previous record's value behind, and the longer
+  // the form the likelier that is.
+  //
+  // The second is the obsolete-response gap that P19-03 and P20-01 already
+  // fixed in EventFormPage -- this is its third instance, in a file nobody had
+  // touched. `latestOnly` and `editTargetReady` are the same shared primitives
+  // rather than a third hand-rolled copy, which is the entire point of having
+  // extracted them.
+  const loadGate = useRef(latestOnly());
+  const [loadedId, setLoadedId] = useState<string | null>(null);
+
   useEffect(() => {
     if (!isEdit) return;
+    const isCurrent = loadGate.current.begin();
+    setLoadedId(null);
     setLoading(true);
     setLoadError(null);
     api
       .get<PersonalEvent>(`/personal-events/${personalEventId}`)
       .then((pe) => {
+        if (!isCurrent()) return;
         setTitle(pe.title);
         setDescription(pe.description ?? '');
         setTimezone(pe.timezone);
@@ -74,6 +105,12 @@ export default function PersonalEventPage() {
           const e = DateTime.fromMillis(pe.endAt).setZone(pe.timezone);
           setEndDate(e.toISODate()!);
           setEndTime(e.toFormat('HH:mm'));
+        }
+        if (!pe.recurrence) {
+          // The else this loader never had. Without it a fixed block inherited
+          // the previously loaded block's schedule wholesale.
+          setIsRecurring(false);
+          setRecurrence(DEFAULT_RECURRENCE);
         }
         if (pe.recurrence) {
           setIsRecurring(true);
@@ -109,15 +146,23 @@ export default function PersonalEventPage() {
             setEndTime(fields.endTime);
           }
         }
+        setLoadedId(personalEventId ?? null);
       })
       .catch((e: unknown) => {
+        if (!isCurrent()) return;
         // Silently failing here is worse than a wrong empty state: the form
         // would sit at its blank defaults, and saving it would overwrite the
         // real block with them (idea 24).
         setLoadError(describeError(e));
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (isCurrent()) setLoading(false);
+      });
   }, [isEdit, personalEventId, loadNonce]);
+
+  // Same rule as the event form: these fields belong to a record, and Save
+  // must not write them to a different one.
+  const targetReady = editTargetReady({ isEdit, loadedId, targetId: personalEventId });
 
   const toUtc = (d: string, t: string) => DateTime.fromISO(`${d}T${t}`, { zone: timezone }).toMillis();
 
@@ -134,6 +179,11 @@ export default function PersonalEventPage() {
     }
     setSaving(true);
     try {
+      // These fields belong to the record the loader filled them from, and
+      // Save targets whatever the route currently names (P21-01 / P20-01).
+      if (!targetReady) {
+        throw new Error('Still loading this block — give it a moment before saving.');
+      }
       const body: Record<string, unknown> = {
         title: title.trim(),
         description: description.trim() || null,
@@ -354,11 +404,11 @@ export default function PersonalEventPage() {
         </button>
         {!importedFromGoogle && (
           <button
-            disabled={saving}
+            disabled={saving || !targetReady}
             onClick={handleSubmit}
             className={buttonClass('primary', 'lg')}
           >
-            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Block this time'}
+            {saving ? 'Saving…' : !targetReady ? 'Loading…' : isEdit ? 'Save changes' : 'Block this time'}
           </button>
         )}
       </div>

@@ -329,3 +329,68 @@ describe('a Google account switch cannot skip the disconnect promise (F-60)', ()
     expect(res.status, 'a user whose grant is already dead was trapped').toBe(200);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Pass-21 review (P21-04). Authority was re-derived correctly here and SCOPE
+// was not. "Cancel this session" is only ever emitted for a one-off, but the
+// owner can convert that event into a recurring series afterwards -- and the
+// handler applied a one-session control to the whole series.
+//
+// Nothing about identity was wrong, which is why reading the custom-id parser
+// and the authorization checks did not reveal it. One reviewer read exactly
+// those and called the surface clean; another executed it and measured three
+// occurrences going to zero.
+describe('a one-session Discord control cannot cancel a series (P21-04)', () => {
+  async function seedConvertedEvent(db: ShimDatabase): Promise<void> {
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'owner');
+    await seedMembership(db, 'owner', 'guild-1');
+    // Emitted as a one-off; converted to a three-day series afterwards.
+    await seedEvent(db, { id: 'evt-1', organizerId: 'owner', startAt: null, endAt: null, isRecurring: 1 });
+    await db
+      .prepare(
+        `INSERT INTO event_recurrence_rules
+           (event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
+            duration_minutes, end_type, end_date, end_count)
+         VALUES ('evt-1', 'DAILY', 1, NULL, NULL, '2026-09-20', '19:00', 120, 'after_count', NULL, 3)`,
+      )
+      .run();
+  }
+
+  it('refuses the stale one-off control and leaves the series active', async () => {
+    const { db, env } = setup();
+    await seedConvertedEvent(db);
+
+    const { handleInteraction } = await import('../src/lib/interactions');
+    const res = await handleInteraction(
+      env,
+      { type: 3, data: { custom_id: 'uo:v2:cancel:evt-1' }, member: { user: { id: 'owner' } } } as never,
+    );
+
+    const after = await db.prepare(`SELECT status FROM events WHERE id = 'evt-1'`).first<{ status: string }>();
+    expect(
+      after?.status,
+      'a button that says "cancel this session" cancelled every date in the series',
+    ).toBe('active');
+    expect(JSON.stringify(res)).toMatch(/repeating/i);
+  });
+
+  // The control: an ordinary one-off cancel must still work, or this guard has
+  // broken the feature instead of scoping it.
+  it('still cancels a genuinely one-off event', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'owner');
+    await seedMembership(db, 'owner', 'guild-1');
+    await seedEvent(db, { id: 'evt-2', organizerId: 'owner' });
+
+    const { handleInteraction } = await import('../src/lib/interactions');
+    await handleInteraction(
+      env,
+      { type: 3, data: { custom_id: 'uo:v2:cancel:evt-2' }, member: { user: { id: 'owner' } } } as never,
+    );
+
+    const after = await db.prepare(`SELECT status FROM events WHERE id = 'evt-2'`).first<{ status: string }>();
+    expect(after?.status, 'scoping the control broke ordinary one-off cancellation').toBe('cancelled');
+  });
+});

@@ -414,9 +414,11 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
   }
 
   if (parsed.kind === 'cancel') {
-    const event = await env.DB.prepare(`SELECT organizer_id, status, guild_id FROM events WHERE id = ?`)
+    const event = await env.DB.prepare(
+      `SELECT organizer_id, status, is_recurring, guild_id FROM events WHERE id = ?`,
+    )
       .bind(parsed.eventId)
-      .first<{ organizer_id: string; status: string; guild_id: string }>();
+      .first<{ organizer_id: string; status: string; is_recurring: number; guild_id: string }>();
     if (!event) return ephemeral(`That event no longer exists. ${siteLink(env)}`);
     // Re-checked from the database rather than trusted from the fact that
     // this DM was only ever sent to the organizer -- the presser is the
@@ -441,8 +443,33 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
     if (event.status !== 'active') {
       return ephemeral(`That session isn't active any more. ${siteLink(env)}`);
     }
+    // Pass-21 review (P21-04). Authority was re-derived correctly here and
+    // SCOPE was not. This button says "Cancel this session" and is only ever
+    // sent for a one-off, but the owner can convert that event into a
+    // recurring series afterwards -- and the handler then applied a
+    // one-session control to the whole series, taking every occurrence with
+    // it. Measured: three occurrences to zero, from a button the app really
+    // did send, with a real signature and a real organizer pressing it.
+    //
+    // Nothing about identity was wrong, which is why reading the custom-id
+    // parser and the authorization checks did not reveal it: a signature
+    // proves who pressed, and the guard above proves they may still act. What
+    // neither proves is that the thing they are acting on is still the thing
+    // the control was issued for.
+    //
+    // The mirror of this check already existed one handler down --
+    // cancel_occurrence refuses when `!event.is_recurring` -- so this is the
+    // pair being completed rather than a new rule. A stale control is refused
+    // and the owner is sent to the current UI, which offers the per-occurrence
+    // cancel this event now actually needs.
+    if (event.is_recurring) {
+      return ephemeral(
+        `This is a repeating event now, so this button can't cancel it -- it would take every date with it. Cancel a single date, or the whole series, on the site. ${siteLink(env)}`,
+      );
+    }
     await env.DB.prepare(
-      `UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND organizer_id = ? AND status = 'active'`,
+      `UPDATE events SET status = 'cancelled', updated_at = ?
+       WHERE id = ? AND organizer_id = ? AND status = 'active' AND is_recurring = 0`,
     )
       .bind(Date.now(), parsed.eventId, userId)
       .run();

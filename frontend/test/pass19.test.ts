@@ -116,3 +116,56 @@ describe('editTargetReady (P20-01)', () => {
     expect(editTargetReady({ isEdit: true, loadedId: null, targetId: undefined })).toBe(false);
   });
 });
+
+// Pass-21 review (P21-01). The worse half of that finding needs no race: the
+// personal editor's loader did `if (pe.recurrence) { setIsRecurring(true); … }`
+// with no else, so loading a fixed block after a recurring one left Repeats
+// ticked and the previous block's rule in state. Renaming the fixed block then
+// saved it as recurring — one occurrence became three on the owner's own
+// calendar, from an ordinary sequence with nothing held back.
+//
+// The rule, which is the transferable part: a loader must write EVERY field it
+// owns for EVERY record, including the fields the new record does not have. A
+// conditional set silently keeps the previous record's value, and the longer
+// the form the likelier that is. Modelled here as the reduction the loader
+// performs, because this repo has no component-test harness.
+describe('a loader must not carry one record\'s fields into another (P21-01)', () => {
+  interface Loaded {
+    isRecurring: boolean;
+    recurrenceFreq: string | null;
+  }
+  const DEFAULT: Loaded = { isRecurring: false, recurrenceFreq: null };
+
+  // The corrected shape: an explicit else, restoring the default.
+  function applyRecord(prev: Loaded, record: { recurrence: { freq: string } | null }): Loaded {
+    if (!record.recurrence) return { ...prev, isRecurring: false, recurrenceFreq: null };
+    return { ...prev, isRecurring: true, recurrenceFreq: record.recurrence.freq };
+  }
+
+  it('clears recurrence when a fixed record follows a recurring one', () => {
+    let state = DEFAULT;
+    state = applyRecord(state, { recurrence: { freq: 'DAILY' } });
+    expect(state.isRecurring).toBe(true);
+
+    state = applyRecord(state, { recurrence: null });
+
+    expect(
+      state.isRecurring,
+      'a fixed block kept the previous block\'s Repeats tick, and saving it made a one-off repeat',
+    ).toBe(false);
+    expect(state.recurrenceFreq, 'the previous block\'s rule was still in state and would be saved').toBeNull();
+  });
+
+  it('still loads recurrence for a recurring record', () => {
+    const state = applyRecord(DEFAULT, { recurrence: { freq: 'WEEKLY' } });
+    expect(state.isRecurring).toBe(true);
+    expect(state.recurrenceFreq).toBe('WEEKLY');
+  });
+
+  it('is stable across repeated fixed records', () => {
+    let state = applyRecord(DEFAULT, { recurrence: { freq: 'DAILY' } });
+    state = applyRecord(state, { recurrence: null });
+    state = applyRecord(state, { recurrence: null });
+    expect(state.isRecurring).toBe(false);
+  });
+});
