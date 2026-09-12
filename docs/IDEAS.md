@@ -439,40 +439,39 @@ projection and both views, and give the organizer an explicit way to reconcile.
 That is the same design item 70 needs, approached from the UI end, and it
 should be built with item 70 rather than before it.
 
-### 79. Recurring series with no occurrence in range can empty the noticeboard
+### 79. The noticeboard's candidate limit cannot prove completeness
 
-From the Pass-17 review (P17-07), pre-existing and newly demonstrated. The
-noticeboard's candidate SQL selects every active recurring series *before*
-testing whether it has an occurrence in the requested range. A recurring event
-has a NULL `start_at`, so those rows sort as the window's beginning, and the
-100-event candidate limit is applied before expansion. A hundred irrelevant
-series can therefore consume the whole limit, expand to zero occurrences, and
-keep a real in-range event from ever being considered.
+From the Pass-17 review (P17-07). **Half fixed; the half that is left is the
+harder half and is stated here so it is not mistaken for done.**
 
-The review built all 101 events through real signed routes, within the existing
-per-guild limits, and observed: the noticeboard returns 200 with an empty array
-while the same user's personal calendar shows the event, and cancelling any one
-irrelevant series makes it appear. There is no cursor and no truncation
-indicator, and the frontend renders an empty array as "nothing scheduled" -- so
-the failure looks like an empty calendar rather than a limit.
+The candidate query admitted every active recurring series with no reference to
+the requested window, and a recurring event has a NULL `start_at`, so
+`ORDER BY COALESCE(start_at, from)` sorted them all to the front. The
+hundred-event cut was then applied before anything expanded. A hundred series
+that finished last month filled the page, expanded to nothing, and left an
+event happening tomorrow outside it -- measured as a noticeboard returning zero
+occurrences while the same user's personal calendar showed the event, rendered
+by the frontend as "nothing scheduled" because the response carries no cursor
+or truncation flag.
 
-The later expanded-occurrence overflow check cannot catch this, because the
-event was excluded before expansion.
+**Fixed:** the query now excludes a series whose rule cannot overlap the window
+-- ended before it opened, or beginning after it closes. That is provable from
+stored dates, closes the demonstrated case, and is conservative: both date
+bounds are widened by a day, because the rule's dates are local to the event's
+timezone while the window is epoch milliseconds, so widening can only admit a
+series that turns out to have nothing in range, never exclude one that does.
 
-**The fix is not raising the limit** -- that moves the threshold and weakens the
-bound the limit exists for. It is to spend the display limit on events that
-actually have an in-range occurrence: either narrow the candidate query so a
-recurring series must plausibly produce one (its rule's start/end bracketing the
-window, which is checkable in SQL), or page through bounded candidate batches
-until enough eligible results are found, and return an explicit overflow
-condition when the budget cannot establish completeness.
+**Still open, and it is the part that needs a design:** a hundred *currently
+active* series with no occurrence in a narrow window still fill the page.
+Deciding that needs the expander, not SQL -- a daily series is live all year and
+may still have nothing inside a two-day window once overrides and cancellations
+are applied. The shape of the answer is to page through bounded candidate
+batches until enough eligible results are found, and to return an explicit
+overflow condition when the budget cannot establish completeness, so the
+frontend can say "there may be more" instead of "nothing scheduled".
 
-Not done in Pass 17: the candidate query and the expansion are load-bearing for
-every calendar read in the app, and this is the kind of change that wants its
-own pass rather than a rider on a review batch. It is the highest-value open
-item here, because unlike the lifecycle races it needs no concurrency, no
-interruption and no second account -- just a guild with a hundred recurring
-series.
+Raising `MAX_NOTICEBOARD_EVENTS` is not the fix. It moves the threshold and
+weakens the bound the limit exists for.
 
 ## Parked until after 1.0
 

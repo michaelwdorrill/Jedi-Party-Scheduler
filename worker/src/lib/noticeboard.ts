@@ -36,6 +36,9 @@ const MAX_NOTICEBOARD_EVENTS = 100;
 // rather than opaque ranges, so each occurrence carries far more payload.
 const MAX_NOTICEBOARD_OCCURRENCES = 1_000;
 
+// One day, for widening the candidate window's date bounds (P17-07 below).
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 export interface NoticeboardAttendee {
   userId: string;
   username: string;
@@ -94,20 +97,58 @@ export async function buildNoticeboard(
   // reached a decision -- and made the poll clause below dead code, since
   // nothing could reach it that 'active' had not already excluded. The
   // unresolved-poll test still passed, for the wrong reason.
+  // Pass-17 review (P17-07). `is_recurring = 1` used to admit EVERY active
+  // series with no reference to the window at all, and a recurring event has a
+  // NULL start_at, so `ORDER BY COALESCE(start_at, from)` sorts them all to the
+  // front. The hundred-event cut was then applied before anything expanded.
+  //
+  // A hundred series that finished last month therefore filled the page,
+  // expanded to nothing, and left an event happening tomorrow outside it --
+  // measured as a noticeboard returning ZERO occurrences while the same user's
+  // personal calendar showed the event. The later expanded-occurrence ceiling
+  // cannot catch that, because the event was excluded before expansion, and
+  // the response carries no cursor or truncation flag, so the frontend renders
+  // it as "nothing scheduled".
+  //
+  // What this clause does is narrow, and the limit of it matters as much as
+  // the fix: a series is excluded only when its RULE cannot overlap the
+  // window -- it ended before the window opened, or begins after it closes.
+  // That is provable from stored dates and closes the demonstrated case.
+  //
+  // What it does NOT do is establish completeness. A hundred *currently
+  // active* series with no occurrence in a narrow window still fill the page,
+  // because deciding that needs the expander, not SQL. Paging bounded
+  // candidates until enough eligible results are found, and signalling
+  // overflow when the budget cannot prove completeness, is the rest of the
+  // fix; IDEAS item 79 carries it. Raising MAX_NOTICEBOARD_EVENTS is not the
+  // fix -- it moves the threshold and weakens the bound the limit exists for.
+  //
+  // The dates are compared as ISO text, which sorts chronologically, and both
+  // bounds are widened by a day because the rule's dates are local to the
+  // event's timezone while the window is epoch milliseconds. Widening can only
+  // admit a series that turns out to have nothing in range, never exclude one
+  // that does.
+  const windowStartDate = new Date(from - DAY_MS).toISOString().slice(0, 10);
+  const windowEndDate = new Date(to + DAY_MS).toISOString().slice(0, 10);
   const { results: events } = await env.DB.prepare(
     `SELECT * FROM events
      WHERE guild_id = ?
        AND is_private = 0
        AND status IN ('active','resolved')
        AND (
-         is_recurring = 1
+         (is_recurring = 1 AND EXISTS (
+            SELECT 1 FROM event_recurrence_rules r
+            WHERE r.event_id = events.id
+              AND (r.end_date IS NULL OR r.end_date >= ?)
+              AND r.start_date <= ?
+          ))
          OR (start_at IS NOT NULL AND start_at <= ? AND COALESCE(end_at, start_at) >= ?)
        )
        AND NOT (event_type = 'poll' AND status != 'resolved')
      ORDER BY COALESCE(start_at, ?) ASC
      LIMIT ?`,
   )
-    .bind(guildId, to, from, from, MAX_NOTICEBOARD_EVENTS)
+    .bind(guildId, windowStartDate, windowEndDate, to, from, from, MAX_NOTICEBOARD_EVENTS)
     .all<EventRow>();
 
   if (events.length === 0) return [];

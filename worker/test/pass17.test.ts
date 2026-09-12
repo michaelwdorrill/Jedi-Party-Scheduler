@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runReminderSweep } from '../src/cron/reminders';
 import { MAX_DELIVERY_ATTEMPTS } from '../src/lib/outbox';
+import { buildNoticeboard } from '../src/lib/noticeboard';
 import type { ShimDatabase } from './d1shim';
 import {
   DAY_MS,
@@ -274,5 +275,123 @@ describe('the migration does not manufacture completion evidence (P17-02)', () =
       sent!.n,
       'the requester was told their change was accepted, for a change with no record of ever being applied',
     ).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P17-07
+// ---------------------------------------------------------------------------
+
+// The candidate query admitted every active series regardless of the window,
+// and a recurring event's NULL start_at sorts to the front of
+// `ORDER BY COALESCE(start_at, from)`. So the hundred-event cut was spent on
+// series that expand to nothing, and a real event fell outside it -- an empty
+// noticeboard that the frontend renders as "nothing scheduled", with no cursor
+// or truncation flag to say otherwise.
+describe('finished series do not crowd a real event off the noticeboard (P17-07)', () => {
+  async function seedFinishedSeries(db: ShimDatabase, count: number, endDate: string): Promise<void> {
+    for (let i = 0; i < count; i++) {
+      await seedEvent(db, { id: `rec-${i}`, organizerId: 'owner', startAt: null, endAt: null, isRecurring: 1 });
+      await db
+        .prepare(
+          `INSERT INTO event_recurrence_rules
+             (event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
+              duration_minutes, end_type, end_date, end_count)
+           VALUES (?, 'WEEKLY', 1, '0', NULL, '2026-07-01', '19:00', 120, 'on_date', ?, NULL)`,
+        )
+        .bind(`rec-${i}`, endDate)
+        .run();
+    }
+  }
+
+  it('returns the event even behind a full page of ended series', async () => {
+    const { db, env } = setup('paid');
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'owner');
+    await seedMembership(db, 'owner', 'guild-1');
+
+    // Exactly the candidate limit, all finished a month ago. Written as a
+    // literal on purpose: importing MAX_NOTICEBOARD_EVENTS from the module
+    // under test made the first version of this test pass on the unfixed tree,
+    // because reverting that module removed the `export` and the count came
+    // through as undefined -- so the loop seeded nothing and the assertion
+    // held over an empty database. A fixture must not take its inputs from the
+    // thing it is testing.
+    await seedFinishedSeries(db, 100, '2026-08-01');
+    const start = Date.now() + DAY_MS;
+    await seedEvent(db, {
+      id: 'real',
+      organizerId: 'owner',
+      title: 'Actually Happening',
+      startAt: start,
+      endAt: start + 2 * HOUR_MS,
+    });
+
+    const board = await buildNoticeboard(env, 'guild-1', Date.now(), Date.now() + 60 * DAY_MS);
+
+    expect(
+      board.some((o) => o.eventId === 'real'),
+      'a hundred series that ended last month hid an event happening tomorrow, and the noticeboard came back empty',
+    ).toBe(true);
+  });
+
+  // The next two are invariant guards, not reproductions: both pass on the
+  // unfixed tree, because that tree admitted every series unconditionally.
+  // They are the shapes this narrowing must not break -- an open-ended series
+  // (end_date IS NULL, which is most of them) and one that ends partway
+  // through the window.
+  it('still returns a series that is live in the window', async () => {
+    const { db, env } = setup('paid');
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'owner');
+    await seedMembership(db, 'owner', 'guild-1');
+
+    await seedEvent(db, { id: 'rec-live', organizerId: 'owner', startAt: null, endAt: null, isRecurring: 1 });
+    const today = new Date().toISOString().slice(0, 10);
+    await db
+      .prepare(
+        `INSERT INTO event_recurrence_rules
+           (event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
+            duration_minutes, end_type, end_date, end_count)
+         VALUES ('rec-live', 'DAILY', 1, NULL, NULL, ?, '19:00', 120, 'never', NULL, NULL)`,
+      )
+      .bind(today)
+      .run();
+
+    const board = await buildNoticeboard(env, 'guild-1', Date.now(), Date.now() + 7 * DAY_MS);
+
+    // The narrowing must not exclude an open-ended series: end_date IS NULL is
+    // the common case and has to stay in.
+    expect(
+      board.some((o) => o.eventId === 'rec-live'),
+      'the narrowing excluded a live open-ended series, which is most of them',
+    ).toBe(true);
+  });
+
+  it('still returns a series that is live but ends inside the window', async () => {
+    const { db, env } = setup('paid');
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'owner');
+    await seedMembership(db, 'owner', 'guild-1');
+
+    await seedEvent(db, { id: 'rec-ending', organizerId: 'owner', startAt: null, endAt: null, isRecurring: 1 });
+    const today = new Date().toISOString().slice(0, 10);
+    const inThreeDays = new Date(Date.now() + 3 * DAY_MS).toISOString().slice(0, 10);
+    await db
+      .prepare(
+        `INSERT INTO event_recurrence_rules
+           (event_id, freq, interval, by_weekday, by_month_day, start_date, start_time,
+            duration_minutes, end_type, end_date, end_count)
+         VALUES ('rec-ending', 'DAILY', 1, NULL, NULL, ?, '19:00', 120, 'on_date', ?, NULL)`,
+      )
+      .bind(today, inThreeDays)
+      .run();
+
+    const board = await buildNoticeboard(env, 'guild-1', Date.now(), Date.now() + 7 * DAY_MS);
+
+    expect(
+      board.some((o) => o.eventId === 'rec-ending'),
+      'a series ending partway through the window was excluded from it entirely',
+    ).toBe(true);
   });
 });
