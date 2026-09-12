@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { latestOnly } from '../src/lib/async';
+import { editTargetReady, latestOnly } from '../src/lib/async';
 
 // Pass-19 review, P19-03. EventFormPage loads an event into shared component
 // state -- title, description, schedule, and crucially `loadedRevision` --
@@ -80,5 +80,39 @@ describe('latestOnly (P19-03)', () => {
 
     expect(title).toBe('Event B');
     expect(revision).toBe(0);
+  });
+});
+
+// Pass-20 review (P20-01), the residual half of P19-03. `latestOnly` stopped an
+// obsolete response overwriting newer state -- the reported bug. It never
+// touched the opposite order: while a newly selected event is still loading,
+// the fields and the loaded revision still belong to the PREVIOUS event, and
+// Save was enabled and submitted them to the current route's id. Two events are
+// legitimately both at revision 0, so the server accepted a well-formed request
+// the client had assembled wrongly, and one event's contents landed on another.
+describe('editTargetReady (P20-01)', () => {
+  it('blocks a save while a different event is still loading', () => {
+    expect(
+      editTargetReady({ isEdit: true, loadedId: 'evt-a', targetId: 'evt-b' }),
+      "event A's fields were submittable to event B",
+    ).toBe(false);
+  });
+
+  it('blocks a save before anything has loaded', () => {
+    expect(editTargetReady({ isEdit: true, loadedId: null, targetId: 'evt-b' })).toBe(false);
+  });
+
+  it('allows a save once the loaded event is the target', () => {
+    expect(editTargetReady({ isEdit: true, loadedId: 'evt-b', targetId: 'evt-b' })).toBe(true);
+  });
+
+  // A creation form has nothing loaded and must not be blocked by a rule about
+  // loaded state -- getting this wrong would break every new event instead.
+  it('never blocks event creation', () => {
+    expect(editTargetReady({ isEdit: false, loadedId: null, targetId: undefined })).toBe(true);
+  });
+
+  it('blocks an edit with no target id rather than defaulting to allowed', () => {
+    expect(editTargetReady({ isEdit: true, loadedId: null, targetId: undefined })).toBe(false);
   });
 });

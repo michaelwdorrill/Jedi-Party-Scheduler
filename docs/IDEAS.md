@@ -692,7 +692,7 @@ this is recorded rather than done. The reason to do it eventually is the
 comment, not the bytes: a stored object whose documented purpose no longer
 exists is how the next person is misled.
 
-### 83. Poll resolution had no concurrency token, and three other writers still do not
+### 83. Poll resolution had no concurrency token, and three other writers still do not -- fixed in Pass 20
 
 From the Pass-19 review (P19-02), and the **fix is in** -- this entry is the
 part that outlives it.
@@ -717,7 +717,20 @@ one that would have been missed. Losing the race is not an error: the vote is
 recorded, the poll stays active, and the next vote or the deadline sweep
 decides again from current state.
 
-**What stays open is the general question.** This project has an
+**Closed in Pass 20, one pass after being predicted, which is the lesson.** The
+audit this item asked for was left for v1.0.1; the Pass-20 review then
+demonstrated two of the writers it names, and the whole class is now guarded --
+`confirmOption`, `confirmWindowedOption`, `markCancelled` and the multi-winner
+deadline closure all carry the parent event's revision, via one shared
+`requireRevision`. Two shapes were reproduced and revert-verified: a threshold
+raised from one to two immediately before a confirmation, and a deadline
+extended into the future immediately before a cancellation.
+
+Recording a predicted class and scheduling it for later cost a full review
+round. When a fix reveals that its neighbours share the defect, the neighbours
+are part of the fix.
+
+**The general question, for the record:** This project has an
 optimistic-concurrency token on events and uses it inconsistently. The event
 write path guards with it; poll resolution did not until now. Worth an audit
 rather than a guess: `confirmOption` and `confirmWindowedOption` both write
@@ -752,6 +765,39 @@ Related, from the same session: the first crowding control written for
 which the candidate query does not define. Both were caught by revert-verifying
 rather than by review, which is the argument for revert-verifying every
 reproduction rather than only the ones that look risky.
+
+### 85. A Google insert is only recoverable across a failed statement, not a lost process
+
+From the Pass-20 review (P20-04), and recorded rather than fixed because the
+honest scope of what was fixed is narrower than "durable".
+
+The push half creates the event in Google and then writes the local mapping.
+Between those two points the remote object exists and nothing local knows it.
+Pass 19 handled the mapping being REFUSED; Pass 20 handled it THROWING, by
+recording the obligation from a catch before rethrowing. Both are statement-level
+failures.
+
+What neither covers is the process not surviving to run the catch at all -- a
+Worker evicted, a request cancelled, an isolate torn down between Google's 200
+and any local write. The obligation table cannot help, because writing to it is
+itself the thing that did not happen.
+
+The reviewer's own framing is right: closing this needs the creation to be
+idempotent, not the bookkeeping to be more careful. Google's Events resource
+accepts a client-supplied `id`, so a deterministic id derived from
+(user, event, occurrence) would make a retried insert converge on the same
+remote object instead of making a second one -- and then a lost process costs
+nothing, because the next sweep's insert IS the recovery.
+
+Not done here, deliberately. It changes the payload of every insert, Google
+constrains the id format (base32hex, length bounds) and rejects collisions
+across the calendar including deleted events, and getting it wrong duplicates or
+refuses real sessions. That is a design with its own failure modes, and this
+release's rule is to prefer the smaller answer -- the smaller answer being an
+honest record of what the current one does not cover, which is this item.
+
+**Do not "fix" this by widening the catch.** There is no catch that runs when
+the process is gone.
 
 ## Parked until after 1.0
 

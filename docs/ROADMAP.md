@@ -659,7 +659,7 @@ Four things this release turned up that the phase entry above did not plan for:
   access or refresh tokens are not written to the database" was offered as a
   general statement, and a stored Google refresh token makes it incomplete.
 
-### Phase 6 — What nineteen review passes left standing (66–73, 76, 77, 82, 83) → **v1.0.1**
+### Phase 6 — What twenty review passes left standing (66–73, 76, 77, 82, 85) → **v1.0.1**
 
 Nineteen passes of independent AI security review across 0.8.x. Everything
 demonstrably a disclosure, authorization or privacy defect is closed, including
@@ -694,10 +694,16 @@ described as design work with regression controls, plus maintenance.**
   to be worse than the bug -- the removed recovery arm is what caused the P1 --
   so it needs approval and verified application represented separately, not a
   replay.
-- **83** is the audit Pass 19's poll fix implies rather than performs: this
-  project maintains an optimistic-concurrency token on events and uses it
-  inconsistently, and `markResolved` went eighteen passes as "not known to be
-  wrong" before it turned out to be.
+- **85** is idempotent Google creation. Pass 20 made a lost mapping write
+  recoverable across a failed statement; it cannot be made recoverable across a
+  lost process by any amount of bookkeeping, because the bookkeeping is what is
+  lost. That needs a client-supplied event id, which is a design with its own
+  failure modes.
+
+Item **83** closed in Pass 20 rather than waiting: the audit it asked for found
+that four other poll writers had the same gap `markResolved` had, and the
+Pass-20 review independently demonstrated two of them. Predicting a class and
+then leaving it for later turned out to cost a whole review round.
 
 **Feature gaps predating the review cycle (66, 67, 68, 69).** The import's
 forty-event horizon, a retried voice DM that does not re-check attendance,
@@ -720,6 +726,69 @@ faster than Still open shrinks, which recreates item 29's failure of a list that
 has stopped saying where things stand. The honest options remain: ship 1.0 with
 a named, written-down exception listing exactly these items, or restate the
 test. Sweeping them into the drawer to turn a number green is not one of them.
+
+### What "release ready" means, decided 12 September 2026
+
+Written down because it was not, and that absence is most of why 0.8.x took
+twenty review passes to not finish.
+
+The bar in force until then was implicit and unreachable: **ship when the next
+independent review comes back empty.** Against an adversarial reviewer with
+unlimited scope that never happens, and the evidence says so plainly. Findings
+per pass: 14, 15, 8, 9, 7, 8, 9, 8. It flatlined at eight, six passes ago.
+
+What did NOT flatline is severity. Five P1s in Pass 13, one in Pass 14, one in
+Pass 16 -- and none at all in Passes 17 through 20. The last P1 in this project
+was caused by a fix nobody asked for.
+
+The reason the count stopped falling is visible in Pass 20's own
+classifications. Of its eight findings, three were acknowledged design
+residuals, three were in code written during the two immediately preceding
+passes, two were pre-existing but adjacent to those same fixes -- and one of
+those two had been predicted and recorded by this project a pass earlier.
+**Zero were newly discovered defects in original application code that nobody
+had already flagged.** The review had stopped finding bugs in the app and
+started finding bugs in the repairs.
+
+So the bar is now a property of the software, not of a report:
+
+**Release when all three hold.**
+
+1. **No P1.** No unauthenticated access, no cross-user disclosure, no
+   authorization bypass, no private content reaching someone whose access was
+   removed.
+2. **No P2 that writes wrong data, discloses data, or makes a published
+   statement false.** The third clause is not decoration: P19-08 was the one
+   finding in the cycle where the Privacy Policy asserted something the code
+   did not do, and text the user is asked to rely on is a promise, not a
+   comment.
+3. **Everything else recorded in `IDEAS.md` with the design it needs.**
+
+Findings in categories 1 and 2 block. Everything else is scheduled. A reviewer
+disagreeing with the schedule is a result worth hearing and is not a veto --
+which is the counterpart of the standing request that reviewers say plainly
+when something should be left alone.
+
+**Two guardrails, because this bar could obviously be gamed.**
+
+- It is not a licence to reclassify. A finding moves out of category 2 only by
+  being fixed or by being demonstrated not to write wrong data -- never by
+  being described differently. The same discipline that keeps
+  "Parked until after 1.0" honest applies here.
+- **Prefer removal to mechanism.** Three consecutive regressions in
+  `lib/noticeboard.ts` (P18-01, P19-01, P20-03) were each introduced by a fix
+  for the previous one, and each fix added machinery: a widened predicate, then
+  an override arm, then a mutable-cursor pager. The two changes in this cycle
+  that closed findings and introduced nothing were both DELETIONS -- the change
+  request recovery arm, and migration 0044's backfill. When a fix requires new
+  state, new lifecycle, or a new table, that is a signal to look for the
+  smaller answer first.
+
+**The final review is scoped to the whole application, not to the diff.** Every
+pass so far reviewed the change since the last one, which guarantees the
+findings concentrate wherever the most recent work happened. One whole-app pass
+is the only way to test whether the original surface is genuinely exhausted or
+whether that is an artifact of always reviewing the same author's newest code.
 
 ## Versions
 
@@ -780,7 +849,7 @@ shifts.
 | **0.8** | Phase 5 — Google Calendar sync (2), push half: connect one Google account, pick a calendar, and have the sessions you're committed to written to it. Policy version 3, and the first long-lived third-party credential this app stores | **Shipped 5 September 2026** |
 | **0.8.1** | Phase 5's pull half (2) — one nominated calendar read back via `freebusy.query`, cached by the cron rather than called live inside a request; the server noticeboard (5, per `specs/0007`); the sandbox frontend gap closed as decided-against (23); and policy version 4 covering both disclosures at once. **`IDEAS.md`'s Still open is empty** | **Built — held for the security review** |
 | 1.0 | `IDEAS.md`'s **Still open** section empty — leave Beta | **The test no longer passes, and that is now a decision to make rather than a task to finish.** Nineteen review passes refilled Still open; everything demonstrably a disclosure, authorization or privacy defect is closed and re-verified, and Pass 19 additionally closed the three data-integrity items its reviewer named as release blockers. What remains is design work, pre-cycle feature gaps and maintenance. Ships with a written exception, or the test gets restated — see Phase 6 |
-| **1.0.1** | Phase 6 — what nineteen review passes left standing: Google grant lifecycle (73, 71), cross-tab identity (72), acceptance atomicity and its presentation (70, 78), the concurrency-token audit (83), the pre-cycle feature gaps (66–69, of which **68 login rate limiting** is the only remaining security control), plus maintenance (76, 77, 82) | Planned |
+| **1.0.1** | Phase 6 — what the review cycle left standing after the release bar was applied: Google grant lifecycle (73, 71), cross-tab identity (72), acceptance atomicity and its presentation (70, 78), idempotent Google creation (85), the pre-cycle feature gaps (66–69, of which **68 login rate limiting** is the only remaining security control), plus maintenance (76, 77, 82) | Planned |
 
 ## Summary
 

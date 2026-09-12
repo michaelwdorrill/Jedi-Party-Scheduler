@@ -11,7 +11,7 @@ import TimezoneSelect from '../components/TimezoneSelect';
 import SchedulingAssistant, { type AssistantSlot } from '../components/SchedulingAssistant';
 import { isValidRange, startsInPast } from '../lib/datetime';
 import type { EventDetail, Friend, Group, PollStrategy, VoiceChannel } from '../types';
-import { describeError, latestOnly } from '../lib/async';
+import { describeError, editTargetReady, latestOnly } from '../lib/async';
 import { ErrorState, InlineError, buttonClass, cardClass, controlClass } from '../components/ui';
 
 // Module scope on purpose: the availability memo below needs this during the
@@ -160,6 +160,11 @@ export default function EventFormPage() {
   // each other's changes in whatever order their requests happen to land.
   const [loadedRevision, setLoadedRevision] = useState<number | null>(null);
 
+  // Which event the fields above actually came from (P20-01). Without it the
+  // form knows WHAT it loaded but not WHAT FOR, and Save submits to whatever
+  // the route currently names.
+  const [loadedEventId, setLoadedEventId] = useState<string | null>(null);
+
   // Every slot being proposed, so the availability strip can show all of them
   // rather than only the first (idea 39). One entry for a fixed-time event,
   // one per candidate for an options poll, one for a window poll's span --
@@ -234,8 +239,13 @@ export default function EventFormPage() {
   useEffect(() => {
     if (!isEdit || !eventId) return;
     const isCurrent = loadGate.current.begin();
+    // Synchronously, before the fetch: whatever is on screen belongs to the
+    // event we are navigating AWAY from, so it is not editable state for this
+    // one until the response lands and says otherwise.
+    setLoadedEventId(null);
     api.get<EventDetail>(`/events/${eventId}`).then((ev) => {
       if (!isCurrent()) return;
+      setLoadedEventId(eventId);
       setTitle(ev.title);
       setDescription(ev.description ?? '');
       setGame(ev.game ?? '');
@@ -347,6 +357,10 @@ export default function EventFormPage() {
       setLoadError(describeError(e));
     });
   }, [isEdit, eventId]);
+
+  // Save is not merely discouraged while a different event is loading; the
+  // fields on screen are another event's, so submitting them is the bug.
+  const targetReady = editTargetReady({ isEdit, loadedId: loadedEventId, targetId: eventId });
 
   const addPollSlot = () =>
     setPollSlots((prev) => [
@@ -595,6 +609,12 @@ export default function EventFormPage() {
       }
 
       if (isEdit) {
+        // Belt and braces with the disabled button below: the callback is
+        // reachable programmatically, and this is the guard that actually
+        // decides whether these fields may be written to this event.
+        if (!editTargetReady({ isEdit, loadedId: loadedEventId, targetId: eventId })) {
+          throw new Error('Still loading this event — give it a moment before saving.');
+        }
         if (loadedRevision != null) body.revision = loadedRevision;
         try {
           await api.patch(`/events/${eventId}`, body);
@@ -1103,11 +1123,11 @@ export default function EventFormPage() {
           Cancel
         </button>
         <button
-          disabled={saving || !rangeValid}
+          disabled={saving || !rangeValid || !targetReady}
           onClick={handleSubmit}
           className={buttonClass('primary', 'lg')}
         >
-          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create event'}
+          {saving ? 'Saving…' : !targetReady ? 'Loading…' : isEdit ? 'Save changes' : 'Create event'}
         </button>
       </div>
     </div>

@@ -37,16 +37,15 @@ import { NoticeboardTooLargeError } from './validate';
 // event out of a board that then reports itself as empty.
 const MAX_NOTICEBOARD_EVENTS = 100;
 
-// How many candidate rows one page of the scan reads, and how many rows the
-// whole scan may read before it gives up and says so. The scan cap is what
-// keeps this bounded now that the event cap no longer does: without it, a
-// guild whose candidates all expand to nothing would page forever.
+// How many candidate rows the scan will read before it gives up and says so.
+// This is what keeps the work bounded now that the event cap no longer does:
+// the event cap counts events that survive expansion, so on its own it would
+// let a guild whose candidates all expand to nothing read the entire table.
 //
-// 500 is five pages, so five extra statements at worst over the old single
-// query -- see the statement-count guard in test/pass19.test.ts, which exists
-// because this path runs inside a request and D1's Free plan allows 50
-// statements per invocation.
-const CANDIDATE_PAGE_SIZE = 100;
+// 500 is the cap on rows read in the single candidate statement. It bounds the
+// two chunked loaders below far more than it bounds that statement -- see the
+// guard in test/pass19.test.ts, which exists because this path runs inside a
+// request and D1's Free plan allows 50 statements per invocation.
 const MAX_CANDIDATES_SCANNED = 500;
 
 // The ceiling on expanded occurrences across every event in one request.
@@ -200,30 +199,47 @@ export async function buildNoticeboard(
        )
        AND NOT (event_type = 'poll' AND status != 'resolved')`;
 
-  // Paging needs a TOTAL order, and the old `ORDER BY COALESCE(start_at, ?)`
-  // was not one: a recurring event has a NULL start_at, so every series in a
-  // guild ties at `from` and the hundred-row cut among them was undefined.
-  // That is not just a paging problem -- it is the same undefined ordering
-  // that made one of this project's own fixtures pass with a defect present
-  // (P17-01), and it meant the "soonest hundred" promise was never true for a
-  // guild whose candidates were mostly series. `id` breaks the tie.
-  const pageOf = async (cursor: { key: number; id: string } | null): Promise<EventRow[]> => {
-    const where = cursor
-      ? `${CANDIDATE_SQL}
-       AND (COALESCE(start_at, ?) > ? OR (COALESCE(start_at, ?) = ? AND id > ?))`
-      : CANDIDATE_SQL;
-    const binds: unknown[] = [guildId, windowStartDate, windowEndDate, to, from, to, from];
-    if (cursor) binds.push(from, cursor.key, from, cursor.key, cursor.id);
-    binds.push(from, CANDIDATE_PAGE_SIZE);
-    const { results } = await env.DB.prepare(
-      `${where}
+  // ONE query, one snapshot, no cursor. Pass-20 review (P20-03).
+  //
+  // The Pass-19 version paged with a cursor of `(COALESCE(start_at, from), id)`
+  // -- and `start_at` is editable. An owner moving an event between two page
+  // reads could push it behind the cursor (never selected, and the response
+  // still claimed `complete: true`) or across it (selected twice, with the same
+  // occurrence id in the output twice). Both were demonstrated.
+  //
+  // The instinct was to fix the cursor: dedupe by id, snapshot the keys,
+  // detect edits and retry. Every one of those adds machinery to machinery that
+  // exists to bound a scan -- and this file has now produced a regression in
+  // three consecutive passes, each one introduced by the fix for the last, and
+  // each one bigger than what it replaced. So the pager is gone instead.
+  //
+  // Reading the whole bounded candidate set in a single statement is smaller
+  // than paging, and the entire mutable-key class stops existing rather than
+  // being defended against: there is no second read for an edit to land
+  // between. The cap is enforced by asking for one row more than we will use,
+  // which is also what makes `complete` exact -- with the full candidate list
+  // in hand there is nothing left to guess about, so the flag no longer has to
+  // be conservative the way the paged version's did.
+  //
+  // The total order still matters and is still `id`-broken. Not for paging any
+  // more, but because a recurring event has a NULL start_at, so every series in
+  // a guild ties at `from` -- and an untied cut means "the soonest hundred" was
+  // never a true description of what a mostly-recurring guild got back. It is
+  // the same undefined ordering that let a P17-01 fixture pass with its defect
+  // present.
+  const { results: candidates } = await env.DB.prepare(
+    `${CANDIDATE_SQL}
      ORDER BY COALESCE(start_at, ?) ASC, id ASC
      LIMIT ?`,
-    )
-      .bind(...binds)
-      .all<EventRow>();
-    return results;
-  };
+  )
+    .bind(guildId, windowStartDate, windowEndDate, to, from, to, from, from, MAX_CANDIDATES_SCANNED + 1)
+    .all<EventRow>();
+
+  // More candidates exist than we are willing to read, so whatever we return
+  // cannot be claimed as the whole answer however few of them turn out to be
+  // eligible.
+  let complete = candidates.length <= MAX_CANDIDATES_SCANNED;
+  const scanned = complete ? candidates : candidates.slice(0, MAX_CANDIDATES_SCANNED);
 
   let budget = MAX_NOTICEBOARD_OCCURRENCES;
   const spend = (n: number): void => {
@@ -241,62 +257,53 @@ export async function buildNoticeboard(
     occurrences: { date: string; startAt: number; endAt: number }[];
   }
 
+  // Bulk, once, for the whole snapshot rather than per page. These two are the
+  // reason the candidate cap is 500 and not larger: they chunk their id lists,
+  // so they cost statements in proportion to it. The package comment that said
+  // "three statements per page" was wrong and the Pass-20 reviewer corrected
+  // it -- a hundred recurring ids split 80 + 20, so it was five. The
+  // statement-count guard in test/pass19.test.ts is what actually holds this
+  // inside D1's Free ceiling of 50 for a request, not the arithmetic in a
+  // comment.
+  const recurringIds = scanned.filter((e) => e.is_recurring).map((e) => e.id);
+  const overridesByEvent = await loadOverridesForEvents(env, recurringIds);
+  const recurrenceRulesByEvent = await loadRecurrenceRulesForEvents(env, recurringIds);
+
   const selected: Selected[] = [];
-  let cursor: { key: number; id: string } | null = null;
-  let scanned = 0;
-  let complete = false;
-
-  scan: while (scanned < MAX_CANDIDATES_SCANNED) {
-    const page = await pageOf(cursor);
-    if (page.length === 0) {
-      complete = true;
+  for (let i = 0; i < scanned.length; i++) {
+    const event = scanned[i];
+    if (selected.length >= MAX_NOTICEBOARD_EVENTS) {
+      // The board is full and candidates remain. Unlike the paged version,
+      // which had to assume this, we can see the rest of the list.
+      complete = false;
       break;
     }
-    scanned += page.length;
 
-    // Per page rather than per candidate: two statements for up to a hundred
-    // events, which is what keeps the scan affordable inside a request.
-    const recurringIds = page.filter((e) => e.is_recurring).map((e) => e.id);
-    const overridesByEvent = await loadOverridesForEvents(env, recurringIds);
-    const recurrenceRulesByEvent = await loadRecurrenceRulesForEvents(env, recurringIds);
-
-    for (const event of page) {
-      if (selected.length >= MAX_NOTICEBOARD_EVENTS) break scan;
-      cursor = { key: event.start_at ?? from, id: event.id };
-
-      if (!event.is_recurring) {
-        if (event.start_at == null) continue;
-        spend(1);
-        selected.push({
-          event,
-          occurrences: [{ date: '', startAt: event.start_at, endAt: event.end_at ?? event.start_at }],
-        });
-        continue;
-      }
-
-      const expanded = await expandOccurrencesForEvent(
-        env,
+    if (!event.is_recurring) {
+      if (event.start_at == null) continue;
+      spend(1);
+      selected.push({
         event,
-        from,
-        to,
-        overridesByEvent.get(event.id) ?? [],
-        recurrenceRulesByEvent.get(event.id),
-      );
-      // The point of the whole rewrite: a series that expands to nothing costs
-      // a candidate slot and no event slot. Before this, it cost an event slot
-      // and evicted something real.
-      if (expanded.length === 0) continue;
-      spend(expanded.length);
-      selected.push({ event, occurrences: expanded });
+        occurrences: [{ date: '', startAt: event.start_at, endAt: event.end_at ?? event.start_at }],
+      });
+      continue;
     }
 
-    // A short page means the candidate set is exhausted, so what we have is
-    // everything. A full page means there may be more, and the loop condition
-    // decides whether we can afford to look.
-    if (page.length < CANDIDATE_PAGE_SIZE) {
-      complete = true;
-      break;
-    }
+    const expanded = await expandOccurrencesForEvent(
+      env,
+      event,
+      from,
+      to,
+      overridesByEvent.get(event.id) ?? [],
+      recurrenceRulesByEvent.get(event.id),
+    );
+    // The point of counting here rather than in SQL: a series that expands to
+    // nothing costs a candidate slot and no event slot. Before this it cost an
+    // event slot and evicted something real -- three separate times, wearing
+    // three different hats (P17-07, P18-02, P19-01).
+    if (expanded.length === 0) continue;
+    spend(expanded.length);
+    selected.push({ event, occurrences: expanded });
   }
 
   if (selected.length === 0) return { occurrences: [], complete };

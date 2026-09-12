@@ -97,6 +97,32 @@ export function latestOnly(): { begin: () => () => boolean } {
 }
 
 /**
+ * Whether a form's loaded state belongs to the thing it is about to write to.
+ *
+ * Pass-20 review (P20-01), the residual half of P19-03. `latestOnly` stopped an
+ * obsolete response from OVERWRITING newer state, which was the reported bug.
+ * It does not stop the opposite order: while a newly selected event is still
+ * loading, the fields and the loaded revision still belong to the PREVIOUS
+ * event, and Save was enabled and submitted them to the current route's id.
+ * Two events are legitimately both at revision 0, so the server's concurrency
+ * check saw a well-formed request and accepted it -- one event's contents
+ * written over another's, at the client's invitation.
+ *
+ * Clearing the revision instead would be worse, not better: it would send the
+ * wrong event's fields with no concurrency protection at all.
+ *
+ * A creation form has nothing loaded and is always ready.
+ */
+export function editTargetReady(opts: {
+  isEdit: boolean;
+  loadedId: string | null;
+  targetId: string | undefined;
+}): boolean {
+  if (!opts.isEdit) return true;
+  return opts.targetId != null && opts.loadedId === opts.targetId;
+}
+
+/**
  * Runs `load` on mount and whenever `deps` change, tracking loading and error
  * alongside the data so a page can tell "nothing came back" apart from
  * "nothing is scheduled".

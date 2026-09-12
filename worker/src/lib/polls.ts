@@ -71,6 +71,29 @@ export async function getOptionTallies(env: Env, eventId: string): Promise<Optio
   return [...byId.values()];
 }
 
+// The parent event's optimistic-concurrency token, as the caller read it.
+//
+// Pass-20 review (P20-02). `markResolved` gained a revision check in Pass 19
+// and the other four poll-decision writers did not, so the same class of stale
+// decision simply moved next door: an owner raising a threshold or extending a
+// deadline could have their successful, authorized edit ignored by a decision
+// computed before it. Every state-changing poll decision now carries this.
+//
+// `events.revision` is NOT NULL DEFAULT 0 (migration 0013) and every caller
+// reads its row with SELECT *, so the throw is an assertion rather than a
+// reachable branch. It is worth having because `revision` is optional on
+// EventRow -- narrower selects omit it -- and binding `undefined` would make
+// `revision = NULL`, which is never true, so every poll in the system would
+// silently stop settling. The deadline sweep catches this per poll and counts
+// it as a resolution failure, which is visible. Silence is not.
+function requireRevision(event: EventRow): number {
+  const revision = event.revision;
+  if (revision == null) {
+    throw new Error('poll decisions need an event row read with its revision');
+  }
+  return revision;
+}
+
 // Compare-and-set: only transitions an event that's still 'active', is still
 // at the revision the winner was computed from, and whose winning option is
 // still a candidate. Two concurrent requests (a synchronous threshold-crossing
@@ -112,18 +135,7 @@ async function markResolved(
   event: EventRow,
   option: { id: string; startAt: number; endAt: number },
 ): Promise<boolean> {
-  // `events.revision` is NOT NULL DEFAULT 0 (migration 0013) and every caller
-  // here reads the row with SELECT *, so this is an assertion rather than a
-  // reachable branch. It is an assertion worth having: `revision` is optional
-  // on EventRow because narrower selects elsewhere omit it, and binding
-  // `undefined` would make `revision = NULL` -- never true, so every poll in
-  // the system would quietly stop resolving and nothing would say why. A throw
-  // is caught by the deadline sweep's per-poll handler and counted as a
-  // resolution failure, which is visible; silence is not.
-  const revision = event.revision;
-  if (revision == null) {
-    throw new Error('markResolved needs an event row read with its revision');
-  }
+  const revision = requireRevision(event);
   const eventId = event.id;
   const result = await env.DB.prepare(
     `UPDATE events SET status = 'resolved', resolved_option_id = ?, start_at = ?, end_at = ?, updated_at = ?
@@ -135,9 +147,16 @@ async function markResolved(
   return result.meta.changes > 0;
 }
 
-async function markCancelled(env: Env, eventId: string): Promise<boolean> {
-  const result = await env.DB.prepare(`UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'active'`)
-    .bind(Date.now(), eventId)
+async function markCancelled(env: Env, event: EventRow): Promise<boolean> {
+  // Revision-guarded for the same reason as markResolved (P20-02). Cancelling
+  // an unanswered poll is a decision like any other, and the specific schedule
+  // the review demonstrated is an owner EXTENDING the deadline into the future
+  // moments before an old close: the new deadline was saved and the poll was
+  // cancelled anyway.
+  const result = await env.DB.prepare(
+    `UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'active' AND revision = ?`,
+  )
+    .bind(Date.now(), event.id, requireRevision(event))
     .run();
   return result.meta.changes > 0;
 }
@@ -153,10 +172,21 @@ function pickMostVotes(tallies: OptionTally[]): OptionTally | null {
   })[0];
 }
 
-// Same compare-and-set principle as markResolved, scoped to one option.
-async function confirmOption(env: Env, optionId: string): Promise<boolean> {
-  const result = await env.DB.prepare(`UPDATE event_poll_options SET confirmed_at = ? WHERE id = ? AND confirmed_at IS NULL`)
-    .bind(Date.now(), optionId)
+// Same compare-and-set principle as markResolved, scoped to one option -- and
+// since P20-02, carrying the parent's revision the same way. The row being
+// written is the option, so the parent check is an EXISTS rather than a column
+// comparison; confirming a candidate is still a decision about the poll, and a
+// threshold raised from one to two between the tally and this write must
+// invalidate it. It did not, and a full reminder sweep then created the child
+// session for a day nobody had agreed to.
+async function confirmOption(env: Env, event: EventRow, optionId: string): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE event_poll_options SET confirmed_at = ?
+     WHERE id = ? AND confirmed_at IS NULL
+       AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_poll_options.event_id
+                     AND e.status = 'active' AND e.revision = ?)`,
+  )
+    .bind(Date.now(), optionId, requireRevision(event))
     .run();
   return result.meta.changes > 0;
 }
@@ -184,7 +214,7 @@ export async function checkThresholdAndResolve(env: Env, event: EventRow): Promi
     const newlyConfirmed: string[] = [];
     for (const t of tallies) {
       if (!t.confirmedAt && t.yes >= event.poll_threshold_count) {
-        if (await confirmOption(env, t.id)) newlyConfirmed.push(t.id);
+        if (await confirmOption(env, event, t.id)) newlyConfirmed.push(t.id);
       }
     }
     return newlyConfirmed;
@@ -394,11 +424,20 @@ export function resolveWindowedCandidates(
 // the span that actually won. Both writes are in the one compare-and-set, so
 // a candidate cannot be confirmed twice or be left confirmed with its window
 // still in place.
-async function confirmWindowedOption(env: Env, optionId: string, span: WindowCandidate): Promise<boolean> {
+async function confirmWindowedOption(
+  env: Env,
+  event: EventRow,
+  optionId: string,
+  span: WindowCandidate,
+): Promise<boolean> {
+  // The windowed twin of confirmOption, guarded identically (P20-02).
   const result = await env.DB.prepare(
-    `UPDATE event_poll_options SET confirmed_at = ?, start_at = ?, end_at = ? WHERE id = ? AND confirmed_at IS NULL`,
+    `UPDATE event_poll_options SET confirmed_at = ?, start_at = ?, end_at = ?
+     WHERE id = ? AND confirmed_at IS NULL
+       AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_poll_options.event_id
+                     AND e.status = 'active' AND e.revision = ?)`,
   )
-    .bind(Date.now(), span.startAt, span.endAt, optionId)
+    .bind(Date.now(), span.startAt, span.endAt, optionId, requireRevision(event))
     .run();
   return result.meta.changes > 0;
 }
@@ -425,7 +464,7 @@ export async function checkWindowThresholdAndResolve(env: Env, event: EventRow):
     const newlyConfirmed: string[] = [];
     for (const { candidate, best } of resolved) {
       if (candidate.confirmedAt || !best || best.count < threshold) continue;
-      if (await confirmWindowedOption(env, candidate.id, best)) newlyConfirmed.push(candidate.id);
+      if (await confirmWindowedOption(env, event, candidate.id, best)) newlyConfirmed.push(candidate.id);
     }
     return newlyConfirmed;
   }
@@ -498,11 +537,19 @@ export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): P
         const tallies = await getOptionTallies(env, event.id);
         const anyConfirmed = tallies.some((t) => t.confirmedAt);
         if (anyConfirmed) {
-          await env.DB.prepare(`UPDATE events SET status = 'resolved', updated_at = ? WHERE id = ? AND status = 'active'`)
-            .bind(now, event.id)
+          // Revision-guarded like every other decision (P20-02): the review's
+          // schedule is an already-confirmed multi-winner day plus a deadline
+          // the owner has just extended, where the old close wrote 'resolved'
+          // over the new future deadline.
+          const closed = await env.DB.prepare(
+            `UPDATE events SET status = 'resolved', updated_at = ?
+             WHERE id = ? AND status = 'active' AND revision = ?`,
+          )
+            .bind(now, event.id, requireRevision(event))
             .run();
-        } else {
-          await markCancelled(env, event.id);
+          if (closed.meta.changes === 0) continue;
+        } else if (!(await markCancelled(env, event))) {
+          continue;
         }
         resolvedEventIds.push(event.id);
         continue;
@@ -529,7 +576,7 @@ export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): P
         // sweep decides from the edited state.
         if (winner) {
           if (!(await markResolved(env, event, { id: winner.candidate.id, ...winner.best! }))) continue;
-        } else if (!(await markCancelled(env, event.id))) {
+        } else if (!(await markCancelled(env, event))) {
           continue;
         }
         resolvedEventIds.push(event.id);
@@ -540,7 +587,7 @@ export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): P
       const winner = pickMostVotes(tallies);
       if (winner) {
         if (!(await markResolved(env, event, winner))) continue;
-      } else if (!(await markCancelled(env, event.id))) {
+      } else if (!(await markCancelled(env, event))) {
         continue;
       }
       resolvedEventIds.push(event.id);

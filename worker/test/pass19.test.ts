@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { EventRow } from '../src/lib/events';
 import { buildNoticeboard } from '../src/lib/noticeboard';
-import { checkThresholdAndResolve } from '../src/lib/polls';
+import { checkThresholdAndResolve, resolvePastDeadlinePolls } from '../src/lib/polls';
 import type { ShimDatabase } from './d1shim';
 import { seedEvent, seedGuild, seedMembership, seedUser, setup } from './helpers';
 
@@ -360,5 +360,245 @@ describe('a poll must not resolve to a candidate that was just removed (P19-02)'
       after?.status,
       'one vote settled a poll whose organizer had just raised the threshold to five',
     ).toBe('active');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P20-03. The Pass-19 pager used `(COALESCE(start_at, from), id)` as its
+// cursor, and `start_at` is editable. An owner moving an event between two page
+// reads could push it BEHIND the cursor -- never selected, while the response
+// still claimed completeness -- or across it, selected twice with the same
+// occurrence id appearing in the output twice.
+//
+// The pager is gone rather than guarded: candidates are read in one statement,
+// so there is no second read for an edit to land between. These tests drive an
+// edit at the moment the old design would have been between pages, and both
+// are now structurally impossible rather than merely defended against.
+//
+// They are written against the observable contract -- what comes back, and
+// whether `complete` is true -- so they keep meaning something if the internals
+// change again, which on this file's record they will.
+describe('an edit during the scan cannot duplicate or hide an event (P20-03)', () => {
+  // Fires `edit` the first time a statement reads the events table, which is
+  // exactly where the pager's second SELECT used to be. Under the snapshot
+  // design this lands after the only candidate read; under the pager it landed
+  // between two of them.
+  function editDuringScan(env: { DB: unknown }, edit: () => Promise<void>): void {
+    const db = env.DB as ShimDatabase;
+    const realPrepare = db.prepare.bind(db);
+    let seenCandidateRead = false;
+    (db as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      const statement = realPrepare(sql);
+      if (!sql.includes('FROM events') || !sql.includes('is_recurring')) return statement;
+      const realAll = statement.all.bind(statement);
+      (statement as unknown as { all: () => Promise<unknown> }).all = async () => {
+        const out = await realAll();
+        if (!seenCandidateRead) {
+          seenCandidateRead = true;
+          await edit();
+        }
+        return out;
+      };
+      return statement;
+    };
+  }
+
+  async function seedCrowd(db: ShimDatabase, n: number): Promise<void> {
+    for (let i = 0; i < n; i++) await seedExhaustedCountSeries(db, `spent-${String(i).padStart(4, '0')}`);
+  }
+
+  it('never returns the same occurrence twice when an event is moved later', async () => {
+    const { db, env } = await guild();
+    await seedCrowd(db, 98);
+    await seedEvent(db, { id: 'evt-a', organizerId: 'owner', title: 'A',
+      startAt: Date.UTC(2026, 8, 16, 1, 0), endAt: Date.UTC(2026, 8, 16, 2, 0) });
+    await seedEvent(db, { id: 'evt-b', organizerId: 'owner', title: 'B',
+      startAt: Date.UTC(2026, 8, 16, 2, 0), endAt: Date.UTC(2026, 8, 16, 3, 0) });
+    await seedEvent(db, { id: 'evt-d', organizerId: 'owner', title: 'D',
+      startAt: Date.UTC(2026, 8, 16, 4, 0), endAt: Date.UTC(2026, 8, 16, 5, 0) });
+
+    // A moves from +1h to +3h, i.e. past where the cursor had reached.
+    editDuringScan(env, async () => {
+      await db
+        .prepare(`UPDATE events SET start_at = ?, end_at = ? WHERE id = 'evt-a'`)
+        .bind(Date.UTC(2026, 8, 16, 3, 0), Date.UTC(2026, 8, 16, 4, 0))
+        .run();
+    });
+
+    const board = await buildNoticeboard(env, 'guild-1', WINDOW_FROM, WINDOW_TO);
+    const ids = board.occurrences.map((o) => o.occurrenceId);
+
+    expect(
+      new Set(ids).size,
+      `the same occurrence was returned more than once: ${JSON.stringify(ids)}`,
+    ).toBe(ids.length);
+  });
+
+  it('does not claim completeness after an event moves earlier mid-scan', async () => {
+    const { db, env } = await guild();
+    await seedCrowd(db, 99);
+    await seedEvent(db, { id: 'evt-a', organizerId: 'owner', title: 'A',
+      startAt: Date.UTC(2026, 8, 16, 1, 0), endAt: Date.UTC(2026, 8, 16, 2, 0) });
+    await seedEvent(db, { id: 'evt-b', organizerId: 'owner', title: 'B',
+      startAt: Date.UTC(2026, 8, 17, 1, 0), endAt: Date.UTC(2026, 8, 17, 2, 0) });
+
+    // B moves earlier, staying inside the window -- behind the old cursor.
+    editDuringScan(env, async () => {
+      await db
+        .prepare(`UPDATE events SET start_at = ?, end_at = ? WHERE id = 'evt-b'`)
+        .bind(Date.UTC(2026, 8, 15, 1, 0), Date.UTC(2026, 8, 15, 2, 0))
+        .run();
+    });
+
+    const board = await buildNoticeboard(env, 'guild-1', WINDOW_FROM, WINDOW_TO);
+    const ids = board.occurrences.map((o) => o.eventId);
+
+    // Either B is in the answer, or the answer does not claim to be whole. The
+    // pager managed neither: it dropped B and reported complete: true.
+    expect(
+      ids.includes('evt-b') || !board.complete,
+      'an event moved during the scan vanished from a board that still reported itself complete',
+    ).toBe(true);
+  });
+
+  // An invariant guard: it passes on the paged tree too. Here because the
+  // snapshot must not have quietly changed what an ordinary board contains.
+  it('still returns every eligible event when nothing is edited', async () => {
+    const { db, env } = await guild();
+    await seedCrowd(db, 98);
+    for (const [id, hour] of [['evt-a', 1], ['evt-b', 2], ['evt-d', 4]] as const) {
+      await seedEvent(db, { id, organizerId: 'owner', title: id,
+        startAt: Date.UTC(2026, 8, 16, hour, 0), endAt: Date.UTC(2026, 8, 16, hour + 1, 0) });
+    }
+
+    const board = await buildNoticeboard(env, 'guild-1', WINDOW_FROM, WINDOW_TO);
+
+    expect(board.occurrences.map((o) => o.eventId).sort()).toEqual(['evt-a', 'evt-b', 'evt-d']);
+    expect(board.complete).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P20-02. Pass 19 gave `markResolved` a revision check and left the other four
+// poll-decision writers alone, so the same class of stale decision moved next
+// door. IDEAS item 83 predicted exactly this and the Pass-20 review found it,
+// which is a reasonable argument for auditing a class rather than patching the
+// instance that was reported.
+//
+// Two shapes, both from successful, authorized owner edits: raising a threshold
+// immediately before a confirmation, and extending a deadline immediately
+// before a close.
+describe('every poll decision honours an edit that beat it (P20-02)', () => {
+  async function seedMultiWinnerPoll(db: ShimDatabase): Promise<void> {
+    await seedEvent(db, { id: 'poll-1', organizerId: 'owner', title: 'Which nights?',
+      eventType: 'poll', startAt: null, endAt: null });
+    await db.prepare(
+      `UPDATE events SET poll_strategy = 'threshold', poll_threshold_count = 1,
+         poll_resolution_mode = 'multi_winner', window_block_minutes = NULL, revision = 0
+       WHERE id = 'poll-1'`,
+    ).run();
+    await db.prepare(
+      `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order)
+       VALUES ('opt-a', 'poll-1', ?, ?, 0)`,
+    ).bind(Date.UTC(2026, 8, 20, 19, 0), Date.UTC(2026, 8, 20, 21, 0)).run();
+  }
+
+  function editAfterTallyRead(env: { DB: unknown }, edit: string): void {
+    const db = env.DB as ShimDatabase;
+    const realPrepare = db.prepare.bind(db);
+    let fired = false;
+    (db as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      const statement = realPrepare(sql);
+      if (fired || !sql.includes('FROM event_poll_options o')) return statement;
+      const realAll = statement.all.bind(statement);
+      (statement as unknown as { all: () => Promise<unknown> }).all = async () => {
+        const out = await realAll();
+        if (!fired) {
+          fired = true;
+          realPrepare(edit).run();
+          realPrepare(`UPDATE events SET revision = revision + 1 WHERE id = 'poll-1'`).run();
+        }
+        return out;
+      };
+      return statement;
+    };
+  }
+
+  it('does not confirm a multi-winner option after the threshold was raised', async () => {
+    const { db, env } = await guild();
+    await seedUser(db, 'voter');
+    await seedMembership(db, 'voter', 'guild-1');
+    await seedMultiWinnerPoll(db);
+
+    const staleEvent = await db.prepare(`SELECT * FROM events WHERE id = 'poll-1'`).first<EventRow>();
+    await db.prepare(
+      `INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES ('opt-a', 'voter', 'yes', ?)`,
+    ).bind(Date.now()).run();
+
+    editAfterTallyRead(env, `UPDATE events SET poll_threshold_count = 2 WHERE id = 'poll-1'`);
+    await checkThresholdAndResolve(env, staleEvent!);
+
+    const opt = await db
+      .prepare(`SELECT confirmed_at FROM event_poll_options WHERE id = 'opt-a'`)
+      .first<{ confirmed_at: number | null }>();
+    expect(
+      opt?.confirmed_at,
+      'one vote confirmed a candidate after the owner had just raised the threshold to two',
+    ).toBeNull();
+  });
+
+  it('still confirms a multi-winner option when nothing changed', async () => {
+    const { db, env } = await guild();
+    await seedUser(db, 'voter');
+    await seedMembership(db, 'voter', 'guild-1');
+    await seedMultiWinnerPoll(db);
+
+    const event = await db.prepare(`SELECT * FROM events WHERE id = 'poll-1'`).first<EventRow>();
+    await db.prepare(
+      `INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES ('opt-a', 'voter', 'yes', ?)`,
+    ).bind(Date.now()).run();
+
+    const confirmed = await checkThresholdAndResolve(env, event!);
+
+    expect(confirmed).toEqual(['opt-a']);
+  });
+
+  it('does not cancel an unanswered poll whose deadline was just extended', async () => {
+    const { db, env } = await guild();
+    await seedMultiWinnerPoll(db);
+    await db.prepare(
+      `UPDATE events SET poll_resolution_mode = 'single_winner', poll_deadline_at = ? WHERE id = 'poll-1'`,
+    ).bind(Date.now() - 1000).run();
+
+    // The owner extends the deadline while the sweep is mid-decision. Fired
+    // from the tally read, which is the point the sweep has committed to a
+    // no-winner outcome but has not written it.
+    editAfterTallyRead(
+      env,
+      `UPDATE events SET poll_deadline_at = ${Date.now() + 7 * 24 * 60 * 60 * 1000} WHERE id = 'poll-1'`,
+    );
+    await resolvePastDeadlinePolls(env);
+
+    const after = await db
+      .prepare(`SELECT status, poll_deadline_at FROM events WHERE id = 'poll-1'`)
+      .first<{ status: string; poll_deadline_at: number }>();
+    expect(
+      after?.status,
+      'a poll was cancelled for having no answer after its owner had just given it another week',
+    ).toBe('active');
+    expect(after!.poll_deadline_at).toBeGreaterThan(Date.now());
+  });
+
+  it('still cancels an unanswered poll whose deadline really has passed', async () => {
+    const { db, env } = await guild();
+    await seedMultiWinnerPoll(db);
+    await db.prepare(
+      `UPDATE events SET poll_resolution_mode = 'single_winner', poll_deadline_at = ? WHERE id = 'poll-1'`,
+    ).bind(Date.now() - 1000).run();
+
+    await resolvePastDeadlinePolls(env);
+
+    const after = await db.prepare(`SELECT status FROM events WHERE id = 'poll-1'`).first<{ status: string }>();
+    expect(after?.status, 'the guard stopped ordinary deadline cancellation from working').toBe('cancelled');
   });
 });

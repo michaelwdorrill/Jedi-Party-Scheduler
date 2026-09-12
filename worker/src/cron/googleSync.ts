@@ -313,12 +313,48 @@ async function runDisconnect(
     // session that really happened and is worth keeping, whereas one of these
     // is a duplicate the user never asked for and cannot see the provenance
     // of. Leaving it as "history" would be leaving litter.
+    //
+    // Pass-20 review (P20-05). Scoped to the account being disconnected, and
+    // that scoping is the fix rather than a refinement of it. `primary` is an
+    // alias meaning "the primary calendar of whoever is asking", so sending
+    // account A's event id to account B's primary calendar is a well-formed
+    // request about a different object -- and Google answers 404, which this
+    // code read as "already gone". It then deleted the obligation and reported
+    // the disconnect complete while A's event sat untouched in A's calendar.
+    // A 404 is not proof of absence; it is also what "you cannot see this"
+    // looks like.
+    //
+    // A NULL `google_account_email` is treated as NOT matching, which is the
+    // conservative direction: an obligation we cannot attribute is one we must
+    // not act on. Only rows written by migration 0045 before 0046 added the
+    // column can be NULL, and 0045 never reached production.
+    //
+    // An obligation belonging to an account the user has already left is
+    // genuinely unreachable -- we hold no credential for it and should not keep
+    // one in order to look tidy. It stays on the table as an honest unresolved
+    // record and keeps `allCleared` false, so the disconnect logs that it could
+    // not finish rather than claiming it did. The product promise is about
+    // "that calendar", the one being disconnected, and account-scoping is what
+    // makes that sentence true.
     const { results: orphans } = await env.DB.prepare(
-      `SELECT id, google_event_id, calendar_id FROM google_orphaned_inserts WHERE user_id = ?`,
+      `SELECT id, google_event_id, calendar_id, google_account_email
+       FROM google_orphaned_inserts WHERE user_id = ?`,
     )
       .bind(row.user_id)
-      .all<{ id: string; google_event_id: string; calendar_id: string }>();
+      .all<{ id: string; google_event_id: string; calendar_id: string; google_account_email: string | null }>();
     for (const orphan of orphans) {
+      const sameAccount =
+        !!orphan.google_account_email &&
+        !!row.google_account_email &&
+        orphan.google_account_email === row.google_account_email;
+      if (!sameAccount) {
+        console.warn(
+          `Google disconnect for ${row.user_id}: an entry this app created cannot be removed, ` +
+            'because it belongs to a Google account this connection is not for.',
+        );
+        allCleared = false;
+        continue;
+      }
       if (!budget.tryCalendarWrite()) {
         outOfBudget = true;
         break;
@@ -694,7 +730,44 @@ async function syncOneConnection(
     }
     const result = await insertCalendarEvent(accessToken, row.calendar_id, payload);
     if (result.ok) {
-      const mapping = await env.DB.prepare(
+      // Pass-20 review (P20-04). Everything from here to the mapping write is
+      // the window in which Google has ALREADY created the event and nothing
+      // local knows it. The Pass-19 compensation handled the mapping returning
+      // zero changes; it did not handle the mapping THROWING, because the
+      // throw left the function before either the compensating delete or the
+      // obligation record could run. The event stayed in the calendar with no
+      // record anywhere, the next sweep made a second copy, and disconnect
+      // could reach only the second.
+      //
+      // `owe()` is the smallest thing that closes the exception schedule: a
+      // best-effort obligation, written in its own try because the database is
+      // by hypothesis unhealthy at this point. Being honest about its limit
+      // matters more than the fix -- this covers a failed statement, NOT a
+      // process interruption between Google's 200 and any local write at all.
+      // Closing that needs idempotent creation with a client-supplied event id,
+      // which is a real design and is IDEAS item 85, not something to improvise
+      // here.
+      const owe = async (): Promise<void> => {
+        try {
+          await env.DB.prepare(
+            `INSERT INTO google_orphaned_inserts
+               (id, user_id, google_event_id, calendar_id, created_at, google_account_email)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(user_id, calendar_id, google_event_id) DO NOTHING`,
+          )
+            .bind(newId(), row.user_id, result.value.id, row.calendar_id, now, row.google_account_email)
+            .run();
+        } catch (err) {
+          console.error(
+            `Google sync for ${row.user_id}: created ${result.value.id} in Google and could not record the obligation to remove it`,
+            err,
+          );
+        }
+      };
+
+      let mapping;
+      try {
+        mapping = await env.DB.prepare(
         // Pass-13 review (P13-08). Records the destination this entry was
         // actually written to, and refuses to record it at all if that
         // destination is no longer the connection's -- the R10 `stillCurrent`
@@ -742,6 +815,14 @@ async function syncOneConnection(
           row.refresh_token_ciphertext,
         )
         .run();
+      } catch (err) {
+        // The insert succeeded remotely and the bookkeeping did not. Record
+        // what we owe, then let the error surface -- the sweep must still
+        // report this tick as failed rather than continue as if nothing
+        // happened.
+        await owe();
+        throw err;
+      }
 
       // Pass-19 review (P19-08). The guard above refuses the mapping when the
       // destination or credential moved while this insert was in flight -- and
@@ -764,15 +845,7 @@ async function syncOneConnection(
         const compensated =
           budget.tryCalendarWrite() &&
           (await deleteCalendarEvent(accessToken, row.calendar_id, result.value.id)).ok;
-        if (!compensated) {
-          await env.DB.prepare(
-            `INSERT INTO google_orphaned_inserts (id, user_id, google_event_id, calendar_id, created_at)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(user_id, calendar_id, google_event_id) DO NOTHING`,
-          )
-            .bind(newId(), row.user_id, result.value.id, row.calendar_id, now)
-            .run();
-        }
+        if (!compensated) await owe();
         continue;
       }
 

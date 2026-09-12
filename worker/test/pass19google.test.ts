@@ -223,4 +223,130 @@ describe('a Google event we created is never left untracked (P19-08)', () => {
     const owed = await db.prepare(`SELECT COUNT(*) AS n FROM google_orphaned_inserts`).first<{ n: number }>();
     expect(owed!.n).toBe(0);
   });
+
+  // Pass-20 review (P20-04). The Pass-19 compensation handled the mapping
+  // write RETURNING zero changes. It never ran when that write THREW, because
+  // the throw left the function before either the compensating delete or the
+  // obligation record. Google had already created the event; nothing local
+  // knew; the next sweep made a second copy and disconnect reached only that.
+  it('still records the obligation when the mapping write throws', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedSyncable(db);
+
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      { match: '/calendar/v3/calendars/', status: 200, body: { id: 'google-event-orphan' } },
+    ]);
+
+    // One injected failure on the mapping INSERT, after a successful provider
+    // response. Not a forged state: it is what a D1 error at that instant does.
+    const realPrepare = db.prepare.bind(db);
+    let thrown = false;
+    (db as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      if (!thrown && sql.includes('INSERT INTO google_event_links')) {
+        thrown = true;
+        return {
+          bind: () => ({
+            run: async () => {
+              throw new Error('D1_ERROR: injected');
+            },
+          }),
+        };
+      }
+      return realPrepare(sql);
+    };
+
+    // The sweep must NOT swallow this -- a failed tick has to look failed.
+    await expect(sweepGoogleCalendar(env, new TickBudget('paid'))).rejects.toThrow(/injected/);
+
+    const owed = await db
+      .prepare(`SELECT google_event_id, google_account_email FROM google_orphaned_inserts WHERE user_id = 'u1'`)
+      .all<{ google_event_id: string; google_account_email: string | null }>();
+    expect(
+      owed.results.length,
+      'Google created the event, the local write failed, and nothing recorded that we owe its removal',
+    ).toBe(1);
+    expect(owed.results[0].google_event_id).toBe('google-event-orphan');
+    expect(owed.results[0].google_account_email).toBe('someone@gmail.com');
+  });
+
+  // Pass-20 review (P20-05). An obligation created while account A was
+  // connected must not be discharged by asking account B. Google answers 404
+  // because the event is not in B -- which is not proof it is gone from A.
+  it('does not discharge an obligation by asking a different Google account', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedSyncable(db);
+
+    await db
+      .prepare(
+        `INSERT INTO google_orphaned_inserts
+           (id, user_id, google_event_id, calendar_id, created_at, google_account_email)
+         VALUES ('owe-1', 'u1', 'google-event-in-account-a', 'primary', ?, 'account-a@gmail.com')`,
+      )
+      .bind(Date.now())
+      .run();
+
+    // The user is now connected as a DIFFERENT account and disconnects it.
+    await db
+      .prepare(
+        `UPDATE google_calendar_connections
+         SET google_account_email = 'account-b@gmail.com', status = 'disconnecting' WHERE user_id = 'u1'`,
+      )
+      .run();
+
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      REVOKE_RULE,
+      // Account B genuinely does not have this event.
+      { match: 'google-event-in-account-a', status: 404, body: {} },
+      { match: '/calendar/v3/calendars/', status: 200, body: {} },
+    ]);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(
+      fetchStub.calls.some((u) => u.includes('google-event-in-account-a')),
+      "the wrong account was asked to delete account A's event",
+    ).toBe(false);
+    const stillOwed = await db
+      .prepare(`SELECT COUNT(*) AS n FROM google_orphaned_inserts WHERE id = 'owe-1'`)
+      .first<{ n: number }>();
+    expect(
+      stillOwed!.n,
+      'a 404 from an unrelated account was accepted as proof the obligation was discharged',
+    ).toBe(1);
+  });
+
+  // The control for that scoping: a same-account obligation must still be
+  // discharged, or the P19-08 fix has been undone by the P20-05 one.
+  it('still discharges an obligation belonging to the account being disconnected', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedSyncable(db);
+
+    await db
+      .prepare(
+        `INSERT INTO google_orphaned_inserts
+           (id, user_id, google_event_id, calendar_id, created_at, google_account_email)
+         VALUES ('owe-1', 'u1', 'google-event-owed', 'primary', ?, 'someone@gmail.com')`,
+      )
+      .bind(Date.now())
+      .run();
+    await db
+      .prepare(`UPDATE google_calendar_connections SET status = 'disconnecting' WHERE user_id = 'u1'`)
+      .run();
+
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      REVOKE_RULE,
+      { match: 'google-event-owed', status: 200, body: {} },
+      { match: '/calendar/v3/calendars/', status: 200, body: {} },
+    ]);
+    await sweepGoogleCalendar(env, new TickBudget('paid'));
+
+    expect(fetchStub.calls.some((u) => u.includes('google-event-owed'))).toBe(true);
+    const stillOwed = await db.prepare(`SELECT COUNT(*) AS n FROM google_orphaned_inserts`).first<{ n: number }>();
+    expect(stillOwed!.n).toBe(0);
+  });
 });

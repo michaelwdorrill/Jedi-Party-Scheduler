@@ -1,0 +1,27 @@
+-- Pass-20 review (P20-05). Which Google account an orphaned insert belongs to.
+--
+-- Migration 0045 recorded the user, the calendar and the Google event id, and
+-- that is not enough to identify a remote object. `primary` is not a calendar
+-- name, it is an alias meaning "the primary calendar of whoever is asking" --
+-- the same ambiguity that caused P14-06, arriving from the other direction.
+--
+-- So disconnect could load an obligation created while account A was connected,
+-- send its event id to account B's primary calendar, receive 404 because the
+-- event does not exist THERE, treat 404 as "already gone", delete the
+-- obligation and report the disconnect complete. A's event was still sitting in
+-- A's calendar, and the record that we owed its deletion had just been thrown
+-- away. Google's own error documentation is explicit that 404 can mean the
+-- requesting identity cannot see the resource, not that it is absent.
+--
+-- An ALTER rather than an edit to 0045, because 0045 has already been applied
+-- to the sandbox database. That is the lesson 0044 taught at some length:
+-- editing a migration file changes nothing about a database that already ran
+-- it, and the only reason 0044's backfill could be deleted outright was that it
+-- had not reached production either.
+--
+-- Nullable, and rows written by 0045 keep NULL. A NULL account means "we cannot
+-- prove which account this belongs to", which disconnect must treat as NOT
+-- MATCHING rather than as matching -- refusing to act on an obligation we
+-- cannot attribute is the whole point of the column. In practice there are no
+-- such rows outside the sandbox: 0045 has never reached production.
+ALTER TABLE google_orphaned_inserts ADD COLUMN google_account_email TEXT;
