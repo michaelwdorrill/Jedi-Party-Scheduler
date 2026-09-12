@@ -237,8 +237,23 @@ export default function EventFormPage() {
   // where the state actually lands.
   const loadGate = useRef(latestOnly());
   useEffect(() => {
-    if (!isEdit || !eventId) return;
+    // Pass-21 review (P21-02). The gate is advanced BEFORE the early return,
+    // and the order is the whole fix. It used to return first, so leaving an
+    // edit for the create route never invalidated the in-flight load: the held
+    // response for the old event was still "current", landed on the create
+    // form, and replaced the draft the person had just typed -- and Create
+    // then POSTed that old event's fields as a brand new event.
+    //
+    // `editTargetReady` could not catch it either, because a creation form
+    // legitimately has nothing loaded and is always ready to submit. The
+    // identity guard answers "may these fields be written to this record"; this
+    // answers "are these fields still wanted at all", and leaving an edit is
+    // the moment they stop being.
     const isCurrent = loadGate.current.begin();
+    if (!isEdit || !eventId) {
+      setLoadedEventId(null);
+      return;
+    }
     // Synchronously, before the fetch: whatever is on screen belongs to the
     // event we are navigating AWAY from, so it is not editable state for this
     // one until the response lands and says otherwise.

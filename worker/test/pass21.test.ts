@@ -394,3 +394,144 @@ describe('a one-session Discord control cannot cancel a series (P21-04)', () => 
     expect(after?.status, 'scoping the control broke ordinary one-off cancellation').toBe('cancelled');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Pass-21 review (P21-03). The ownership check is a read at the top of the
+// handler; the writes happen later. A handover landing in between -- by the
+// same person, through their own legitimate action -- let the stale request
+// replace the roster and remove the NEW owner from it. The result was a group
+// whose stored owner was not a member: 404 for them on every route, 403 for
+// everyone else on every administrative one. Nobody could administer it, and
+// nothing had failed.
+describe('a roster write cannot outlive the authority it was allowed under (P21-03)', () => {
+  async function seedGroup(db: ShimDatabase): Promise<void> {
+    await seedGuild(db, 'guild-1');
+    for (const id of ['alpha', 'bravo', 'charlie']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    // Migration 0031 dropped groups.guild_id -- groups are server-less since
+    // specs/0011. Getting this wrong is how the first version of this fixture
+    // failed, which is a cheap reminder that a test written from an old schema
+    // reads as a product failure.
+    await db
+      .prepare(`INSERT INTO groups (id, name, created_by, created_at) VALUES ('grp-1','Party','alpha',?)`)
+      .bind(Date.now())
+      .run();
+    for (const id of ['alpha', 'bravo']) {
+      await db
+        .prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES ('grp-1', ?, ?)`)
+        .bind(id, Date.now())
+        .run();
+    }
+  }
+
+  // The handover has to land BETWEEN the handler's ownership read and its
+  // write. Applying it beforehand instead is how the first version of this
+  // test passed on the unfixed tree -- the handler's own read then saw the new
+  // owner and returned 404 because alpha was no longer a member, which is
+  // correct behaviour for a different scenario. Seventh fixture in this cycle
+  // to pass for the wrong reason, and the third caught by revert-verifying
+  // rather than by a reviewer.
+  // The handover lands after authorization and before the write batch, which
+  // is exactly where the reviewer put it. Two earlier placements both made
+  // this pass on the unfixed tree for reasons unrelated to the guard: applying
+  // it before the request meant the handler's own read saw the new owner, and
+  // firing it on the ownership SELECT meant loadGroup's membership check --
+  // which runs after that SELECT -- returned 404. Both are correct behaviour
+  // for a different scenario.
+  //
+  // Seventh fixture in this cycle to pass for the wrong reason, and the third
+  // caught by revert-verifying rather than by a reviewer. The rule from IDEAS
+  // item 84 held: revert the fix and confirm the test fails FOR THE STATED
+  // REASON, not merely that it fails.
+  function handoverBeforeWriteBatch(env: { DB: unknown }): void {
+    const db = env.DB as ShimDatabase;
+    const realBatch = db.batch.bind(db);
+    let fired = false;
+    (db as unknown as { batch: (s: unknown[]) => unknown }).batch = async (statements: unknown[]) => {
+      if (!fired) {
+        fired = true;
+        await db.prepare(`UPDATE groups SET created_by = 'bravo' WHERE id = 'grp-1'`).run();
+        await db.prepare(`DELETE FROM group_members WHERE group_id = 'grp-1' AND user_id = 'alpha'`).run();
+      }
+      return realBatch(statements as never);
+    };
+  }
+
+  it('refuses a roster replacement written under ownership that has since moved', async () => {
+    const { db, env } = setup();
+    await seedGroup(db);
+
+    const auth = await authFor(env, 'alpha');
+    // Alpha's PATCH is authorised against the ownership it reads, and the
+    // handover commits immediately afterwards.
+    handoverBeforeWriteBatch(env);
+    const res = await app.request(
+      'https://worker.test/groups/grp-1',
+      {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ member_user_ids: ['alpha', 'charlie'] }),
+      },
+      env,
+    );
+
+    expect(res.status, 'a former owner rewrote the roster after handing the group over').not.toBe(200);
+
+    // The invariant that actually matters: the stored owner is still a member,
+    // so the group still has someone who can administer it.
+    const owner = await db.prepare(`SELECT created_by FROM groups WHERE id = 'grp-1'`).first<{ created_by: string }>();
+    const ownerIsMember = await db
+      .prepare(`SELECT COUNT(*) AS n FROM group_members WHERE group_id = 'grp-1' AND user_id = ?`)
+      .bind(owner!.created_by)
+      .first<{ n: number }>();
+    expect(
+      ownerIsMember!.n,
+      'the group was left with an owner who is not a member, so nobody can administer it',
+    ).toBe(1);
+  });
+
+  // The control: the current owner's ordinary roster edit must still work.
+  it('still lets the current owner replace the roster', async () => {
+    const { db, env } = setup();
+    await seedGroup(db);
+
+    const auth = await authFor(env, 'alpha');
+    const res = await app.request(
+      'https://worker.test/groups/grp-1',
+      {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ member_user_ids: ['alpha', 'charlie'] }),
+      },
+      env,
+    );
+
+    expect(res.status, 'guarding the roster write broke ordinary roster editing').toBe(200);
+    const members = await db
+      .prepare(`SELECT user_id FROM group_members WHERE group_id = 'grp-1' ORDER BY user_id`)
+      .all<{ user_id: string }>();
+    expect(members.results.map((m) => m.user_id)).toEqual(['alpha', 'charlie']);
+  });
+
+  it('still lets the current owner rename the group', async () => {
+    const { db, env } = setup();
+    await seedGroup(db);
+
+    const auth = await authFor(env, 'alpha');
+    const res = await app.request(
+      'https://worker.test/groups/grp-1',
+      {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Renamed' }),
+      },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    const row = await db.prepare(`SELECT name FROM groups WHERE id = 'grp-1'`).first<{ name: string }>();
+    expect(row!.name).toBe('Renamed');
+  });
+});
