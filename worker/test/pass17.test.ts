@@ -44,7 +44,13 @@ async function seedOrganizer(db: ShimDatabase): Promise<void> {
 }
 
 // One answered event per notice, so no roster or invite cap is involved.
-async function seedNotice(db: ShimDatabase, i: number, opts: { exhausted: boolean }): Promise<void> {
+// Returns the attendance `responded_at` it wrote. Pass-19 review (P19-09):
+// that timestamp is part of the notification's IDENTITY -- the sweep joins
+// attendance to log on it -- so a caller that wants to seed a log row for this
+// notice has to key it with this exact value rather than a fresh Date.now().
+// The version that did not return it is why the live-lease test below could
+// pass while testing a different notification entirely.
+async function seedNotice(db: ShimDatabase, i: number, opts: { exhausted: boolean }): Promise<number> {
   const responder = `resp-${i}`;
   await seedUser(db, responder);
   await seedMembership(db, responder, 'guild-1');
@@ -66,7 +72,7 @@ async function seedNotice(db: ShimDatabase, i: number, opts: { exhausted: boolea
     .bind(`att-${i}`, `ev-${i}`, responder, respondedAt)
     .run();
 
-  if (!opts.exhausted) return;
+  if (!opts.exhausted) return respondedAt;
   // The state eight ordinary 503s leave behind: undelivered, NOT failed, out
   // of attempts, and past its last backoff. Nothing marks this table terminal,
   // so the row stays in exactly this shape forever.
@@ -79,6 +85,7 @@ async function seedNotice(db: ShimDatabase, i: number, opts: { exhausted: boolea
     )
     .bind(`log-${i}`, `ev-${i}`, responder, respondedAt, respondedAt, MAX_DELIVERY_ATTEMPTS, Date.now() - HOUR_MS)
     .run();
+  return respondedAt;
 }
 
 describe('exhausted notices do not starve healthy ones (P17-01)', () => {
@@ -184,10 +191,26 @@ describe('exhausted notices do not starve healthy ones (P17-01)', () => {
     expect(row!.delivered_at, 'P16-08 regressed: a row with attempts left stopped being retried').not.toBeNull();
   });
 
+  // Pass-19 review (P19-09), and this was the fifth fixture in the cycle to be
+  // capable of passing without exercising what it names.
+  //
+  // The attendance row and this log row were seeded from two separate
+  // Date.now() calls. `responded_at` is part of the notification's identity --
+  // cron joins attendance to log on it -- so if the two writes crossed a
+  // millisecond boundary they described DIFFERENT notifications. Cron then
+  // correctly treated the attendance as a brand-new notice, claimed it, and
+  // delivered it, while this assertion happily confirmed that the unrelated
+  // leased row was still undelivered. Green, and about nothing.
+  //
+  // Three changes, all from the reviewer's correction: the log is keyed with
+  // the exact stored timestamp, the join is asserted BEFORE the sweep runs, and
+  // the outcome is measured as claims and total deliveries rather than one
+  // row's stamp -- a delivery-only assertion cannot tell selection exclusion
+  // apart from the claim layer refusing the candidate for its own reasons.
   it('does not select a row another invocation holds a live lease on', async () => {
     const { db, env } = setup('paid');
     await seedOrganizer(db);
-    await seedNotice(db, 0, { exhausted: false });
+    const respondedAt = await seedNotice(db, 0, { exhausted: false });
     await db
       .prepare(
         `INSERT INTO organizer_rsvp_notice_log
@@ -195,16 +218,40 @@ describe('exhausted notices do not starve healthy ones (P17-01)', () => {
             delivered_at, failed_at, attempt_count, next_attempt_at, claimed_until, content)
          VALUES ('log-0', 'organizer', 'ev-0', '', 'resp-0', ?, ?, NULL, NULL, 1, ?, ?, 'in flight')`,
       )
-      .bind(Date.now(), Date.now(), Date.now() - HOUR_MS, Date.now() + 10 * 60 * 1000)
+      .bind(respondedAt, respondedAt, Date.now() - HOUR_MS, Date.now() + 10 * 60 * 1000)
       .run();
+
+    // The fixture is only meaningful if these two rows are the same
+    // notification. Asserted here rather than assumed, because assuming it is
+    // exactly how this test came to pass for the wrong reason.
+    const joined = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM event_attendance a
+           JOIN organizer_rsvp_notice_log l
+             ON l.event_id = a.event_id AND l.responder_id = a.user_id
+            AND l.occurrence_date = a.occurrence_date AND l.responded_at = a.responded_at
+         WHERE l.id = 'log-0'`,
+      )
+      .first<{ n: number }>();
+    expect(joined!.n, 'the seeded lease does not describe the seeded attendance').toBe(1);
+
+    let claimAttempts = 0;
+    const realPrepare = db.prepare.bind(db);
+    (db as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      if (sql.includes('organizer_rsvp_notice_log') && sql.includes('RETURNING id, attempt_count')) {
+        claimAttempts += 1;
+      }
+      return realPrepare(sql);
+    };
 
     fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
     await runReminderSweep(env);
 
-    const row = await db
-      .prepare(`SELECT delivered_at FROM organizer_rsvp_notice_log WHERE id = 'log-0'`)
-      .first<{ delivered_at: number | null }>();
-    expect(row!.delivered_at, 'a row under a live lease was delivered twice').toBeNull();
+    expect(claimAttempts, 'a row under a live lease was offered to claim()').toBe(0);
+    const rows = await db
+      .prepare(`SELECT COUNT(*) AS n FROM organizer_rsvp_notice_log WHERE delivered_at IS NOT NULL`)
+      .first<{ n: number }>();
+    expect(rows!.n, 'something was delivered while the only notice was under a live lease').toBe(0);
   });
 });
 
@@ -327,7 +374,7 @@ describe('finished series do not crowd a real event off the noticeboard (P17-07)
       endAt: start + 2 * HOUR_MS,
     });
 
-    const board = await buildNoticeboard(env, 'guild-1', Date.now(), Date.now() + 60 * DAY_MS);
+    const board = (await buildNoticeboard(env, 'guild-1', Date.now(), Date.now() + 60 * DAY_MS)).occurrences;
 
     expect(
       board.some((o) => o.eventId === 'real'),
@@ -358,7 +405,7 @@ describe('finished series do not crowd a real event off the noticeboard (P17-07)
       .bind(today)
       .run();
 
-    const board = await buildNoticeboard(env, 'guild-1', Date.now(), Date.now() + 7 * DAY_MS);
+    const board = (await buildNoticeboard(env, 'guild-1', Date.now(), Date.now() + 7 * DAY_MS)).occurrences;
 
     // The narrowing must not exclude an open-ended series: end_date IS NULL is
     // the common case and has to stay in.
@@ -387,7 +434,7 @@ describe('finished series do not crowd a real event off the noticeboard (P17-07)
       .bind(today, inThreeDays)
       .run();
 
-    const board = await buildNoticeboard(env, 'guild-1', Date.now(), Date.now() + 7 * DAY_MS);
+    const board = (await buildNoticeboard(env, 'guild-1', Date.now(), Date.now() + 7 * DAY_MS)).occurrences;
 
     expect(
       board.some((o) => o.eventId === 'rec-ending'),

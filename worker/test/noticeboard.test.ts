@@ -45,10 +45,22 @@ async function seedServer(db: ShimDatabase): Promise<void> {
   for (const id of ['organizer', 'invitee', 'bystander']) await seedMembership(db, id, 'guild-1');
 }
 
-async function fetchBoard(env: Env, userId: string): Promise<NoticeboardItem[]> {
+// The response carries `{ occurrences, complete }` since IDEAS item 79 -- the
+// board is built by a bounded scan that can stop with candidates unexamined,
+// and an empty array had no way to distinguish "nothing scheduled" from "we
+// stopped looking". These tests are about what the board contains, so they
+// read the occurrences; `fetchBoardResult` is for the ones about the flag.
+async function fetchBoardResult(
+  env: Env,
+  userId: string,
+): Promise<{ occurrences: NoticeboardItem[]; complete: boolean }> {
   const res = await call(env, `/guilds/guild-1/noticeboard?${RANGE}`, await authFor(env, userId));
   expect(res.status).toBe(200);
-  return res.json<NoticeboardItem[]>();
+  return res.json<{ occurrences: NoticeboardItem[]; complete: boolean }>();
+}
+
+async function fetchBoard(env: Env, userId: string): Promise<NoticeboardItem[]> {
+  return (await fetchBoardResult(env, userId)).occurrences;
 }
 
 describe('the server noticeboard', () => {

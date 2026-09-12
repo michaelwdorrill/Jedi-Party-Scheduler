@@ -588,6 +588,14 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
     // (revoked just above), and they are that person's own record of sessions
     // they actually played.
     env.DB.prepare(`DELETE FROM google_event_links WHERE user_id = ?`).bind(userId),
+    // Migration 0045's obligations (P19-08). ON DELETE CASCADE would carry
+    // these anyway, but the rule this batch exists to enforce is that a table
+    // referencing users(id) is deleted here explicitly, in child-before-parent
+    // order -- three separate FK failures were caused by trusting that
+    // something else would handle it. The same reasoning as the links above
+    // applies to what stays in Google: this app has just revoked its own
+    // access, so it could not remove them now even if that were the policy.
+    env.DB.prepare(`DELETE FROM google_orphaned_inserts WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM google_calendar_connections WHERE user_id = ?`).bind(userId),
     // Migration 0040's pending grants (F-16 / R01). Another REFERENCES
     // users(id) with no ON DELETE action, so this is here for the same reason

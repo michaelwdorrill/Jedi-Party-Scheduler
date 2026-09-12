@@ -140,6 +140,12 @@ guildRoutes.get('/:guildId/noticeboard', async (c) => {
   if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
 
   const { from, to } = parseRangeQuery(c, LIMITS.MAX_NOTICEBOARD_RANGE_MS);
+  // `{ occurrences, complete }` rather than a bare array since IDEAS item 79.
+  // The board is assembled by a bounded scan that can stop with candidates
+  // unexamined, and the response has to be able to say so -- an empty array
+  // meaning "nothing scheduled" and an empty array meaning "we ran out of
+  // allowance before we could tell" are the same bytes otherwise, which is how
+  // three separate regressions here reached a user as a confidently blank page.
   return c.json(await buildNoticeboard(c.env, guildId, from, to));
 });
 

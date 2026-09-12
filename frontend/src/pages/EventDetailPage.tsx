@@ -71,7 +71,15 @@ export default function EventDetailPage() {
         ? await api.get<ChangeRequestView[]>(`/events/${eventId}/change-requests`)
         : [];
     return { event: ev, windowInfo, changeRequests };
-  }, [eventId]);
+    // Pass-19 review (P19-04). `occurrenceDate` is read INSIDE this loader and
+    // was missing from its identity, so keeping this page mounted while only
+    // `?occurrence=` changed left the previous occurrence's date and RSVP
+    // state on screen while handleRsvp below closed over the NEW one. Pressing
+    // "declined" then answered for a date the user was not looking at, and the
+    // reload afterwards was the first thing to show which. useAsync's
+    // generation guard was always here and always correct; it just was never
+    // being told that the selection had changed.
+  }, [eventId, occurrenceDate]);
 
   // Every mutation on this page was `await api.post(...); await load();` with
   // no catch, so a refused request became an unhandled rejection and the

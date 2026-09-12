@@ -79,7 +79,7 @@ describe('the noticeboard filter must not exclude a real occurrence (P18-01)', (
     await seedRule(db, 'moved-fwd', { startDate: '2026-09-12', endDate: '2026-09-12', byWeekday: '5' });
     await seedMove(db, 'moved-fwd', '2026-09-12', Date.UTC(2026, 8, 16, 19, 0), Date.UTC(2026, 8, 16, 21, 0));
 
-    const board = await buildNoticeboard(env, 'guild-1', WINDOW_FROM, WINDOW_TO);
+    const board = (await buildNoticeboard(env, 'guild-1', WINDOW_FROM, WINDOW_TO)).occurrences;
 
     expect(
       board.some((o) => o.eventId === 'moved-fwd'),
@@ -95,7 +95,7 @@ describe('the noticeboard filter must not exclude a real occurrence (P18-01)', (
     await seedRule(db, 'moved-back', { startDate: '2026-10-01', endDate: '2026-10-01', byWeekday: '3' });
     await seedMove(db, 'moved-back', '2026-10-01', Date.UTC(2026, 8, 16, 19, 0), Date.UTC(2026, 8, 16, 21, 0));
 
-    const board = await buildNoticeboard(env, 'guild-1', WINDOW_FROM, WINDOW_TO);
+    const board = (await buildNoticeboard(env, 'guild-1', WINDOW_FROM, WINDOW_TO)).occurrences;
 
     expect(
       board.some((o) => o.eventId === 'moved-back'),
@@ -116,7 +116,7 @@ describe('the noticeboard filter must not exclude a real occurrence (P18-01)', (
       durationMinutes: 6 * 24 * 60,
     });
 
-    const board = await buildNoticeboard(env, 'guild-1', WINDOW_FROM, WINDOW_TO);
+    const board = (await buildNoticeboard(env, 'guild-1', WINDOW_FROM, WINDOW_TO)).occurrences;
 
     expect(
       board.some((o) => o.eventId === 'long-rec'),
@@ -139,7 +139,7 @@ describe('the noticeboard filter must not exclude a real occurrence (P18-01)', (
     await seedEvent(db, { id: 'finished', organizerId: 'owner', startAt: null, endAt: null, isRecurring: 1 });
     await seedRule(db, 'finished', { startDate: '2026-07-01', endDate: '2026-08-01', byWeekday: '5' });
 
-    const board = await buildNoticeboard(env, 'guild-1', WINDOW_FROM, WINDOW_TO);
+    const board = (await buildNoticeboard(env, 'guild-1', WINDOW_FROM, WINDOW_TO)).occurrences;
 
     expect(
       board.some((o) => o.eventId === 'finished'),

@@ -26,10 +26,28 @@ import { loadOverridesForEvents } from './events';
 import { expandOccurrencesForEvent, loadRecurrenceRulesForEvents } from './recurrence';
 import { NoticeboardTooLargeError } from './validate';
 
-// How many events one noticeboard request will read. A guild is capped at
+// How many events one noticeboard request will RETURN. A guild is capped at
 // MAX_ACTIVE_EVENTS_PER_GUILD (300) active events, so this is a real cut, and
 // it is ordered by start time -- the soonest hundred is the useful hundred.
+//
+// Since IDEAS item 79 this counts events that actually have an occurrence in
+// the window, not candidate rows read from the table. The difference is the
+// whole of P17-07, P18-02 and P19-01: three separate ways for a page of
+// candidates that expand to NOTHING to spend this budget and push a real
+// event out of a board that then reports itself as empty.
 const MAX_NOTICEBOARD_EVENTS = 100;
+
+// How many candidate rows one page of the scan reads, and how many rows the
+// whole scan may read before it gives up and says so. The scan cap is what
+// keeps this bounded now that the event cap no longer does: without it, a
+// guild whose candidates all expand to nothing would page forever.
+//
+// 500 is five pages, so five extra statements at worst over the old single
+// query -- see the statement-count guard in test/pass19.test.ts, which exists
+// because this path runs inside a request and D1's Free plan allows 50
+// statements per invocation.
+const CANDIDATE_PAGE_SIZE = 100;
+const MAX_CANDIDATES_SCANNED = 500;
 
 // The ceiling on expanded occurrences across every event in one request.
 // Smaller than free/busy's, because this returns titles and attendee lists
@@ -45,6 +63,25 @@ export interface NoticeboardAttendee {
   globalName: string | null;
   avatarHash: string | null;
   rsvpStatus: 'accepted' | 'declined' | 'tentative' | null;
+}
+
+// What the board came back with, and whether it is the whole answer.
+//
+// The flag is the half of IDEAS item 79 that SQL cannot supply. Deciding
+// whether a series has an occurrence in a narrow window needs the expander,
+// so a bounded scan can run out of allowance with candidates left unexamined.
+// Before this existed the response could not say so, and the frontend
+// rendered "nothing scheduled" over a server that had plenty scheduled --
+// which is exactly what made P17-07 and P19-01 so hard to see.
+//
+// `complete: false` means "this is what we found before the budget ran out",
+// never "this is everything". It is deliberately conservative: stopping
+// because the event cap filled on the last available candidate also reports
+// incomplete, because proving otherwise would cost another query to learn
+// nothing actionable.
+export interface NoticeboardResult {
+  occurrences: NoticeboardOccurrence[];
+  complete: boolean;
 }
 
 export interface NoticeboardOccurrence {
@@ -79,7 +116,7 @@ export async function buildNoticeboard(
   guildId: string,
   from: number,
   to: number,
-): Promise<NoticeboardOccurrence[]> {
+): Promise<NoticeboardResult> {
   // `is_private = 0` is doing the load-bearing work here, and migration 0038
   // is what makes it safe: every event that existed before this feature was
   // backfilled to private, so nothing created under the old Privacy Policy can
@@ -97,70 +134,45 @@ export async function buildNoticeboard(
   // reached a decision -- and made the poll clause below dead code, since
   // nothing could reach it that 'active' had not already excluded. The
   // unresolved-poll test still passed, for the wrong reason.
-  // Pass-17 review (P17-07). `is_recurring = 1` used to admit EVERY active
-  // series with no reference to the window at all, and a recurring event has a
-  // NULL start_at, so `ORDER BY COALESCE(start_at, from)` sorts them all to the
-  // front. The hundred-event cut was then applied before anything expanded.
   //
-  // A hundred series that finished last month therefore filled the page,
-  // expanded to nothing, and left an event happening tomorrow outside it --
-  // measured as a noticeboard returning ZERO occurrences while the same user's
-  // personal calendar showed the event. The later expanded-occurrence ceiling
-  // cannot catch that, because the event was excluded before expansion, and
-  // the response carries no cursor or truncation flag, so the frontend renders
-  // it as "nothing scheduled".
+  // ---------------------------------------------------------------------
+  // The candidate predicate, and the three passes it took to get here.
   //
-  // What this clause does is narrow, and the limit of it matters as much as
-  // the fix: a series is excluded only when its RULE cannot overlap the
-  // window -- it ended before the window opened, or begins after it closes.
-  // That is provable from stored dates and closes the demonstrated case.
+  // This clause decides which events are worth EXPANDING. It cannot decide
+  // which events have an occurrence in the window -- that needs the expander,
+  // for reasons the three regressions below each demonstrate -- so its only
+  // job is to be cheap and to never exclude something that might qualify.
   //
-  // What it does NOT do is establish completeness. A hundred *currently
-  // active* series with no occurrence in a narrow window still fill the page,
-  // because deciding that needs the expander, not SQL. Paging bounded
-  // candidates until enough eligible results are found, and signalling
-  // overflow when the budget cannot prove completeness, is the rest of the
-  // fix; IDEAS item 79 carries it. Raising MAX_NOTICEBOARD_EVENTS is not the
-  // fix -- it moves the threshold and weakens the bound the limit exists for.
+  // P17-07: `is_recurring = 1` used to admit every active series with no
+  // reference to the window at all. Narrowing it to series whose rule can
+  // overlap the window closed that.
   //
-  // Pass-18 review (P18-01). The first version of this clause was wrong in two
-  // ways, and both were mine. It excluded a valid series that the tree before
-  // it returned, which is the worst shape a "fix" can take.
+  // P18-01: that narrowing then EXCLUDED valid occurrences, in two ways. It
+  // compared `end_date` as a point when an occurrence is an interval
+  // (`duration_minutes` runs to a year), and it read nominal rule dates when
+  // an override can move an occurrence anywhere. Hence the duration widening
+  // and the override arm.
   //
-  // First, it compared `end_date` against the window start as though an
-  // occurrence were a point. An occurrence is an INTERVAL: `duration_minutes`
-  // is allowed up to a year (validate.ts), so a series whose last occurrence
-  // STARTS before the window can still be running inside it. A six-day
-  // occurrence beginning on the 12th overlaps a window opening on the 15th,
-  // and the date-only test dropped it. The ordinary-event arm below has always
-  // used interval overlap; the recurring arm now agrees with it. Note that a
-  // recurring event carries a NULL start_at, so that arm never rescued one.
+  // P19-01: the override arm then admitted series holding overrides that no
+  // longer belong to their rule -- a whole-series edit can orphan an override
+  // without deleting it, and only `isSeriesOccurrence` can tell, in JS, after
+  // the walk. Those series expand to nothing.
   //
-  // Second, it read only NOMINAL rule dates, and an override can move an
-  // occurrence anywhere -- overrides are not loaded until 30 lines below this
-  // query, so at this point the rule's dates do not know where its occurrences
-  // actually are. A series that ended on the 12th, whose occurrence was moved
-  // by an accepted change request to the 16th, was excluded from a window
-  // containing it. The second EXISTS admits any series holding an uncancelled
-  // override that overlaps the window, in either direction, which is decidable
-  // here because an override stores absolute instants rather than rule dates.
+  // Every one of those three was a defect of the same shape: a candidate set
+  // trimmed to a fixed page BEFORE anything expanded, so rows that expand to
+  // nothing evict rows that do not. That is why the fix is no longer in this
+  // predicate. The predicate stays deliberately generous; the paging below is
+  // what bounds the work, and it counts events that survive expansion.
   //
-  // Both additions only ever ADMIT candidates, so neither can reintroduce
-  // P17-07: a hundred series that finished last month still hold no overlapping
-  // override and still have a bounded duration, so they are still excluded.
-  // Both are one indexed EXISTS against a primary/unique key, so the query
-  // count per call is unchanged -- this runs inside the cron's budget.
-  //
-  // The dates are compared as ISO text, which sorts chronologically, and both
+  // The dates are compared as ISO text, which sorts chronologically. Both
   // bounds are widened by a day because the rule's dates are local to the
-  // event's timezone while the window is epoch milliseconds. Widening can only
-  // admit a series that turns out to have nothing in range, never exclude one
-  // that does. The duration widening is rounded UP to whole days for the same
-  // reason, which also absorbs the `start_time` this comparison ignores.
+  // event's timezone while the window is epoch milliseconds, and the end
+  // bound is widened again by the rule's duration rounded up to whole days,
+  // which also absorbs the `start_time` the comparison ignores.
   const windowStartDate = new Date(from - DAY_MS).toISOString().slice(0, 10);
   const windowEndDate = new Date(to + DAY_MS).toISOString().slice(0, 10);
-  const { results: events } = await env.DB.prepare(
-    `SELECT * FROM events
+
+  const CANDIDATE_SQL = `SELECT * FROM events
      WHERE guild_id = ?
        AND is_private = 0
        AND status IN ('active','resolved')
@@ -186,23 +198,118 @@ export async function buildNoticeboard(
           ))
          OR (start_at IS NOT NULL AND start_at <= ? AND COALESCE(end_at, start_at) >= ?)
        )
-       AND NOT (event_type = 'poll' AND status != 'resolved')
-     ORDER BY COALESCE(start_at, ?) ASC
+       AND NOT (event_type = 'poll' AND status != 'resolved')`;
+
+  // Paging needs a TOTAL order, and the old `ORDER BY COALESCE(start_at, ?)`
+  // was not one: a recurring event has a NULL start_at, so every series in a
+  // guild ties at `from` and the hundred-row cut among them was undefined.
+  // That is not just a paging problem -- it is the same undefined ordering
+  // that made one of this project's own fixtures pass with a defect present
+  // (P17-01), and it meant the "soonest hundred" promise was never true for a
+  // guild whose candidates were mostly series. `id` breaks the tie.
+  const pageOf = async (cursor: { key: number; id: string } | null): Promise<EventRow[]> => {
+    const where = cursor
+      ? `${CANDIDATE_SQL}
+       AND (COALESCE(start_at, ?) > ? OR (COALESCE(start_at, ?) = ? AND id > ?))`
+      : CANDIDATE_SQL;
+    const binds: unknown[] = [guildId, windowStartDate, windowEndDate, to, from, to, from];
+    if (cursor) binds.push(from, cursor.key, from, cursor.key, cursor.id);
+    binds.push(from, CANDIDATE_PAGE_SIZE);
+    const { results } = await env.DB.prepare(
+      `${where}
+     ORDER BY COALESCE(start_at, ?) ASC, id ASC
      LIMIT ?`,
-  )
-    .bind(guildId, windowStartDate, windowEndDate, to, from, to, from, from, MAX_NOTICEBOARD_EVENTS)
-    .all<EventRow>();
+    )
+      .bind(...binds)
+      .all<EventRow>();
+    return results;
+  };
 
-  if (events.length === 0) return [];
+  let budget = MAX_NOTICEBOARD_OCCURRENCES;
+  const spend = (n: number): void => {
+    // Refuses rather than truncating, the same call lib/freeBusy.ts makes: a
+    // silently shortened noticeboard is indistinguishable from a quiet server,
+    // and "ask for a shorter window" is recoverable advice. Distinct from the
+    // `complete` flag, which covers the case where we stopped looking rather
+    // than found too much.
+    if (n > budget) throw new NoticeboardTooLargeError();
+    budget -= n;
+  };
 
+  interface Selected {
+    event: EventRow;
+    occurrences: { date: string; startAt: number; endAt: number }[];
+  }
+
+  const selected: Selected[] = [];
+  let cursor: { key: number; id: string } | null = null;
+  let scanned = 0;
+  let complete = false;
+
+  scan: while (scanned < MAX_CANDIDATES_SCANNED) {
+    const page = await pageOf(cursor);
+    if (page.length === 0) {
+      complete = true;
+      break;
+    }
+    scanned += page.length;
+
+    // Per page rather than per candidate: two statements for up to a hundred
+    // events, which is what keeps the scan affordable inside a request.
+    const recurringIds = page.filter((e) => e.is_recurring).map((e) => e.id);
+    const overridesByEvent = await loadOverridesForEvents(env, recurringIds);
+    const recurrenceRulesByEvent = await loadRecurrenceRulesForEvents(env, recurringIds);
+
+    for (const event of page) {
+      if (selected.length >= MAX_NOTICEBOARD_EVENTS) break scan;
+      cursor = { key: event.start_at ?? from, id: event.id };
+
+      if (!event.is_recurring) {
+        if (event.start_at == null) continue;
+        spend(1);
+        selected.push({
+          event,
+          occurrences: [{ date: '', startAt: event.start_at, endAt: event.end_at ?? event.start_at }],
+        });
+        continue;
+      }
+
+      const expanded = await expandOccurrencesForEvent(
+        env,
+        event,
+        from,
+        to,
+        overridesByEvent.get(event.id) ?? [],
+        recurrenceRulesByEvent.get(event.id),
+      );
+      // The point of the whole rewrite: a series that expands to nothing costs
+      // a candidate slot and no event slot. Before this, it cost an event slot
+      // and evicted something real.
+      if (expanded.length === 0) continue;
+      spend(expanded.length);
+      selected.push({ event, occurrences: expanded });
+    }
+
+    // A short page means the candidate set is exhausted, so what we have is
+    // everything. A full page means there may be more, and the loop condition
+    // decides whether we can afford to look.
+    if (page.length < CANDIDATE_PAGE_SIZE) {
+      complete = true;
+      break;
+    }
+  }
+
+  if (selected.length === 0) return { occurrences: [], complete };
+
+  const events = selected.map((s) => s.event);
   const eventIds = events.map((e) => e.id);
-  const recurringIds = events.filter((e) => e.is_recurring).map((e) => e.id);
-  const overridesByEvent = await loadOverridesForEvents(env, recurringIds);
-  const recurrenceRulesByEvent = await loadRecurrenceRulesForEvents(env, recurringIds);
 
   // Every invitee of every visible event, in chunked bulk rather than per
   // event. The attendee list is the point of the noticeboard, so this is not
-  // optional detail that could be lazily loaded.
+  // optional detail that could be lazily loaded. Loaded once, for the events
+  // that survived the scan, rather than once per page -- the scan touches up
+  // to five times as many candidates as it keeps, and none of the ones it
+  // discards needs an attendee list.
   const invitesByEvent = new Map<string, InviteRow[]>();
   for (const chunk of chunkIds(eventIds)) {
     const { results } = await env.DB.prepare(
@@ -246,17 +353,6 @@ export async function buildNoticeboard(
       .all<InviteRow>();
     for (const row of results) organizersById.set(row.user_id, row);
   }
-
-  let budget = MAX_NOTICEBOARD_OCCURRENCES;
-  const spend = (n: number): void => {
-    // Refuses rather than truncating, the same call lib/freeBusy.ts makes: a
-    // silently shortened noticeboard is indistinguishable from a quiet server,
-    // and "ask for a shorter window" is recoverable advice.
-    if (n > budget) throw new NoticeboardTooLargeError();
-    budget -= n;
-  };
-
-  const out: NoticeboardOccurrence[] = [];
 
   // Decision 1 / attendance.ts's ORGANIZER_UNLESS_DECLINED, which every other
   // read of an occurrence already applies: an organiser who has not answered is
@@ -306,42 +402,17 @@ export async function buildNoticeboard(
     return list;
   };
 
-  for (const event of events) {
-    if (!event.is_recurring) {
-      if (event.start_at == null) continue;
-      spend(1);
+  const out: NoticeboardOccurrence[] = [];
+  for (const { event, occurrences } of selected) {
+    for (const occ of occurrences) {
       out.push({
-        occurrenceId: event.id,
-        eventId: event.id,
-        title: event.title,
-        game: event.game,
-        startAt: event.start_at,
-        endAt: event.end_at ?? event.start_at,
-        isRecurring: false,
-        organizerId: event.organizer_id,
-        attendees: attendeesFor(event, ''),
-      });
-      continue;
-    }
-
-    const expanded = await expandOccurrencesForEvent(
-      env,
-      event,
-      from,
-      to,
-      overridesByEvent.get(event.id) ?? [],
-      recurrenceRulesByEvent.get(event.id),
-    );
-    spend(expanded.length);
-    for (const occ of expanded) {
-      out.push({
-        occurrenceId: `${event.id}::${occ.date}`,
+        occurrenceId: event.is_recurring ? `${event.id}::${occ.date}` : event.id,
         eventId: event.id,
         title: event.title,
         game: event.game,
         startAt: occ.startAt,
         endAt: occ.endAt,
-        isRecurring: true,
+        isRecurring: !!event.is_recurring,
         organizerId: event.organizer_id,
         attendees: attendeesFor(event, occ.date),
       });
@@ -349,5 +420,5 @@ export async function buildNoticeboard(
   }
 
   out.sort((a, b) => a.startAt - b.startAt);
-  return out;
+  return { occurrences: out, complete };
 }

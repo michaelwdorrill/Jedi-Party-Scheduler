@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { DateTime } from 'luxon';
 import { scheduleFieldsFromRecurrence } from '../lib/recurrenceFields';
@@ -11,7 +11,7 @@ import TimezoneSelect from '../components/TimezoneSelect';
 import SchedulingAssistant, { type AssistantSlot } from '../components/SchedulingAssistant';
 import { isValidRange, startsInPast } from '../lib/datetime';
 import type { EventDetail, Friend, Group, PollStrategy, VoiceChannel } from '../types';
-import { describeError } from '../lib/async';
+import { describeError, latestOnly } from '../lib/async';
 import { ErrorState, InlineError, buttonClass, cardClass, controlClass } from '../components/ui';
 
 // Module scope on purpose: the availability memo below needs this during the
@@ -216,9 +216,26 @@ export default function EventFormPage() {
       .catch(() => setVoiceChannels([])); // e.g. bot not yet invited to this server
   }, [effectiveGuildId]);
 
+  // Pass-19 review (P19-03). This loader writes a dozen pieces of component
+  // state AND `loadedRevision`, while Save below PATCHes whatever event the
+  // ROUTE currently names. With no obsolete-response guard, a late response
+  // for the event you were editing a moment ago repopulated all of it, and the
+  // next Save wrote those values over the event you had moved on to -- with
+  // the wrong revision attached. The server's optimistic-concurrency check
+  // could not catch it, because two different events are legitimately both at
+  // revision 0; the association between loaded data and target identity had
+  // already been lost on the client.
+  //
+  // `useAsync` in lib/async.ts has carried exactly this guard since it was
+  // written, and EventDetailPage uses it. This effect predates that and hand
+  // rolls its own fetch, so it never got one. Same generation counter, applied
+  // where the state actually lands.
+  const loadGate = useRef(latestOnly());
   useEffect(() => {
     if (!isEdit || !eventId) return;
+    const isCurrent = loadGate.current.begin();
     api.get<EventDetail>(`/events/${eventId}`).then((ev) => {
+      if (!isCurrent()) return;
       setTitle(ev.title);
       setDescription(ev.description ?? '');
       setGame(ev.game ?? '');
@@ -325,7 +342,10 @@ export default function EventFormPage() {
           );
         }
       }
-    }, (e: unknown) => setLoadError(describeError(e)));
+    }, (e: unknown) => {
+      if (!isCurrent()) return;
+      setLoadError(describeError(e));
+    });
   }, [isEdit, eventId]);
 
   const addPollSlot = () =>

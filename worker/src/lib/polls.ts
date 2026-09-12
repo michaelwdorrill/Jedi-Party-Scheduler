@@ -71,18 +71,66 @@ export async function getOptionTallies(env: Env, eventId: string): Promise<Optio
   return [...byId.values()];
 }
 
-// Compare-and-set: only transitions an event that's still 'active'. Two
-// concurrent requests (a synchronous threshold-crossing vote racing the cron
-// deadline sweep, or two votes crossing threshold in the same instant) must
-// produce exactly one resolution and one notification claim, not two -- the
-// WHERE clause makes the database the arbiter instead of a check-then-act
-// race in application code. Returns whether *this* call won the transition.
-async function markResolved(env: Env, eventId: string, option: { id: string; startAt: number; endAt: number }): Promise<boolean> {
+// Compare-and-set: only transitions an event that's still 'active', is still
+// at the revision the winner was computed from, and whose winning option is
+// still a candidate. Two concurrent requests (a synchronous threshold-crossing
+// vote racing the cron deadline sweep, or two votes crossing threshold in the
+// same instant) must produce exactly one resolution and one notification
+// claim, not two -- the WHERE clause makes the database the arbiter instead of
+// a check-then-act race in application code. Returns whether *this* call won.
+//
+// Pass-19 review (P19-02). `status = 'active'` alone was not enough, and the
+// gap was a real one rather than a theoretical interleaving: an organizer can
+// edit a poll's candidates while it is still active and still collecting
+// votes, through the ordinary authorized PATCH. Between the tally read and
+// this UPDATE, the winning option can therefore be DELETED -- and because
+// `resolved_option_id` is plain TEXT with no foreign key, the id was committed
+// anyway. The event ended up resolved to a time that was no longer a
+// candidate, pointing at an option that no longer existed, and the noticeboard
+// advertised that time to the whole server.
+//
+// `revision` is the token that closes it, not option existence, because it
+// catches every edit and not just the deletion: eventWrites applies a poll
+// edit as one guarded batch whose sibling statements all carry the revision,
+// so ANY change -- a moved candidate, a different threshold, a new deadline --
+// bumps it and invalidates a decision computed before it. The caller passes
+// the revision it read the event at, which is necessarily before it read the
+// tallies.
+//
+// The EXISTS is defence in depth rather than the mechanism. It costs nothing
+// inside a statement that already has to find the row, and it means a future
+// path that removes an option WITHOUT bumping the revision cannot resurrect
+// this bug silently.
+//
+// Losing this race is not an error. The vote that triggered it is already
+// recorded, the poll is still active, and the next vote or the deadline sweep
+// decides again from current state -- which is what the reviewer's correction
+// asks for, and is strictly better than committing a decision about a world
+// that no longer exists.
+async function markResolved(
+  env: Env,
+  event: EventRow,
+  option: { id: string; startAt: number; endAt: number },
+): Promise<boolean> {
+  // `events.revision` is NOT NULL DEFAULT 0 (migration 0013) and every caller
+  // here reads the row with SELECT *, so this is an assertion rather than a
+  // reachable branch. It is an assertion worth having: `revision` is optional
+  // on EventRow because narrower selects elsewhere omit it, and binding
+  // `undefined` would make `revision = NULL` -- never true, so every poll in
+  // the system would quietly stop resolving and nothing would say why. A throw
+  // is caught by the deadline sweep's per-poll handler and counted as a
+  // resolution failure, which is visible; silence is not.
+  const revision = event.revision;
+  if (revision == null) {
+    throw new Error('markResolved needs an event row read with its revision');
+  }
+  const eventId = event.id;
   const result = await env.DB.prepare(
     `UPDATE events SET status = 'resolved', resolved_option_id = ?, start_at = ?, end_at = ?, updated_at = ?
-     WHERE id = ? AND status = 'active'`,
+     WHERE id = ? AND status = 'active' AND revision = ?
+       AND EXISTS (SELECT 1 FROM event_poll_options o WHERE o.id = ? AND o.event_id = events.id)`,
   )
-    .bind(option.id, option.startAt, option.endAt, Date.now(), eventId)
+    .bind(option.id, option.startAt, option.endAt, Date.now(), eventId, revision, option.id)
     .run();
   return result.meta.changes > 0;
 }
@@ -147,7 +195,7 @@ export async function checkThresholdAndResolve(env: Env, event: EventRow): Promi
     .filter((t) => t.yes >= event.poll_threshold_count!)
     .sort((a, b) => a.displayOrder - b.displayOrder || a.id.localeCompare(b.id))[0];
 
-  if (winner && (await markResolved(env, event.id, winner))) {
+  if (winner && (await markResolved(env, event, winner))) {
     return [winner.id];
   }
   return [];
@@ -383,7 +431,7 @@ export async function checkWindowThresholdAndResolve(env: Env, event: EventRow):
   }
 
   const winner = resolved.find(({ best }) => best && best.count >= threshold);
-  if (winner && (await markResolved(env, event.id, { id: winner.candidate.id, ...winner.best! }))) {
+  if (winner && (await markResolved(env, event, { id: winner.candidate.id, ...winner.best! }))) {
     return [winner.candidate.id];
   }
   return [];
@@ -475,10 +523,14 @@ export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): P
             if (lenB !== lenA) return lenB - lenA;
             return a.candidate.displayOrder - b.candidate.displayOrder || a.candidate.id.localeCompare(b.candidate.id);
           })[0];
+        // A refused CAS here means the poll was edited out from under this
+        // decision (P19-02). Neither resolving nor cancelling is right, and
+        // marking it handled would strand it -- leave it due so the next
+        // sweep decides from the edited state.
         if (winner) {
-          await markResolved(env, event.id, { id: winner.candidate.id, ...winner.best! });
-        } else {
-          await markCancelled(env, event.id);
+          if (!(await markResolved(env, event, { id: winner.candidate.id, ...winner.best! }))) continue;
+        } else if (!(await markCancelled(env, event.id))) {
+          continue;
         }
         resolvedEventIds.push(event.id);
         continue;
@@ -487,9 +539,9 @@ export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): P
       const tallies = await getOptionTallies(env, event.id);
       const winner = pickMostVotes(tallies);
       if (winner) {
-        await markResolved(env, event.id, winner);
-      } else {
-        await markCancelled(env, event.id);
+        if (!(await markResolved(env, event, winner))) continue;
+      } else if (!(await markCancelled(env, event.id))) {
+        continue;
       }
       resolvedEventIds.push(event.id);
     } catch (err) {

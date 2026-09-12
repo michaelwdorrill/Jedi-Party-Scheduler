@@ -351,7 +351,7 @@ describe('a private multi-winner poll fans out private events (F-18 / R03)', () 
     expect(spawned).not.toBeNull();
     expect(spawned!.is_private).toBe(1);
 
-    const board = await buildNoticeboard(env, 'guild-1', now, now + 30 * DAY_MS);
+    const board = (await buildNoticeboard(env, 'guild-1', now, now + 30 * DAY_MS)).occurrences;
     expect(board.map((o) => o.eventId)).not.toContain(spawned!.id);
   });
 
@@ -370,7 +370,7 @@ describe('a private multi-winner poll fans out private events (F-18 / R03)', () 
     expect(spawned).not.toBeNull();
     expect(spawned!.is_private).toBe(0);
 
-    const board = await buildNoticeboard(env, 'guild-1', now, now + 30 * DAY_MS);
+    const board = (await buildNoticeboard(env, 'guild-1', now, now + 30 * DAY_MS)).occurrences;
     expect(board.map((o) => o.eventId)).toContain(spawned!.id);
   });
 });

@@ -5,7 +5,7 @@ import { useGuild } from '../auth/GuildContext';
 import { useAsync } from '../lib/async';
 import Avatar from '../components/ui/Avatar';
 import { cardClass, controlClass, EmptyState, ErrorState, Loading, PageHeader } from '../components/ui';
-import type { NoticeboardOccurrence } from '../types';
+import type { NoticeboardResult } from '../types';
 
 // IDEAS item 5 (second half) / docs/specs/0007: what's on in a server.
 //
@@ -45,15 +45,20 @@ export default function NoticeboardPage() {
   const [guildId, setGuildId] = useState<string>('');
   const effectiveGuildId = guildId || guilds[0]?.id || '';
 
-  const board = useAsync(
+  const board = useAsync<NoticeboardResult>(
     () =>
       effectiveGuildId
-        ? api.get<NoticeboardOccurrence[]>(
+        ? api.get<NoticeboardResult>(
             `/guilds/${effectiveGuildId}/noticeboard?from=${Date.now()}&to=${Date.now() + WINDOW_MS}`,
           )
-        : Promise.resolve([]),
+        : Promise.resolve({ occurrences: [], complete: true }),
     [effectiveGuildId],
   );
+
+  const occurrences = board.data?.occurrences ?? [];
+  // Only meaningful once the response has actually arrived: `board.data`
+  // is undefined while loading, and `?? true` there would flash the warning.
+  const incomplete = board.data ? !board.data.complete : false;
 
   if (guildsLoading) return <Loading />;
   if (guildsError) return <ErrorState message={guildsError} />;
@@ -90,15 +95,33 @@ export default function NoticeboardPage() {
       {board.loading && <Loading />}
       {board.error && <ErrorState message={board.error} onRetry={board.reload} />}
 
-      {!board.loading && !board.error && (board.data?.length ?? 0) === 0 && (
+      {/* An empty board and an empty board we could not finish checking are
+          different answers, and saying "nothing scheduled" for the second is
+          how P17-07, P18-02 and P19-01 each reached a user looking like a
+          quiet server rather than a bug. */}
+      {!board.loading && !board.error && occurrences.length === 0 && !incomplete && (
         <EmptyState title="Nothing on the board">
           No one has anything scheduled on this server in the next couple of months — or what is
           scheduled has been kept private.
         </EmptyState>
       )}
 
+      {!board.loading && !board.error && occurrences.length === 0 && incomplete && (
+        <EmptyState title="Couldn't check the whole server">
+          This server has more events than the board can scan in one go, so we can't say what's on.
+          Try a narrower range, or open the calendar for the sessions you're part of.
+        </EmptyState>
+      )}
+
+      {!board.loading && !board.error && occurrences.length > 0 && incomplete && (
+        <p className="rounded-lg bg-surface-2 px-3 py-2 text-sm text-muted">
+          There may be more — this server has more events than the board can scan in one go, so
+          this list might not be everything that's on.
+        </p>
+      )}
+
       <div className="space-y-3">
-        {(board.data ?? []).map((occ) => (
+        {occurrences.map((occ) => (
           <div key={occ.occurrenceId} className={cardClass('md', 'space-y-2')}>
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               {/* Links through to the event, which enforces its own visibility

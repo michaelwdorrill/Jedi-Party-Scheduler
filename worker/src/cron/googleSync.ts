@@ -299,6 +299,41 @@ async function runDisconnect(
         if (result.kind === 'unauthorized') break;
       }
     }
+
+    // Pass-19 review (P19-08). Entries this app created in Google that never
+    // got a link row, because the mapping guard refused them while the
+    // destination or credential was changing under an in-flight insert. They
+    // are invisible to the enumeration above -- it reads google_event_links --
+    // which is precisely why disconnect used to leave them behind while
+    // reporting success, against an unqualified promise in the confirm dialog,
+    // the disconnecting state and the Privacy Policy.
+    //
+    // No date filter here, unlike `future` above. That asymmetry is deliberate
+    // and is not a change of policy about history: a link row records a
+    // session that really happened and is worth keeping, whereas one of these
+    // is a duplicate the user never asked for and cannot see the provenance
+    // of. Leaving it as "history" would be leaving litter.
+    const { results: orphans } = await env.DB.prepare(
+      `SELECT id, google_event_id, calendar_id FROM google_orphaned_inserts WHERE user_id = ?`,
+    )
+      .bind(row.user_id)
+      .all<{ id: string; google_event_id: string; calendar_id: string }>();
+    for (const orphan of orphans) {
+      if (!budget.tryCalendarWrite()) {
+        outOfBudget = true;
+        break;
+      }
+      const result = await deleteCalendarEvent(accessToken, orphan.calendar_id, orphan.google_event_id);
+      // `missing` counts as done: someone deleting it by hand inside Google is
+      // the outcome we were trying to produce.
+      if (result.ok || result.kind === 'missing') {
+        await env.DB.prepare(`DELETE FROM google_orphaned_inserts WHERE id = ?`).bind(orphan.id).run();
+        removed += 1;
+      } else {
+        allCleared = false;
+        if (result.kind === 'unauthorized') break;
+      }
+    }
   } else {
     allCleared = false;
   }
@@ -659,7 +694,7 @@ async function syncOneConnection(
     }
     const result = await insertCalendarEvent(accessToken, row.calendar_id, payload);
     if (result.ok) {
-      await env.DB.prepare(
+      const mapping = await env.DB.prepare(
         // Pass-13 review (P13-08). Records the destination this entry was
         // actually written to, and refuses to record it at all if that
         // destination is no longer the connection's -- the R10 `stillCurrent`
@@ -707,6 +742,40 @@ async function syncOneConnection(
           row.refresh_token_ciphertext,
         )
         .run();
+
+      // Pass-19 review (P19-08). The guard above refuses the mapping when the
+      // destination or credential moved while this insert was in flight -- and
+      // until now, that was the end of it. The event existed in the user's
+      // Google calendar and nothing local pointed at it, so the next sweep
+      // made a second copy, and DISCONNECT could not remove the first, because
+      // disconnect enumerates google_event_links. Three places in the product
+      // promise, without qualification, that disconnecting removes the
+      // upcoming entries this app added.
+      //
+      // So a refused mapping is now an obligation rather than a shrug. Try to
+      // undo the remote insert straight away, which also removes the duplicate
+      // that made this visible; if that cannot happen -- the delete fails, or
+      // the calendar-write allowance is spent -- record it so cleanup can.
+      //
+      // Note the delete targets `row.calendar_id`, the calendar this insert
+      // was actually dispatched to, not wherever the connection points now.
+      // That is the same lesson P13-08 taught the disconnect sweep.
+      if (mapping.meta.changes === 0) {
+        const compensated =
+          budget.tryCalendarWrite() &&
+          (await deleteCalendarEvent(accessToken, row.calendar_id, result.value.id)).ok;
+        if (!compensated) {
+          await env.DB.prepare(
+            `INSERT INTO google_orphaned_inserts (id, user_id, google_event_id, calendar_id, created_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(user_id, calendar_id, google_event_id) DO NOTHING`,
+          )
+            .bind(newId(), row.user_id, result.value.id, row.calendar_id, now)
+            .run();
+        }
+        continue;
+      }
+
       counts.inserted += 1;
       pushedGoogleEventIds.add(result.value.id);
     } else if (result.kind === 'unauthorized') {

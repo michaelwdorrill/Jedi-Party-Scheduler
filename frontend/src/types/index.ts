@@ -186,6 +186,15 @@ export interface NoticeboardAttendee {
   rsvpStatus: RsvpStatus | null;
 }
 
+// The board plus whether it is the whole answer. `complete: false` means the
+// server's bounded scan stopped with candidates unexamined, so an empty
+// `occurrences` must NOT be rendered as "nothing scheduled" -- that conflation
+// is what hid three separate backend regressions from three reviews.
+export interface NoticeboardResult {
+  occurrences: NoticeboardOccurrence[];
+  complete: boolean;
+}
+
 export interface NoticeboardOccurrence {
   occurrenceId: string;
   eventId: string;

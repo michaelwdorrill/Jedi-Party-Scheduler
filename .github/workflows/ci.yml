@@ -105,3 +105,17 @@ jobs:
       - name: Test
         working-directory: frontend
         run: npm test
+
+      # Pass-19 review (P19-04). `npm run lint` existed and had never run in
+      # CI, so the one rule that would have caught that finding -- and did
+      # catch a second instance of the same class in HomePage the moment it
+      # was pointed at this app's own `useAsync` -- could only fire if someone
+      # remembered to run it locally. Nobody did, for nineteen passes.
+      #
+      # Warnings are not failed here: the two react-refresh ones are known and
+      # cosmetic, and turning them into blockers now would mean fixing them
+      # under release pressure for no safety gain. Errors block, and
+      # exhaustive-deps is an error.
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint

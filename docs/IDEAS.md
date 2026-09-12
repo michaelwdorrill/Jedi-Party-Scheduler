@@ -353,7 +353,7 @@ retry consumer avoids a new fixed per-tick query, which is the cost
 `cron/budget.ts` records three incidents of, and which the Pass-15 recovery arm
 tripped over as well.
 
-### 75. A successful Google insert whose mapping is refused is duplicated
+### 75. A successful Google insert whose mapping is refused is duplicated -- fixed in Pass 19
 
 From the Pass-16 review (P16-07), pre-existing and newly reachable through the
 Pass-15 destination-move path. The push half creates the remote event and then
@@ -370,6 +370,36 @@ idempotency (a stable client-supplied id) or durable reconciliation of creates
 whose mapping was rejected. A re-read before creating narrows nothing that
 matters, because the create is already away.
 
+**Closed in Pass 19, with its impact corrected upward first.** The Pass-19
+review traced this through an actual completed disconnect and found it is not
+only a duplicate: because disconnect enumerates `google_event_links`, and this
+event has no link row, **disconnect could not remove it** -- while the confirm
+dialog, the disconnecting state and the Privacy Policy all promise, without
+qualification, that disconnecting removes the upcoming entries this service
+added. That made it the one open finding whose consequence contradicted
+published product text rather than merely inconveniencing someone.
+
+The mapping guard stays exactly as it is: refusing to record a mapping under a
+credential or destination that has moved is correct, and weakening it would
+restore the older, worse class of bug where an in-flight insert reattached
+itself to the wrong account. What changes is what happens when it refuses. A
+refused mapping is now an obligation: the push path tries to delete the remote
+event immediately, which also removes the duplicate, and only if that cannot
+happen -- the delete fails, or the calendar-write allowance is spent -- does it
+record a row in `google_orphaned_inserts` (migration 0045). Disconnect drains
+that table alongside the link rows, and account erasure deletes it explicitly
+in the same batch as the rest, per the rule F-15 established.
+
+Deliberately no new per-tick query: the obligation write only happens on the
+refused-mapping branch, which is the rare race, so the fixed cost of a sweep is
+unchanged. Three recorded incidents in this project came from a new fixed
+per-tick statement starving `sweepPurgeTerminalHistory`, and that was not going
+to be the fourth.
+
+Unlike the link rows, obligations are drained with no date filter. That is not
+a change of policy about history: a link row records a session someone actually
+played and is worth keeping, whereas one of these is a duplicate the user never
+asked for and cannot trace. Leaving it as "history" would be leaving litter.
 ### 76. The development-dependency audit cannot be cleared by `npm audit fix` alone
 
 From the Pass-16 review's dependency table, and an attempt at it in the same
@@ -439,7 +469,7 @@ projection and both views, and give the organizer an explicit way to reconcile.
 That is the same design item 70 needs, approached from the UI end, and it
 should be built with item 70 rather than before it.
 
-### 79. The noticeboard's candidate limit cannot prove completeness
+### 79. The noticeboard's candidate limit cannot prove completeness -- fixed in Pass 19
 
 From the Pass-17 review (P17-07). **Half fixed; the half that is left is the
 harder half and is stated here so it is not mistaken for done.**
@@ -505,7 +535,51 @@ frontend can say "there may be more" instead of "nothing scheduled".
 Raising `MAX_NOTICEBOARD_EVENTS` is not the fix. It moves the threshold and
 weakens the bound the limit exists for.
 
-### 80. Changing only the occurrence in the URL leaves the page showing the old one
+**Closed in Pass 19, and the third correction to this item is the interesting
+one.** The Pass-18 fix carried its own false claim -- "both additions only ever
+ADMIT candidates, so neither can reintroduce the P17-07 crowding" -- and the
+Pass-19 review disproved it in one move: **admitting IS the crowding
+mechanism.** The crowd is bounded by the candidate limit, so a predicate that
+admits more spends that limit faster. The override arm added for P18-01
+admitted series holding overrides that a whole-series edit had orphaned; the
+expander correctly refuses those dates (`isSeriesOccurrence`, P14-13), so they
+expand to nothing, and a hundred of them emptied the board again. Measured:
+the same fixture returns the real event on the Pass-18 tree and ZERO
+occurrences on the Pass-19 one.
+
+That is the same error as Pass 18's, one pass apart: reason carefully about
+dimension A (can this wrongly exclude a valid occurrence?), then state a
+conclusion about dimension B (can this crowd the page?). Both times the
+sentence was in the commit message, this item, and the code comment.
+
+So the fix is no longer in the predicate at all, which is what this item asked
+for from the start. Candidates are read in pages with a deterministic total
+order, each page is expanded, and only events that actually have an occurrence
+in the window count against `MAX_NOTICEBOARD_EVENTS`. A series that expands to
+nothing now costs a candidate slot and no event slot -- so P17-07 (finished
+series), P18-02 (`after_count` series with no `end_date`, which no date filter
+can ever exclude) and P19-01 (orphaned overrides) all close together, because
+they were always one bug wearing three hats.
+
+The scan is bounded by `MAX_CANDIDATES_SCANNED` rather than by the event cap,
+and when it stops early the response says so: `buildNoticeboard` returns
+`{ occurrences, complete }`, the route returns that, and the frontend renders
+"couldn't check the whole server" or "there may be more" instead of "nothing
+scheduled". That flag is the half of this item that SQL could never supply, and
+its absence is precisely what let three regressions reach a user looking like a
+quiet Tuesday.
+
+Two costs, both measured rather than argued. Paging spends three statements per
+page instead of one for the whole query, so `test/pass19.test.ts` carries a
+guard that the worst case stays under D1's Free ceiling of 50 per invocation --
+this is a request path, so that limit is real. And the candidate `ORDER BY`
+gained `id` as a tiebreak, because `COALESCE(start_at, from)` ties every
+recurring event in a guild and paging over an undefined order is meaningless.
+That tie was never harmless: it is why the "soonest hundred" promise was untrue
+for any guild whose candidates were mostly series, and it is the same undefined
+ordering that made a P17-01 fixture pass with its defect present.
+
+### 80. Changing only the occurrence in the URL leaves the page showing the old one -- fixed in Pass 19
 
 From the Pass-18 review (P18-03). Pre-existing -- the frontend files involved
 are byte-identical to Pass 17 -- and newly demonstrated rather than newly
@@ -541,7 +615,28 @@ without losing the existing protection against a delayed old response landing
 last. Verify retained-query navigation as well as fresh mounts; only the
 second is covered today.
 
-### 81. The live-lease fixture can pass without exercising the lease
+**Closed in Pass 19, along with the reason it was reachable.** `EventFormPage`
+now runs its load through `latestOnly()`, a generation gate extracted from
+`useAsync` into `lib/async.ts` -- the point being that the protection already
+existed and had been implemented exactly once, in the hook this page predates.
+The same guard written twice is the same guard missing once, so there is now a
+single copy, used by both, with its own tests.
+
+Item 80's own case (`EventDetailPage` omitting `occurrenceDate` from its loader
+identity) is a one-token fix. The systemic half is more useful:
+`react-hooks/exhaustive-deps` never checked it, because the rule only inspects
+hooks it knows about and `useAsync` is this app's own. Naming it via
+`additionalHooks` in `.eslintrc.cjs` makes the rule flag exactly this finding --
+verified by reverting the fix and watching it error -- and it immediately found
+a second instance of the same class in `HomePage`, whose `useAsync` listed
+`monthStart.toMillis()` (an expression the rule cannot check) and a redundant
+`zone`. Neither was a live defect; both were the shape that becomes one.
+
+And `npm run lint` had never run in CI at all, on any branch, so even a
+correctly configured rule could only fire if somebody remembered to run it. It
+is a CI step now. Errors block; the two known cosmetic react-refresh warnings
+do not.
+### 81. The live-lease fixture can pass without exercising the lease -- fixed in Pass 19
 
 From the Pass-18 review (P18-08), and it is mine. Test confidence only: the
 reviewer's matched-key control establishes that the runtime behaves correctly
@@ -569,6 +664,14 @@ session. Knowing about a fixture failure mode did not prevent writing it
 again. That is an argument for a shared seeding helper that returns the
 timestamps it wrote, rather than for being more careful.
 
+**Closed in Pass 19.** `seedNotice` returns the `responded_at` it wrote and the
+live-lease fixture keys its log row with that exact value; the join is asserted
+before the sweep rather than assumed; and the outcome is measured as claim
+attempts plus total deliveries instead of one row's delivery stamp -- a
+delivery-only assertion cannot tell selection exclusion apart from the claim
+layer refusing a candidate for its own reasons. Re-verified by reintroducing
+the one-millisecond skew, which now fails on the join assertion rather than
+passing silently.
 ### 82. Migration 0044's index outlived the code that needed it
 
 Housekeeping, found while reconciling Pass 18 rather than reported by it, and
@@ -588,6 +691,67 @@ partial index on a table this size costs approximately nothing, which is why
 this is recorded rather than done. The reason to do it eventually is the
 comment, not the bytes: a stored object whose documented purpose no longer
 exists is how the next person is misled.
+
+### 83. Poll resolution had no concurrency token, and three other writers still do not
+
+From the Pass-19 review (P19-02), and the **fix is in** -- this entry is the
+part that outlives it.
+
+`markResolved` committed a poll's winner under `WHERE id = ? AND status =
+'active'`. That is a real compare-and-set, and it correctly stopped a poll
+resolving twice, which is what it was written for. What it never checked is
+whether the world the winner was computed FROM still existed. An organizer can
+edit a poll's candidates through the ordinary authorized route while it is
+active and collecting votes, so between the tally read and the UPDATE the
+winning option can be deleted -- and `resolved_option_id` is plain TEXT with no
+foreign key, so the id committed anyway. The event ended up resolved to a time
+that was no longer a candidate, pointing at an option that no longer existed,
+and the noticeboard advertised that time to the server.
+
+It now commits against `events.revision`, the token the event write path
+already maintains, plus an EXISTS on the option as defence in depth. The
+revision is the mechanism rather than option existence, because it catches
+every edit and not only the deletion -- a raised threshold or a moved candidate
+invalidates the decision just as thoroughly, and the test for that case is the
+one that would have been missed. Losing the race is not an error: the vote is
+recorded, the poll stays active, and the next vote or the deadline sweep
+decides again from current state.
+
+**What stays open is the general question.** This project has an
+optimistic-concurrency token on events and uses it inconsistently. The event
+write path guards with it; poll resolution did not until now. Worth an audit
+rather than a guess: `confirmOption` and `confirmWindowedOption` both write
+poll state under their own narrower CAS, and the multi-winner deadline branch
+marks an event resolved under `status = 'active'` alone. None of those is known
+to be wrong -- confirming an option that survived an edit is arguably fine --
+but "not known to be wrong" is exactly what was true of `markResolved` through
+eighteen review passes.
+
+### 84. A fixture that models a race has to model where the race actually is
+
+Process, not product, and recorded because it is the sixth instance in this
+cycle and the first one caught before it was committed.
+
+The first version of the P19-02 reproduction deleted the poll candidate and
+then called the resolver. It passed on the unfixed tree. The reason is that
+`getOptionTallies` runs INSIDE the resolver, so deleting beforehand meant the
+tally never saw the option, there was no winner to commit, and the poll stayed
+active for a reason with nothing to do with the guard under test. The finding
+is about an edit landing BETWEEN the tally read and the commit, and a fixture
+that puts it anywhere else is testing something adjacent.
+
+The fix was to fire the edit from the tally statement's own completion, so the
+interleaving is the one the finding describes. The general rule this adds to
+the five already recorded: **for a race, the fixture must place the interfering
+write at the exact point the finding names, and the way to check that is to
+revert the fix and confirm the test fails for the stated reason** -- not merely
+that it fails.
+
+Related, from the same session: the first crowding control written for
+`test/pass19.test.ts` depended on tie order among rows with a NULL `start_at`,
+which the candidate query does not define. Both were caught by revert-verifying
+rather than by review, which is the argument for revert-verifying every
+reproduction rather than only the ones that look risky.
 
 ## Parked until after 1.0
 
