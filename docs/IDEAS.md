@@ -461,6 +461,38 @@ bounds are widened by a day, because the rule's dates are local to the event's
 timezone while the window is epoch milliseconds, so widening can only admit a
 series that turns out to have nothing in range, never exclude one that does.
 
+**That paragraph was wrong twice when it was written, and the Pass-18 review
+(P18-01) proved it by returning three real occurrences from the tree BEFORE
+the fix and an empty noticeboard after it.** "Conservative" was an argument,
+not a proof, and it was false in two independent ways:
+
+- It compared `end_date` against the window start as if an occurrence were a
+  point. An occurrence is an interval, and `duration_minutes` may be up to a
+  year, so a series whose last occurrence *starts* before the window can still
+  be running inside it. A six-day occurrence beginning on the 12th was dropped
+  from a window opening on the 15th. The ordinary-event arm of the same query
+  has always used interval overlap; the recurring arm did not, and a recurring
+  event's NULL `start_at` means that arm never rescued one.
+- It read nominal rule dates only, and overrides are not loaded until thirty
+  lines later -- so at that point the rule's dates do not know where its
+  occurrences actually are. A series that ended on the 12th, whose occurrence
+  an accepted change request moved to the 16th, was excluded from a window
+  containing the 16th. So was one moved the other way, out of October back
+  into September.
+
+Both are now closed: the end bound is widened by the rule's duration rounded
+up to whole days, and a second `EXISTS` admits any series holding an
+uncancelled override that overlaps the window, which is decidable in SQL
+because an override stores absolute instants rather than rule dates. Both
+additions only ever *admit* candidates, so neither can reintroduce the P17-07
+crowding this item exists for. All three cases are revert-verified in
+`test/pass18.test.ts`.
+
+The lesson is the one this cycle keeps teaching: a narrowing justified by an
+argument about what it "can only" do is a claim, and claims in this project
+have a bad record. The clause that widened by a day to be safe about timezones
+was written in the same breath as two exclusions that were not safe at all.
+
 **Still open, and it is the part that needs a design:** a hundred *currently
 active* series with no occurrence in a narrow window still fill the page.
 Deciding that needs the expander, not SQL -- a daily series is live all year and
@@ -472,6 +504,90 @@ frontend can say "there may be more" instead of "nothing scheduled".
 
 Raising `MAX_NOTICEBOARD_EVENTS` is not the fix. It moves the threshold and
 weakens the bound the limit exists for.
+
+### 80. Changing only the occurrence in the URL leaves the page showing the old one
+
+From the Pass-18 review (P18-03). Pre-existing -- the frontend files involved
+are byte-identical to Pass 17 -- and newly demonstrated rather than newly
+introduced.
+
+`EventDetailPage` reads `occurrenceDate` out of the URL but lists only
+`eventId` in its loader's dependency array
+(`frontend/src/pages/EventDetailPage.tsx:52-74`). Keep the page mounted and
+change only the occurrence query and no fetch happens: the rendered date stays
+on the old occurrence while the freshly created RSVP callback closes over the
+new one. The reviewer drove the shipped component, hooks and API client
+against real signed Worker routes and confirmed at both the database and the
+endpoint that answering "declined" marked 13 September declined while
+12 September -- the date on screen when the button was pressed -- stayed
+accepted.
+
+This is worse than an ordinary staleness bug because it attributes an answer
+to a person that they did not give, and it does it silently: the reload that
+follows the callback finally shows the occurrence they actually answered, by
+which point the RSVP is already recorded.
+
+What keeps it from being higher is the precondition and the evidence boundary.
+The page must be *retained* while its query changes; a fresh mount and an
+explicit reload both load correctly, so ordinary navigation that remounts is
+not shown faulty. The driver is a deterministic hook-lifecycle harness with
+substituted router inputs, not React DOM or a live browser, so how often real
+navigation retains the page is not established.
+
+The fix is to make event *and* occurrence part of the loader's identity, and
+to tie the displayed data and the action to the same resolved selection --
+disabling or deferring the action while a different selection is in flight,
+without losing the existing protection against a delayed old response landing
+last. Verify retained-query navigation as well as fresh mounts; only the
+second is covered today.
+
+### 81. The live-lease fixture can pass without exercising the lease
+
+From the Pass-18 review (P18-08), and it is mine. Test confidence only: the
+reviewer's matched-key control establishes that the runtime behaves correctly
+on both inputs.
+
+`seedNotice` in `test/pass17.test.ts` captures the attendance `responded_at`
+from one `Date.now()` and then inserts the live-leased outbox row using
+another. That timestamp is part of the notification's identity -- the sweep
+joins attendance to log on it (`cron/reminders.ts:2872`) -- so if the two
+writes cross a millisecond boundary the attendance no longer joins the seeded
+lease, and cron correctly sees a different, brand-new notification. The
+assertion only checks that the *old* row's delivery stamp is still NULL, which
+a new-key delivery satisfies. A deterministic one-millisecond reproduction
+passes the test while the sweep makes a claim and delivers.
+
+The fix is to read back the stored attendance timestamp and key the log with
+it, assert that the two actually join *before* running the sweep, and count
+claim attempts and all deliveries rather than checking one row's stamp -- a
+delivery-only assertion cannot establish selection exclusion when the claim
+layer may be refusing the candidate for its own reasons.
+
+Worth recording beyond the fix: this is the same millisecond-boundary defect
+found and repaired in P17-01's seeding two fixtures earlier in the same
+session. Knowing about a fixture failure mode did not prevent writing it
+again. That is an argument for a shared seeding helper that returns the
+timestamps it wrote, rather than for being more careful.
+
+### 82. Migration 0044's index outlived the code that needed it
+
+Housekeeping, found while reconciling Pass 18 rather than reported by it, and
+exactly the "dead mechanism" the Pass-17 brief asked to be watched for.
+
+`idx_change_requests_unapplied` is documented in
+`worker/migrations/0044_change_request_applied.sql` as "the recovery arm's
+predicate", partial on `status = 'accepted' AND applied_at IS NULL`. The
+recovery arm was removed in P16-01 because it re-admitted removed guests, and
+nothing in the tree queries that shape any more: the only two readers of
+`applied_at` are the stamp write in `lib/changeRequests.ts:367` and the
+decision-notice gate in `cron/reminders.ts:907`, and neither uses it.
+
+The column still earns its place -- the notice gate needs it -- but the index
+does not. Dropping it needs a migration, so it is not free, and an unused
+partial index on a table this size costs approximately nothing, which is why
+this is recorded rather than done. The reason to do it eventually is the
+comment, not the bytes: a stored object whose documented purpose no longer
+exists is how the next person is misled.
 
 ## Parked until after 1.0
 

@@ -123,11 +123,40 @@ export async function buildNoticeboard(
   // fix; IDEAS item 79 carries it. Raising MAX_NOTICEBOARD_EVENTS is not the
   // fix -- it moves the threshold and weakens the bound the limit exists for.
   //
+  // Pass-18 review (P18-01). The first version of this clause was wrong in two
+  // ways, and both were mine. It excluded a valid series that the tree before
+  // it returned, which is the worst shape a "fix" can take.
+  //
+  // First, it compared `end_date` against the window start as though an
+  // occurrence were a point. An occurrence is an INTERVAL: `duration_minutes`
+  // is allowed up to a year (validate.ts), so a series whose last occurrence
+  // STARTS before the window can still be running inside it. A six-day
+  // occurrence beginning on the 12th overlaps a window opening on the 15th,
+  // and the date-only test dropped it. The ordinary-event arm below has always
+  // used interval overlap; the recurring arm now agrees with it. Note that a
+  // recurring event carries a NULL start_at, so that arm never rescued one.
+  //
+  // Second, it read only NOMINAL rule dates, and an override can move an
+  // occurrence anywhere -- overrides are not loaded until 30 lines below this
+  // query, so at this point the rule's dates do not know where its occurrences
+  // actually are. A series that ended on the 12th, whose occurrence was moved
+  // by an accepted change request to the 16th, was excluded from a window
+  // containing it. The second EXISTS admits any series holding an uncancelled
+  // override that overlaps the window, in either direction, which is decidable
+  // here because an override stores absolute instants rather than rule dates.
+  //
+  // Both additions only ever ADMIT candidates, so neither can reintroduce
+  // P17-07: a hundred series that finished last month still hold no overlapping
+  // override and still have a bounded duration, so they are still excluded.
+  // Both are one indexed EXISTS against a primary/unique key, so the query
+  // count per call is unchanged -- this runs inside the cron's budget.
+  //
   // The dates are compared as ISO text, which sorts chronologically, and both
   // bounds are widened by a day because the rule's dates are local to the
   // event's timezone while the window is epoch milliseconds. Widening can only
   // admit a series that turns out to have nothing in range, never exclude one
-  // that does.
+  // that does. The duration widening is rounded UP to whole days for the same
+  // reason, which also absorbs the `start_time` this comparison ignores.
   const windowStartDate = new Date(from - DAY_MS).toISOString().slice(0, 10);
   const windowEndDate = new Date(to + DAY_MS).toISOString().slice(0, 10);
   const { results: events } = await env.DB.prepare(
@@ -136,11 +165,24 @@ export async function buildNoticeboard(
        AND is_private = 0
        AND status IN ('active','resolved')
        AND (
-         (is_recurring = 1 AND EXISTS (
-            SELECT 1 FROM event_recurrence_rules r
-            WHERE r.event_id = events.id
-              AND (r.end_date IS NULL OR r.end_date >= ?)
-              AND r.start_date <= ?
+         (is_recurring = 1 AND (
+            EXISTS (
+              SELECT 1 FROM event_recurrence_rules r
+              WHERE r.event_id = events.id
+                AND (
+                  r.end_date IS NULL
+                  OR date(r.end_date, '+' || ((r.duration_minutes + 1439) / 1440) || ' days') >= ?
+                )
+                AND r.start_date <= ?
+            )
+            OR EXISTS (
+              SELECT 1 FROM event_occurrence_overrides o
+              WHERE o.event_id = events.id
+                AND o.is_cancelled = 0
+                AND o.override_start_at IS NOT NULL
+                AND o.override_start_at <= ?
+                AND COALESCE(o.override_end_at, o.override_start_at) >= ?
+            )
           ))
          OR (start_at IS NOT NULL AND start_at <= ? AND COALESCE(end_at, start_at) >= ?)
        )
@@ -148,7 +190,7 @@ export async function buildNoticeboard(
      ORDER BY COALESCE(start_at, ?) ASC
      LIMIT ?`,
   )
-    .bind(guildId, windowStartDate, windowEndDate, to, from, from, MAX_NOTICEBOARD_EVENTS)
+    .bind(guildId, windowStartDate, windowEndDate, to, from, to, from, from, MAX_NOTICEBOARD_EVENTS)
     .all<EventRow>();
 
   if (events.length === 0) return [];

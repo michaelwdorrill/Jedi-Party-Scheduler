@@ -659,6 +659,68 @@ Four things this release turned up that the phase entry above did not plan for:
   access or refresh tokens are not written to the database" was offered as a
   general statement, and a stored Google refresh token makes it incomplete.
 
+### Phase 6 — What the security review left standing (70/72/73/75/76/77/78/79/80/81/82) → **v1.0.1**
+
+Eighteen passes of independent AI security review across 0.8.x closed
+everything that was demonstrably a disclosure, authorization or privacy
+defect, including the one P1 of the cycle — private event content replayed to
+a guest who had been explicitly removed — which is now independently verified
+closed three times over. What is left is real, recorded, and none of it
+blocks the release. **Michael's call, 12 September 2026: it ships in v1.0.1
+rather than holding 1.0.**
+
+The eleven items split into three kinds, and the distinction is the useful
+part of this phase, because "eleven open findings" and "eleven open security
+findings" are very different sentences and only the first is true.
+
+**Identity and third-party lifecycle (75, 73, 72).** None is a disclosure and
+none needs an attacker.
+
+- **75** is the one to do first, and it is the only item here whose
+  consequence persists outside this app. A reconnect landing during a
+  destination move lets the old continuation create the event in Google while
+  the local mapping write correctly refuses stale credentials — leaving a real
+  calendar entry the app has no record of, which disconnect and account
+  withdrawal therefore cannot remove. That is a gap against the withdrawal
+  promise, not just the duplicate the next sweep also creates.
+- **73** is an in-flight Google revoke outrunning a same-account reconnect.
+  Unfixable by local checks by construction: Google revokes at grant level and
+  a dispatched request cannot be recalled, which is the same semantics that
+  forced the F-44 revoke to be reverted in Pass 16. Costs a reconnect, not
+  data.
+- **72** is cross-tab login identity: same browser, same person, two accounts
+  they both hold, a refresh in flight. A confused deputy between one human's
+  own two sessions.
+
+**Correctness the user can see (79, 80, 78/70).**
+
+- **79** is the half of the noticeboard limit that SQL cannot decide, and it
+  shares a symptom with the P18-01 regression fixed just before this phase:
+  a page that says "nothing scheduled" while the same user's calendar shows
+  the event. Worth doing for that reason rather than for its priority.
+- **80** silently attributes an RSVP to a person for an occurrence other than
+  the one they were looking at.
+- **78** with **70**: a stranded acceptance reads as a plain success with no
+  uncertainty and no reconciliation path. Design work, and the one item where
+  the wrong fix is known to be worse than the bug — the removed recovery arm
+  is what caused the P1.
+
+**Maintenance (76, 77, 81, 82).** The dependency audit that `npm audit fix`
+cannot clear without breaking the test typecheck; the demo seed that DMs a
+real operator on some days of the week; a fixture that can pass without
+exercising the lease it names; and a migration index whose purpose was
+deleted. 81 and 82 are an hour between them and should ride along with
+whatever else touches those files.
+
+**One thing to settle before 1.0 ships, not after:** the v1.0 test is
+"`IDEAS.md`'s Still open section is empty", and scheduling these for 1.0.1
+leaves it non-empty. Moving them to "Parked until after 1.0" would make the
+test pass, and would be precisely the misuse that section's own warning
+describes — parked growing faster than Still open shrinks. The honest options
+are to ship 1.0 with a named, written-down exception, or to restate the test.
+Sweeping eleven items into the drawer to turn a number green is how item 29's
+failure comes back.
+
 ## Versions
 
 The app entered **Beta at v0.2**, the moment there was a written backlog
@@ -717,7 +779,8 @@ shifts.
 | **0.7.2** | What v0.7.1 and the standing backlog turned up — already-allow-listed servers shown, not hidden, on `/add-bot` (57); the bot can leave a server on deactivation (58); the calendar chip shows your own declined/tentative answer (52); a guarded `CURRENT_POLICY_VERSION` (43); the terminal-history purge's budget under-count and FK error fixed together (53, 56); a plain organizer cancel now notifies invitees (55); idea 49 found already shipped in v0.6.2 and documented as such. A second pass, after Michael settled the open design questions directly, shipped both items originally assessed and left open: groups without servers, per `specs/0011` plus the resolved access-control gap it didn't cover (36), and the minimum-attendees cascade extended to recurring events with configurable per-event/per-occurrence deadlines (54) — plus two new ideas captured and built in the same motion: the organizer notified on every invitee RSVP for every event (59), an owner-only tool for checking whether a hypothetical group of people has a common server before committing to one, found useful while manually verifying 36 on the sandbox (60), the New Event form's field order inverted to match: invite first, then let the server narrow from who's invited (61), the event detail page now names which server an event actually landed on, also found while testing 36 (62), and editing an event no longer shows its own invitees as busy during the very slot being edited (63) | **Shipped** |
 | **0.8** | Phase 5 — Google Calendar sync (2), push half: connect one Google account, pick a calendar, and have the sessions you're committed to written to it. Policy version 3, and the first long-lived third-party credential this app stores | **Shipped 5 September 2026** |
 | **0.8.1** | Phase 5's pull half (2) — one nominated calendar read back via `freebusy.query`, cached by the cron rather than called live inside a request; the server noticeboard (5, per `specs/0007`); the sandbox frontend gap closed as decided-against (23); and policy version 4 covering both disclosures at once. **`IDEAS.md`'s Still open is empty** | **Built — held for the security review** |
-| 1.0 | `IDEAS.md`'s **Still open** section empty — leave Beta | **Test passes as of 0.8.1.** Gated on the security review, then release |
+| 1.0 | `IDEAS.md`'s **Still open** section empty — leave Beta | **The test no longer passes:** eighteen review passes refilled Still open with 66–69 and 70–82. Everything demonstrably a disclosure, authorization or privacy defect is closed and re-verified; the remainder is scheduled for 1.0.1. Ships with a written exception, or the test gets restated — see Phase 6 |
+| **1.0.1** | Phase 6 — what the security review left standing: the untracked Google insert (75), the in-flight revoke (73), cross-tab identity (72), noticeboard completeness (79), occurrence-selection state (80), acceptance atomicity and its presentation (70, 78), plus maintenance (76, 77, 81, 82) | Planned |
 
 ## Summary
 
