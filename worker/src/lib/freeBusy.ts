@@ -325,12 +325,19 @@ async function loadConfirmedYesVotesForEvents(
   // bound-parameter ceiling even at the maximum 25 requested users.
   for (const chunk of chunkIds(eventIds, userIds.length + 2)) {
     const { results } = await env.DB.prepare(
+      // Pass-22 acceptance review (RG-06). Same handover as
+      // loadConfirmedOptionsForEvents, and this is the reader where getting it
+      // wrong actually costs someone: a historical yes-vote on a confirmed
+      // option kept marking them BUSY at the old time after they had moved or
+      // declined the real session. The child event's own attendance is the
+      // answer once the child exists.
       `SELECT o.event_id, v.user_id, o.start_at, o.end_at
        FROM event_poll_options o
        JOIN event_poll_votes v ON v.option_id = o.id
        WHERE o.event_id IN (${placeholders(chunk.length)}) AND o.confirmed_at IS NOT NULL AND v.vote = 'yes'
          AND v.user_id IN (${placeholders(userIds.length)})
-         AND o.start_at <= ? AND o.end_at >= ?`,
+         AND o.start_at <= ? AND o.end_at >= ?
+         AND NOT EXISTS (SELECT 1 FROM events c WHERE c.created_from_option_id = o.id)`,
     )
       .bind(...chunk, ...userIds, toMs, fromMs)
       .all<ConfirmedVoteRow>();

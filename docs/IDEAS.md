@@ -879,7 +879,7 @@ have lost interest in is asking its owner. `DELETE /groups/:id/members/me`, with
 the owner refused (they must transfer or delete the group instead, which is the
 same rule the roster cap already implies), and a line in the group view.
 
-### 88. Materialized poll sessions keep their parent's commitment -- P21-06
+### 88. Materialized poll sessions keep their parent's commitment -- fixed in Pass 22
 
 From the Pass-21 executable review, and the reason it is not merely cosmetic:
 the stale entry is non-provisional, so it makes the person **actually busy** at
@@ -902,10 +902,26 @@ parent must stop being consulted. A cancelled child must not fall back to
 reactivating its parent. Votes can stay as history -- they simply must not be a
 second, independent obligation.
 
-Not fixed in the release pass. It touches three readers that every scheduling
-surface depends on, and getting it wrong makes people look free when they are
-busy, which is worse than the bug. It wants its own change with its own
-controls.
+**Fixed in Pass 22, and it was one clause, not the change we feared.** The
+scheduling to 1.0.1 was refused by the acceptance reviewer -- RG-06 was already
+on the agreed checklist, and our rationale for deferring it did not override
+that. They were right, and the estimate behind the deferral was wrong: the
+handover is `created_from_option_id`, which migration 0027 already records and
+which the fanout itself already uses as `NOT EXISTS (...)` to avoid
+materializing twice. The reading half is the same clause added to
+`loadConfirmedOptionsForEvents` and to free/busy's confirmed-vote query.
+
+A CANCELLED child still satisfies the NOT EXISTS -- the row exists -- so
+cancelling cannot resurrect the historical parent commitment. That was a
+requirement the reviewer named, and it falls out of the shape rather than
+needing its own clause, which is the sign the clause is in the right place.
+
+The lesson is about the deferral, not the code. "It touches three readers every
+scheduling surface depends on" was true and led to the wrong conclusion: the
+right response to a wide blast radius is to find the narrow mechanism, not to
+schedule the wide change for later. We had already written down that this
+project should prefer removal to mechanism; this is the same instinct applied
+to estimating.
 
 ### 89. A confirmed window session is invisible to free/busy until fanout -- P21-07
 

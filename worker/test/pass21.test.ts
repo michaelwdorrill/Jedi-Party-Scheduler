@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/router';
 import { signToken } from '../src/lib/signedToken';
 import { pollAnswersClosed } from '../src/lib/polls';
+import { UNAUTHORIZED_ERROR } from '../src/cron/googleSync';
 import { seedEvent, seedGuild, seedMembership, seedUser, setup, stubFetch, type FetchStub } from './helpers';
 import { storePendingConnection } from '../src/lib/googleCalendar';
 import { signJwt } from '../src/lib/jwt';
@@ -318,9 +319,15 @@ describe('a Google account switch cannot skip the disconnect promise (F-60)', ()
     await seedActiveConnection(db, 'first@gmail.com');
     await db
       .prepare(
-        `UPDATE google_calendar_connections SET sync_enabled = 0, last_error = 'Google access was revoked.'
+        // The exact marker markUnauthorized writes -- imported rather than
+        // retyped, because Pass 22 showed that "disabled and carrying some
+        // error" is a different and much broader condition than "Google
+        // rejected the grant", and a fixture that blurs them tests the broad
+        // one.
+        `UPDATE google_calendar_connections SET sync_enabled = 0, last_error = ?
          WHERE user_id = 'u1'`,
       )
+      .bind(UNAUTHORIZED_ERROR)
       .run();
 
     fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
@@ -573,5 +580,158 @@ describe('an advertised poll deadline holds at every submission boundary (P21-05
     // `>` not `>=`: the cutoff is the last moment you can answer, which is what
     // "voting closes at" reads as to a person.
     expect(pollAnswersClosed({ poll_deadline_at: NOW }, true, NOW)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pass-22 acceptance review, RG-05 residual. The deadline rule asked what an
+// answer ADDS. A complete-answer update also REMOVES, and the Discord select
+// legitimately permits zero choices -- so an empty selection loaded no options,
+// `options.some(unconfirmed)` was false, the cutoff passed, and the DELETE
+// still withdrew votes already cast on unconfirmed candidates. Withdrawing
+// after the deadline changed the winner, which is the same harm as casting.
+describe('a late update cannot withdraw an answer either (RG-05)', () => {
+  async function seedMostVotesPoll(db: ShimDatabase, deadlineAt: number): Promise<void> {
+    await seedGuild(db, 'guild-1');
+    for (const id of ['owner', 'voter-a', 'voter-b']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    await seedEvent(db, { id: 'poll-1', organizerId: 'owner', eventType: 'poll', startAt: null, endAt: null });
+    await db
+      .prepare(
+        `UPDATE events SET poll_strategy = 'most_votes', poll_resolution_mode = 'single_winner',
+           window_block_minutes = NULL, poll_deadline_at = ?, revision = 0 WHERE id = 'poll-1'`,
+      )
+      .bind(deadlineAt)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order) VALUES
+           ('opt-a', 'poll-1', ?, ?, 0), ('opt-b', 'poll-1', ?, ?, 1)`,
+      )
+      .bind(
+        Date.UTC(2026, 8, 20, 19, 0), Date.UTC(2026, 8, 20, 21, 0),
+        Date.UTC(2026, 8, 21, 19, 0), Date.UTC(2026, 8, 21, 21, 0),
+      )
+      .run();
+    for (const id of ['voter-a', 'voter-b']) {
+      await db
+        .prepare(`INSERT INTO event_invites (id, event_id, user_id, invited_via, invited_at) VALUES (?, 'poll-1', ?, 'individual', ?)`)
+        .bind(`inv-${id}`, id, Date.now())
+        .run();
+    }
+    await db
+      .prepare(`INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES ('opt-a','voter-a','yes',?)`)
+      .bind(Date.now() - 60_000)
+      .run();
+    await db
+      .prepare(`INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES ('opt-b','voter-b','yes',?)`)
+      .bind(Date.now() - 60_000)
+      .run();
+  }
+
+  it('refuses an empty selection that would withdraw a vote after the cutoff', async () => {
+    const { db, env } = setup();
+    await seedMostVotesPoll(db, Date.now() - 1);
+
+    const { recordPollSelection } = await import('../src/lib/polls');
+    const outcome = await recordPollSelection(env, 'voter-a', 'poll-1', []);
+
+    expect(outcome.status, 'clearing every choice after the deadline was accepted').toBe('closed');
+    const votes = await db
+      .prepare(`SELECT COUNT(*) AS n FROM event_poll_votes WHERE user_id = 'voter-a'`)
+      .first<{ n: number }>();
+    expect(votes!.n, "the voter's pre-deadline answer was deleted after the deadline").toBe(1);
+  });
+
+  it('still allows clearing a selection before the cutoff', async () => {
+    const { db, env } = setup();
+    await seedMostVotesPoll(db, Date.now() + 60 * 60 * 1000);
+
+    const { recordPollSelection } = await import('../src/lib/polls');
+    const outcome = await recordPollSelection(env, 'voter-a', 'poll-1', []);
+
+    expect(outcome.status, 'withdrawing a vote before the deadline is ordinary and must work').toBe('recorded');
+    const votes = await db
+      .prepare(`SELECT COUNT(*) AS n FROM event_poll_votes WHERE user_id = 'voter-a'`)
+      .first<{ n: number }>();
+    expect(votes!.n).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pass-22 acceptance review, RG-06. A confirmed poll option is the commitment
+// only until its child event exists; afterwards the child is. Reading both
+// meant moving the materialized session left the OLD time on the calendar
+// beside the new one, and declining the child left the historical yes-vote
+// still marking the person busy at a time nothing was happening.
+describe('a materialized child takes authority from its parent option (RG-06)', () => {
+  async function seedConfirmedWithChild(db: ShimDatabase, withChild: boolean): Promise<void> {
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'owner');
+    await seedMembership(db, 'owner', 'guild-1');
+    await seedEvent(db, { id: 'poll-1', organizerId: 'owner', eventType: 'poll', startAt: null, endAt: null });
+    await db
+      .prepare(`UPDATE events SET poll_resolution_mode = 'multi_winner' WHERE id = 'poll-1'`)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO event_poll_options (id, event_id, start_at, end_at, display_order, confirmed_at)
+         VALUES ('opt-a', 'poll-1', ?, ?, 0, ?)`,
+      )
+      .bind(Date.UTC(2026, 8, 20, 19, 0), Date.UTC(2026, 8, 20, 21, 0), Date.now())
+      .run();
+    if (withChild) {
+      await seedEvent(db, {
+        id: 'child-1',
+        organizerId: 'owner',
+        startAt: Date.UTC(2026, 8, 25, 19, 0),
+        endAt: Date.UTC(2026, 8, 25, 21, 0),
+      });
+      await db
+        .prepare(`UPDATE events SET created_from_option_id = 'opt-a' WHERE id = 'child-1'`)
+        .run();
+    }
+  }
+
+  it('stops projecting the parent option once its child exists', async () => {
+    const { db, env } = setup();
+    await seedConfirmedWithChild(db, true);
+
+    const { loadConfirmedOptionsForEvents } = await import('../src/lib/events');
+    const byEvent = await loadConfirmedOptionsForEvents(env, ['poll-1']);
+
+    expect(
+      byEvent.get('poll-1') ?? [],
+      'the confirmed option was still projected alongside the session it became',
+    ).toHaveLength(0);
+  });
+
+  it('still projects a confirmed option that has not been materialized', async () => {
+    const { db, env } = setup();
+    await seedConfirmedWithChild(db, false);
+
+    const { loadConfirmedOptionsForEvents } = await import('../src/lib/events');
+    const byEvent = await loadConfirmedOptionsForEvents(env, ['poll-1']);
+
+    expect(
+      byEvent.get('poll-1') ?? [],
+      'a confirmed day with no child yet is the only record of the commitment and must still show',
+    ).toHaveLength(1);
+  });
+
+  // A cancelled child still exists as a row, so the parent stays excluded --
+  // cancelling must not resurrect the historical commitment. That falls out of
+  // the NOT EXISTS rather than needing its own clause, and this pins it.
+  it('does not resurrect the parent when the child is cancelled', async () => {
+    const { db, env } = setup();
+    await seedConfirmedWithChild(db, true);
+    await db.prepare(`UPDATE events SET status = 'cancelled' WHERE id = 'child-1'`).run();
+
+    const { loadConfirmedOptionsForEvents } = await import('../src/lib/events');
+    const byEvent = await loadConfirmedOptionsForEvents(env, ['poll-1']);
+
+    expect(byEvent.get('poll-1') ?? []).toHaveLength(0);
   });
 });

@@ -467,12 +467,23 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
         `This is a repeating event now, so this button can't cancel it -- it would take every date with it. Cancel a single date, or the whole series, on the site. ${siteLink(env)}`,
       );
     }
-    await env.DB.prepare(
+    // Pass-22 acceptance review noted the response could still say "cancelled"
+    // when the guarded UPDATE changed nothing -- a conversion landing between
+    // the shape read above and this write. The series is protected either way,
+    // which is why they filed it as presentation rather than reopening the
+    // gate; but telling someone their session is cancelled when it is not is
+    // its own small harm, and the affected-row count already knows.
+    const cancelled = await env.DB.prepare(
       `UPDATE events SET status = 'cancelled', updated_at = ?
        WHERE id = ? AND organizer_id = ? AND status = 'active' AND is_recurring = 0`,
     )
       .bind(Date.now(), parsed.eventId, userId)
       .run();
+    if (cancelled.meta.changes === 0) {
+      return ephemeral(
+        `That session changed while you were pressing this, so nothing was cancelled. Take a look on the site. ${siteLink(env)}`,
+      );
+    }
     // No components after -- a fired cancel button must not be pressable
     // twice. Everyone still marked as coming is told through the outbox
     // (sweepCancelledEventNotices), same as an auto-cancel.

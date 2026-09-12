@@ -38,6 +38,7 @@ import {
   storePendingConnection,
 } from '../lib/googleCalendar';
 import { signToken, verifyToken } from '../lib/signedToken';
+import { UNAUTHORIZED_ERROR } from '../cron/googleSync';
 import { assertBoolean, assertString, readJsonBody } from '../lib/validate';
 
 export const googleRoutes = new Hono<AppEnv>();
@@ -353,14 +354,37 @@ googleRoutes.post('/finalize', requireAuth, requirePolicyAcceptance, async (c) =
   // would abandon them. It is the pair that means "dead": disabled AND
   // carrying the error that disabled it.
   const existing = await c.env.DB.prepare(
-    `SELECT google_account_email, sync_enabled, last_error
+    `SELECT google_account_email, sync_enabled, last_error, status
      FROM google_calendar_connections WHERE user_id = ?`,
   )
     .bind(c.get('userId'))
-    .first<{ google_account_email: string | null; sync_enabled: number; last_error: string | null }>();
-  const grantIsDead = !!existing && existing.sync_enabled === 0 && existing.last_error != null;
+    .first<{
+      google_account_email: string | null;
+      sync_enabled: number;
+      last_error: string | null;
+      status: string;
+    }>();
+  // Pass-22 acceptance review narrowed this, and the correction is mine to
+  // own: `sync_enabled = 0 AND last_error IS NOT NULL` is not "Google rejected
+  // the grant". A transient Calendar 503 writes `last_error` while the
+  // connection stays enabled and perfectly usable; a subsequent disconnect
+  // then sets `sync_enabled = 0`, and the pair suddenly reads as dead. The
+  // exemption fired, the switch went through, and the old account's entries
+  // were abandoned with no obligation recorded -- exactly the harm F-60
+  // exists to prevent, reachable again through a route I added to prevent it.
+  //
+  // A dead grant is specifically an AUTHORIZATION failure, which is what
+  // markUnauthorized writes and nothing else does. Matching its sentence is a
+  // string comparison and therefore brittle, so the marker is explicit: only
+  // `status = 'active'` counts as a live connection worth protecting, and a
+  // connection that is mid-disconnect is not a switch candidate at all.
+  const grantIsDead =
+    !!existing &&
+    existing.sync_enabled === 0 &&
+    existing.last_error === UNAUTHORIZED_ERROR;
   const switchingFromActive =
     !!existing &&
+    existing.status === 'active' &&
     !grantIsDead &&
     !!existing.google_account_email &&
     !!pending.google_account_email &&

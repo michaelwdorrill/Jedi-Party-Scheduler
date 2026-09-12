@@ -219,8 +219,24 @@ export async function loadConfirmedOptionsForEvents(
   const map = new Map<string, ConfirmedPollOptionRow[]>();
   for (const chunk of chunkIds(eventIds)) {
     const { results } = await env.DB.prepare(
-      `SELECT id, event_id, start_at, end_at FROM event_poll_options
-       WHERE event_id IN (${placeholders(chunk.length)}) AND confirmed_at IS NOT NULL`,
+      // Pass-22 acceptance review (RG-06). A confirmed option is the
+      // commitment only until its child event exists; after fanout the child
+      // is, and reading both means one agreement shows up twice.
+      //
+      // The consequence was not cosmetic. Moving the materialized session left
+      // the OLD parent time still on the calendar beside the new one, and
+      // declining the child left the historical yes-vote making the old slot
+      // busy -- so the projection disagreed with the event the person had
+      // actually answered. `created_from_option_id` (migration 0027) is the
+      // handover, and the fanout itself already uses this exact NOT EXISTS to
+      // avoid materializing twice; this is the reading half of the same rule.
+      //
+      // A CANCELLED child still satisfies this, deliberately: the row exists,
+      // so the parent stays excluded and cancelling cannot resurrect the
+      // historical commitment.
+      `SELECT id, event_id, start_at, end_at FROM event_poll_options o
+       WHERE event_id IN (${placeholders(chunk.length)}) AND confirmed_at IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM events c WHERE c.created_from_option_id = o.id)`,
     )
       .bind(...chunk)
       .all<ConfirmedPollOptionRow>();

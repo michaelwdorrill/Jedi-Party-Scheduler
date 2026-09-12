@@ -82,8 +82,15 @@ export default function PersonalEventPage() {
   const [loadedId, setLoadedId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isEdit) return;
+    // Gate first, then the early return -- the same ordering EventFormPage
+    // needed for P21-02 and this file did not get at the time. Remounting by
+    // route identity (App.tsx) is what actually resets the draft; this makes
+    // sure a response in flight when the mode changes cannot write either way.
     const isCurrent = loadGate.current.begin();
+    if (!isEdit) {
+      setLoadedId(null);
+      return;
+    }
     setLoadedId(null);
     setLoading(true);
     setLoadError(null);

@@ -233,6 +233,13 @@ async function loadLinks(env: Env, userId: string): Promise<LinkRow[]> {
 // user_id alone, a stale `invalid_grant` from the old account's in-flight
 // refresh disabled the account the user had just connected -- the same defect
 // P12-03 fixed for the success path and left on the failure path.
+// The exact `last_error` markUnauthorized writes, exported so the connect
+// route can recognise a genuinely revoked grant rather than inferring it from
+// "disabled and carrying some error" -- which a transient sync failure plus a
+// disconnect also produces (Pass-22 acceptance review). One constant, two
+// readers, no string duplicated across files.
+export const UNAUTHORIZED_ERROR = 'Google access was revoked. Reconnect to resume syncing.';
+
 async function markUnauthorized(env: Env, row: GoogleConnectionRow, message: string): Promise<void> {
   // sync_enabled = 0, not just an error message: a dead grant cannot recover
   // on its own, and leaving it enabled means every future tick spends part of
@@ -633,7 +640,7 @@ async function syncOneConnection(
       const removal = await deleteCalendarEvent(accessToken, existing.calendar_id, existing.google_event_id);
       if (!removal.ok) {
         if (removal.kind === 'unauthorized') {
-          await markUnauthorized(env, row, 'Google access was revoked. Reconnect to resume syncing.');
+          await markUnauthorized(env, row, UNAUTHORIZED_ERROR);
           return;
         }
         // Leave the link pointing at the old entry so the next tick tries the
@@ -716,7 +723,7 @@ async function syncOneConnection(
         await env.DB.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(existing.id).run();
         counts.relinked += 1;
       } else if (result.kind === 'unauthorized') {
-        await markUnauthorized(env, row, 'Google access was revoked. Reconnect to resume syncing.');
+        await markUnauthorized(env, row, UNAUTHORIZED_ERROR);
         return;
       } else {
         noteWriteFailure(result.message);
@@ -852,7 +859,7 @@ async function syncOneConnection(
       counts.inserted += 1;
       pushedGoogleEventIds.add(result.value.id);
     } else if (result.kind === 'unauthorized') {
-      await markUnauthorized(env, row, 'Google access was revoked. Reconnect to resume syncing.');
+      await markUnauthorized(env, row, UNAUTHORIZED_ERROR);
       return;
     } else {
       noteWriteFailure(result.message);
@@ -886,7 +893,7 @@ async function syncOneConnection(
       await env.DB.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(orphan.id).run();
       counts.deleted += 1;
     } else if (result.kind === 'unauthorized') {
-      await markUnauthorized(env, row, 'Google access was revoked. Reconnect to resume syncing.');
+      await markUnauthorized(env, row, UNAUTHORIZED_ERROR);
       return;
     } else {
       noteWriteFailure(result.message);
@@ -1020,7 +1027,7 @@ async function syncImportedPersonalEvents(
 
   if (!result.ok) {
     if (result.kind === 'unauthorized') {
-      await markUnauthorized(env, row, 'Google access was revoked. Reconnect to resume syncing.');
+      await markUnauthorized(env, row, UNAUTHORIZED_ERROR);
       return;
     }
     if (result.kind === 'missing') {

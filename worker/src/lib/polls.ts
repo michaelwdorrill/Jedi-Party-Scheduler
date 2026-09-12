@@ -778,6 +778,32 @@ export async function recordPollSelection(
   const loaded = await loadVotablePoll(env, userId, eventId, optionIds);
   if (loaded.status !== 'recorded') return loaded;
 
+  // Pass-22 acceptance review (RG-05). A complete-answer update is a mutation
+  // of every answer this person has on this poll, and the deadline check above
+  // only saw the ones being ADDED. The Discord select legitimately permits zero
+  // choices, and an empty selection loads no options at all -- so
+  // `options.some(unconfirmed)` was false, the cutoff passed, and the DELETE
+  // below still removed the votes the person had already cast on unconfirmed
+  // candidates. Withdrawing a vote after the deadline changed the eventual
+  // winner, which is the same harm as casting one.
+  //
+  // So the eligibility question is not "what is being added" but "what answers
+  // does this mutation touch". Only asked once the cutoff has actually passed,
+  // so the ordinary path costs nothing extra.
+  if (loaded.event.poll_deadline_at && Date.now() > loaded.event.poll_deadline_at) {
+    const removing = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM event_poll_votes v
+       JOIN event_poll_options o ON o.id = v.option_id
+       WHERE v.user_id = ? AND o.event_id = ? AND o.confirmed_at IS NULL
+         ${optionIds.length ? `AND o.id NOT IN (${optionIds.map(() => '?').join(', ')})` : ''}`,
+    )
+      .bind(userId, eventId, ...optionIds)
+      .first<{ n: number }>();
+    if ((removing?.n ?? 0) > 0) {
+      return { status: 'closed', reason: 'Voting for this poll has closed' };
+    }
+  }
+
   const statements = [];
   const keep = optionIds.map(() => '?').join(', ');
   statements.push(
