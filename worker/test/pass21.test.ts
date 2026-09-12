@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/router';
 import { signToken } from '../src/lib/signedToken';
+import { pollAnswersClosed } from '../src/lib/polls';
 import { seedEvent, seedGuild, seedMembership, seedUser, setup, stubFetch, type FetchStub } from './helpers';
 import { storePendingConnection } from '../src/lib/googleCalendar';
 import { signJwt } from '../src/lib/jwt';
@@ -533,5 +534,44 @@ describe('a roster write cannot outlive the authority it was allowed under (P21-
     expect(res.status).toBe(200);
     const row = await db.prepare(`SELECT name FROM groups WHERE id = 'grp-1'`).first<{ name: string }>();
     expect(row!.name).toBe('Renamed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pass-21 review (P21-05). The deadline check lived in one arm of one
+// function. The single-winner arm checked only `status`, and the window
+// submission route checked neither -- so a poll past its advertised cutoff
+// still accepted a decisive answer until the cron sweep happened to notice.
+// Whether a late answer counted depended on when the sweep last ran, which is
+// not a rule anyone can see, and the UI states when voting closes.
+describe('an advertised poll deadline holds at every submission boundary (P21-05)', () => {
+  const PAST = 1_000_000;
+  const NOW = 2_000_000;
+
+  it('closes an unconfirmed candidate once the deadline has passed', () => {
+    expect(
+      pollAnswersClosed({ poll_deadline_at: PAST }, true, NOW),
+      'a decisive answer was accepted after the cutoff the UI advertises',
+    ).toBe(true);
+  });
+
+  // The exemption that must survive: joining a day everyone already agreed on
+  // is not a new decision, and late joiners rely on it.
+  it('keeps an already confirmed candidate joinable after the deadline', () => {
+    expect(pollAnswersClosed({ poll_deadline_at: PAST }, false, NOW)).toBe(false);
+  });
+
+  it('does not close anything before the deadline', () => {
+    expect(pollAnswersClosed({ poll_deadline_at: NOW + 1 }, true, NOW)).toBe(false);
+  });
+
+  it('does not close a poll that has no deadline at all', () => {
+    expect(pollAnswersClosed({ poll_deadline_at: null }, true, NOW)).toBe(false);
+  });
+
+  it('treats the deadline instant itself as still open', () => {
+    // `>` not `>=`: the cutoff is the last moment you can answer, which is what
+    // "voting closes at" reads as to a person.
+    expect(pollAnswersClosed({ poll_deadline_at: NOW }, true, NOW)).toBe(false);
   });
 });

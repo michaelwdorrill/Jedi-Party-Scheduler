@@ -652,6 +652,25 @@ export type VoteOutcome =
 // refuse it, in the order the route used to ask them. Shared by the HTTP
 // route and the interactions endpoint so the two can never drift on what
 // "this poll is still open to you" means.
+// Whether the advertised cutoff has closed the answers being submitted.
+//
+// A CONFIRMED candidate stays joinable forever -- that is a deliberate feature
+// for late joiners, and joining a day everyone already agreed on is not a new
+// decision. An unconfirmed one is, so the deadline governs it.
+//
+// Exported because the same rule has to hold at every submission boundary.
+// Pass-21 review (P21-05) found it in one arm of one function: the other arm
+// checked only `status`, and the window route checked neither, so three ways of
+// answering a poll had three different answers to "is it too late".
+export function pollAnswersClosed(
+  event: { poll_deadline_at: number | null },
+  targetsAnyUnconfirmed: boolean,
+  now: number = Date.now(),
+): boolean {
+  if (!event.poll_deadline_at || now <= event.poll_deadline_at) return false;
+  return targetsAnyUnconfirmed;
+}
+
 async function loadVotablePoll(
   env: Env,
   userId: string,
@@ -686,14 +705,22 @@ async function loadVotablePoll(
     if (options.length !== optionIds.length) return { status: 'invalid_option' };
   }
 
-  if (event.poll_resolution_mode === 'multi_winner') {
-    // Confirmed days stay open forever for late joiners; unconfirmed days
-    // close once the deadline passes.
-    const deadlinePassed = !!event.poll_deadline_at && Date.now() > event.poll_deadline_at;
-    if (deadlinePassed && options.some((o) => !o.confirmed_at)) {
-      return { status: 'closed', reason: 'Voting for this day has closed' };
-    }
-  } else if (event.status !== 'active') {
+  // Pass-21 review (P21-05). The deadline check used to live only in the
+  // multi-winner arm, so a single-winner poll past its advertised cutoff still
+  // accepted a decisive answer for as long as it took the cron sweep to notice
+  // -- and whether a late answer counted therefore depended on when the sweep
+  // last ran, which is not a rule anyone can see or rely on. The UI states when
+  // voting closes.
+  //
+  // The two arms are now one shared rule plus a mode-specific status check,
+  // because having the rule in one arm and not the other is the whole finding.
+  // `pollAnswersClosed` is exported so the window submission route -- which had
+  // no deadline check at all -- applies the identical test rather than a third
+  // interpretation of it.
+  if (pollAnswersClosed(event, options.some((o) => !o.confirmed_at))) {
+    return { status: 'closed', reason: 'Voting for this poll has closed' };
+  }
+  if (event.poll_resolution_mode !== 'multi_winner' && event.status !== 'active') {
     return { status: 'closed', reason: 'Voting is closed for this event' };
   }
 

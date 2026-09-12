@@ -879,6 +879,65 @@ have lost interest in is asking its owner. `DELETE /groups/:id/members/me`, with
 the owner refused (they must transfer or delete the group instead, which is the
 same rule the roster cap already implies), and a line in the group view.
 
+### 88. Materialized poll sessions keep their parent's commitment -- P21-06
+
+From the Pass-21 executable review, and the reason it is not merely cosmetic:
+the stale entry is non-provisional, so it makes the person **actually busy** at
+a time nothing is happening.
+
+When a confirmed poll option is fanned out into a real child event, the
+projections keep reading the parent. A confirmed option and its old yes-votes
+are still counted as current scheduled time by `lib/calendar.ts`,
+`lib/events.ts` and `lib/freeBusy.ts`, none of which hand authority to the child
+through the `created_from_option_id` relationship that `cron/reminders.ts`
+records at fanout. So moving the child to a new date leaves the old parent time
+still busy alongside it, and explicitly declining the child leaves the
+historical parent vote making the old slot busy anyway. The window counterpart
+clears correctly on decline, which is what makes the fixed-slot behaviour a bug
+rather than a policy.
+
+The design: before materialization the confirmed option IS the commitment;
+afterwards the child's own schedule, cancellation and attendance are, and the
+parent must stop being consulted. A cancelled child must not fall back to
+reactivating its parent. Votes can stay as history -- they simply must not be a
+second, independent obligation.
+
+Not fixed in the release pass. It touches three readers that every scheduling
+surface depends on, and getting it wrong makes people look free when they are
+busy, which is worse than the bug. It wants its own change with its own
+controls.
+
+### 89. A confirmed window session is invisible to free/busy until fanout -- P21-07
+
+The sibling of item 88 at the other end. `lib/freeBusy.ts`'s confirmed
+commitment query joins fixed yes-votes and never window availability, so between
+a window candidate being confirmed and the cron materializing its child, the
+person's own calendar shows the session while free/busy reports them free.
+A fixed-slot candidate is busy immediately; only the window path has the gap.
+
+Reviewer's disposition: a bounded pre-materialization gap that can be recorded
+as an availability limitation if consciously accepted. It is accepted, here,
+and it should be fixed together with item 88 -- the two are the same handover
+seen from before and after, and fixing either alone leaves the projection
+inconsistent in the other direction.
+
+### 90. Guild verification costs one query per administered server -- P21-08
+
+The guild-verification callback checks whether the user is known and then issues
+one lookup per administered guild, not limited to allow-listed ones. Fifty
+eligible guilds is 51 statements; `Promise.all` runs them concurrently but D1
+counts them all. Measured against the documented Free-plan ceiling of 50 per
+invocation, the callback's catch path returns 500 instead of the picker
+redirect. Forty-nine works, at exactly 50.
+
+The prerequisite is administering or owning fifty servers -- not fifty
+memberships -- so nobody using this app today is close. Fix by fetching active
+status for the eligible ids in chunked set-based queries, exactly as
+`chunkIds` already does everywhere else; the shape is routine and the reason it
+was missed is that nothing else in this app fans out per-guild.
+
+Availability only, outside clauses 1 and 2, consciously scheduled.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.

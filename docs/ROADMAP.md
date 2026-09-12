@@ -810,6 +810,29 @@ when something should be left alone.
   state, new lifecycle, or a new table, that is a signal to look for the
   smaller answer first.
 
+**Who clears a release, decided 12 September 2026.** Two independent reviewers
+ran the first whole-application pass. One read the surfaces statically and
+found two defects, declaring four others clean and the package releasable. The
+other executed 254 checks and found eight, including defects in **all four**
+surfaces the first had called clean -- a group roster write that strands a
+group, a Discord control that cancels a series it was never issued for, polls
+that accept answers past their advertised deadline, and two availability
+projection faults.
+
+Spot-checking settled it in minutes: the one-off cancel handler selects
+`organizer_id, status, guild_id` and not `is_recurring`, and the personal
+editor's loader sets `isRecurring` true with no else branch. Both were real,
+both were in code the static reviewer had read and passed.
+
+The static reviewer said so themselves -- *"I have never executed this code"* --
+and that is the whole difference. **Release clearance follows the executing
+reviewer from here.** A static read is useful for finding candidates and worse
+than useless for clearing them, because a clean list from one reads exactly like
+a clean list from the other.
+
+The corollary matters as much: **a reviewer declaring a surface clean is not
+evidence it is.** Only a reproduction is evidence, in either direction.
+
 **That final whole-application review happened, and it answered the question.**
 Pass 21 read the never-covered surfaces end to end and found two defects in
 original code, neither in any recent diff, both of a kind diff review could not
