@@ -298,7 +298,10 @@ export default function PrivacyPage() {
               profile, personal time blocks, votes, invitations, group memberships, notification
               records, login sessions, and the events you organised. There is no soft-delete or grace
               period, and nothing is retained for analytics. The automatic year-of-inactivity deletion
-              described above removes exactly the same things.
+              described above removes exactly the same things. Sessions this service already added to
+              a connected Google calendar are <em>not</em> removed: deleting your account revokes this
+              service's access to that calendar, so it can no longer reach them. Disconnect Google
+              first if you want them taken out, and see the note on switching accounts below.
             </>,
             <>
               <strong>Rectification.</strong> Edit your events, groups, and preferences at any time.
@@ -307,7 +310,12 @@ export default function PrivacyPage() {
               <strong>Objection / restriction.</strong> Turn off Discord notifications, hide your
               free/busy availability, or disconnect a connected Google calendar — all in Settings.
               Disconnecting also removes the upcoming entries this service added to that calendar,
-              and revokes its access with Google.
+              and revokes its access with Google. Because that removal needs the access it is about to
+              give up, connecting a different Google account while one is still connected is refused —
+              disconnect first, and the entries are cleared properly. If Google has already
+              rejected a connection, reconnecting a different account is allowed and anything it had
+              added to the old calendar stays there, because the access needed to remove it is already
+              gone.
             </>,
           ]}
         />

@@ -25,12 +25,20 @@ import {
   type GuildVerifyTokenPayload,
   signGuildVerifyToken,
 } from '../lib/guildRequests';
-import { verifyToken } from '../lib/signedToken';
+import { signToken, verifyToken } from '../lib/signedToken';
 import { assertString, readJsonBody } from '../lib/validate';
 
 export const guildRequestRoutes = new Hono<AppEnv>();
 
 const STATE_COOKIE = 'guild_verify_state';
+
+// Pass-21 review (F-59). The same unauthenticated token-exchange trigger as
+// routes/auth.ts's login callback, one route over and with the same fix: the
+// state is signed and verified before `exchangeCodeForToken` is reached, so a
+// fabricated one costs an HMAC instead of a call to Discord's token endpoint.
+// The cookie stays and still does the CSRF binding.
+const OAUTH_STATE_PURPOSE = 'discord_oauth_state';
+const OAUTH_STATE_TTL_SECONDS = 300;
 const NO_STORE = 'no-store, private';
 
 function redirectUri(c: { req: { url: string } }): string {
@@ -50,15 +58,21 @@ function frontendRequestPageUrl(c: { env: { FRONTEND_URL: string } }): string {
   return `${c.env.FRONTEND_URL}/#/add-bot`;
 }
 
-guildRequestRoutes.get('/connect', (c) => {
-  const state = randomState();
-  setCookie(c, STATE_COOKIE, state, {
+guildRequestRoutes.get('/connect', async (c) => {
+  const nonce = randomState();
+  setCookie(c, STATE_COOKIE, nonce, {
     httpOnly: true,
     secure: true,
     sameSite: 'Lax',
     path: '/guild-requests',
     maxAge: 600,
   });
+  const state = await signToken(
+    OAUTH_STATE_PURPOSE,
+    { nonce },
+    c.env.JWT_SIGNING_KEY,
+    OAUTH_STATE_TTL_SECONDS,
+  );
   const params = new URLSearchParams({
     client_id: c.env.DISCORD_CLIENT_ID,
     redirect_uri: redirectUri(c),
@@ -75,7 +89,11 @@ guildRequestRoutes.get('/callback', async (c) => {
   const cookieState = getCookie(c, STATE_COOKIE);
   deleteCookie(c, STATE_COOKIE, { path: '/guild-requests' });
 
-  if (!code || !state || !cookieState || state !== cookieState) {
+  // Signature before spend (F-59), as in routes/auth.ts.
+  const stateToken = state
+    ? await verifyToken<{ nonce: string }>(state, OAUTH_STATE_PURPOSE, c.env.JWT_SIGNING_KEY)
+    : null;
+  if (!code || !stateToken || !cookieState || stateToken.nonce !== cookieState) {
     c.header('Cache-Control', NO_STORE);
     return c.text('This request could not be verified. Please try again.', 400);
   }

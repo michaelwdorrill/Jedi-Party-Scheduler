@@ -752,7 +752,11 @@ started finding bugs in the repairs.
 
 So the bar is now a property of the software, not of a report:
 
-**Release when all three hold.**
+**Release when all five hold.** Clause 2 was sharpened and clauses 3 and 4
+added after the Pass-21 whole-application review, which endorsed the bar for
+data and then demonstrated two things it could not see. Both amendments make
+the bar stricter, which is worth noting: the reviewer's proposals moved two of
+their own findings from "does not block" to "blocks".
 
 1. **No P1.** No unauthenticated access, no cross-user disclosure, no
    authorization bypass, no private content reaching someone whose access was
@@ -762,7 +766,29 @@ So the bar is now a property of the software, not of a report:
    finding in the cycle where the Privacy Policy asserted something the code
    did not do, and text the user is asked to rely on is a promise, not a
    comment.
-3. **Everything else recorded in `IDEAS.md` with the design it needs.**
+
+   **The line, stated so it is not re-argued each time:** a wrong write
+   reachable on the ordinary path, or under a race no faster than a person,
+   blocks. A wrong write that needs a concurrent actor inside a
+   request-length window is scheduled. That is what actually separated P19-08
+   (blocked) from P20-06/07/08 (scheduled), and writing it down means a finding
+   of the same class gets the same disposition whichever way it falls.
+3. **Abuse resistance.** Every unauthenticated endpoint that consumes a metered
+   third-party resource, sends mail, or writes durable state is bounded, in
+   code or at the edge.
+
+   Added because F-59 was invisible to clauses 1 and 2 by construction: one
+   unauthenticated request spending a Discord token exchange writes nothing,
+   discloses nothing and falsifies nothing. Without this clause, IDEAS item 68
+   would have stayed outside the release test forever.
+4. **No silence about consequences.** Every destructive action's confirmation
+   states what it does **not** undo.
+
+   Clause 2 catches a false statement; it does not catch an omitted one. Both
+   findings a whole-application read turned up were this shape — a dialog
+   listing what it removes and not what it leaves. It is checkable surface by
+   surface.
+5. **Everything else recorded in `IDEAS.md` with the design it needs.**
 
 Findings in categories 1 and 2 block. Everything else is scheduled. A reviewer
 disagreeing with the schedule is a result worth hearing and is not a veto --
@@ -783,6 +809,16 @@ when something should be left alone.
   request recovery arm, and migration 0044's backfill. When a fix requires new
   state, new lifecycle, or a new table, that is a signal to look for the
   smaller answer first.
+
+**That final whole-application review happened, and it answered the question.**
+Pass 21 read the never-covered surfaces end to end and found two defects in
+original code, neither in any recent diff, both of a kind diff review could not
+have found: F-59 and F-60. Everything else on that list read clean and is
+enumerated in the report. Zero disclosures, zero authorization defects — after
+a whole-application pass, that is evidence rather than an absence of it.
+
+The reasoning for scoping it that way, kept because it is the transferable
+part:
 
 **The final review is scoped to the whole application, not to the diff.** Every
 pass so far reviewed the change since the last one, which guarantees the

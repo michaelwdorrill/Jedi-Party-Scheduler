@@ -106,7 +106,7 @@ attendance in the codebase, which is a worse failure than the thing it fixes.
 The honest fix is to make that predicate callable for a single (user,
 occurrence) pair and have the consumer ask it.
 
-### 68. Login still has no rate limit
+### 68. Login still has no rate limit -- code half fixed in Pass 21; the control is an edge rule
 
 Carried forward from the Pass-11 review, which noted it as an already-known
 open item rather than a new discovery (it is F-06 in the earlier register).
@@ -115,6 +115,34 @@ Real rate limiting needs somewhere to keep counters that is not D1, which is
 the piece of infrastructure this app does not have yet; `lib/sessions.ts`'s
 `MAX_SESSIONS_PER_USER` comment records the same reasoning for the storage
 consequence it caps instead.
+
+**Pass-21 review (F-59) made this precise, and half of it is now fixed.** The
+item said "no rate limit" and left it there; the review said what that actually
+costs. `/auth/login` is cheap, but `/auth/callback` and
+`/guild-requests/callback` compared `?state=` against a cookie the same client
+sets, so **one unauthenticated request reached `exchangeCodeForToken`** -- a
+POST to Discord's token endpoint carrying this app's client secret, against a
+per-client rate limit, with no session and no database write in the way.
+Reproduced: no `/auth/login` first, a self-minted cookie, and the outbound call
+to `discord.com/api/v10/oauth2/token` happened.
+
+Nothing is disclosed by it and no account is affected except by being unable to
+log in, which is exactly why the release bar's first two clauses could not see
+it. The bar has an abuse-resistance clause now, and this is the instance that
+earned it.
+
+**Fixed in code:** both callbacks now sign the `state` and verify it before
+spending anything, mirroring `routes/google.ts`, which already had the right
+shape forty lines away. The cookie stays and still does the CSRF binding -- a
+signed state proves *we* issued it, not that *this browser* asked for it, and
+there is a test for each half.
+
+**Still open, and it is the actual control:** signing only raises the price to
+one real `/auth/login` per attempt. It does not bound the rate, and nothing in
+the Worker throttles anything. That wants a Cloudflare rate-limiting rule on
+`/auth/*` and `/guild-requests/*`, which needs no code and is available on the
+plan this already runs on. Written up with the exact steps, and the trap about
+not catching `/auth/refresh` with a path prefix, in `docs/SETUP.md`.
 
 ### 69. A removed invitee's poll vote still counts toward the tally
 
@@ -798,6 +826,58 @@ honest record of what the current one does not cover, which is this item.
 
 **Do not "fix" this by widening the catch.** There is no catch that runs when
 the process is gone.
+
+### 86. Connecting a second Google account was a disconnect without the cleanup -- fixed in Pass 21
+
+From the Pass-21 whole-application review (F-60), and it is the finding that
+justifies whole-application review on its own: it is in code nobody had changed
+in months, and no diff-scoped pass could have seen it, because seeing it means
+reading `storeConnection`'s switch branch against the disconnect sweep and
+against the Privacy Policy at the same time.
+
+`storeConnection`, on a switch, revoked the old grant, then dropped every
+mapping and import. Its own comment said the entries were "left in the old
+account ... nothing this app can do about them from here" and called that
+unavoidable. It is unavoidable *from there* -- because the revoke three
+statements earlier threw away the authority that could have removed them.
+Disconnect does the opposite and revokes last, which is why disconnect can keep
+the promise the confirm dialog and the policy both make.
+
+So a person who connected a second account had, in effect, disconnected the
+first with none of the cleanup, and nothing on screen said so.
+
+**Fixed by refusing rather than by reordering.** `/google/finalize` returns 409
+when an active connection for a different account exists, and revokes the
+pending grant rather than leaving it lying around. Reordering the switch to
+delete-then-revoke would have meant a second copy of the disconnect sweep --
+its budget, its retry accounting, its partial-failure handling -- inside a
+request handler with none of them. Refusing routes every path that ends a
+connection through the one path that already keeps the promise, and makes the
+destructive branch unreachable from the ordinary flow.
+
+**A wrong assumption corrected on the way, and the test is what caught it.**
+There is no `unauthorized` connection status: migration 0036 CHECKs `status`
+into `('active', 'disconnecting')`, and a grant Google has rejected is marked
+`sync_enabled = 0` with a `last_error` while *staying* `'active'`. A guard keyed
+on status alone would have trapped the person most likely to be switching
+accounts -- someone whose grant just died -- behind a disconnect they would
+have to wait out. The exemption is the pair, `sync_enabled = 0 AND last_error
+IS NOT NULL`, because `sync_enabled = 0` alone is also what turning sync off
+deliberately looks like, and there the grant is fine and the entries really are
+still removable.
+
+### 87. A member cannot leave a group
+
+Noted in passing by the Pass-21 review while reading `routes/groups.ts` for
+authorization, and explicitly not a security finding: only the owner can remove
+someone, and group membership confers nothing that can be used against a member
+-- invitations can be declined, and free/busy visibility is a separate setting
+the person controls themselves. Nothing is disclosed by staying in a group.
+
+It is a product gap, and a slightly rude one: the only exit from a group you
+have lost interest in is asking its owner. `DELETE /groups/:id/members/me`, with
+the owner refused (they must transfer or delete the group instead, which is the
+same rule the roster cap already implies), and a line in the group view.
 
 ## Parked until after 1.0
 

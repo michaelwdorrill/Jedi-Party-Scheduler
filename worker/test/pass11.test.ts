@@ -2538,12 +2538,19 @@ describe('an emailed decision needs a person, and a refused login leaves nothing
       { match: '/users/@me', status: 200, body: { id: 'stranger', username: 'stranger', global_name: 'A Stranger', avatar: 'abc' } },
     ]);
 
-    const state = 'a-state-value';
+    // Pass-21 review (F-59). The state is signed now, so a fixture that mints a
+    // bare one is exercising the new abuse guard rather than this test's
+    // subject -- these two started failing with 400 instead of 403 when the
+    // signing landed, which is the fix working, not a regression. A real login
+    // gets the state from /auth/login; this builds the same envelope so the
+    // test still reaches the authorization decision it is named for.
+    const nonce = 'a-state-value';
+    const state = await signToken('discord_oauth_state', { nonce }, env.JWT_SIGNING_KEY, 300);
     const challenge = base64UrlEncode(
       new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('verifier'))),
     );
-    const res = await call(env, `/auth/callback?code=abc&state=${state}`, {
-      headers: { Cookie: `oauth_state=${state}:${challenge}` },
+    const res = await call(env, `/auth/callback?code=abc&state=${encodeURIComponent(state)}`, {
+      headers: { Cookie: `oauth_state=${nonce}:${challenge}` },
     });
 
     expect(res.status).toBe(403);
@@ -2568,12 +2575,13 @@ describe('an emailed decision needs a person, and a refused login leaves nothing
       { match: '/users/@me', status: 200, body: { id: 'former', username: 'former', global_name: null, avatar: null } },
     ]);
 
-    const state = 'a-state-value';
+    const nonce = 'a-state-value';
+    const state = await signToken('discord_oauth_state', { nonce }, env.JWT_SIGNING_KEY, 300);
     const challenge = base64UrlEncode(
       new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('verifier'))),
     );
-    const res = await call(env, `/auth/callback?code=abc&state=${state}`, {
-      headers: { Cookie: `oauth_state=${state}:${challenge}` },
+    const res = await call(env, `/auth/callback?code=abc&state=${encodeURIComponent(state)}`, {
+      headers: { Cookie: `oauth_state=${nonce}:${challenge}` },
     });
 
     expect(res.status).toBe(403);

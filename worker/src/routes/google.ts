@@ -315,6 +315,69 @@ googleRoutes.post('/finalize', requireAuth, requirePolicyAcceptance, async (c) =
     return c.text('That connection attempt does not belong to this account.', 403);
   }
 
+  // Pass-21 review (F-60). Connecting a DIFFERENT Google account while one is
+  // active is a disconnect that skips everything disconnect promises.
+  //
+  // storeConnection's switch branch revokes the old grant first, then drops
+  // every mapping and import, and its own comment says the entries are "left
+  // in the old account ... nothing this app can do about them from here."
+  // That is true from there -- and only because the revoke three statements
+  // earlier threw away the authority that could have removed them. Disconnect
+  // does the opposite: it spends ticks deleting the entries under the old
+  // grant and revokes last, which is the behaviour the confirm dialog and the
+  // Privacy Policy describe.
+  //
+  // So a switch left a person's old calendar full of entries this app had
+  // added, with no way to reach them, and nothing on screen saying so.
+  //
+  // Refusing is the fix rather than reordering the switch to delete-then-
+  // revoke, because reordering would duplicate the disconnect sweep -- its
+  // budget, its retry accounting, its partial-failure handling -- inside a
+  // request handler that has none of them. This routes every path that ends a
+  // connection through the one path that keeps the promise, and it makes the
+  // destructive half of the switch branch unreachable from the ordinary flow
+  // rather than adding a second copy of the careful half.
+  //
+  // The exemption is for a grant that is already DEAD, and identifying one
+  // took correcting a wrong assumption: there is no 'unauthorized' status.
+  // `status` is CHECK-constrained to ('active', 'disconnecting') by migration
+  // 0036, and a grant Google has rejected is marked by markUnauthorized as
+  // sync_enabled = 0 with a last_error -- still 'active'. Keying the guard on
+  // status alone would therefore have trapped exactly the person most likely
+  // to be switching accounts: someone whose grant just died. They would have
+  // had to disconnect and wait out the retry budget first.
+  //
+  // sync_enabled = 0 on its own is not enough either, because that is also
+  // what turning sync off deliberately looks like -- and there the grant is
+  // fine and the entries really are still removable, so the switch really
+  // would abandon them. It is the pair that means "dead": disabled AND
+  // carrying the error that disabled it.
+  const existing = await c.env.DB.prepare(
+    `SELECT google_account_email, sync_enabled, last_error
+     FROM google_calendar_connections WHERE user_id = ?`,
+  )
+    .bind(c.get('userId'))
+    .first<{ google_account_email: string | null; sync_enabled: number; last_error: string | null }>();
+  const grantIsDead = !!existing && existing.sync_enabled === 0 && existing.last_error != null;
+  const switchingFromActive =
+    !!existing &&
+    !grantIsDead &&
+    !!existing.google_account_email &&
+    !!pending.google_account_email &&
+    existing.google_account_email !== pending.google_account_email;
+  if (switchingFromActive) {
+    // The pending grant is abandoned rather than left to expire: the user is
+    // not getting this connection, so this app should not keep the credential
+    // for it. Same discipline as the wrong-owner branch above.
+    const orphanToken = await readPendingRefreshToken(c.env, pending);
+    if (orphanToken) await revokeToken(orphanToken);
+    await deletePendingConnection(c.env, pendingId);
+    return c.text(
+      'Disconnect your current Google calendar first. Disconnecting removes the upcoming entries this app added to it — connecting a different account straight away would leave them there for good.',
+      409,
+    );
+  }
+
   const [refreshToken, accessToken] = await Promise.all([
     readPendingRefreshToken(c.env, pending),
     readPendingAccessToken(c.env, pending),

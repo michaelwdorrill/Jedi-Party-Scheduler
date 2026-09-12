@@ -56,7 +56,7 @@ export default function SettingsPage() {
   const handleDelete = async () => {
     if (
       !confirm(
-        'Permanently delete your account?\n\nThis removes your profile, personal time blocks, RSVPs, votes, group memberships, and every event you organised. It cannot be undone.',
+        'Permanently delete your account?\n\nThis removes your profile, personal time blocks, RSVPs, votes, group memberships, and every event you organised. It cannot be undone.\n\nSessions already added to your Google calendar stay there — deleting your account revokes this app\u2019s access, so it cannot reach them afterwards. Disconnect Google first if you want them removed.',
       )
     ) {
       return;

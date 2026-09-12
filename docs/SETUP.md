@@ -934,6 +934,44 @@ different responses:
 A 401 or 403 will not fix itself, and after 24 hours it locks everyone out.
 Those two are the ones worth alerting on.
 
+### Rate limiting the OAuth callbacks — do this before the Worker is public
+
+**This is a dashboard change, not a code change, and it is the actual control
+for the abuse-resistance clause of the release bar.** Michael has to do it; a
+cloud session cannot.
+
+The Pass-21 review found that both Discord OAuth callbacks could be triggered by
+one unauthenticated request, each spending a POST to Discord's token endpoint
+against a per-client rate limit. The code half is fixed — the `state` is signed
+now and a forged one is refused before anything is spent — but signing only
+raises the price to one real `/auth/login` per attempt. It does not bound the
+rate, and nothing else in the Worker does either: there is no throttle on any
+route.
+
+In the Cloudflare dashboard for the **`uncleowen`** account, on the zone serving
+the Worker:
+
+1. **Security → WAF → Rate limiting rules → Create rule.**
+2. Match: `URI Path starts with /auth/` **or** `URI Path starts with /guild-requests/`.
+3. Characteristics: client IP. Something like 20 requests per minute is far
+   above any real login and far below anything worth doing on purpose.
+4. Action: Block, or Managed Challenge — a challenge is friendlier to a real
+   person behind a shared address.
+
+Two things to know before setting it:
+
+- **Do not include `/auth/refresh`.** Every open tab refreshes on its own
+  schedule, and a household behind one address can legitimately produce a burst.
+  Path-prefix matching on `/auth/` would catch it, so either exclude that path
+  explicitly or set the threshold with it in mind.
+- The Worker's own Free-plan daily request quota is the second resource this
+  protects, not just Discord's rate limit.
+
+To check it afterwards: request `/auth/callback?code=x&state=x` in a loop from
+one address and confirm the block or challenge engages. The Worker answers 400
+to each of those either way now, so a 400 is not evidence the rule is working —
+the block page or challenge is.
+
 ### D1 plan limits
 
 The code assumes D1's documented **100 bound parameters per statement**, which

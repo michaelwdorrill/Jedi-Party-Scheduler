@@ -37,6 +37,35 @@ const NO_STORE = 'no-store, private';
 // it. That buys one-time semantics where they matter without a migration, a
 // new table and a pruning sweep.
 const LOGIN_CODE_PURPOSE = 'login_code';
+
+// Pass-21 review (F-59). The state carried to Discord and back is now SIGNED,
+// not just random.
+//
+// The double-submit cookie below is a genuine CSRF binding and stays. What it
+// could not do is refuse a request cheaply: `state === cookieState` compares
+// two values the same client supplies, so anyone could send
+// `?state=X` with `Cookie: oauth_state=X:y` and reach the next line, which is
+// `exchangeCodeForToken` -- a POST to Discord's token endpoint carrying this
+// app's client secret, against a per-client rate limit, with no session and no
+// database write to slow it down. A loop degrades login for every real user.
+// Verified: one such request, no /auth/login first, reached
+// discord.com/api/v10/oauth2/token.
+//
+// Nothing is disclosed by it and no account is touched -- which is exactly why
+// clauses 1 and 2 of the release bar could not see it, and why the bar now has
+// a third clause for abuse resistance.
+//
+// The shape of the fix was already in this repo, forty lines away in
+// routes/google.ts: sign the state, verify it BEFORE spending anything. A
+// fabricated state now fails on signature for free, and an attacker must pay a
+// real /auth/login per attempt -- bounded per token, and countable in one
+// place.
+//
+// This is the belt. The braces are an edge rate-limiting rule on /auth/* and
+// /guild-requests/*, which needs no code and is the actual control; see
+// docs/SETUP.md.
+const OAUTH_STATE_PURPOSE = 'discord_oauth_state';
+const OAUTH_STATE_TTL_SECONDS = 300;
 const LOGIN_CODE_TTL_SECONDS = 120;
 
 // The challenge is the Base64URL of a SHA-256 digest: 43 characters, no
@@ -72,7 +101,7 @@ function randomState(): string {
 // this cookie on the victim's browser, so the callback can tell "a login this
 // browser started" apart from "a login someone else started and redirected
 // the victim into." No server-side storage needed -- the cookie IS the state.
-authRoutes.get('/login', (c) => {
+authRoutes.get('/login', async (c) => {
   // Required, not optional: accepting a login that carries no challenge would
   // leave the pre-R02 path open alongside the fixed one, which is the same as
   // not fixing it. A browser arriving here without one is running a frontend
@@ -83,17 +112,26 @@ authRoutes.get('/login', (c) => {
     return c.text('Login could not be started. Please reload the page and try again.', 400);
   }
 
-  const state = randomState();
+  const nonce = randomState();
   // Both halves in the one HttpOnly cookie -- only the server ever reads it.
   // ':' is safe as a separator because both values are Base64URL, whose
   // alphabet does not include it.
-  setCookie(c, STATE_COOKIE, `${state}:${challenge}`, {
+  setCookie(c, STATE_COOKIE, `${nonce}:${challenge}`, {
     httpOnly: true,
     secure: true,
     sameSite: 'Lax',
     path: '/auth',
     maxAge: 600,
   });
+  // The nonce goes to Discord inside a signed envelope. The cookie still holds
+  // the bare nonce, so the callback checks both that this browser started the
+  // login (cookie) and that the state is one we actually issued (signature).
+  const state = await signToken(
+    OAUTH_STATE_PURPOSE,
+    { nonce },
+    c.env.JWT_SIGNING_KEY,
+    OAUTH_STATE_TTL_SECONDS,
+  );
   const params = new URLSearchParams({
     client_id: c.env.DISCORD_CLIENT_ID,
     redirect_uri: redirectUri(c),
@@ -116,9 +154,17 @@ authRoutes.get('/callback', async (c) => {
     c.header('Cache-Control', NO_STORE);
     return c.text('Login request could not be verified. Please try logging in again.', 400);
   }
-  if (!state || !cookieState || state !== cookieState) {
-    // Covers a missing/forged state, an expired cookie, and callback replay
-    // (the cookie is cleared above on first use either way).
+  // Signature FIRST, before anything is spent (F-59). A fabricated state fails
+  // here at the cost of one HMAC and never reaches Discord.
+  const stateToken = state
+    ? await verifyToken<{ nonce: string }>(state, OAUTH_STATE_PURPOSE, c.env.JWT_SIGNING_KEY)
+    : null;
+  if (!stateToken || !cookieState || stateToken.nonce !== cookieState) {
+    // Covers a missing/forged/expired state, an expired cookie, and callback
+    // replay (the cookie is cleared above on first use either way). The cookie
+    // comparison is still here and still doing the CSRF work: a signed state is
+    // proof we issued it, not proof this browser is the one that asked.
+    c.header('Cache-Control', NO_STORE);
     return c.text('Login request could not be verified. Please try logging in again.', 400);
   }
 
