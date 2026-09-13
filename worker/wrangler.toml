@@ -84,18 +84,6 @@ migrations_dir = "migrations"
 [triggers]
 crons = ["*/15 * * * *"]
 
-# A second, isolated deployment to build and test against instead of building
-# directly in prod (docs/specs/0002-sandbox-and-promotion.md). Same Cloudflare
-# account -- the isolation that matters is the *data* (a separate D1 database)
-# and the *bot* (a separate Discord application), not a separate account.
-#
-# Wrangler does NOT inherit top-level [vars] or bindings (D1, cron triggers)
-# into a named environment -- only plain top-level settings like `main`,
-# `compatibility_date` and `account_id` carry through automatically. Every
-# var, every D1 binding and the cron trigger are redeclared below for exactly
-# that reason; scripts/check-env-parity.mjs (run in CI) fails the build if
-# [vars] and [env.sandbox.vars] ever drift out of the same key set, so this
-# doesn't have to be caught by hand.
 # Bounds the three unauthenticated OAuth callbacks (item 92 / release-bar
 # clause 3). See worker/src/lib/rateLimit.ts for why the bound is here rather
 # than a zone-level WAF rule, and for the per-colocation caveat.
@@ -114,6 +102,18 @@ namespace_id = "1001"
 limit = 20
 period = 60
 
+# A second, isolated deployment to build and test against instead of building
+# directly in prod (docs/specs/0002-sandbox-and-promotion.md). Same Cloudflare
+# account -- the isolation that matters is the *data* (a separate D1 database)
+# and the *bot* (a separate Discord application), not a separate account.
+#
+# Wrangler does NOT inherit top-level [vars] or bindings (D1, cron triggers)
+# into a named environment -- only plain top-level settings like `main`,
+# `compatibility_date` and `account_id` carry through automatically. Every
+# var, every D1 binding and the cron trigger are redeclared below for exactly
+# that reason; scripts/check-env-parity.mjs (run in CI) fails the build if
+# [vars] and [env.sandbox.vars] ever drift out of the same key set, so this
+# doesn't have to be caught by hand.
 [env.sandbox]
 name = "jedi-party-scheduler-worker-sandbox"
 
