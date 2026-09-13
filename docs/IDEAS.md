@@ -1038,6 +1038,80 @@ stopped applying to the exact sequence it existed to catch. A narrowing
 justified as caution needs the same scrutiny as a widening -- more, because it
 does not feel like one.
 
+### 92. The OAuth callbacks are still unbounded, and the fix we documented was impossible
+
+From the Pass-21 review (F-59), scheduled to v1.0.1 by Michael on 13 September
+2026 -- but the reason it is still open is worth more than the schedule.
+
+The code half is done: both Discord callbacks sign their `state` and verify it
+before spending anything, so a fabricated one costs an HMAC instead of a POST
+to Discord's token endpoint. What that does NOT do is bound the rate. An
+attacker now pays one `/auth/login` per attempt to obtain a valid signed state
+and cookie -- two requests per token call instead of one, with the rate still
+unlimited.
+
+**And the control we wrote down for it could never have been applied.**
+`docs/SETUP.md` said to add a Cloudflare rate limiting rule "on the zone serving
+the Worker". Rate limiting rules are zone-scoped, and this Worker runs on its
+default `*.workers.dev` subdomain -- `wrangler.toml` declares no `routes` and no
+`custom_domain`. `workers.dev` is Cloudflare's zone. `uncleowen.space` is ours
+and the Worker is not on it.
+
+That stood through two review passes. One reviewer verified the rule was not
+configured; nobody asked whether it *could* be. The lesson is the same one item
+91 records for guards, applied to operations: **a remediation written from
+memory is a claim, and this project's own rule is to check claims.** The step
+that was skipped is the cheapest one -- open the dashboard and look.
+
+**Two ways to close it, and the first is free**, which is the other thing the
+original write-up got wrong by implying a cost trade-off that does not exist:
+
+1. **Move the Worker to `api.uncleowen.space`.** The zone is already in the
+   account and Worker Custom Domains are included, so the money cost is zero.
+   The real cost is coordination -- both Discord redirect URIs, the Discord
+   interactions endpoint, the Google redirect URI and `VITE_API_BASE_URL` move
+   in lockstep, and the wrong order breaks login. Also makes Worker and
+   frontend same-site.
+2. **A per-IP limiter in the Worker.** (`CF-Connecting-IP`, unix minute) as the
+   key, one D1 upsert with `RETURNING count` before the exchange, 429 over the
+   threshold. Per-IP so an attacker locks out only themselves. ~40 lines and a
+   migration, and it puts a write back on an unauthenticated path that F-24
+   deliberately cleared -- a bounded cheap write against an unbounded
+   third-party call.
+
+Do (1) regardless, because it is free and unlocks the whole zone-level toolbox.
+Then decide whether (2) is still wanted.
+
+### 93. Most of the cron's budget machinery exists to fit a plan we may not need
+
+Noticed while answering a question about paying for rate limiting, and recorded
+because the saving is much larger than the thing that prompted it.
+
+`WORKERS_PLAN` is already a config flag: `budget.ts` reads it and switches
+between `FREE_D1_QUERIES` and `PAID_D1_QUERIES` (and the subrequest ceilings).
+Both `[vars]` and `[env.sandbox.vars]` currently say `"free"`. **Switching is a
+one-line change and a redeploy, not a refactor** -- the code has supported it
+since the budget was written.
+
+What the Free plan's 50-statement-per-invocation ceiling has cost this project,
+by contrast: `TickBudget` and `WorkBudget` and everything that reserves against
+them; the chunking in `chunkIds`/`chunkRows`; the "reserving the two binds
+guardedStatement appends" arithmetic; the noticeboard's statement-count guard;
+the whole design of the outbox's per-tick fixed cost; and **three separate
+recorded incidents** in which a newly added fixed per-tick query starved
+`sweepPurgeTerminalHistory`. Every one of those is a Free-plan artifact.
+
+None of it can simply be deleted -- a budget you are not enforcing is still a
+budget you should measure, and the machinery also documents intent. But the
+constant fear of adding one statement, which has shaped several designs in this
+codebase and caused three incidents, is a Free-plan fear.
+
+Not a recommendation to switch, and deliberately not costed here: this
+project's write-ups have twice asserted platform facts from memory and been
+wrong (item 92, and the D1 comment the Pass-20 reviewer corrected). Check the
+current Workers pricing page. The point to carry is only that the switch itself
+is cheap in effort, and the thing it would buy is not a marginal convenience.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.

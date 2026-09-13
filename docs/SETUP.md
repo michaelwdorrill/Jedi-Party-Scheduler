@@ -934,43 +934,68 @@ different responses:
 A 401 or 403 will not fix itself, and after 24 hours it locks everyone out.
 Those two are the ones worth alerting on.
 
-### Rate limiting the OAuth callbacks — do this before the Worker is public
+### Rate limiting the OAuth callbacks — scheduled for v1.0.1
 
-**This is a dashboard change, not a code change, and it is the actual control
-for the abuse-resistance clause of the release bar.** Michael has to do it; a
-cloud session cannot.
+**Correcting an earlier version of this section, which described something
+that cannot be done on this deployment.** It said to add a Cloudflare rate
+limiting rule under Security → WAF "on the zone serving the Worker". There is
+no such zone. Cloudflare's rate limiting rules are configured per *zone* — a
+domain you have added to your account — and this Worker is deployed to its
+default `*.workers.dev` subdomain: `wrangler.toml` declares no `routes` and no
+`custom_domain`, and every URL in this document is a `workers.dev` one.
+`workers.dev` is Cloudflare's zone, not ours. `uncleowen.space` *is* ours, but
+the Worker is not on it, so a rule there would never see an `/auth/callback`
+request.
 
-The Pass-21 review found that both Discord OAuth callbacks could be triggered by
-one unauthenticated request, each spending a POST to Discord's token endpoint
-against a per-client rate limit. The code half is fixed — the `state` is signed
-now and a forged one is refused before anything is spent — but signing only
-raises the price to one real `/auth/login` per attempt. It does not bound the
-rate, and nothing else in the Worker does either: there is no throttle on any
-route.
+Nobody caught this for two review passes, including a reviewer who checked
+that the rule was not configured. Checking whether it *could* be is the step
+that was skipped.
 
-In the Cloudflare dashboard for the **`uncleowen`** account, on the zone serving
-the Worker:
+**What the exposure actually is.** `/auth/callback` and
+`/guild-requests/callback` each spend one POST to Discord's token endpoint,
+which Discord rate-limits per client — so a sustained loop degrades login for
+everyone until the limit resets, and the Worker's own request quota is the
+second resource. Nothing is disclosed and no account is affected except by
+being unable to log in. Since the state is signed (F-59), an attacker must
+first call `/auth/login` for a valid signed state and its matching cookie, so
+it costs them two requests per token call rather than one — the price went up,
+the rate is still unbounded.
 
-1. **Security → WAF → Rate limiting rules → Create rule.**
-2. Match: `URI Path starts with /auth/` **or** `URI Path starts with /guild-requests/`.
-3. Characteristics: client IP. Something like 20 requests per minute is far
-   above any real login and far below anything worth doing on purpose.
-4. Action: Block, or Managed Challenge — a challenge is friendlier to a real
-   person behind a shared address.
+**Under the release bar's clause 3 this is unmet**, and it is deliberately
+recorded as unmet rather than reworded, because "a finding leaves the bar by
+being fixed or disproved, never by being described differently" applies to the
+project's own clauses first.
 
-Two things to know before setting it:
+**The two ways to close it, for v1.0.1** (IDEAS item 92):
 
-- **Do not include `/auth/refresh`.** Every open tab refreshes on its own
-  schedule, and a household behind one address can legitimately produce a burst.
-  Path-prefix matching on `/auth/` would catch it, so either exclude that path
-  explicitly or set the threshold with it in mind.
-- The Worker's own Free-plan daily request quota is the second resource this
-  protects, not just Discord's rate limit.
+1. **Put the Worker on `api.uncleowen.space`.** The zone is already in the
+   account, so this costs nothing in money — Worker Custom Domains are included
+   — and it makes rate limiting rules available, along with everything else
+   zone-level. What it costs is coordination: the Discord OAuth redirect URIs
+   (both of them), the Discord interactions endpoint URL, the Google OAuth
+   redirect URI and `VITE_API_BASE_URL` all move together, and getting the
+   order wrong breaks login. Do it deliberately, not on release day. A side
+   benefit: Worker and frontend become same-site, which is tidier than the
+   cross-origin note in `ARCHITECTURE.md`.
 
-To check it afterwards: request `/auth/callback?code=x&state=x` in a loop from
-one address and confirm the block or challenge engages. The Worker answers 400
-to each of those either way now, so a 400 is not evidence the rule is working —
-the block page or challenge is.
+2. **Bound it in code.** A per-IP counter keyed on
+   (`CF-Connecting-IP`, unix minute), one D1 upsert with `RETURNING count`
+   before the token exchange; over the threshold, 429 and no Discord call.
+   Per-IP rather than global so an attacker locks out only themselves. Roughly
+   forty lines and a migration. The honest cost is that it puts a database
+   write back on an unauthenticated path, which F-24 deliberately removed —
+   the trade is a bounded cheap write against an unbounded third-party call,
+   which is the usual one.
+
+These are not exclusive and (1) does not depend on (2).
+
+**Before choosing, check what Cloudflare currently offers**, because this
+document has now been wrong once by asserting platform behaviour from memory.
+Specifically worth confirming on the pricing and docs pages rather than taking
+from here: how many rate limiting rules a Free zone gets and with what
+matching, whether the Workers-native rate limiting binding (which needs no
+zone) is generally available, and the current free-tier status of Durable
+Objects.
 
 ### D1 plan limits
 
