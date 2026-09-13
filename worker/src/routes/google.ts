@@ -38,7 +38,6 @@ import {
   storePendingConnection,
 } from '../lib/googleCalendar';
 import { signToken, verifyToken } from '../lib/signedToken';
-import { UNAUTHORIZED_ERROR } from '../cron/googleSync';
 import { assertBoolean, assertString, readJsonBody } from '../lib/validate';
 
 export const googleRoutes = new Hono<AppEnv>();
@@ -91,11 +90,18 @@ async function markCalendarUnauthorized(
   row: { user_id: string; refresh_token_ciphertext: string },
   message: string,
 ): Promise<void> {
+  // The twin of cron's markUnauthorized, and it must write the same FACT
+  // (F60-B). These two produce different sentences for the same condition --
+  // "revoked" here via the Calendar 401 path, "revoked or expired" via token
+  // refresh -- which is exactly why the guard reads the column and not the
+  // message.
+  const now = Date.now();
   await env.DB.prepare(
-    `UPDATE google_calendar_connections SET sync_enabled = 0, last_error = ?, updated_at = ?
+    `UPDATE google_calendar_connections
+     SET sync_enabled = 0, last_error = ?, authorization_failed_at = ?, updated_at = ?
      WHERE user_id = ? AND refresh_token_ciphertext = ?`,
   )
-    .bind(message, Date.now(), row.user_id, row.refresh_token_ciphertext)
+    .bind(message, now, now, row.user_id, row.refresh_token_ciphertext)
     .run();
 }
 
@@ -339,56 +345,49 @@ googleRoutes.post('/finalize', requireAuth, requirePolicyAcceptance, async (c) =
   // destructive half of the switch branch unreachable from the ordinary flow
   // rather than adding a second copy of the careful half.
   //
-  // The exemption is for a grant that is already DEAD, and identifying one
-  // took correcting a wrong assumption: there is no 'unauthorized' status.
-  // `status` is CHECK-constrained to ('active', 'disconnecting') by migration
-  // 0036, and a grant Google has rejected is marked by markUnauthorized as
-  // sync_enabled = 0 with a last_error -- still 'active'. Keying the guard on
-  // status alone would therefore have trapped exactly the person most likely
-  // to be switching accounts: someone whose grant just died. They would have
-  // had to disconnect and wait out the retry budget first.
+  // Two corrections from the Pass-23 acceptance review, both to guards this
+  // project added in the pass before it, and both from the same mistake:
+  // inferring a lifecycle state instead of reading one.
   //
-  // sync_enabled = 0 on its own is not enough either, because that is also
-  // what turning sync off deliberately looks like -- and there the grant is
-  // fine and the entries really are still removable, so the switch really
-  // would abandon them. It is the pair that means "dead": disabled AND
-  // carrying the error that disabled it.
+  // F60-B. "Is this grant dead" compared `last_error` against one exact
+  // sentence. Two paths record an authorization failure and word it
+  // differently, so a grant Google rejected during token refresh stopped
+  // qualifying and its owner was trapped -- unable to switch accounts, on a
+  // connection that could never work again. `authorization_failed_at`
+  // (migration 0047) is the fact now; `last_error` went back to being prose.
+  //
+  // F60-A. Requiring `status = 'active'` was meant to be conservative and did
+  // the opposite: a signed disconnect sets the row to 'disconnecting', so an
+  // ordinary sequence -- sync A, request disconnect, finalize B before the
+  // cleanup sweep runs -- slipped past the refusal entirely and abandoned A's
+  // entries. That was a REGRESSION against Pass 22, which refused it, and it
+  // needed no provider failure at all.
+  //
+  // So cleanup-pending is its own reason to refuse, ahead of the dead-grant
+  // exception rather than folded into it. While a disconnect is in flight the
+  // right answer is always "wait for it", whatever the grant's state: the
+  // sweep is the thing that keeps the promise, and letting a switch overtake
+  // it is precisely what F-60 exists to stop.
   const existing = await c.env.DB.prepare(
-    `SELECT google_account_email, sync_enabled, last_error, status
+    `SELECT google_account_email, sync_enabled, authorization_failed_at, status
      FROM google_calendar_connections WHERE user_id = ?`,
   )
     .bind(c.get('userId'))
     .first<{
       google_account_email: string | null;
       sync_enabled: number;
-      last_error: string | null;
+      authorization_failed_at: number | null;
       status: string;
     }>();
-  // Pass-22 acceptance review narrowed this, and the correction is mine to
-  // own: `sync_enabled = 0 AND last_error IS NOT NULL` is not "Google rejected
-  // the grant". A transient Calendar 503 writes `last_error` while the
-  // connection stays enabled and perfectly usable; a subsequent disconnect
-  // then sets `sync_enabled = 0`, and the pair suddenly reads as dead. The
-  // exemption fired, the switch went through, and the old account's entries
-  // were abandoned with no obligation recorded -- exactly the harm F-60
-  // exists to prevent, reachable again through a route I added to prevent it.
-  //
-  // A dead grant is specifically an AUTHORIZATION failure, which is what
-  // markUnauthorized writes and nothing else does. Matching its sentence is a
-  // string comparison and therefore brittle, so the marker is explicit: only
-  // `status = 'active'` counts as a live connection worth protecting, and a
-  // connection that is mid-disconnect is not a switch candidate at all.
+  const cleanupPending = existing?.status === 'disconnecting';
   const grantIsDead =
+    !!existing && existing.sync_enabled === 0 && existing.authorization_failed_at != null;
+  const differentAccount =
     !!existing &&
-    existing.sync_enabled === 0 &&
-    existing.last_error === UNAUTHORIZED_ERROR;
-  const switchingFromActive =
-    !!existing &&
-    existing.status === 'active' &&
-    !grantIsDead &&
     !!existing.google_account_email &&
     !!pending.google_account_email &&
     existing.google_account_email !== pending.google_account_email;
+  const switchingFromActive = differentAccount && (cleanupPending || !grantIsDead);
   if (switchingFromActive) {
     // The pending grant is abandoned rather than left to expire: the user is
     // not getting this connection, so this app should not keep the credential

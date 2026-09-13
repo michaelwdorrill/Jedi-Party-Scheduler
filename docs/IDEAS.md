@@ -954,6 +954,41 @@ was missed is that nothing else in this app fans out per-guild.
 
 Availability only, outside clauses 1 and 2, consciously scheduled.
 
+### 91. A guard must read state, not infer it from a message
+
+Process, recorded because this project made the same mistake twice in
+consecutive passes, in the same forty lines, in opposite directions.
+
+The account-switch guard needs to know whether a Google grant is dead. It has
+now been wrong two ways:
+
+- **Too broad (Pass 22 → F-60 residual):** `sync_enabled = 0 AND last_error IS
+  NOT NULL`. A transient Calendar 503 writes `last_error` on a perfectly
+  healthy connection, a later disconnect sets `sync_enabled = 0`, and the pair
+  read as "Google rejected this grant".
+- **Too narrow (Pass 23 → F60-B):** `last_error = <one exact sentence>`. Two
+  paths record an authorization failure and word it differently -- the Calendar
+  401 path says "revoked", the token-refresh path says "revoked or expired" --
+  so a genuinely dead grant reached by refresh stopped qualifying, and its
+  owner was trapped on a connection that could never work again.
+
+Both attempts were inferences about a lifecycle state from a field that is not
+one. `last_error` is prose for a person: localisable, rewordable, and edited by
+anyone improving a message. Two readers agreeing on its text is a coincidence
+waiting to be broken by a copy-editing commit.
+
+Migration 0047 adds `authorization_failed_at`, written by both paths that
+observe the failure and cleared on a successful reconnect. The guard reads the
+column. **The rule: if a guard depends on a state, that state gets a field of
+its own.** A message is an output, never an input.
+
+The companion mistake, from the same pass (F60-A): adding `status = 'active'`
+to that guard *to be conservative* made it strictly weaker, because a signed
+disconnect sets the row to `'disconnecting'` and the whole refusal then
+stopped applying to the exact sequence it existed to catch. A narrowing
+justified as caution needs the same scrutiny as a widening -- more, because it
+does not feel like one.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.

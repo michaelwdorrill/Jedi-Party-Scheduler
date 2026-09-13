@@ -1,0 +1,27 @@
+-- Pass-23 acceptance review (F60-B). When Google has actually rejected this
+-- app's authorization, recorded as a fact rather than inferred from prose.
+--
+-- The account-switch guard added in the previous pass decided "is this grant
+-- dead" by comparing `last_error` to one exact sentence. Two paths write an
+-- authorization failure and they write DIFFERENT sentences -- the Calendar
+-- 401 path says "Google access was revoked", and the token-refresh rejection
+-- path says "revoked or expired" -- so a genuinely dead grant reached by the
+-- refresh path stopped qualifying for the recovery exception, and its owner
+-- was trapped: unable to switch accounts, on a connection that could never
+-- work again.
+--
+-- The lesson is the shape, not the sentence. `last_error` is a message for a
+-- person, it is localisable and rewordable, and it was never a state machine.
+-- Two readers agreeing on a string is a coincidence waiting to be edited away
+-- by anyone improving the wording. State that a guard depends on gets its own
+-- column.
+--
+-- Nullable, and NULL means "no authorization failure recorded". Every existing
+-- row starts NULL, which is the safe direction: an unrecognised connection is
+-- treated as live and therefore protected by the switch refusal, so the worst
+-- an unmigrated row can do is ask its owner to disconnect first.
+--
+-- Cleared on a successful reconnect (storeConnection resets it alongside
+-- status, sync_enabled and last_error), because a grant that just authorised
+-- is by definition no longer rejected.
+ALTER TABLE google_calendar_connections ADD COLUMN authorization_failed_at INTEGER;

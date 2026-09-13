@@ -310,6 +310,11 @@ export async function storeConnection(
        sync_enabled = 1,
        status = 'active',
        last_error = NULL,
+       -- Cleared with the rest of the failure state (migration 0047): a grant
+       -- that has just authorised is by definition no longer rejected, and
+       -- leaving the marker set would keep the account-switch guard treating
+       -- a working connection as dead.
+       authorization_failed_at = NULL,
        disconnect_attempts = 0,
        -- F-22: a reconnect to a *different* Google account must not inherit
        -- the previous one's read selection. read_calendar_id names a

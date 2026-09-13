@@ -244,11 +244,16 @@ async function markUnauthorized(env: Env, row: GoogleConnectionRow, message: str
   // sync_enabled = 0, not just an error message: a dead grant cannot recover
   // on its own, and leaving it enabled means every future tick spends part of
   // its allowance rediscovering that. The user reconnects, which resets both.
+  // `authorization_failed_at` is the fact; `last_error` is the sentence shown
+  // to a person (F60-B). Both are written here, and only the column is ever
+  // read by a guard -- see migration 0047 for why that separation exists.
+  const now = Date.now();
   await env.DB.prepare(
-    `UPDATE google_calendar_connections SET sync_enabled = 0, last_error = ?, updated_at = ?
+    `UPDATE google_calendar_connections
+     SET sync_enabled = 0, last_error = ?, authorization_failed_at = ?, updated_at = ?
      WHERE user_id = ? AND refresh_token_ciphertext = ?`,
   )
-    .bind(message, Date.now(), row.user_id, row.refresh_token_ciphertext)
+    .bind(message, now, now, row.user_id, row.refresh_token_ciphertext)
     .run();
 }
 

@@ -319,15 +319,16 @@ describe('a Google account switch cannot skip the disconnect promise (F-60)', ()
     await seedActiveConnection(db, 'first@gmail.com');
     await db
       .prepare(
-        // The exact marker markUnauthorized writes -- imported rather than
-        // retyped, because Pass 22 showed that "disabled and carrying some
-        // error" is a different and much broader condition than "Google
-        // rejected the grant", and a fixture that blurs them tests the broad
-        // one.
-        `UPDATE google_calendar_connections SET sync_enabled = 0, last_error = ?
+        // The FACT, not the sentence (F60-B, migration 0047). Pass 22 showed
+        // that "disabled and carrying some error" is far broader than "Google
+        // rejected the grant"; Pass 23 then showed that pinning it to one
+        // exact sentence is far narrower, because the two paths that record an
+        // authorization failure word it differently. The column is neither.
+        `UPDATE google_calendar_connections
+         SET sync_enabled = 0, last_error = ?, authorization_failed_at = ?
          WHERE user_id = 'u1'`,
       )
-      .bind(UNAUTHORIZED_ERROR)
+      .bind(UNAUTHORIZED_ERROR, Date.now())
       .run();
 
     fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
@@ -733,5 +734,130 @@ describe('a materialized child takes authority from its parent option (RG-06)', 
     const byEvent = await loadConfirmedOptionsForEvents(env, ['poll-1']);
 
     expect(byEvent.get('poll-1') ?? []).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pass-23 acceptance review, F60-A and F60-B. Both are regressions this
+// project introduced in the guard it added to fix F-60, and both come from the
+// same mistake: inferring a lifecycle state instead of reading one.
+describe('the account-switch guard reads state rather than inferring it (F60-A, F60-B)', () => {
+  const ENCRYPTION_KEY = 'test-google-encryption-key-at-least-32-chars';
+
+  function googleEnv(base: Env): Env {
+    return {
+      ...base,
+      GOOGLE_SYNC_MODE: 'live',
+      GOOGLE_CLIENT_ID: 'google-client-id',
+      GOOGLE_CLIENT_SECRET: 'google-client-secret',
+      GOOGLE_TOKEN_ENCRYPTION_KEY: ENCRYPTION_KEY,
+    };
+  }
+
+  async function seedConnection(
+    db: ShimDatabase,
+    fields: { status?: string; syncEnabled?: number; lastError?: string | null; authFailedAt?: number | null } = {},
+  ): Promise<void> {
+    const now = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO google_calendar_connections
+           (user_id, refresh_token_ciphertext, refresh_token_iv, access_token_ciphertext, access_token_iv,
+            access_token_expires_at, google_account_email, calendar_id, sync_enabled, status,
+            last_synced_at, last_error, authorization_failed_at, disconnect_attempts, connected_at, updated_at)
+         VALUES ('u1','ct','iv',NULL,NULL,NULL,'first@gmail.com','primary',?,?,NULL,?,?,0,?,?)`,
+      )
+      .bind(
+        fields.syncEnabled ?? 1,
+        fields.status ?? 'active',
+        fields.lastError ?? null,
+        fields.authFailedAt ?? null,
+        now,
+        now,
+      )
+      .run();
+  }
+
+  async function finalizeB(env: Env): Promise<Response> {
+    const auth = await authFor(env, 'u1');
+    const pendingId = await storePendingConnection(env, 'u1', 'r', 'a', 3600, 'second@gmail.com');
+    return app.request(
+      'https://worker.test/google/finalize',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pendingId }),
+      },
+      env,
+    );
+  }
+
+  async function seedUserAndGuild(db: ShimDatabase): Promise<void> {
+    await seedGuild(db, 'guild-1');
+    await seedUser(db, 'u1');
+    await seedMembership(db, 'u1', 'guild-1');
+  }
+
+  // F60-A. Requiring status = 'active' was meant to be conservative and did the
+  // opposite: a signed disconnect sets the row to 'disconnecting', so an
+  // ordinary sequence slipped past the refusal entirely. No provider failure
+  // needed, and Pass 22 had refused this.
+  it('refuses a switch while a disconnect is still in flight', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUserAndGuild(db);
+    await seedConnection(db, { status: 'disconnecting' });
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    const res = await finalizeB(env);
+
+    expect(
+      res.status,
+      'a switch overtook the disconnect that was still cleaning up the old calendar',
+    ).toBe(409);
+  });
+
+  // F60-B. The guard compared last_error to one exact sentence, and the
+  // token-refresh path writes a different one. A genuinely dead grant reached
+  // that way stopped qualifying, trapping its owner on a connection that could
+  // never work again. Any authorization failure now qualifies, whatever it said.
+  it('allows the switch for an authorization failure recorded by the refresh path', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUserAndGuild(db);
+    await seedConnection(db, {
+      syncEnabled: 0,
+      // Deliberately NOT the Calendar-401 sentence: this is what the token
+      // refresh path writes, and the whole finding is that the two differ.
+      lastError: 'Google access was revoked or expired. Reconnect to resume syncing.',
+      authFailedAt: Date.now(),
+    });
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    const res = await finalizeB(env);
+
+    expect(
+      res.status,
+      'a user whose grant Google rejected during refresh was trapped, unable to switch accounts',
+    ).toBe(200);
+  });
+
+  // The control that both regressions have to keep passing: a transient
+  // failure is not an authorization failure, so a disabled connection carrying
+  // an ordinary error is still protected.
+  it('still refuses a switch away from a connection disabled by a transient error', async () => {
+    const { db, env: base } = setup();
+    const env = googleEnv(base);
+    await seedUserAndGuild(db);
+    await seedConnection(db, {
+      syncEnabled: 0,
+      lastError: 'Google token refresh failed: 503',
+      authFailedAt: null,
+    });
+
+    fetchStub = stubFetch([{ match: 'oauth2.googleapis.com/revoke', status: 200, body: {} }]);
+    const res = await finalizeB(env);
+
+    expect(res.status, 'a transient error was mistaken for a dead grant again').toBe(409);
   });
 });
