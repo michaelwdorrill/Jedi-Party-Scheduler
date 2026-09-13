@@ -254,6 +254,55 @@ back to pending over an event that had already moved, and the next deadline
 pass declined it on a stale revision. The stamp's failure is now contained; the
 cost is a row that applied and does not say so, which the gate keeps quiet.
 
+### 70a. Make accept-and-apply one transaction (the agreed design for item 70)
+
+Michael's call, 13 September 2026, on how to close P21-09: **the change should
+be made first, and marked accepted only once it has been.**
+
+The literal ordering cannot be used, and the reason is written into
+`changeRequests.ts` at the claim itself. Apply-then-mark is what this code did
+until Pass 12, and P12-18 changed it: a decline landing between the route's
+snapshot read and the accept's write meant the accept moved the event and then
+found nothing to mark, so the stored request read **declined**, complete with
+the organizer's decline note, over a schedule that had already moved. Claiming
+first is what makes `pending` the thing accept and decline compete for, so
+exactly one of them can win it.
+
+So the requirement is right and the sequencing is the wrong lever. What
+delivers it is **atomicity**: claim, effect and completion stamp in ONE D1
+batch. Then the request is marked accepted *if and only if* the change landed
+-- which is a stronger form of what was asked for, and it keeps P12-18's race
+arbitration because the claim's `WHERE status = 'pending'` is still in there.
+
+It also dissolves the rest of the item rather than patching it:
+
+- the compensating release disappears, because there is nothing to compensate;
+- `applied_at` becomes atomic with the effect, closing the P16-02 residual
+  (a change that applied but could not record that it had);
+- and P21-09 stops existing, because the interruption window it needs is gone
+  rather than made smaller.
+
+**It is mechanical, and that was worth checking before proposing it.** All
+three effect paths already build a statement array and end in exactly one
+`env.DB.batch(...)`: `updateEvent` (eventWrites.ts, one batch at the end, then
+an interpretation of `results[0].meta.changes`), `addInvitesToEvent` (same
+shape), and the recurring-occurrence override, which is a single statement
+already. The work is to split each into a `build…Statements()` half and a thin
+`execute` half, then have `applyAndAccept` prepend its claim, append its stamp,
+and run one batch.
+
+**Not landed with the Pass-23 acceptance candidate, deliberately.** That
+candidate passed all six release gates, and this refactors the most heavily
+guarded write path in the app -- the one whose revision guard doubles as the
+concurrency control for three other features. Dropping an unreviewed change of
+that shape onto a package that has just been accepted is precisely how the only
+P1 of this cycle happened: unrequested work, on a finding two reviewers had
+called non-blocking, landing without a reviewer seeing it.
+
+So it is the first thing in 1.0.1, with the acceptance reviewer verifying it,
+and item 70's other half -- surfacing an uncertain state in the UI -- becomes
+unnecessary if this lands, because there will be no uncertain state to surface.
+
 ### 71. A same-account reconnect can still race the tail of a disconnect
 
 From the Pass-14 review (P14-08), **narrowed in Pass 15 (P15-07) and no longer
