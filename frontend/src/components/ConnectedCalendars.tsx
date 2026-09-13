@@ -29,6 +29,14 @@ const RETURN_MESSAGES: Record<string, { tone: 'ok' | 'bad'; text: string }> = {
     text: 'Google did not grant long-term access, so syncing would stop working within the hour. Try connecting again and accept the offline-access prompt.',
   },
   failed: { tone: 'bad', text: "Connecting to Google didn't work. Please try again." },
+  // The Worker's OAuth callback rate limit (item 92 / release-bar clause 3).
+  // Reachable by an ordinary user only if they retry the connect flow many
+  // times in a minute, so the message says the one thing that actually helps:
+  // it clears on its own.
+  rate_limited: {
+    tone: 'bad',
+    text: 'Too many connection attempts from your network. Please wait a minute and try again.',
+  },
 };
 
 function formatSyncedAt(ms: number | null | undefined): string {

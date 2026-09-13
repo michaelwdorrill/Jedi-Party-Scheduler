@@ -37,6 +37,7 @@ import {
   storeConnection,
   storePendingConnection,
 } from '../lib/googleCalendar';
+import { oauthCallbackAllowed } from '../lib/rateLimit';
 import { signToken, verifyToken } from '../lib/signedToken';
 import { assertBoolean, assertString, readJsonBody } from '../lib/validate';
 
@@ -196,6 +197,16 @@ googleRoutes.get('/callback', async (c) => {
   const payload = await verifyToken<GoogleConnectTokenPayload>(state, GOOGLE_CONNECT_PURPOSE, c.env.JWT_SIGNING_KEY);
   if (!payload || !cookieNonce || payload.nonce !== cookieNonce) {
     return c.redirect(`${settingsUrl}?google=unverified`);
+  }
+
+  // Bound before the spend, same rule and ordering as the two Discord
+  // callbacks. Included even though production ships GOOGLE_SYNC_MODE = "off"
+  // -- isGoogleConfigured() already refuses above, so this endpoint spends
+  // nothing there today, but the sandbox runs it live and 1.0.1 turns it on.
+  // Two of three unauthenticated spends bounded and the third left out is
+  // exactly the shape P21-05 was: one rule, three implementations.
+  if (!(await oauthCallbackAllowed(c.env, c.req.raw.headers))) {
+    return c.redirect(`${settingsUrl}?google=rate_limited`);
   }
 
   try {

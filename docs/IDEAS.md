@@ -1056,7 +1056,7 @@ stopped applying to the exact sequence it existed to catch. A narrowing
 justified as caution needs the same scrutiny as a widening -- more, because it
 does not feel like one.
 
-### 92. The OAuth callbacks are still unbounded, and the fix we documented was impossible
+### 92. Bounding the OAuth callbacks, and two remediations written from memory
 
 From the Pass-21 review (F-59). Scheduled to v1.0.1 on 13 September 2026 and
 then **pulled back into 1.0 the same day** once the assumptions behind the
@@ -1083,87 +1083,95 @@ configured; nobody asked whether it *could* be. The lesson is the same one item
 memory is a claim, and this project's own rule is to check claims.** The step
 that was skipped is the cheapest one -- open the dashboard and look.
 
-**Decided 13 September 2026: option 1, for 1.0, not 1.0.1.** Michael pushed
-back on deferring it -- "option 1 doesn't seem that hard, I can do it fine" --
-and he was right. The objection on record was that a remote session cannot
-verify a dashboard change, which is a fact about the session rather than about
-the change.
+**Closed in v1.0 by the Workers rate-limiting binding.** Getting there took
+two reversals in one afternoon, and the second one is the entry that matters.
 
-**Three things checked before committing to it, because writing this entry
-from memory is how the impossible remediation above got written:**
+**Reversal 1 -- deferral to 1.0.1 was wrong.** Michael pushed back: "option 1
+doesn't seem that hard, I can do it fine." The objection on record had been
+that a remote session cannot verify a dashboard change, which is a fact about
+the session rather than about the change. He was right and it moved into 1.0.
 
-1. **Worker Custom Domains need an active Cloudflare zone, and the free zone
-   plan is enough.** `uncleowen.space` is already a zone in the `uncleowen`
-   account. Money cost: zero, confirmed rather than assumed.
-2. **The Free plan includes one rate-limiting rule.** One is what this needs,
-   so the "willing to pay a little more" this was scheduled against turns out
-   to be moot.
-3. **The Worker needs no code change at all, and the move is reversible.**
-   `redirectUri()` in both `routes/auth.ts` and `routes/guildRequests.ts` is
-   `` `${new URL(c.req.url).origin}/...` ``, and `googleRedirectUri` takes the
-   request URL the same way -- so the redirect URI FOLLOWS the hostname the
-   request arrived on. Register both hostnames in the Discord application and
-   the Worker serves `*.workers.dev` and `api.uncleowen.space` correctly at the
-   same time. Discord refuses any redirect_uri not on its registered list, so a
-   wrong hostname fails safe rather than redirecting somewhere.
+**Reversal 2 -- and this one is on this project, again, in this entry, about
+this exact class of claim.** The write-up for reversal 1 asserted three
+"checked" facts. Two really were checked against primary sources: Worker Custom
+Domains need an active zone and the free zone plan suffices, and the Free plan
+includes one rate limiting rule. The third -- **"`uncleowen.space` is already a
+zone in the `uncleowen` account"** -- was never checked at all. It was inferred
+from `FRONTEND_URL = "https://uncleowen.space"` in `wrangler.toml` and written
+down in the same voice as the two that were verified.
 
-That third point is what turns this from a cutover into an additive change,
-and it is the reason the coordination cost the original write-up worried about
-is much lower than it looked: nothing has to happen in lockstep, because the
-old path keeps working until `VITE_API_BASE_URL` is pointed at the new one.
+Michael's screenshots settled it in seconds. **Cloudflare's Domains page is
+empty -- there is no zone.** `uncleowen.space` is registered and DNS-hosted at
+Namecheap, the site is on GITHUB Pages (`185.199.108-111.153`, `www ->
+michaelwdorrill.github.io`), and the SPF record points at Namecheap's email
+forwarding, so there are MX records riding along too.
 
-**Sequenced before the release walkthrough, deliberately.** If we test on
-`workers.dev` and ship on `api.uncleowen.space`, every login, OAuth redirect
-and Discord interaction in production runs through a hostname the walkthrough
-never touched -- which is the exact class of untested difference
-`RELEASE-TESTING.md` exists to eliminate. Doing the sandbox first makes the
-walkthrough the verification of the move rather than an extra step after it.
+This is the second time this single entry has carried an unchecked platform
+claim -- the first was the WAF rule "on the zone serving the Worker" that could
+never have been applied. The failure is identical and it is not really about
+Cloudflare: **an inference and a verified fact were written in the same
+register, so the reader could not tell them apart, and neither could the
+author a day later.** Item 91 records the code version of this rule ("a guard
+must read state, not infer it from a message"). This is the prose version, and
+it needs saying separately because prose has no type checker: if a claim was
+not checked, the sentence has to say so.
 
-**The one thing still unverified, and it must be checked in the dashboard
-rather than reasoned about:** whether the Free plan's single rate-limiting rule
-permits a PATH-based expression. Free's rate limiting is IP-based fixed-window
-and more restricted than Pro's, and the primary docs do not say. It matters
-because the rule has to catch `/auth/callback` and `/guild-requests/callback`
-without catching `/auth/refresh` -- the trap `docs/SETUP.md` already records.
-If Free will not express paths, the fallback is a rule on the whole `api.`
-hostname with a threshold generous enough that ordinary use never trips it,
-which is still a bound and still closes the clause.
+**What that does to the options.** Adding only `api.uncleowen.space` as a zone
+is [Enterprise-only](https://developers.cloudflare.com/dns/zone-setups/subdomain-setup/)
+-- Free and Pro get full setup only. So a zone-level WAF rule requires moving
+the nameservers for the WHOLE domain to Cloudflare, dragging a live site and
+mail forwarding through a DNS migration for a control unrelated to either, days
+before a release. Option 1's cost went from "four lines in `wrangler.toml`" to
+"change DNS providers". Michael chose the binding.
 
-**Option 2 is retired rather than deferred.** A per-IP D1 limiter
-(`CF-Connecting-IP` plus unix minute, one upsert with `RETURNING count` before
-the exchange) would put a metered write back on an unauthenticated path that
-F-24 deliberately cleared -- and it defends a metered third-party call by
-spending a metered resource whose exhaustion takes down the entire app. That is
-a worse failure than the one it prevents.
+**What shipped:**
 
-**A third option was considered and rejected: the Workers rate-limiting
-binding** (GA since Sept 2025, `[[ratelimits]]` plus
-`await env.LIMITER.limit({ key })`, no zone required, works on `workers.dev`,
-and our wrangler 4.114.0 clears its 4.36.0 floor). It would have worked. It
-loses to option 1 on three counts: it is ~10 lines of new code on an auth path
-landing immediately after an acceptance review passed, which is precisely the
-shape that has produced this project's last several regressions; its limits are
-**per-colo rather than global**, so a distributed attacker gets
-`limit x colocation count`; and Cloudflare's own docs advise against IP keys
-and do not surface the binding in the dashboard, so the control would be
-invisible. An edge rule blocks before the Worker is invoked, costs no
-invocation, and is visible where it is configured. Zero new code beats ten
-lines -- prefer removal to mechanism, applied to a control rather than a fix.
+- `[[ratelimits]]` / `[[env.sandbox.ratelimits]]` declaring
+  `OAUTH_CALLBACK_LIMITER`, 20 per 60 seconds, on separate namespace ids so
+  sandbox traffic cannot consume production's allowance for an address.
+- `src/lib/rateLimit.ts` -- `oauthCallbackAllowed(env, headers)`, keyed on
+  `CF-Connecting-IP`.
+- Called in all three callbacks (`/auth/callback`, `/guild-requests/callback`,
+  `/google/callback`), **after** the signature check and **before** the token
+  exchange. After, because a forged state already costs nothing and must not be
+  able to burn a real address's allowance; before, because the exchange is the
+  spend.
+- Google included even though production ships `GOOGLE_SYNC_MODE = "off"`.
+  Bounding two of three and leaving the third is the exact shape of P21-05:
+  one rule, three implementations, and the one nobody updated is the one that
+  lets an answer through.
+- `check:env-parity` now fails CI if the binding is undeclared in either
+  environment, or if the two share a namespace id. This is the other half of
+  the helper's deliberate FAIL-OPEN behaviour: failing open is right at runtime
+  (a config slip should degrade the bound, not break every login) and would
+  otherwise mean an unbounded production that nothing reports. Both branches
+  revert-verified.
+- Seven tests, all revert-verified against the specific defect each names --
+  including the ordering one, checked by moving the limiter ahead of the
+  signature check and watching it fail. Two are labelled in-file as invariant
+  guards rather than reproductions.
 
-**What closing this actually requires**, sandbox first:
+**The honest limitation, stated because it will not be visible later:** the
+binding's limits are **per Cloudflare location, not global**. A caller spread
+across N locations gets N x 20 per minute. Unbounded became
+bounded-per-source-per-location, which meets clause 3 and is a real
+improvement, but it is not the cap an edge rule would give. Cloudflare also
+advises against IP keys because users share them -- the generous threshold is
+what keeps a shared NAT harmless, and one human login spends one callback.
 
-- `[[env.sandbox.routes]]` with `custom_domain = true` for
-  `api-sandbox.uncleowen.space`, in `wrangler.toml` rather than the dashboard,
-  so it is in version control and the sandbox deploy workflow applies it.
-- The **sandbox** Discord application: ADD (do not replace) the two callback
-  URIs, and repoint the Interactions Endpoint URL.
-- Walk through with `VITE_API_BASE_URL=https://api-sandbox.uncleowen.space`.
-- Then the same for production and `api.uncleowen.space`, plus
-  `VITE_API_BASE_URL` in the Pages build, plus the one WAF rule on the zone.
-
-Closing this closes release-bar clause 3 by fixing it, which is the only way a
-finding is allowed to leave a category -- and it retires the written exception
-that was otherwise going to have to ship with 1.0.
+**Still worth doing eventually, but on its own merits and its own schedule:**
+the custom domain. It would let the WAF rule replace this binding (blocking
+before the Worker is invoked, at no invocation cost, visible in the dashboard),
+and it makes Worker and frontend same-site. It is not release work, it is DNS
+work, and it should happen when nothing is riding on it. The Worker needs no
+code change for it either way: `redirectUri()` in both Discord routes is
+`` `${new URL(c.req.url).origin}/...` `` and `googleRedirectUri` takes the
+request URL, so the redirect URI follows whatever hostname the request arrived
+on -- register both in the Discord application and `workers.dev` and the custom
+domain serve correctly at once. Two traps recorded for whoever does it: adding
+`routes` infers `workers_dev = false` on the next deploy and silently kills the
+`workers.dev` URL, and a Custom Domain cannot be created on a hostname that
+already has a CNAME record.
 
 ### 93. Most of the cron's budget machinery exists to fit a plan we may not need
 

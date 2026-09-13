@@ -934,146 +934,109 @@ different responses:
 A 401 or 403 will not fix itself, and after 24 hours it locks everyone out.
 Those two are the ones worth alerting on.
 
-### Putting the Worker on a custom domain, and rate limiting the OAuth callbacks
+### Rate limiting the OAuth callbacks
 
-**Scheduled for v1.0** (IDEAS item 92). Moved forward from v1.0.1 on 13
-September 2026, once the assumptions behind deferring it were checked and most
-of them turned out to be wrong in the cheap direction.
+**Closed in v1.0** (IDEAS item 92), in the Worker rather than at the edge.
 
-**First, correcting an earlier version of this section, which described
-something that cannot be done on this deployment.** It said to add a Cloudflare
-rate limiting rule under Security → WAF "on the zone serving the Worker". There
-is no such zone. Rate limiting rules are configured per *zone* — a domain you
-have added to your account — and this Worker is deployed to its default
-`*.workers.dev` subdomain. `workers.dev` is Cloudflare's zone, not ours.
-`uncleowen.space` *is* ours, but the Worker is not on it, so a rule there would
-never see an `/auth/callback` request.
+**Two earlier versions of this section described things that could not be
+done, and both were wrong the same way**, so the history is kept rather than
+overwritten:
 
-Nobody caught this for two review passes, including a reviewer who checked that
-the rule was not configured. Checking whether it *could* be is the step that was
-skipped.
+1. It said to add a Cloudflare rate limiting rule "on the zone serving the
+   Worker". Rate limiting rules are zone-scoped and this Worker is on
+   `*.workers.dev`, which is Cloudflare's zone, not ours.
+2. Corrected to "put the Worker on `api.uncleowen.space`, the zone is already
+   in the account". **There is no zone.** `uncleowen.space` is registered and
+   DNS-hosted at **Namecheap**, the site is on **GitHub Pages**
+   (`185.199.108-111.153`), and Cloudflare's Domains page is empty. That claim
+   was inferred from `FRONTEND_URL` and written in the same voice as facts that
+   had actually been checked.
 
-**What the exposure actually is.** `/auth/callback` and
-`/guild-requests/callback` each spend one POST to Discord's token endpoint,
-which Discord rate-limits per client — so a sustained loop degrades login for
-everyone until the limit resets, and the Worker's own request quota is the
-second resource. Nothing is disclosed and no account is affected except by being
-unable to log in. Since the state is signed (F-59), an attacker must first call
-`/auth/login` for a valid signed state and its matching cookie, so it costs them
-two requests per token call rather than one — the price went up, the rate is
-still unbounded. Under the release bar's clause 3 that is **unmet**, recorded as
-unmet rather than reworded, because "a finding leaves the bar by being fixed or
-disproved, never by being described differently" applies to the project's own
-clauses first. Putting the Worker on the zone is what closes it.
+The lesson is one line and it is not about Cloudflare: **an unchecked claim has
+to be marked as unchecked.** A reader cannot tell an inference from a
+verification if both are written as statements, and neither can whoever wrote
+it a day later.
 
-#### What was checked, September 2026
+**What the exposure is.** `/auth/callback`, `/guild-requests/callback` and
+`/google/callback` each spend one POST to a provider's token endpoint. Discord
+rate-limits that per *client*, so a sustained loop degrades login for everyone
+until the limit resets. Nothing is disclosed and no account is affected except
+by being unable to log in. F-59 made a *forged* state cost an HMAC instead of a
+token exchange; it did not bound a callback that verifies, since an attacker
+can call `/auth/login` for a real signed state and pay two requests per
+exchange rather than one.
 
-Written down with the caveat this section exists to carry: these are platform
-facts as of the date above, checked rather than remembered, and worth
-re-checking if a decision turns on one.
+#### What is deployed
 
-- **Worker Custom Domains need an active Cloudflare zone; the free zone plan is
-  enough.** `uncleowen.space` already is one. Money cost: zero.
-- **The Free plan includes one rate limiting rule.** One is what this needs.
-- **You cannot create a Custom Domain on a hostname that already has a CNAME
-  record.** Check DNS for the hostname first; delete a stale record if there is
-  one.
-
-#### The move is additive and reversible, which is the part worth knowing
-
-```
-src/routes/auth.ts:88          `${new URL(c.req.url).origin}/auth/callback`
-src/routes/guildRequests.ts:45 `${new URL(c.req.url).origin}/guild-requests/callback`
-```
-
-Both OAuth redirect URIs are **derived from the hostname the request arrived
-on**, not from configuration, and `googleRedirectUri` takes the request URL the
-same way. So the Worker serves `*.workers.dev` and the custom domain correctly
-**at the same time**, with no code change, provided both hostnames are
-registered in the Discord application. Discord refuses any `redirect_uri` not on
-its registered list, so a hostname you forgot to register fails safe rather than
-redirecting somewhere unintended.
-
-Nothing therefore has to move in lockstep. Register both, switch
-`VITE_API_BASE_URL` when you are ready, and switch it back if anything is wrong.
-
-#### The trap: adding `routes` silently switches off `workers.dev`
-
-`workers_dev` defaults to **true** when no route is configured and **false** as
-soon as one is — Wrangler infers it on the next deploy, with no warning. Add a
-`[[routes]]` block without thinking about this and the existing
-`*.workers.dev` URL stops answering, which will look exactly like the custom
-domain having broken everything.
-
-So the route and the explicit `workers_dev` go in together:
+The [Workers rate-limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/),
+GA since September 2025. It needs no zone and works on `workers.dev`.
 
 ```toml
-# sandbox
-[env.sandbox]
-name = "jedi-party-scheduler-worker-sandbox"
-# Explicit because adding routes below would otherwise infer `false` and take
-# the *.workers.dev URL away — see above.
-workers_dev = true
+[[ratelimits]]
+name = "OAUTH_CALLBACK_LIMITER"
+namespace_id = "1001"
 
-[[env.sandbox.routes]]
-pattern = "api-sandbox.uncleowen.space"
-custom_domain = true
+[ratelimits.simple]
+limit = 20
+period = 60
 ```
 
-and the same shape at the top level for production and `api.uncleowen.space`.
-Wrangler creates the DNS record and issues the certificate on deploy, so the
-first `npm run deploy:sandbox` (or a push to the `sandbox` branch) is what
-provisions it.
+and the same under `[[env.sandbox.ratelimits]]` with `namespace_id = "1002"` --
+separate namespaces so sandbox traffic cannot consume production's allowance
+for an address. `period` must be `10` or `60`. Requires Wrangler >= 4.36.0; the
+repo is on 4.114.0.
 
-#### Order of operations — sandbox first, as always
+`src/lib/rateLimit.ts` exposes `oauthCallbackAllowed(env, headers)`, keyed on
+`CF-Connecting-IP`, called in all three callbacks **after** the signature check
+and **before** the token exchange. After, so a forged state cannot burn a real
+address's allowance; before, because the exchange is the spend.
 
-1. Add the `[[env.sandbox.routes]]` block above and deploy the sandbox. Confirm
-   `https://api-sandbox.uncleowen.space` answers **and** the old
-   `*.workers.dev` URL still does.
-2. In the **sandbox** Discord application: *add* (do not replace)
-   `https://api-sandbox.uncleowen.space/auth/callback` and
-   `/guild-requests/callback` to the OAuth2 redirect list, and repoint the
-   Interactions Endpoint URL to `.../discord/interactions`.
-3. Run the release walkthrough with
-   `VITE_API_BASE_URL=https://api-sandbox.uncleowen.space`. This is deliberately
-   before the walkthrough rather than after: testing on `workers.dev` and
-   shipping on the custom domain would mean every login, OAuth redirect and
-   interaction in production runs through a hostname nobody exercised.
-4. Repeat 1–2 for production and `api.uncleowen.space`, and set
-   `VITE_API_BASE_URL` in the Pages build.
-5. Add the rate limiting rule on the `uncleowen.space` zone.
+**Three properties worth knowing before trusting it:**
 
-#### The rule, and the one thing to check in the dashboard
+- **Per Cloudflare location, not global.** A caller spread across N locations
+  gets N x 20 per minute. Still a bound, and it meets release-bar clause 3, but
+  it is not the cap an edge rule gives.
+- **Not visible in the Cloudflare dashboard.** Bindings are not surfaced there.
+  `wrangler tail` is where a refusal shows up.
+- **It fails open if the binding is missing**, so a config slip degrades the
+  bound rather than breaking every login. `check:env-parity` fails CI if the
+  binding is undeclared in either environment, or if the two share a namespace
+  id -- that check is what stops "fails open" meaning "unbounded in
+  production", so do not remove one without the other.
 
-It has to catch `/auth/callback` and `/guild-requests/callback` **without**
-catching `/auth/refresh` — a path *prefix* on `/auth` would throttle every
-logged-in session's token refresh, which is a self-inflicted outage rather than
-a control.
+#### The custom domain, still worth doing, but not as release work
 
-**Unverified and worth five minutes before relying on it:** whether the Free
-plan's single rate limiting rule permits a path-based expression at all. Free's
-rate limiting is IP-based fixed-window and more restricted than Pro's, and the
-primary docs do not say. Open the rule builder and look at what it offers. If
-paths are not available, a rule on the whole `api.` hostname with a threshold
-generous enough that ordinary use never trips it is still a bound and still
-closes clause 3 — the callbacks are the only unauthenticated spend on that
-hostname.
+Putting the Worker on `api.uncleowen.space` would let a WAF rule replace the
+binding -- blocking before the Worker is invoked, at no invocation cost, and
+visible where it is configured -- and would make Worker and frontend same-site.
 
-#### Two alternatives, both rejected
+It is **DNS work, not release work**, and it is bigger than it looks here:
+[subdomain-only zones are Enterprise](https://developers.cloudflare.com/dns/zone-setups/subdomain-setup/),
+so it means moving nameservers for the whole of `uncleowen.space` to
+Cloudflare, taking the GitHub Pages records and Namecheap's email forwarding
+(MX plus that SPF TXT) with them. Do it when nothing is riding on it.
 
-- **A per-IP D1 counter in the Worker** (`CF-Connecting-IP` plus unix minute,
-  one upsert with `RETURNING count` before the exchange). Rejected: it puts a
-  database write back on an unauthenticated path that F-24 deliberately
-  cleared, and it defends a metered third-party call by spending a metered
-  resource whose exhaustion takes the whole app down.
-- **The Workers rate limiting binding** (GA since September 2025, needs no zone,
-  works on `workers.dev`; our Wrangler 4.114.0 clears its 4.36.0 floor).
-  It would have worked, and it is the right answer for a Worker with no zone
-  available. Rejected here because it is new code on an auth path, its limits
-  are **per-colo rather than global**, and it is not visible in the dashboard —
-  where an edge rule blocks before the Worker is even invoked, costs no
-  invocation, and is visible where it is configured. Zero new code beats ten
-  lines.
+Notes for whoever does:
+
+- **The Worker needs no code change.** `redirectUri()` in both Discord routes
+  is `` `${new URL(c.req.url).origin}/...` `` and `googleRedirectUri` takes the
+  request URL, so the redirect URI follows the hostname the request arrived on.
+  Register both hostnames in the Discord application and `workers.dev` and the
+  custom domain serve correctly at the same time -- additive, and reversible by
+  pointing `VITE_API_BASE_URL` back.
+- **Adding `routes` infers `workers_dev = false` on the next deploy**, with no
+  warning, killing the existing `*.workers.dev` URL. Set `workers_dev = true`
+  explicitly alongside the route.
+- **A Custom Domain cannot be created on a hostname that already has a CNAME
+  record.**
+- `VITE_API_BASE_URL` is a **GitHub Actions repository variable** (Settings ->
+  Secrets and variables -> Actions -> Variables), read by
+  `.github/workflows/deploy-pages.yml`. Not a Cloudflare setting -- the
+  frontend is GitHub Pages.
+- The Free plan includes **one** rate limiting rule. It must catch
+  `/auth/callback` and `/guild-requests/callback` **without** catching
+  `/auth/refresh`; whether Free's rule permits a path expression at all is
+  unverified, so check the rule builder before planning around it.
 
 ### D1 plan limits
 

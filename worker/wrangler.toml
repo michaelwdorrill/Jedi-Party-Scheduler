@@ -96,6 +96,24 @@ crons = ["*/15 * * * *"]
 # that reason; scripts/check-env-parity.mjs (run in CI) fails the build if
 # [vars] and [env.sandbox.vars] ever drift out of the same key set, so this
 # doesn't have to be caught by hand.
+# Bounds the three unauthenticated OAuth callbacks (item 92 / release-bar
+# clause 3). See worker/src/lib/rateLimit.ts for why the bound is here rather
+# than a zone-level WAF rule, and for the per-colocation caveat.
+#
+# `namespace_id` is just an identifier for the counter namespace, and production
+# and the sandbox deliberately use different ones so a sandbox loop can never
+# consume production's allowance.
+[[ratelimits]]
+name = "OAUTH_CALLBACK_LIMITER"
+namespace_id = "1001"
+
+# Expanded rather than an inline table on purpose: scripts/check-env-parity.mjs
+# parses the subset of TOML this file uses, and its header says inline tables
+# are outside it. Staying inside that subset is cheaper than growing a parser.
+[ratelimits.simple]
+limit = 20
+period = 60
+
 [env.sandbox]
 name = "jedi-party-scheduler-worker-sandbox"
 
@@ -160,3 +178,12 @@ migrations_dir = "migrations"
 # wrong half of the app.
 [env.sandbox.triggers]
 crons = ["*/15 * * * *"]
+
+# The sandbox's own counter namespace -- see the production block above.
+[[env.sandbox.ratelimits]]
+name = "OAUTH_CALLBACK_LIMITER"
+namespace_id = "1002"
+
+[env.sandbox.ratelimits.simple]
+limit = 20
+period = 60

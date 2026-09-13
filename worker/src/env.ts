@@ -46,6 +46,20 @@ export interface Env {
   // the secrets below, exactly as DISCORD_CLIENT_ID does.
   GOOGLE_CLIENT_ID?: string;
 
+  // Cloudflare's Workers rate-limiting binding (GA since Sept 2025), declared
+  // in wrangler.toml's [[ratelimits]] / [[env.sandbox.ratelimits]]. Bounds the
+  // three unauthenticated OAuth callbacks, which are the only endpoints that
+  // spend a third-party token exchange without a session -- see
+  // lib/rateLimit.ts for why the bound is here rather than at the edge, and
+  // for the per-colocation caveat.
+  //
+  // Optional in the type for the same reason DISCORD_PUBLIC_KEY is: it is
+  // genuinely absent in `wrangler dev` and in tests, and the callbacks have to
+  // answer that by working rather than by 500ing. What stops that becoming a
+  // silently unbounded production is scripts/check-env-parity.mjs, which fails
+  // CI if the binding stops being declared for either environment.
+  OAUTH_CALLBACK_LIMITER?: RateLimit;
+
   // Secrets (`wrangler secret put ...`, see docs/SETUP.md)
   DISCORD_CLIENT_SECRET: string;
   DISCORD_BOT_TOKEN: string;

@@ -130,6 +130,48 @@ if (prodGoogleId !== '' && prodGoogleId === sandboxGoogleId) {
   );
 }
 
+// The OAuth callback rate limiter (IDEAS item 92 / release-bar clause 3).
+//
+// src/lib/rateLimit.ts FAILS OPEN when the binding is absent, so that a
+// configuration slip degrades the bound rather than breaking every login. That
+// is the right runtime behaviour and the wrong thing to leave unwatched: an
+// undeclared binding would mean an unbounded production and nothing would say
+// so. This check is the other half of that decision -- it is what stops "fail
+// open" quietly meaning "no limit".
+//
+// Deliberately checked for BOTH environments. Declaring it only in production
+// would leave the sandbox unable to exercise the refusal, and the sandbox
+// existing to lie about production is the specific failure spec 0002 is about.
+const RATE_LIMITER_NAME = 'OAUTH_CALLBACK_LIMITER';
+for (const [label, path] of [
+  ['[[ratelimits]]', 'ratelimits'],
+  ['[[env.sandbox.ratelimits]]', 'env.sandbox.ratelimits'],
+]) {
+  const blocks = config[path] ?? [];
+  if (!blocks.some((b) => b.name === RATE_LIMITER_NAME)) {
+    errors.push(
+      `No ${label} block named ${RATE_LIMITER_NAME}. The three OAuth callbacks bound their ` +
+        `token-exchange spend through it (src/lib/rateLimit.ts), and that helper fails OPEN when ` +
+        `the binding is missing -- so without this declaration the callbacks are unbounded and ` +
+        `nothing at runtime would report it.`,
+    );
+  }
+}
+
+// Different namespaces on purpose: a shared one lets sandbox traffic consume
+// production's per-IP allowance, which is a sandbox affecting production --
+// the same class of mistake as a shared database_id, if a much cheaper one.
+const prodLimiterNs = (config['ratelimits'] ?? []).find((b) => b.name === RATE_LIMITER_NAME)?.namespace_id;
+const sandboxLimiterNs = (config['env.sandbox.ratelimits'] ?? []).find(
+  (b) => b.name === RATE_LIMITER_NAME,
+)?.namespace_id;
+if (prodLimiterNs !== undefined && String(prodLimiterNs) === String(sandboxLimiterNs)) {
+  errors.push(
+    `${RATE_LIMITER_NAME} uses the same namespace_id ("${prodLimiterNs}") in both environments, ` +
+      `so sandbox requests would count against production's rate limit for the same address.`,
+  );
+}
+
 const prodD1 = (config['d1_databases'] ?? [])[0];
 const sandboxD1 = (config['env.sandbox.d1_databases'] ?? [])[0];
 if (!prodD1 || !sandboxD1) {

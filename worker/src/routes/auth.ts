@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { AppEnv } from '../lib/authMiddleware';
 import { exchangeCodeForToken, fetchDiscordUser, fetchDiscordUserGuilds } from '../lib/discord';
+import { oauthCallbackAllowed } from '../lib/rateLimit';
 import { activeAllowListedGuildIds, markLoginSucceeded, syncGuildMembership, upsertUser } from '../lib/db';
 import { signJwt, verifyJwt } from '../lib/jwt';
 import { createSession, revokeSession, rotateSession } from '../lib/sessions';
@@ -166,6 +167,15 @@ authRoutes.get('/callback', async (c) => {
     // proof we issued it, not proof this browser is the one that asked.
     c.header('Cache-Control', NO_STORE);
     return c.text('Login request could not be verified. Please try logging in again.', 400);
+  }
+
+  // Bound before the spend (item 92 / bar clause 3). Deliberately after the
+  // signature check above: a forged state costs nothing, so letting one
+  // consume limiter budget would let an attacker exhaust this address's
+  // allowance for real logins without ever paying for a valid state.
+  if (!(await oauthCallbackAllowed(c.env, c.req.raw.headers))) {
+    c.header('Cache-Control', NO_STORE);
+    return c.text('Too many login attempts from this address. Please wait a minute and try again.', 429);
   }
 
   try {

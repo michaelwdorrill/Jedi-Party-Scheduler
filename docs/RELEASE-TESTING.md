@@ -46,18 +46,6 @@ production, with its own token and its own public key. So:
 
 If DMs never arrive in Phase 4, this is almost always why.
 
-**The Worker is on a custom domain now, and that happened *before* this
-walkthrough on purpose.** Item 92 moved into 1.0, so the sandbox Worker answers
-on `api-sandbox.uncleowen.space` as well as its old `*.workers.dev` URL (both
-work — the move is additive; see `docs/SETUP.md`). Test against the **custom
-domain**, because that is the shape production ships in:
-
-- [ ] The sandbox Discord application has the new callback URIs registered and
-      its Interactions Endpoint repointed. If login redirects to a Discord
-      error page, this is why.
-- [ ] `VITE_API_BASE_URL=https://api-sandbox.uncleowen.space`, not the
-      `workers.dev` URL.
-
 **The sandbox frontend runs on your machine only.** `FRONTEND_URL` for the
 sandbox Worker is `http://localhost:5173`, and that single value drives both
 the CORS origin and where Discord's OAuth callback returns to. So:
@@ -103,10 +91,13 @@ deployed sandbox Worker **is** the candidate.
       pushed worker changes since, push them to `sandbox`
       (`git push -u origin HEAD:sandbox --force-with-lease`) and wait for the
       run before starting.
-- [ ] **0.0b** Both hostnames answer: `https://api-sandbox.uncleowen.space` and
-      the old `*.workers.dev` URL. If the `workers.dev` one has gone dead, the
-      `workers_dev = true` line is missing from `[env.sandbox]` — SETUP.md's
-      trap, not a broken deploy.
+- [ ] **0.0c** The OAuth callback rate limiter is live (item 92). Nothing to
+      click: it is a Worker binding, invisible in the Cloudflare dashboard. The
+      deploy in 0.0 succeeding IS the check — an undeclared binding fails
+      `check:env-parity` in CI, and a binding the plan rejected would fail the
+      deploy. If you want to see it work, log in and out about twenty-five
+      times in a minute and watch for the 429; `wrangler tail --env sandbox`
+      shows the refusal.
 
 ```
 cd frontend
@@ -345,9 +336,11 @@ Brief yourself on these before anyone else is involved:
   (P21-09, 1.0.1).
 - Nobody can leave a group; you have to remove them (IDEAS 87).
 - The OAuth callbacks **are** bounded now — item 92 was pulled into 1.0 and
-  closed by moving the Worker onto the zone and adding the rule, so release-bar
-  clause 3 is met by being fixed rather than excepted. Worth confirming the
-  rule is actually live on the `uncleowen.space` zone before you invite anyone.
+  closed in the Worker with Cloudflare's rate-limiting binding, so release-bar
+  clause 3 is met by being fixed rather than excepted. The limit is **per
+  Cloudflare location rather than global**, which is a real bound and not a
+  perfect one; the custom domain that would allow a proper edge rule is now
+  ordinary future work, not release work.
 - Google sync is **off** in production and out of scope for 1.0.
 
 ---

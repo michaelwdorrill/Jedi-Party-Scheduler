@@ -16,6 +16,7 @@ import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { AppEnv } from '../lib/authMiddleware';
 import { canAdministerGuild, exchangeCodeForToken, fetchDiscordUser, fetchDiscordUserGuilds } from '../lib/discord';
+import { oauthCallbackAllowed } from '../lib/rateLimit';
 import {
   createGuildAddRequest,
   decideGuildAddRequest,
@@ -96,6 +97,12 @@ guildRequestRoutes.get('/callback', async (c) => {
   if (!code || !stateToken || !cookieState || stateToken.nonce !== cookieState) {
     c.header('Cache-Control', NO_STORE);
     return c.text('This request could not be verified. Please try again.', 400);
+  }
+
+  // Bound before the spend, same rule and same ordering as routes/auth.ts.
+  if (!(await oauthCallbackAllowed(c.env, c.req.raw.headers))) {
+    c.header('Cache-Control', NO_STORE);
+    return c.text('Too many attempts from this address. Please wait a minute and try again.', 429);
   }
 
   try {
