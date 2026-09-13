@@ -128,7 +128,9 @@ think about servers":
   attendee lists, not anonymous busy blocks); the four design calls are
   locked and written down in `specs/0007-server-noticeboard.md`, but it is
   unscheduled and blocked on a Privacy Policy rewrite. Still open in
-  `IDEAS.md`, so it still counts against 1.0.
+  `IDEAS.md`, so it still counts against 1.0. *(Superseded 13 Sept 2026: the
+  1.0 test is the release bar, not an empty list — see "Versions". Being open
+  no longer counts against 1.0 by itself.)*
 - **16, group creator membership.** Auto-seed the creator, backfill existing
   groups, ownership transfer on self-removal, and the owner/member split
   (owner adds-removes-renames-deletes; any member can create events for the
@@ -240,7 +242,11 @@ runs entirely through the sandbox.
   rejected: it would redeploy the sandbox out from under whatever feature is
   parked on it.
 - **29, a backlog that never emptied.** `IDEAS.md` is now two sections, and
-  the 1.0 test reads against **Still open** alone.
+  the 1.0 test reads against **Still open** alone. *(Superseded 13 Sept 2026:
+  the test is the release bar rather than an empty section. Item 29's actual
+  complaint — a list that stops saying where things stand — is now answered by
+  every open item carrying a version assignment, which is a stronger answer
+  than emptiness was.)*
 
 **The deployed app stays at 0.4.1, deliberately.** `APP_VERSION`,
 `PUBLISHED_AT` and the changelog page are not bumped for this release,
@@ -718,14 +724,25 @@ without breaking the test typecheck; the demo seed that DMs a real operator on
 some days of the week; and migration 0044's index, whose documented purpose was
 deleted with the recovery arm.
 
-**The v1.0 test still needs settling, and it is a decision, not a task.** The
-test is "`IDEAS.md`'s Still open section is empty". It is not empty and will not
-be. Moving these into "Parked until after 1.0" would make it pass and would be
-precisely the misuse that section's own warning describes -- parked growing
-faster than Still open shrinks, which recreates item 29's failure of a list that
-has stopped saying where things stand. The honest options remain: ship 1.0 with
-a named, written-down exception listing exactly these items, or restate the
-test. Sweeping them into the drawer to turn a number green is not one of them.
+**The v1.0 test was settled on 13 September 2026: it is restated, not
+excepted.** For two releases this section recorded an open decision -- the test
+was "`IDEAS.md`'s Still open section is empty", it was not empty and would not
+be, and the honest options were a named written exception listing exactly these
+items or a restatement. Michael chose the restatement.
+
+An exception listing twenty-nine items would not have been an exception. It
+would have been a new definition wearing a disguise, and the disguise is the
+part that does damage: the next person to read the test would find a rule plus
+a footnote quietly cancelling it, which is item 29's failure mode reached by a
+different route.
+
+The new test is in "Versions" below -- the release bar's five clauses hold, and
+nothing still open is a category-1 or category-2 finding -- along with why the
+old one stopped fitting and why emptiness was never the property worth
+measuring. What did NOT change is the anti-gaming guardrail: version-assigning
+an item is ordinary planning under a bar-based test and would have been
+sweeping under an emptiness-based one, but neither test lets a finding that
+writes wrong data or discloses data leave by being described differently.
 
 ### What "release ready" means, decided 12 September 2026
 
@@ -854,32 +871,72 @@ whether that is an artifact of always reviewing the same author's newest code.
 The app entered **Beta at v0.2**, the moment there was a written backlog
 being worked through rather than a pile of unsorted intentions.
 
-**v1.0 is defined by the backlog, not by a feature set: when `IDEAS.md`'s
-"Still open" section is empty, we leave Beta.** (Until v0.4.2 that read
-"when `IDEAS.md` is empty", and since nothing ever cleared the file, the one
-test 1.0 is defined by could not pass — item 29.) That deliberately makes 1.0 a moving target — new
-ideas get captured all the time, and each one pushes 1.0 out. That's the
-intended behaviour, not a flaw in the definition: shipping 1.0 should mean
-"there is nothing captured that we still intend to build", and the honest way
-to reach it is to keep clearing the list rather than to freeze it.
+**v1.0 is defined by the release bar, not by the size of the backlog: we
+leave Beta when all five clauses of "What release ready means" hold, and
+nothing in `IDEAS.md`'s "Still open" section is a category-1 or category-2
+finding.** Every item that remains open carries a version assignment.
 
-**One deliberate exception, added Sept 2026: `IDEAS.md`'s "Parked until after
-1.0" section.** The definition above is right for work we intend to do, and
-wrong for work we have explicitly decided comes *after* 1.0 — that kind would
-otherwise hold 1.0 hostage forever, or, worse, not get written down at all so
-that it stops holding it hostage. The parked section is where the second kind
-goes, it does not count against the test, and its entry bar is written out in
-`IDEAS.md`'s own "How this file is kept": a recorded decision that it belongs
-after 1.0, nothing scheduled depending on it, and written up to the same
-standard as everything else.
+**Restated 13 September 2026, replacing "when `IDEAS.md`'s Still open section
+is empty".** That test was right for the thing it was written about. The
+backlog then was features being worked through, and "nothing captured that we
+still intend to build" was a real description of leaving Beta. What broke it
+was not drift — it was twenty-three review passes putting design work,
+accepted residuals and maintenance into the same list. Twenty-nine items are
+open as this is written, none of them a defect, and the test could not
+distinguish that from twenty-nine unbuilt features.
 
-The obvious risk is that it becomes the drawer inconvenient items get swept
-into so a number goes green, which would recreate item 29's failure — a list
-that has stopped saying where things stand. The tell is simple enough to
-watch for: if parked grows faster than *Still open* shrinks, it is being
-misused. Its first entry is 64 (Google OAuth verification), parked because
-every user of this app personally knows its author, which is precisely the
-condition the warning it removes asks about.
+Kept as it was, the test had one more property nobody chose: **it made every
+captured idea a release blocker, which taxes capture.** `IDEAS.md` exists to
+be a low-friction place to write down anything noticed in passing. A rule that
+turns each of those notes into something standing between us and shipping is a
+rule that argues, quietly and constantly, for not writing them down. That is a
+worse failure than a stale list, and it is the one this project was closest to.
+
+The two earlier readings of the test are the same mistake at different scales:
+until v0.4.2 it read "when `IDEAS.md` is empty", and nothing ever cleared the
+file, so the single test 1.0 was defined by could not pass at all (item 29).
+Emptiness was never the property worth testing. **What we actually mean by
+leaving Beta is that the software has no known defect of a severity we would
+refuse to ship — which is exactly what the release bar already says, clause by
+clause, and says better.**
+
+**This is not a licence to reclassify, and the guardrail transfers verbatim.**
+A finding leaves category 1 or 2 by being fixed or by being demonstrated not to
+belong there — never by being given a version number. Assigning an item to
+1.0.1 is ordinary release planning under this test *because the test no longer
+keys on the list being empty*; the moment it is used on something that writes
+wrong data or discloses data, it is the same gaming the old guardrail names,
+and it is refused for the same reason.
+
+**"Parked until after 1.0" survives the restatement, but stops being
+load-bearing — and that is the point.** It was added in Sept 2026 as an
+exception to the emptiness test: work explicitly decided to come after 1.0
+would otherwise hold 1.0 hostage forever, or, worse, not get written down at
+all so that it stops holding it hostage. Under a bar-based test there is no
+hostage to take, so the section no longer *exempts* anything; it now only
+records a genuine distinction worth keeping — decided-for-after versus
+scheduled-for-next. **Which retires the risk it was carrying.** The drawer
+problem below existed because parking an item changed whether we could ship.
+It cannot any more, so the incentive to sweep is gone, and what is left of the
+warning is ordinary hygiene rather than a guardrail holding something up.
+
+Its entry bar is unchanged and still worth meeting, because it is what keeps
+the distinction meaningful — written out in `IDEAS.md`'s own "How this file is
+kept": a recorded decision that it belongs after 1.0, nothing scheduled
+depending on it, and written up to the same standard as everything else. Its
+first entry is 64 (Google OAuth verification), parked because every user of
+this app personally knows its author, which is precisely the condition the
+warning it removes asks about.
+
+The risk the old framing named — that parking becomes the drawer inconvenient
+items are swept into so a number goes green, recreating item 29's failure of a
+list that has stopped saying where things stand — is now mostly historical,
+since no number goes green by sweeping. The residual version is worth keeping
+an eye on anyway: a parked item is one nobody is planning around, so parking
+something that other work quietly depends on still produces a list that
+misleads. That is a hygiene failure rather than a release-integrity one, and
+the old tell still finds it — if parked grows faster than *Still open* shrinks,
+look at why.
 
 The version numbers below are therefore a *plan*, not a promise. If a new
 idea lands in the middle, it gets a phase like everything else and the tail
@@ -907,7 +964,7 @@ shifts.
 | **0.7.2** | What v0.7.1 and the standing backlog turned up — already-allow-listed servers shown, not hidden, on `/add-bot` (57); the bot can leave a server on deactivation (58); the calendar chip shows your own declined/tentative answer (52); a guarded `CURRENT_POLICY_VERSION` (43); the terminal-history purge's budget under-count and FK error fixed together (53, 56); a plain organizer cancel now notifies invitees (55); idea 49 found already shipped in v0.6.2 and documented as such. A second pass, after Michael settled the open design questions directly, shipped both items originally assessed and left open: groups without servers, per `specs/0011` plus the resolved access-control gap it didn't cover (36), and the minimum-attendees cascade extended to recurring events with configurable per-event/per-occurrence deadlines (54) — plus two new ideas captured and built in the same motion: the organizer notified on every invitee RSVP for every event (59), an owner-only tool for checking whether a hypothetical group of people has a common server before committing to one, found useful while manually verifying 36 on the sandbox (60), the New Event form's field order inverted to match: invite first, then let the server narrow from who's invited (61), the event detail page now names which server an event actually landed on, also found while testing 36 (62), and editing an event no longer shows its own invitees as busy during the very slot being edited (63) | **Shipped** |
 | **0.8** | Phase 5 — Google Calendar sync (2), push half: connect one Google account, pick a calendar, and have the sessions you're committed to written to it. Policy version 3, and the first long-lived third-party credential this app stores | **Shipped 5 September 2026** |
 | **0.8.1** | Phase 5's pull half (2) — one nominated calendar read back via `freebusy.query`, cached by the cron rather than called live inside a request; the server noticeboard (5, per `specs/0007`); the sandbox frontend gap closed as decided-against (23); and policy version 4 covering both disclosures at once. **`IDEAS.md`'s Still open is empty** | **Built — held for the security review** |
-| 1.0 | `IDEAS.md`'s **Still open** section empty — leave Beta | **The test no longer passes, and that is now a decision to make rather than a task to finish.** Nineteen review passes refilled Still open; everything demonstrably a disclosure, authorization or privacy defect is closed and re-verified, and Pass 19 additionally closed the three data-integrity items its reviewer named as release blockers. What remains is design work, pre-cycle feature gaps and maintenance. Ships with a written exception, or the test gets restated — see Phase 6 |
+| 1.0 | Leave Beta: the release bar's five clauses hold, and nothing in `IDEAS.md`'s **Still open** is a category-1 or category-2 finding | **Test restated 13 Sept 2026** (see "Versions"); the old "Still open is empty" test is retired rather than excepted. Twenty-three review passes closed every demonstrable disclosure, authorization, privacy and data-integrity defect, each re-verified; Pass 23 passed on all six release gates. What remains open is design work, pre-cycle feature gaps and maintenance, all version-assigned. **Remaining before release:** item 92 (the callback rate limit, via the `api.uncleowen.space` custom domain — closes bar clause 3 rather than excepting it), the Privacy Policy and Terms rewrite, one reviewer pass over both, the walkthrough in `RELEASE-TESTING.md`, then the changelog and version bump |
 | **1.0.1** | Phase 6 — accept-and-apply as one transaction (70a, first), the OAuth callback rate limit and the custom domain that makes it possible (92), Google grant lifecycle (73, 71), cross-tab identity (72), the concurrency-token audit's remainder, idempotent Google creation (85), the pre-cycle feature gaps (66–69), plus maintenance (76, 77, 82) and the plan question (93) | Planned |
 
 ## Summary

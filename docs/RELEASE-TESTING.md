@@ -46,6 +46,18 @@ production, with its own token and its own public key. So:
 
 If DMs never arrive in Phase 4, this is almost always why.
 
+**The Worker is on a custom domain now, and that happened *before* this
+walkthrough on purpose.** Item 92 moved into 1.0, so the sandbox Worker answers
+on `api-sandbox.uncleowen.space` as well as its old `*.workers.dev` URL (both
+work — the move is additive; see `docs/SETUP.md`). Test against the **custom
+domain**, because that is the shape production ships in:
+
+- [ ] The sandbox Discord application has the new callback URIs registered and
+      its Interactions Endpoint repointed. If login redirects to a Discord
+      error page, this is why.
+- [ ] `VITE_API_BASE_URL=https://api-sandbox.uncleowen.space`, not the
+      `workers.dev` URL.
+
 **The sandbox frontend runs on your machine only.** `FRONTEND_URL` for the
 sandbox Worker is `http://localhost:5173`, and that single value drives both
 the CORS origin and where Discord's OAuth callback returns to. So:
@@ -91,6 +103,10 @@ deployed sandbox Worker **is** the candidate.
       pushed worker changes since, push them to `sandbox`
       (`git push -u origin HEAD:sandbox --force-with-lease`) and wait for the
       run before starting.
+- [ ] **0.0b** Both hostnames answer: `https://api-sandbox.uncleowen.space` and
+      the old `*.workers.dev` URL. If the `workers.dev` one has gone dead, the
+      `workers_dev = true` line is missing from `[env.sandbox]` — SETUP.md's
+      trap, not a broken deploy.
 
 ```
 cd frontend
@@ -294,8 +310,13 @@ catches up.
 - [ ] **6.2** Turn off free/busy visibility on the alt. Main can no longer see
       the alt's busy time.
 - [ ] **6.3** Read the Privacy Policy page end to end. **Is every sentence
-      true of what you just saw the app do?** It was edited this cycle —
-      erasure, Google disconnect, the account-switch paragraph.
+      true of what you just saw the app do?** It was rewritten for 1.0, which
+      is why that rewrite is sequenced *before* this walkthrough rather than
+      after — reading text that is about to be replaced tests nothing.
+- [ ] **6.3b** The rewrite bumps the policy version, so **the reacceptance
+      prompt is a code path this walkthrough has to exercise**: the alt account
+      is asked to agree again on next load, cannot proceed without doing so,
+      and is not asked twice afterwards.
 - [ ] **6.4** Read the Terms and the changelog page.
 - [ ] **6.5** `/add-bot` — the self-service flow lists servers you administer.
 
@@ -323,8 +344,10 @@ Brief yourself on these before anyone else is involved:
 - If accepting a change request errors, **check the event actually moved**
   (P21-09, 1.0.1).
 - Nobody can leave a group; you have to remove them (IDEAS 87).
-- The OAuth callbacks are not rate limited (IDEAS 92, 1.0.1). Not a
-  friend-group risk, but it is unbounded and you have accepted that knowingly.
+- The OAuth callbacks **are** bounded now — item 92 was pulled into 1.0 and
+  closed by moving the Worker onto the zone and adding the rule, so release-bar
+  clause 3 is met by being fixed rather than excepted. Worth confirming the
+  rule is actually live on the `uncleowen.space` zone before you invite anyone.
 - Google sync is **off** in production and out of scope for 1.0.
 
 ---

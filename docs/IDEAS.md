@@ -19,13 +19,28 @@ moved to the bottom section. It is not deleted, because for several of these
 the most valuable part is the record of a decision and *why the alternative was
 rejected* — which is worth more after shipping than before.
 
-**The middle section is new, and it is the one that can do damage, so its rule
-is narrow.** `ROADMAP.md` defines 1.0 as "when `IDEAS.md`'s *Still open*
-section is empty", so anything sitting in *Still open* pushes 1.0 further away
-— which is the intended behaviour for work we actually intend to do, and the
-wrong behaviour for work we have deliberately decided comes *after* 1.0. Before
-this section existed there was nowhere to put the second kind, and the only
-options were to let it hold 1.0 hostage or to not write it down at all.
+**The middle section's rule is narrow, though it does less work than it used
+to.** It was added when `ROADMAP.md` defined 1.0 as "when `IDEAS.md`'s *Still
+open* section is empty" — under that test anything sitting in *Still open*
+pushed 1.0 further away, which was the intended behaviour for work we actually
+intend to do and the wrong behaviour for work we had deliberately decided comes
+*after* 1.0. Before this section existed there was nowhere to put the second
+kind, and the only options were to let it hold 1.0 hostage or to not write it
+down at all.
+
+**That test was retired on 13 September 2026.** 1.0 is now defined by the
+release bar — its five clauses hold, and nothing still open is a category-1 or
+category-2 finding — so an open entry no longer counts against 1.0 merely by
+existing, and every open entry carries a version assignment instead. Two things
+follow for this file, and the second is the important one:
+
+- **Parking no longer exempts anything from a release test**, so the incentive
+  to sweep is gone. The section stays because decided-for-after and
+  scheduled-for-next are genuinely different states worth distinguishing.
+- **The tax on capture is gone.** Under the old test every note written here
+  was a release blocker, which argued quietly against writing anything down —
+  in a file whose entire purpose is being cheap to add to. That was the worse
+  of the two failures the old test could cause.
 
 An entry qualifies for **Parked** only if all three are true:
 
@@ -35,12 +50,15 @@ An entry qualifies for **Parked** only if all three are true:
 3. It is written up to the same standard as anything else here, so that
    whoever picks it up later inherits the reasoning rather than a stub.
 
-**Parked is not a synonym for avoided**, and the failure mode is obvious: a
-section the 1.0 test does not read is a place inconvenient items can be filed
-to make a number go green. Item 29's whole lesson was that a list which stops
-saying where things stand stops being worth keeping. If this section starts
-growing faster than *Still open* shrinks, that is the signal it is being
-misused.
+**Parked is not a synonym for avoided.** The original failure mode — a section
+the 1.0 test does not read is a place inconvenient items can be filed to make a
+number go green — is largely historical now that no number goes green by
+filing. What survives is the version of it that never depended on the test:
+a parked item is one nobody is planning around, so parking something other work
+quietly depends on still produces a list that misleads, which is item 29's
+lesson that a list which stops saying where things stand stops being worth
+keeping. The old tell still finds it: if this section starts growing faster
+than *Still open* shrinks, look at why.
 
 That matters more than housekeeping usually does, because `ROADMAP.md`
 defines 1.0 as "when `IDEAS.md` is empty, we leave Beta". For the first four
@@ -1040,8 +1058,10 @@ does not feel like one.
 
 ### 92. The OAuth callbacks are still unbounded, and the fix we documented was impossible
 
-From the Pass-21 review (F-59), scheduled to v1.0.1 by Michael on 13 September
-2026 -- but the reason it is still open is worth more than the schedule.
+From the Pass-21 review (F-59). Scheduled to v1.0.1 on 13 September 2026 and
+then **pulled back into 1.0 the same day** once the assumptions behind the
+deferral were actually checked -- see the decision below. The reason it stayed
+open this long is worth more than either schedule.
 
 The code half is done: both Discord callbacks sign their `state` and verify it
 before spending anything, so a fabricated one costs an HMAC instead of a POST
@@ -1063,24 +1083,87 @@ configured; nobody asked whether it *could* be. The lesson is the same one item
 memory is a claim, and this project's own rule is to check claims.** The step
 that was skipped is the cheapest one -- open the dashboard and look.
 
-**Two ways to close it, and the first is free**, which is the other thing the
-original write-up got wrong by implying a cost trade-off that does not exist:
+**Decided 13 September 2026: option 1, for 1.0, not 1.0.1.** Michael pushed
+back on deferring it -- "option 1 doesn't seem that hard, I can do it fine" --
+and he was right. The objection on record was that a remote session cannot
+verify a dashboard change, which is a fact about the session rather than about
+the change.
 
-1. **Move the Worker to `api.uncleowen.space`.** The zone is already in the
-   account and Worker Custom Domains are included, so the money cost is zero.
-   The real cost is coordination -- both Discord redirect URIs, the Discord
-   interactions endpoint, the Google redirect URI and `VITE_API_BASE_URL` move
-   in lockstep, and the wrong order breaks login. Also makes Worker and
-   frontend same-site.
-2. **A per-IP limiter in the Worker.** (`CF-Connecting-IP`, unix minute) as the
-   key, one D1 upsert with `RETURNING count` before the exchange, 429 over the
-   threshold. Per-IP so an attacker locks out only themselves. ~40 lines and a
-   migration, and it puts a write back on an unauthenticated path that F-24
-   deliberately cleared -- a bounded cheap write against an unbounded
-   third-party call.
+**Three things checked before committing to it, because writing this entry
+from memory is how the impossible remediation above got written:**
 
-Do (1) regardless, because it is free and unlocks the whole zone-level toolbox.
-Then decide whether (2) is still wanted.
+1. **Worker Custom Domains need an active Cloudflare zone, and the free zone
+   plan is enough.** `uncleowen.space` is already a zone in the `uncleowen`
+   account. Money cost: zero, confirmed rather than assumed.
+2. **The Free plan includes one rate-limiting rule.** One is what this needs,
+   so the "willing to pay a little more" this was scheduled against turns out
+   to be moot.
+3. **The Worker needs no code change at all, and the move is reversible.**
+   `redirectUri()` in both `routes/auth.ts` and `routes/guildRequests.ts` is
+   `` `${new URL(c.req.url).origin}/...` ``, and `googleRedirectUri` takes the
+   request URL the same way -- so the redirect URI FOLLOWS the hostname the
+   request arrived on. Register both hostnames in the Discord application and
+   the Worker serves `*.workers.dev` and `api.uncleowen.space` correctly at the
+   same time. Discord refuses any redirect_uri not on its registered list, so a
+   wrong hostname fails safe rather than redirecting somewhere.
+
+That third point is what turns this from a cutover into an additive change,
+and it is the reason the coordination cost the original write-up worried about
+is much lower than it looked: nothing has to happen in lockstep, because the
+old path keeps working until `VITE_API_BASE_URL` is pointed at the new one.
+
+**Sequenced before the release walkthrough, deliberately.** If we test on
+`workers.dev` and ship on `api.uncleowen.space`, every login, OAuth redirect
+and Discord interaction in production runs through a hostname the walkthrough
+never touched -- which is the exact class of untested difference
+`RELEASE-TESTING.md` exists to eliminate. Doing the sandbox first makes the
+walkthrough the verification of the move rather than an extra step after it.
+
+**The one thing still unverified, and it must be checked in the dashboard
+rather than reasoned about:** whether the Free plan's single rate-limiting rule
+permits a PATH-based expression. Free's rate limiting is IP-based fixed-window
+and more restricted than Pro's, and the primary docs do not say. It matters
+because the rule has to catch `/auth/callback` and `/guild-requests/callback`
+without catching `/auth/refresh` -- the trap `docs/SETUP.md` already records.
+If Free will not express paths, the fallback is a rule on the whole `api.`
+hostname with a threshold generous enough that ordinary use never trips it,
+which is still a bound and still closes the clause.
+
+**Option 2 is retired rather than deferred.** A per-IP D1 limiter
+(`CF-Connecting-IP` plus unix minute, one upsert with `RETURNING count` before
+the exchange) would put a metered write back on an unauthenticated path that
+F-24 deliberately cleared -- and it defends a metered third-party call by
+spending a metered resource whose exhaustion takes down the entire app. That is
+a worse failure than the one it prevents.
+
+**A third option was considered and rejected: the Workers rate-limiting
+binding** (GA since Sept 2025, `[[ratelimits]]` plus
+`await env.LIMITER.limit({ key })`, no zone required, works on `workers.dev`,
+and our wrangler 4.114.0 clears its 4.36.0 floor). It would have worked. It
+loses to option 1 on three counts: it is ~10 lines of new code on an auth path
+landing immediately after an acceptance review passed, which is precisely the
+shape that has produced this project's last several regressions; its limits are
+**per-colo rather than global**, so a distributed attacker gets
+`limit x colocation count`; and Cloudflare's own docs advise against IP keys
+and do not surface the binding in the dashboard, so the control would be
+invisible. An edge rule blocks before the Worker is invoked, costs no
+invocation, and is visible where it is configured. Zero new code beats ten
+lines -- prefer removal to mechanism, applied to a control rather than a fix.
+
+**What closing this actually requires**, sandbox first:
+
+- `[[env.sandbox.routes]]` with `custom_domain = true` for
+  `api-sandbox.uncleowen.space`, in `wrangler.toml` rather than the dashboard,
+  so it is in version control and the sandbox deploy workflow applies it.
+- The **sandbox** Discord application: ADD (do not replace) the two callback
+  URIs, and repoint the Interactions Endpoint URL.
+- Walk through with `VITE_API_BASE_URL=https://api-sandbox.uncleowen.space`.
+- Then the same for production and `api.uncleowen.space`, plus
+  `VITE_API_BASE_URL` in the Pages build, plus the one WAF rule on the zone.
+
+Closing this closes release-bar clause 3 by fixing it, which is the only way a
+finding is allowed to leave a category -- and it retires the written exception
+that was otherwise going to have to ship with 1.0.
 
 ### 93. Most of the cron's budget machinery exists to fit a plan we may not need
 
@@ -1115,8 +1198,13 @@ is cheap in effort, and the thing it would buy is not a marginal convenience.
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
-**Nothing in this section counts against the 1.0 test** — that is the entire
-reason it exists, and the reason its entry bar is set where it is.
+
+**This section no longer exempts anything, because since 13 September 2026 the
+1.0 test does not read against an empty list.** Exempting was the entire reason
+it was created; what it does now is record a real distinction —
+decided-for-after versus scheduled-for-next — and its entry bar stays where it
+is because that is what keeps the distinction meaningful rather than
+decorative.
 
 ### 64. Get the Google OAuth app verified, so users stop seeing the unverified warning
 

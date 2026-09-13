@@ -934,68 +934,146 @@ different responses:
 A 401 or 403 will not fix itself, and after 24 hours it locks everyone out.
 Those two are the ones worth alerting on.
 
-### Rate limiting the OAuth callbacks — scheduled for v1.0.1
+### Putting the Worker on a custom domain, and rate limiting the OAuth callbacks
 
-**Correcting an earlier version of this section, which described something
-that cannot be done on this deployment.** It said to add a Cloudflare rate
-limiting rule under Security → WAF "on the zone serving the Worker". There is
-no such zone. Cloudflare's rate limiting rules are configured per *zone* — a
-domain you have added to your account — and this Worker is deployed to its
-default `*.workers.dev` subdomain: `wrangler.toml` declares no `routes` and no
-`custom_domain`, and every URL in this document is a `workers.dev` one.
-`workers.dev` is Cloudflare's zone, not ours. `uncleowen.space` *is* ours, but
-the Worker is not on it, so a rule there would never see an `/auth/callback`
-request.
+**Scheduled for v1.0** (IDEAS item 92). Moved forward from v1.0.1 on 13
+September 2026, once the assumptions behind deferring it were checked and most
+of them turned out to be wrong in the cheap direction.
 
-Nobody caught this for two review passes, including a reviewer who checked
-that the rule was not configured. Checking whether it *could* be is the step
-that was skipped.
+**First, correcting an earlier version of this section, which described
+something that cannot be done on this deployment.** It said to add a Cloudflare
+rate limiting rule under Security → WAF "on the zone serving the Worker". There
+is no such zone. Rate limiting rules are configured per *zone* — a domain you
+have added to your account — and this Worker is deployed to its default
+`*.workers.dev` subdomain. `workers.dev` is Cloudflare's zone, not ours.
+`uncleowen.space` *is* ours, but the Worker is not on it, so a rule there would
+never see an `/auth/callback` request.
+
+Nobody caught this for two review passes, including a reviewer who checked that
+the rule was not configured. Checking whether it *could* be is the step that was
+skipped.
 
 **What the exposure actually is.** `/auth/callback` and
 `/guild-requests/callback` each spend one POST to Discord's token endpoint,
 which Discord rate-limits per client — so a sustained loop degrades login for
 everyone until the limit resets, and the Worker's own request quota is the
-second resource. Nothing is disclosed and no account is affected except by
-being unable to log in. Since the state is signed (F-59), an attacker must
-first call `/auth/login` for a valid signed state and its matching cookie, so
-it costs them two requests per token call rather than one — the price went up,
-the rate is still unbounded.
+second resource. Nothing is disclosed and no account is affected except by being
+unable to log in. Since the state is signed (F-59), an attacker must first call
+`/auth/login` for a valid signed state and its matching cookie, so it costs them
+two requests per token call rather than one — the price went up, the rate is
+still unbounded. Under the release bar's clause 3 that is **unmet**, recorded as
+unmet rather than reworded, because "a finding leaves the bar by being fixed or
+disproved, never by being described differently" applies to the project's own
+clauses first. Putting the Worker on the zone is what closes it.
 
-**Under the release bar's clause 3 this is unmet**, and it is deliberately
-recorded as unmet rather than reworded, because "a finding leaves the bar by
-being fixed or disproved, never by being described differently" applies to the
-project's own clauses first.
+#### What was checked, September 2026
 
-**The two ways to close it, for v1.0.1** (IDEAS item 92):
+Written down with the caveat this section exists to carry: these are platform
+facts as of the date above, checked rather than remembered, and worth
+re-checking if a decision turns on one.
 
-1. **Put the Worker on `api.uncleowen.space`.** The zone is already in the
-   account, so this costs nothing in money — Worker Custom Domains are included
-   — and it makes rate limiting rules available, along with everything else
-   zone-level. What it costs is coordination: the Discord OAuth redirect URIs
-   (both of them), the Discord interactions endpoint URL, the Google OAuth
-   redirect URI and `VITE_API_BASE_URL` all move together, and getting the
-   order wrong breaks login. Do it deliberately, not on release day. A side
-   benefit: Worker and frontend become same-site, which is tidier than the
-   cross-origin note in `ARCHITECTURE.md`.
+- **Worker Custom Domains need an active Cloudflare zone; the free zone plan is
+  enough.** `uncleowen.space` already is one. Money cost: zero.
+- **The Free plan includes one rate limiting rule.** One is what this needs.
+- **You cannot create a Custom Domain on a hostname that already has a CNAME
+  record.** Check DNS for the hostname first; delete a stale record if there is
+  one.
 
-2. **Bound it in code.** A per-IP counter keyed on
-   (`CF-Connecting-IP`, unix minute), one D1 upsert with `RETURNING count`
-   before the token exchange; over the threshold, 429 and no Discord call.
-   Per-IP rather than global so an attacker locks out only themselves. Roughly
-   forty lines and a migration. The honest cost is that it puts a database
-   write back on an unauthenticated path, which F-24 deliberately removed —
-   the trade is a bounded cheap write against an unbounded third-party call,
-   which is the usual one.
+#### The move is additive and reversible, which is the part worth knowing
 
-These are not exclusive and (1) does not depend on (2).
+```
+src/routes/auth.ts:88          `${new URL(c.req.url).origin}/auth/callback`
+src/routes/guildRequests.ts:45 `${new URL(c.req.url).origin}/guild-requests/callback`
+```
 
-**Before choosing, check what Cloudflare currently offers**, because this
-document has now been wrong once by asserting platform behaviour from memory.
-Specifically worth confirming on the pricing and docs pages rather than taking
-from here: how many rate limiting rules a Free zone gets and with what
-matching, whether the Workers-native rate limiting binding (which needs no
-zone) is generally available, and the current free-tier status of Durable
-Objects.
+Both OAuth redirect URIs are **derived from the hostname the request arrived
+on**, not from configuration, and `googleRedirectUri` takes the request URL the
+same way. So the Worker serves `*.workers.dev` and the custom domain correctly
+**at the same time**, with no code change, provided both hostnames are
+registered in the Discord application. Discord refuses any `redirect_uri` not on
+its registered list, so a hostname you forgot to register fails safe rather than
+redirecting somewhere unintended.
+
+Nothing therefore has to move in lockstep. Register both, switch
+`VITE_API_BASE_URL` when you are ready, and switch it back if anything is wrong.
+
+#### The trap: adding `routes` silently switches off `workers.dev`
+
+`workers_dev` defaults to **true** when no route is configured and **false** as
+soon as one is — Wrangler infers it on the next deploy, with no warning. Add a
+`[[routes]]` block without thinking about this and the existing
+`*.workers.dev` URL stops answering, which will look exactly like the custom
+domain having broken everything.
+
+So the route and the explicit `workers_dev` go in together:
+
+```toml
+# sandbox
+[env.sandbox]
+name = "jedi-party-scheduler-worker-sandbox"
+# Explicit because adding routes below would otherwise infer `false` and take
+# the *.workers.dev URL away — see above.
+workers_dev = true
+
+[[env.sandbox.routes]]
+pattern = "api-sandbox.uncleowen.space"
+custom_domain = true
+```
+
+and the same shape at the top level for production and `api.uncleowen.space`.
+Wrangler creates the DNS record and issues the certificate on deploy, so the
+first `npm run deploy:sandbox` (or a push to the `sandbox` branch) is what
+provisions it.
+
+#### Order of operations — sandbox first, as always
+
+1. Add the `[[env.sandbox.routes]]` block above and deploy the sandbox. Confirm
+   `https://api-sandbox.uncleowen.space` answers **and** the old
+   `*.workers.dev` URL still does.
+2. In the **sandbox** Discord application: *add* (do not replace)
+   `https://api-sandbox.uncleowen.space/auth/callback` and
+   `/guild-requests/callback` to the OAuth2 redirect list, and repoint the
+   Interactions Endpoint URL to `.../discord/interactions`.
+3. Run the release walkthrough with
+   `VITE_API_BASE_URL=https://api-sandbox.uncleowen.space`. This is deliberately
+   before the walkthrough rather than after: testing on `workers.dev` and
+   shipping on the custom domain would mean every login, OAuth redirect and
+   interaction in production runs through a hostname nobody exercised.
+4. Repeat 1–2 for production and `api.uncleowen.space`, and set
+   `VITE_API_BASE_URL` in the Pages build.
+5. Add the rate limiting rule on the `uncleowen.space` zone.
+
+#### The rule, and the one thing to check in the dashboard
+
+It has to catch `/auth/callback` and `/guild-requests/callback` **without**
+catching `/auth/refresh` — a path *prefix* on `/auth` would throttle every
+logged-in session's token refresh, which is a self-inflicted outage rather than
+a control.
+
+**Unverified and worth five minutes before relying on it:** whether the Free
+plan's single rate limiting rule permits a path-based expression at all. Free's
+rate limiting is IP-based fixed-window and more restricted than Pro's, and the
+primary docs do not say. Open the rule builder and look at what it offers. If
+paths are not available, a rule on the whole `api.` hostname with a threshold
+generous enough that ordinary use never trips it is still a bound and still
+closes clause 3 — the callbacks are the only unauthenticated spend on that
+hostname.
+
+#### Two alternatives, both rejected
+
+- **A per-IP D1 counter in the Worker** (`CF-Connecting-IP` plus unix minute,
+  one upsert with `RETURNING count` before the exchange). Rejected: it puts a
+  database write back on an unauthenticated path that F-24 deliberately
+  cleared, and it defends a metered third-party call by spending a metered
+  resource whose exhaustion takes the whole app down.
+- **The Workers rate limiting binding** (GA since September 2025, needs no zone,
+  works on `workers.dev`; our Wrangler 4.114.0 clears its 4.36.0 floor).
+  It would have worked, and it is the right answer for a Worker with no zone
+  available. Rejected here because it is new code on an auth path, its limits
+  are **per-colo rather than global**, and it is not visible in the dashboard —
+  where an edge rule blocks before the Worker is even invoked, costs no
+  invocation, and is visible where it is configured. Zero new code beats ten
+  lines.
 
 ### D1 plan limits
 
