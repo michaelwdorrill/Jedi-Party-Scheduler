@@ -58,6 +58,19 @@ the CORS origin and where Discord's OAuth callback returns to. So:
 - [ ] Both accounts are tested from **your machine**, in **two browser
       profiles** (or one normal + one private window). Separate profiles matter:
       the session token lives in `localStorage`, so one profile per account.
+- [ ] **The alt also needs Discord open, not just the website.** Phase 4 has
+      the alt receiving bot DMs and pressing their buttons, and the Discord
+      desktop app shows one account at a time. Sign the alt into Discord in its
+      own browser profile at `discord.com/app`, or on a phone. Without this,
+      4.4–4.7 cannot be run, and nothing else in this list would have told you.
+- [ ] **A second computer is optional, and if used it runs its own frontend.**
+      Nothing here needs one. If the alt is on a laptop, that laptop must
+      clone the repo and run `npm run build` + `npx vite preview --port 5173`
+      itself, because the sandbox only accepts `http://localhost:5173` and on
+      the laptop `localhost` is the laptop — browsing to the main machine's
+      address fails CORS, and Discord's login redirects back to the laptop's
+      own `localhost` regardless. It needs git and Node 22, and **no
+      Cloudflare credentials**: the frontend never touches `wrangler`.
 - [ ] `--port 5173` is not a default and not optional. `vite preview` defaults
       to 4173, and on 4173 login and the Google connect flow both break in ways
       that look like app bugs.
