@@ -119,6 +119,14 @@ Four things the fan-out has to decide:
    "one event, one time". Fanning out a single winner would mean creating an
    event to replace the one the person is already looking at.
 
+**Amended 22 October 2026 (IDEAS 97).** A fixed-slot day's event also
+inherits the poll's threshold as its `minimum_attendees`, with auto-cancel on,
+and the people who voted yes for that day start out accepted -- so a day that
+drops below the threshold after fanning out is called off by the ordinary
+minimum-attendees cascade (decision 4 below). Before fan-out it simply
+un-confirms. A vote on the poll's row for a fanned-out day is recorded as an
+RSVP on the day's event. Windowed days are unchanged.
+
 ## Recurring events: accept one at a time
 
 Michael's second call, and it is what makes per-occurrence attendance

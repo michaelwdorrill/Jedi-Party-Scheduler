@@ -503,6 +503,33 @@ catches up.
 - [ ] **5.9** On a poll that has **already resolved**, the alt RSVPs to the
       resulting session. → It works.
 
+### A confirmed day that loses people — new on 22 Oct (IDEAS 97)
+
+Found on the first walkthrough: "Can't make it" on a confirmed multi-winner
+day left it confirmed, and once the day had become its own event the answer
+reached nothing. Now a day that drops below the poll's threshold is called off.
+Use a multi-winner poll with a threshold of **2**, main and the alt both
+invited.
+
+- [ ] **5.10** Both say **I'm in** on one day. → Confirmed. Within a cron tick
+      (15 min) the row gains *"This day is now its own event — open it"*, and
+      that event is on the calendar with **both** of you already showing as in
+      — not asked again — and the line *"Called off automatically if fewer than
+      2 people are in."*
+- [ ] **5.11** As main, press **Can't make it** on that row. → A confirmation
+      first, saying it will be called off for everyone and can't be put back.
+      **Cancel it** once: nothing changes. Then do it for real. → The row reads
+      **Called off**, struck through, with no buttons.
+- [ ] **5.12** As the alt, on the next tick or two: a DM saying the event was
+      cancelled because attendance dropped below the minimum. **Main gets no
+      such DM** — they made the decision.
+- [ ] **5.13** Same setup on a fresh day, but switch to **Can't make it**
+      *before* the row shows "now its own event" (straight after confirming).
+      → It simply goes back to "1 in", no confirmation, no DM — nobody had been
+      told yet. Say **I'm in** again and it re-confirms.
+- [ ] **5.14** With a threshold of 2 and **three** people in, one drops out.
+      → No warning, and the day stays on.
+
 ---
 
 ## Phase 6 — settings, policy, and the destructive ones last
@@ -566,12 +593,12 @@ the right shape for walking the product but the wrong shape for answering
 user-observable change across the **98 commits since `main`**, and the step
 that would notice if it regressed.
 
-**What the sandbox adds over the test suite, stated honestly.** 863 worker
-tests and 142 frontend tests cover most of the *logic* below, and each fix was
+**What the sandbox adds over the test suite, stated honestly.** 870 worker
+tests and 150 frontend tests cover most of the *logic* below, and each fix was
 revert-verified — the test was watched failing before the fix and passing
 after, so these are not tests that pass vacuously. What no test can see is:
 
-- **The frontend.** 142 tests against a component tree, and until this
+- **The frontend.** 150 tests against a component tree, and until this
   walkthrough, zero browser runs of any kind.
 - **Real Discord.** Every DM test stubs `fetch`. Nothing has proved a real
   interaction round trip.
@@ -614,6 +641,7 @@ table, and therefore how hard to look here.
 | **Change requests** | The recovery arm that re-admitted removed guests was **deleted** | **3.9–3.13** | Good |
 | **Change requests** | Resolution prices its branches and reserves before claiming; the accept path stops acting on stale reads | **3.10, 3.11** | Good. **P21-09 is still open** — see the warning at 3.10 |
 | **Change requests** | **New (22 Oct):** a sole invitee's time change waits for the organizer instead of carrying itself; the organizer is refused a vote and no longer DMed to vote | **3.9, 3.10, 3.21** | Revert-verified; **not yet reviewed** |
+| **Polls** | **New (22 Oct):** a confirmed multi-winner day that drops below its threshold is called off; its own event inherits the threshold as a minimum and starts with the yes-voters counted | **5.10–5.14** | Worker revert-verified; **not yet reviewed**; real DMs untested |
 | **Forms** | **New (22 Oct):** moving a start takes the end with it, in every start/end picker | **2.28–2.31, 3.9** | Logic revert-verified; **wiring is browser-only** |
 | **Discord** | P21-04 — a one-session cancel took a converted series with it | **4.12** | Good logic, **never a real button press** |
 | **Discord** | A cancel that changed nothing no longer reports success | **4.13** | Good |
@@ -644,6 +672,6 @@ Ranked by (no automated coverage) × (how bad it is if broken):
   with its own findings still open (F60-A/B, P21-11, P21-12).
 - **Load or abuse testing.** Related to IDEAS 92 and not a friend-group
   concern.
-- **Anything already covered by the 863 worker and 142 frontend tests.** This
+- **Anything already covered by the 870 worker and 150 frontend tests.** This
   plan is for what those cannot see: whether the product makes sense to a
   person using it.

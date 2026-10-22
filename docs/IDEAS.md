@@ -1326,6 +1326,70 @@ The logic is unit-tested and revert-checked; the wiring into five forms is
 not (there is no component test for any of them), which is what 2.28–2.31 are
 for.
 
+### 97. A confirmed poll day did not notice people leaving it
+
+**Built for 1.0 on 22 October 2026 (`5881e91`, `5f18ee9`), at Michael's call**
+-- "un-confirm below threshold", chosen over the recommended "point the row at
+the day's event". Not yet through the reviewer pass or walkthrough steps
+5.10-5.14, so it stays here until both have happened.
+
+Found on the first browser walkthrough: main and the alt confirmed a day on a
+multi-winner poll, main pressed *Can't make it*, and it stayed *Confirmed*. A
+throwaway test showed it was worse than the label. Within a cron tick a
+confirmed day becomes its own event (spec 0014), and from then on that event's
+attendance is what counts (item 88) -- but the poll row kept its buttons, and
+its text promised you could "join a confirmed day" any time. So the answer was
+recorded on the poll and reached nothing: the real session went on counting
+main, and would have reminded him about a night he had said he could not make.
+That made a sentence on the page false on the ordinary path, which is clause 2.
+
+**What shipped.** Two halves, because a confirmed day has two shapes:
+
+- *Before fan-out* (at most a tick), nobody has been told. When the yes count
+  falls below the threshold, `checkThresholdAndResolve` clears `confirmed_at`
+  and the day can confirm again.
+- *After*, the day's event inherits the threshold as `minimum_attendees` with
+  auto-cancel on, and the yes-voters start out accepted. The existing
+  minimum-attendees cascade in `recordRsvp` is what calls the day off, and its
+  existing notice tells everyone still coming -- no second cancel path, which
+  is the "prefer removal to mechanism" guardrail applied. A vote on the poll row
+  for that day is recorded as an RSVP on the day's event, so the buttons mean
+  what they say, and the row reads its going list and your answer from there.
+
+A *Can't make it* that would call a day off is confirmed first and the
+confirmation says it cannot be put back on (clause 4). The same check now
+guards every one-off event with a minimum and auto-cancel on, whose decline
+has always cancelled without warning; that page also states the minimum now.
+
+**Things this changes that were true before**, worth the reviewer's attention:
+
+- A fanned-out day's event used to start with nobody accepted but the
+  organizer, and asked everyone again. The yes-voters are now carried over.
+  That treats "I'm in" on a *confirmed* day as attendance, which spec 0014's
+  "a vote and an RSVP are two statements" did not -- defensible because the
+  button says *I'm in* about one specific night, but it is a reading of that
+  principle, not an application of it.
+- The day's event counts the organizer unless they declined, as every event
+  does, while the poll's threshold counted them only if they voted yes. So an
+  organizer who never voted makes a fanned-out day survive one more dropout
+  than the poll's arithmetic suggests.
+- P21-05's "a confirmed candidate stays joinable forever" now means joinable
+  on the day's event; a called-off day refuses answers with a reason.
+
+**Known and left alone (1.0.1):**
+
+- **Windowed multi-winner polls are unchanged.** Their answers are ranges, and
+  what withdrawing a range should do to a confirmed day is its own question.
+- **The Discord poll select does not reach a fanned-out day.** Ticking or
+  unticking it there changes the poll's record only; the day's own invite DM,
+  with RSVP buttons, is where that day is answered. Unticking was never "can't
+  make it" (see `recordPollSelection`), so nothing is silently cancelled.
+- **Someone invited to the poll after a day fanned out** is not on that day's
+  event and is refused there (pre-existing: poll invites are not propagated to
+  fanned-out days).
+- **A day called off is final.** Re-confirming it would mean un-cancelling an
+  event people were told is off; it stays called off, struck through.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
