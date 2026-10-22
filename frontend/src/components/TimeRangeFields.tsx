@@ -1,4 +1,4 @@
-import type { TimeRangeDraft } from '../lib/timeRange';
+import { endFollowingStart, type TimeRangeDraft } from '../lib/timeRange';
 import { controlClass } from './ui';
 
 // The four inputs of a start-and-end, shared by the invitee's change-request
@@ -12,15 +12,24 @@ export default function TimeRangeFields({
   startLabel,
   endLabel,
   idPrefix,
+  zone,
 }: {
   draft: TimeRangeDraft;
   onChange: (next: TimeRangeDraft) => void;
   startLabel: string;
   endLabel: string;
   idPrefix: string;
+  // The zone the typed times mean -- needed to know how long the range is, so
+  // that moving the start can take the end with it.
+  zone: string;
 }) {
   const set = (field: keyof TimeRangeDraft) => (e: React.ChangeEvent<HTMLInputElement>) =>
     onChange({ ...draft, [field]: e.target.value });
+  // Moving the start takes the end with it (lib/timeRange.ts).
+  const setStart = (field: 'date' | 'startTime') => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const nextStart = { date: draft.date, startTime: draft.startTime, [field]: e.target.value };
+    onChange({ ...draft, ...nextStart, ...endFollowingStart(draft, nextStart, zone) });
+  };
 
   return (
     <div className="flex flex-wrap gap-3">
@@ -32,7 +41,7 @@ export default function TimeRangeFields({
           id={`${idPrefix}-date`}
           type="date"
           value={draft.date}
-          onChange={set('date')}
+          onChange={setStart('date')}
           className={controlClass('lg', 'w-full')}
         />
       </div>
@@ -44,7 +53,7 @@ export default function TimeRangeFields({
           id={`${idPrefix}-start-time`}
           type="time"
           value={draft.startTime}
-          onChange={set('startTime')}
+          onChange={setStart('startTime')}
           className={controlClass('lg', 'w-full')}
         />
       </div>

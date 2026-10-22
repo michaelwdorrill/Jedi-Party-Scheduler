@@ -9,6 +9,7 @@ import TimezoneSelect from '../components/TimezoneSelect';
 import type { PersonalEvent, PersonalAvailability } from '../types';
 import { describeError, editTargetReady, latestOnly } from '../lib/async';
 import { ErrorState, InlineError, Loading, buttonClass, cardClass, controlClass } from '../components/ui';
+import { endFollowingStart } from '../lib/timeRange';
 
 // Personal time: private to you, never shown to anyone else, and (unless you
 // untick "show me as busy") it makes you look unavailable in other people's
@@ -173,9 +174,15 @@ export default function PersonalEventPage() {
 
   const toUtc = (d: string, t: string) => DateTime.fromISO(`${d}T${t}`, { zone: timezone }).toMillis();
 
-  const handleStartDateChange = (next: string) => {
-    setDate(next);
-    if (endDate < next) setEndDate(next);
+  // Moving the start takes the end with it, keeping the length -- the rule
+  // every start/end picker shares (lib/timeRange.ts's endFollowingStart),
+  // which keeps the old date-level nudge as its fallback.
+  const handleStartChange = (nextDate: string, nextStartTime: string) => {
+    const end = endFollowingStart({ date, startTime, endDate, endTime }, { date: nextDate, startTime: nextStartTime }, timezone);
+    setDate(nextDate);
+    setStartTime(nextStartTime);
+    setEndDate(end.endDate);
+    setEndTime(end.endTime);
   };
 
   const handleSubmit = async () => {
@@ -312,7 +319,7 @@ export default function PersonalEventPage() {
             <input
               type="date"
               value={date}
-              onChange={(e) => handleStartDateChange(e.target.value)}
+              onChange={(e) => handleStartChange(e.target.value, startTime)}
               className={controlClass('lg', 'w-full')}
             />
           </div>
@@ -321,7 +328,7 @@ export default function PersonalEventPage() {
             <input
               type="time"
               value={startTime}
-              onChange={(e) => setStartTime(e.target.value)}
+              onChange={(e) => handleStartChange(date, e.target.value)}
               className={controlClass('lg', 'w-full')}
             />
           </div>

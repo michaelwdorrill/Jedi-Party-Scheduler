@@ -10,6 +10,7 @@ import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceFor
 import TimezoneSelect from '../components/TimezoneSelect';
 import SchedulingAssistant, { type AssistantSlot } from '../components/SchedulingAssistant';
 import { isValidRange, startsInPast } from '../lib/datetime';
+import { endFollowingStart } from '../lib/timeRange';
 import type { EventDetail, Friend, Group, PollStrategy, VoiceChannel } from '../types';
 import { describeError, editTargetReady, latestOnly } from '../lib/async';
 import { ErrorState, InlineError, buttonClass, cardClass, controlClass } from '../components/ui';
@@ -386,12 +387,15 @@ export default function EventFormPage() {
   const removePollSlot = (key: string) =>
     setPollSlots((prev) => prev.filter((s) => s.key !== key));
 
-  // Same nudge as handleStartDateChange below, applied per-slot: moving a
-  // candidate day's start date forward drags its own end date along if the
-  // end would otherwise fall before it.
-  const handleSlotStartDateChange = (key: string, next: string) =>
+  // Each poll option row follows the same rule as the event's own times
+  // (handleStartChange below): moving its start takes its end with it.
+  const handleSlotStartChange = (key: string, next: { date?: string; startTime?: string }) =>
     setPollSlots((prev) =>
-      prev.map((s) => (s.key === key ? { ...s, date: next, endDate: s.endDate < next ? next : s.endDate } : s)),
+      prev.map((s) => {
+        if (s.key !== key) return s;
+        const nextStart = { date: next.date ?? s.date, startTime: next.startTime ?? s.startTime };
+        return { ...s, ...nextStart, ...endFollowingStart(s, nextStart, timezone) };
+      }),
     );
 
   const toggleUser = (id: string) =>
@@ -486,16 +490,22 @@ export default function EventFormPage() {
     setVoiceChannelId('');
   };
 
-  // Moving the start forward drags an earlier end along with it, so the form
-  // can't sit in a state that would submit a negative-length event.
-  const handleStartDateChange = (next: string) => {
-    setDate(next);
-    if (endDate < next) setEndDate(next);
+  // Moving the start takes the end with it, keeping the length
+  // (lib/timeRange.ts's endFollowingStart, shared by every start/end picker).
+  // It subsumes the old date-level nudge, which it keeps as its fallback for a
+  // range with no length yet, so the form still can't be dragged into a
+  // negative-length event.
+  const handleStartChange = (nextDate: string, nextStartTime: string) => {
+    const end = endFollowingStart({ date, startTime, endDate, endTime }, { date: nextDate, startTime: nextStartTime }, timezone);
+    setDate(nextDate);
+    setStartTime(nextStartTime);
+    setEndDate(end.endDate);
+    setEndTime(end.endTime);
   };
 
-  // Catches what handleStartDateChange doesn't: two same-day fields where the
-  // end *time* (not date) is before the start time, which the date-level
-  // nudge above has no way to see. Server-side, worker/src/lib/validate.ts
+  // Catches what handleStartChange can't prevent: an end typed before the
+  // start directly, or a range with no length yet, which endFollowingStart
+  // deliberately leaves alone rather than rewriting. Server-side, worker/src/lib/validate.ts
   // rejects this unconditionally -- this is the client-side warning that was
   // missing (idea 12), not a replacement for that check.
   const singleRangeValid =
@@ -720,7 +730,7 @@ export default function EventFormPage() {
               <input
                 type="date"
                 value={date}
-                onChange={(e) => handleStartDateChange(e.target.value)}
+                onChange={(e) => handleStartChange(e.target.value, startTime)}
                 className={controlClass('lg', 'w-full')}
               />
             </div>
@@ -729,7 +739,7 @@ export default function EventFormPage() {
               <input
                 type="time"
                 value={startTime}
-                onChange={(e) => setStartTime(e.target.value)}
+                onChange={(e) => handleStartChange(date, e.target.value)}
                 className={controlClass('lg', 'w-full')}
               />
             </div>
@@ -854,17 +864,13 @@ export default function EventFormPage() {
                     <input
                       type="date"
                       value={slot.date}
-                      onChange={(e) => handleSlotStartDateChange(slot.key, e.target.value)}
+                      onChange={(e) => handleSlotStartChange(slot.key, { date: e.target.value })}
                       className={controlClass('sm')}
                     />
                     <input
                       type="time"
                       value={slot.startTime}
-                      onChange={(e) =>
-                        setPollSlots((prev) =>
-                          prev.map((s) => (s.key === slot.key ? { ...s, startTime: e.target.value } : s)),
-                        )
-                      }
+                      onChange={(e) => handleSlotStartChange(slot.key, { startTime: e.target.value })}
                       className={controlClass('sm')}
                     />
                     <span className="text-faint">to</span>

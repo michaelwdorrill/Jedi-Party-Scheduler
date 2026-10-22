@@ -69,6 +69,7 @@ export default function MoveOccurrenceForm({
         startLabel="New start"
         endLabel="New end"
         idPrefix="move-occurrence"
+        zone={eventZone}
       />
       {eventZone !== viewerZone && (
         <p className="text-xs text-muted">Times here are in the event&rsquo;s time zone, {eventZone}.</p>

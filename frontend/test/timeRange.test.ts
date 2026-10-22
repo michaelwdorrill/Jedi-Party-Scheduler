@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon';
 import { describe, expect, it } from 'vitest';
 import {
+  endFollowingStart,
   seedTimeRangeDraft,
   timeRangeDraftComplete,
   timeRangeDraftOrdered,
@@ -55,5 +56,58 @@ describe('timeRange', () => {
     // would let a half-typed time through; "complete" is what catches it.
     expect(timeRangeDraftOrdered(halfTyped, NY)).toBe(true);
     expect(timeRangeDraftComplete(halfTyped, NY)).toBe(false);
+  });
+});
+
+describe('endFollowingStart', () => {
+  const evening = { date: '2030-01-14', startTime: '19:00', endDate: '2030-01-14', endTime: '23:00' };
+
+  it('moves the end by the same amount when the start DATE changes', () => {
+    expect(endFollowingStart(evening, { date: '2030-01-16', startTime: '19:00' }, NY)).toEqual({
+      endDate: '2030-01-16',
+      endTime: '23:00',
+    });
+  });
+
+  it('moves the end by the same amount when the start TIME changes, across midnight if it must', () => {
+    expect(endFollowingStart(evening, { date: '2030-01-14', startTime: '21:30' }, NY)).toEqual({
+      endDate: '2030-01-15',
+      endTime: '01:30',
+    });
+  });
+
+  it('keeps a multi-day length', () => {
+    const weekend = { date: '2030-01-18', startTime: '18:00', endDate: '2030-01-20', endTime: '12:00' };
+    expect(endFollowingStart(weekend, { date: '2030-01-25', startTime: '18:00' }, NY)).toEqual({
+      endDate: '2030-01-27',
+      endTime: '12:00',
+    });
+  });
+
+  it('keeps elapsed time across a DST change, as a calendar does', () => {
+    // US clocks go forward at 2am on 10 March 2030. A 4-hour session moved
+    // onto the night it happens still lasts 4 hours: 10pm to 3am, not 2am.
+    const fourHours = { date: '2030-03-02', startTime: '22:00', endDate: '2030-03-03', endTime: '02:00' };
+    expect(endFollowingStart(fourHours, { date: '2030-03-09', startTime: '22:00' }, NY)).toEqual({
+      endDate: '2030-03-10',
+      endTime: '03:00',
+    });
+  });
+
+  it('leaves a half-typed end alone, apart from the old date nudge', () => {
+    const noEndTime = { date: '2030-01-14', startTime: '19:00', endDate: '2030-01-14', endTime: '' };
+    expect(endFollowingStart(noEndTime, { date: '2030-01-14', startTime: '20:00' }, NY)).toEqual({
+      endDate: '2030-01-14',
+      endTime: '',
+    });
+    expect(endFollowingStart(noEndTime, { date: '2030-01-16', startTime: '19:00' }, NY).endDate).toBe('2030-01-16');
+  });
+
+  it('does not invent a length for a backwards range', () => {
+    const backwards = { date: '2030-01-14', startTime: '21:00', endDate: '2030-01-14', endTime: '20:00' };
+    expect(endFollowingStart(backwards, { date: '2030-01-14', startTime: '22:00' }, NY)).toEqual({
+      endDate: '2030-01-14',
+      endTime: '20:00',
+    });
   });
 });

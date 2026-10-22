@@ -77,6 +77,7 @@ function MoveRequestForm({
         startLabel="Proposed start"
         endLabel="Proposed end"
         idPrefix="change-request-time"
+        zone={zone}
       />
       {!rangeValid && <p className="text-xs text-danger-text">End must be after the start.</p>}
       <textarea
