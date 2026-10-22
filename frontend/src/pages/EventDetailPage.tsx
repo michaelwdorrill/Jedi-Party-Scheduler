@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
+import { rsvpCallsOffEvent } from '../lib/callOff';
 import { formatDuration, formatTimeRange } from '../lib/datetime';
 import ChangeRequestSection from '../components/ChangeRequestSection';
 import MoveOccurrenceForm from '../components/MoveOccurrenceForm';
@@ -125,8 +126,19 @@ export default function EventDetailPage() {
   // slots to vote on or windows to find a session inside (specs/0013).
   const isWindowed = event.windowBlockMinutes != null;
 
-  const handleRsvp = (status: RsvpStatus) =>
-    action.run(async () => {
+  const handleRsvp = (status: RsvpStatus) => {
+    // IDEAS 97: the decline that takes an auto-cancelling event below its
+    // minimum calls it off for everyone -- say so before, not after.
+    if (
+      rsvpCallsOffEvent(event, user?.id, status) &&
+      !confirm(
+        `This needs ${event.minimumAttendees} people in, and saying you can't make it takes it below that. ` +
+          `It will be called off for everyone, and the people still coming will be told. It can't be put back on afterwards.`,
+      )
+    ) {
+      return;
+    }
+    return action.run(async () => {
       // specs/0014: attendance is per occurrence. The URL's ?occurrence= wins
       // when present (it's what the calendar linked to); otherwise fall back
       // to the occurrence the server already resolved this page to (decision
@@ -137,6 +149,7 @@ export default function EventDetailPage() {
       });
       reload();
     });
+  };
 
   const handleVote = (optionId: string, vote: PollVote) =>
     action.run(async () => {
@@ -346,6 +359,15 @@ export default function EventDetailPage() {
       {event.eventType === 'single' && event.startAt && event.endAt && (
         <div className={cardClass()}>
           <p className="mb-3 font-medium">{formatTimeRange(event.startAt, event.endAt, zone)}</p>
+          {event.status === 'active' &&
+            event.minimumAttendees != null &&
+            event.autoCancelBelowMinimum &&
+            event.minimumAttendeesDeadlineAt == null &&
+            !event.isRecurring && (
+              <p className="mb-3 text-xs text-muted">
+                Called off automatically if fewer than {event.minimumAttendees} people are in.
+              </p>
+            )}
           {event.status === 'active' && (
             <RsvpButtons current={event.myRsvpStatus} onChange={handleRsvp} />
           )}
@@ -377,7 +399,8 @@ export default function EventDetailPage() {
         <div className="space-y-2">
           <p className="text-sm text-muted">
             Each day is confirmed independently once {event.pollThresholdCount} people say they're in — any that
-            qualify all happen. You can still vote (or join a confirmed day) any time before it starts.
+            qualify all happen, each as its own event. You can change your answer on a confirmed day any time before
+            it starts, but if that leaves fewer than {event.pollThresholdCount} in, the day is called off.
           </p>
           {event.pollOptions.map((opt) => (
             <PollOptionRow
@@ -386,6 +409,7 @@ export default function EventDetailPage() {
               zone={zone}
               onVote={(vote) => handleVote(opt.id, vote)}
               votingDisabled={!opt.confirmedAt && deadlinePassed}
+              threshold={event.pollThresholdCount}
             />
           ))}
         </div>

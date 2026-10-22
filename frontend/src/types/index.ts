@@ -132,6 +132,11 @@ export interface PollOption {
   voters: PollVoter[];
   tally: { yes: number; no: number; maybe: number };
   myVote: PollVote | null;
+  // IDEAS 97: a confirmed multi-winner day becomes its own event, which is
+  // where it is answered and counted from then on. sessionStatus 'cancelled'
+  // means it was called off for dropping below the poll's threshold.
+  sessionEventId: string | null;
+  sessionStatus: EventStatus | null;
 }
 
 export interface WindowSubmission {
