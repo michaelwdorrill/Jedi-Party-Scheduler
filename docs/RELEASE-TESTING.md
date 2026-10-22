@@ -291,6 +291,11 @@ deploys itself, the frontend you run locally does not.
 - [ ] **2.26** Read the form's text as a user. It says answers carry over,
       nobody gets a message, and reminders still to come will show the new
       time. **Is that what you'd want to know, and is any of it surprising?**
+- [ ] **2.27** On your own event, the **Change requests** section offers you
+      **no** *Ask to move this* or *Suggest someone* — those are for invitees,
+      and the server refuses them from the organizer. *(Found on the first
+      walkthrough: the page treated the organizer as an invitee, because idea
+      26 gave every organizer an invite row.)*
 
 ---
 
@@ -370,6 +375,14 @@ opened, not when it was queued or linked.**
       moves that date (2.22's control). → As the alt, that date shows the new
       time and **still shows Accepted**. No DM about the move arrives — that is
       by design, and the form told main so.
+
+### The organizer decides; they do not vote
+
+- [ ] **3.21** With the alt's time-change request pending, main sees **Accept**
+      and **Decline** only — **no vote buttons**. *(The same idea-26 cause as
+      2.27. Before the fix the server also counted an organizer's vote toward a
+      threshold computed without them, so one invitee plus the organizer could
+      carry a request.)*
 
 ---
 

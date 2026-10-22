@@ -450,7 +450,13 @@ export default function EventDetailPage() {
           event={event}
           userId={user.id}
           isOrganizer={isOrganizer}
-          isInvitee={event.invites.some((inv) => inv.userId === user.id)}
+          // Not the organizer, even though they have an invite row. Idea 26 gave
+          // every organizer one (so their own RSVP has somewhere to land), which
+          // quietly made this check true for them too: the section offered the
+          // organizer "Ask to move this" and "Suggest someone" -- both refused by
+          // the server for the organizer -- and vote buttons the spec reserves
+          // for invitees. Found on the first browser walkthrough.
+          isInvitee={!isOrganizer && event.invites.some((inv) => inv.userId === user.id)}
           requests={changeRequests}
           occurrenceDate={occurrenceDate}
           loadFriends={loadFriends}

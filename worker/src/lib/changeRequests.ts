@@ -262,6 +262,19 @@ export async function voteOnChangeRequest(
 ): Promise<void> {
   if (request.kind !== 'time_change') throw new ValidationError('Only a time_change request can be voted on');
   if (request.status !== 'pending') throw new ValidationError('Voting is closed for this request');
+  // The organizer decides a request; they do not vote on it -- the spec's "not
+  // the organizer, who has the override instead", which createChangeRequest
+  // above already enforces for filing. isCurrentInvitee alone stopped being
+  // enough when idea 26 gave every organizer an invite row: their vote then
+  // counted toward a threshold computed WITHOUT them, so with three invitees
+  // (threshold two) the requester's own yes plus the organizer's would carry a
+  // request only one invitee had backed. No privilege was gained -- they can
+  // accept outright -- but the tally invitees see counted someone the spec
+  // excludes. Found on the first browser walkthrough, via the page offering
+  // the organizer vote controls for the same reason.
+  if (event.organizer_id === userId) {
+    throw new ValidationError('The organizer accepts or declines a request rather than voting on it');
+  }
   if (!(await isCurrentInvitee(env, event.id, userId))) {
     throw new ValidationError('Only a current invitee can vote');
   }

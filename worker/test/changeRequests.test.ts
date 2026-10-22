@@ -255,6 +255,43 @@ describe('voting and threshold resolution', () => {
     const request = await loadChangeRequest(env, 'ev1', id);
     await expect(voteOnChangeRequest(env, event, request!, 'inv-a', 'yes')).rejects.toThrow(/voted on/);
   });
+
+  // The organizer decides a request; the spec has them accept or decline, not
+  // vote, and the threshold is computed without them. Since idea 26 every
+  // organizer has an invite row, which is all isCurrentInvitee asked -- so
+  // their vote was accepted and counted toward a threshold that excluded
+  // them. Found on the first browser walkthrough, where the page offered the
+  // organizer vote controls for the same reason.
+  it('refuses a vote from the organizer, so it cannot carry a request invitees did not', async () => {
+    const { db, env } = setup();
+    await seedBasicEvent(db);
+    // Idea 26: the organizer's own invite row, as every real event now has.
+    await seedInvite(db, 'ev1', 'organizer');
+    for (const id of ['inv-a', 'inv-b', 'inv-c']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+      await seedInvite(db, 'ev1', id);
+    }
+    const event = await loadEventRow(db, 'ev1');
+
+    const proposedStartAt = Date.now() + 20 * HOUR_MS;
+    const id = await createChangeRequest(env, event, 'inv-a', {
+      kind: 'time_change',
+      proposedStartAt,
+      proposedEndAt: proposedStartAt + HOUR_MS,
+    });
+    let request = await loadChangeRequest(env, 'ev1', id);
+    // Three invitees, organizer excluded -> majority of two. The requester's
+    // own yes is one.
+    expect(request!.vote_threshold_count, 'fixture: threshold should exclude the organizer').toBe(2);
+
+    await expect(voteOnChangeRequest(env, event, request!, 'organizer', 'yes')).rejects.toThrow(/organizer/i);
+
+    request = await loadChangeRequest(env, 'ev1', id);
+    expect(request!.status, "the organizer's vote carried a request only one of three invitees backed").toBe('pending');
+    expect(await countRows(db, 'event_change_request_votes', `request_id = '${id}' AND user_id = 'organizer'`)).toBe(0);
+    expect((await loadEventRow(db, 'ev1')).start_at).not.toBe(proposedStartAt);
+  });
 });
 
 describe('accepting a request', () => {
