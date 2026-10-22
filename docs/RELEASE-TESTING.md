@@ -232,7 +232,8 @@ steps above only scratch it. These are the ones that would catch a regression.
 > that moves one occurrence is an invitee's time-change request, accepted —
 > which needs two accounts, so it lives in Phase 3. Found on the first real
 > run: the step failed because the control it described does not exist. The
-> product gap behind it is IDEAS 94.
+> product gap behind it is IDEAS 94 — **built the same day**, so the
+> organizer's own move is now tested directly by 2.21–2.26.
 - [ ] **2.14** Look at a series whose occurrences have **all finished**
       (backdate one if there isn't one). → The noticeboard and the calendar
       still show everything else. A fully-past series must not empty either.
