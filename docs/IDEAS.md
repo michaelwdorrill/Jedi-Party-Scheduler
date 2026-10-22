@@ -1220,6 +1220,15 @@ And the organizer cannot use that route on their own event:
 `createChangeRequest` refuses with *"The organizer cannot file a change request
 on their own event."*
 
+**It was never decided; it fell through a gap between two specs.** Spec 0003
+blocks the organizer from filing change requests with this reasoning: *"They
+can edit it. Allowing it would create a second, weirder path to the same
+write."* For a one-off event that holds. For one date of a series it does not
+-- the organizer's Edit is series-wide, so "they can edit it" quietly assumed
+Edit could do everything a change request can, and it cannot. Spec 0014 later
+built per-occurrence cancel and per-occurrence answers without revisiting it.
+Neither spec is wrong about what it considered; nobody considered this.
+
 **So the asymmetry:** someone with less authority over an event can get one of
 its dates moved, and its owner cannot. For a friend group's weekly game night,
 "just this week, start an hour later" is the commonest edit there is.
