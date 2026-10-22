@@ -1203,6 +1203,54 @@ wrong (item 92, and the D1 comment the Pass-20 reviewer corrected). Check the
 current Workers pricing page. The point to carry is only that the switch itself
 is cheap in effort, and the thing it would buy is not a marginal convenience.
 
+### 94. The organizer cannot move one occurrence of their own series — an invitee can
+
+Found on the first browser walkthrough, 22 October 2026, by release-testing
+step 2.12 failing: *"I can't change date on a single occurrence, it's only able
+to edit the series."* The step was wrong — it described a control that has
+never existed — but what it ran into is a real gap.
+
+**What exists.** Per occurrence, the organizer has *Cancel this occurrence*,
+beside the series-level *Edit* and *Cancel event* (the shape spec 0014
+records). There is no *Edit this occurrence*. The one route in the app that
+moves a single occurrence is an invitee's `time_change` change request on a
+recurring event, accepted by the organizer — `applyChangeRequest` writes an
+`event_occurrence_overrides` row with `override_start_at`/`override_end_at`.
+And the organizer cannot use that route on their own event:
+`createChangeRequest` refuses with *"The organizer cannot file a change request
+on their own event."*
+
+**So the asymmetry:** someone with less authority over an event can get one of
+its dates moved, and its owner cannot. For a friend group's weekly game night,
+"just this week, start an hour later" is the commonest edit there is.
+
+**The 1.0 workaround** is to cancel that occurrence and create a one-off event
+at the new time, re-inviting people. It works and it is clumsy: answers given
+for that date do not carry over, because it is a different event.
+
+**Under the release bar this is a feature gap, not a defect** — it writes no
+wrong data, discloses nothing, and no published statement claims the ability
+exists. So it is scheduled rather than blocking, and the recommendation is
+**v1.0.1**. Adding a new write path and UI after the acceptance review passed
+is the shape that has produced most of this project's late regressions, and it
+would need its own review pass.
+
+**Design notes for whoever builds it:**
+
+- **One way an occurrence moves, not two.** The override write already exists,
+  carrying its admission check (`OVERRIDE_ADMISSION_SQL`, P15-06) inside the
+  statement. An organizer route should reuse that write, not grow a second
+  copy of it — the same reasoning that refused a second copy of the disconnect
+  sweep in F-60.
+- **The accept path already had to answer the hard questions**, and a direct
+  move must give the same answers rather than new ones: who is told that a
+  date moved, what happens to answers already given for that date (spec 0014
+  makes them per occurrence), and how reminders keyed on that occurrence
+  follow it.
+- **The control's place is fixed by the existing shape:** *Move this
+  occurrence* beside *Cancel this occurrence*, gated the same way on
+  `?occurrence=`.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.

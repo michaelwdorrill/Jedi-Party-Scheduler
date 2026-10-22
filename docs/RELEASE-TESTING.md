@@ -224,12 +224,15 @@ steps above only scratch it. These are the ones that would catch a regression.
 - [ ] **2.11** Edit the **series** (not one occurrence): change its title. →
       Every occurrence shows the new title, and **not one date has moved**.
       *(Editing a recurring event used to rewrite its schedule.)*
-- [ ] **2.12** Move a **single occurrence** to a different day. Then edit the
-      series title again. → The moved occurrence keeps its **moved** date and
-      picks up the new title; the others are untouched.
-- [ ] **2.13** Open that moved occurrence on its own — its own link — and
-      reload the page. → It resolves to the moved occurrence, not to a 404 and
-      not to the nominal date.
+> **2.12 and 2.13 were retired on 22 Oct 2026 and their intent moved to
+> 3.14–3.16.** As written they asked the organizer to move one occurrence, and
+> the organizer cannot: spec 0014 gives each occurrence *Cancel this
+> occurrence* beside the series-level *Edit*, never *Edit this occurrence*,
+> and the change-request path refuses the organizer outright. The only route
+> that moves one occurrence is an invitee's time-change request, accepted —
+> which needs two accounts, so it lives in Phase 3. Found on the first real
+> run: the step failed because the control it described does not exist. The
+> product gap behind it is IDEAS 94.
 - [ ] **2.14** Look at a series whose occurrences have **all finished**
       (backdate one if there isn't one). → The noticeboard and the calendar
       still show everything else. A fully-past series must not empty either.
@@ -298,18 +301,38 @@ Second browser profile, alt account, log in.
       added.
 - [ ] **3.13** Main **declines** a request. Alt sees it declined.
 
+### A moved occurrence — the only route there is
+
+3.9–3.11 move a **one-off** event, which rewrites the event row. Moving one
+occurrence of a **series** is a different code path entirely — it writes an
+override that the recurrence expander has to apply on every read — and before
+these steps the walkthrough never reached it. Invite the alt to the recurring
+event from 2.2 first.
+
+- [ ] **3.14** As the alt, open **one occurrence** of the recurring event from
+      the calendar (so the page is about that date), and request a time change
+      for it — the form's *Which occurrence?* field should already hold that
+      date. Main accepts. → **That one date moves**, for both accounts. Every
+      other occurrence stays where it was.
+- [ ] **3.15** Main edits the **series** title. → The moved occurrence keeps
+      its **moved** time and picks up the new title; the others are untouched.
+      *(This is what 2.12 was trying to test.)*
+- [ ] **3.16** Open the moved occurrence from the calendar, then **reload** the
+      page. → It shows the moved time — not a 404, and not the original date.
+      *(This is what 2.13 was trying to test.)*
+
 ### Access removal — several findings, one observable behaviour
 
 The rule these all restate: **access is checked when something is sent or
 opened, not when it was queued or linked.**
 
-- [ ] **3.14** Main **removes the alt** from an event they were invited to. →
+- [ ] **3.17** Main **removes the alt** from an event they were invited to. →
       The alt no longer sees it anywhere, and **no further DM about it
       arrives** on the next tick or the one after. *(Check this against Phase
       4 — a queued DM must not outlive the access that justified it.)*
-- [ ] **3.15** While logged in as the alt, paste the URL of the event they were
+- [ ] **3.18** While logged in as the alt, paste the URL of the event they were
       just removed from. → Refused. Knowing the id is not permission.
-- [ ] **3.16** On the noticeboard, an event's organiser shows as **attending**,
+- [ ] **3.19** On the noticeboard, an event's organiser shows as **attending**,
       the same as in every other view.
 
 ---
@@ -475,20 +498,20 @@ table, and therefore how hard to look here.
 | **Sessions** | A login can only be completed by the browser that started it; a refused login leaves no record | **2.19, 2.20** | Good — tested end to end |
 | **Sessions** | F-59 signed OAuth state; item 92 rate limit | **0.0b** | Good. 7 tests, revert-verified; fake binding though |
 | **Recurrence** | Editing a recurring event rewrote its schedule | **2.11** | Good logic coverage |
-| **Recurrence** | Expansion seeded by overrides, not only nominal dates; moved occurrences findable and ordered | **2.12, 2.13** | Good logic coverage |
+| **Recurrence** | Expansion seeded by overrides, not only nominal dates; moved occurrences findable and ordered | **3.14–3.16** | Good logic coverage |
 | **Recurrence** | Series count their own occurrences; long occurrences found in narrow windows | **2.2, 2.3, 2.11** | Good |
-| **Recurrence** | Stored overrides bounded at every writer | **2.12** | Good |
+| **Recurrence** | Stored overrides bounded at every writer | **3.14** | Good |
 | **Noticeboard** | P17-07/P19-01/P20-03 — three consecutive regressions, finally fixed by deleting the pager for a single snapshot | **3.6, 2.14** | Medium. **The most-rewritten file in the codebase** — look hard |
-| **Noticeboard** | Finished series no longer empty it; resolved polls appear; organiser shows as attending | **2.14, 3.16, 5.7** | Good |
+| **Noticeboard** | Finished series no longer empty it; resolved polls appear; organiser shows as attending | **2.14, 3.19, 5.7** | Good |
 | **Polls** | Editing a poll deleted the votes cast on it | **5.6** | Good |
 | **Polls** | A private multi-winner poll fanned out public events | **5.7** | Good |
 | **Polls** | Threshold higher than the invitee count | **5.8** | Good |
 | **Polls** | RSVP on a resolved poll; the invitee cap counts the whole event | **5.9, 3.3** | Good |
 | **Polls** | P21-05 + RG-05 — the advertised deadline held at all three submission paths, including clearing an answer | **5.3, 5.4** | Good. RG-05 is the half missed first time |
 | **Polls** | Window polls; multi-winner confirmation | **5.1, 5.2** | Good |
-| **Access** | A removed invitee stops receiving DMs; a queued DM does not outlive the access | **3.14** | Good logic, **DMs are stubbed** |
-| **Access** | Every outgoing message re-checks current access, editing included | **3.14, 4.x** | Good logic, DMs stubbed |
-| **Access** | An id you know is not permission to use it | **3.15** | Good |
+| **Access** | A removed invitee stops receiving DMs; a queued DM does not outlive the access | **3.17** | Good logic, **DMs are stubbed** |
+| **Access** | Every outgoing message re-checks current access, editing included | **3.17, 4.x** | Good logic, DMs stubbed |
+| **Access** | An id you know is not permission to use it | **3.18** | Good |
 | **Access** | P21-03 — the roster write bound to current ownership | **3.7, 3.8** | Good |
 | **Access** | Private events stay private | **3.6** | Good |
 | **Change requests** | The recovery arm that re-admitted removed guests was **deleted** | **3.9–3.13** | Good |
@@ -512,7 +535,7 @@ Ranked by (no automated coverage) × (how bad it is if broken):
 2. **2.16** — the 30-minute session refresh. Nothing has ever run it in a browser, and it breaks for everyone at once.
 3. **2.17/2.18** — two tabs. A whole class of bug that only exists in a browser.
 4. **4.12** — the Discord cancel on a converted series. The one Discord check testing a real fix, and its failure destroys a series.
-5. **3.14** — a removed invitee still getting DMs. Logic is covered; the delivery path is entirely stubbed.
+5. **3.17** — a removed invitee still getting DMs. Logic is covered; the delivery path is entirely stubbed.
 
 ## What this plan does not cover, deliberately
 
