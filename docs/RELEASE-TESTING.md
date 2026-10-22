@@ -65,7 +65,7 @@ the CORS origin and where Discord's OAuth callback returns to. So:
       4.4–4.7 cannot be run, and nothing else in this list would have told you.
 - [ ] **A second computer is optional, and if used it runs its own frontend.**
       Nothing here needs one. If the alt is on a laptop, that laptop must
-      clone the repo and run `npm run build` + `npx vite preview --port 5173`
+      clone the repo and run `npm run build` + `npx vite preview --port 5173 --strictPort`
       itself, because the sandbox only accepts `http://localhost:5173` and on
       the laptop `localhost` is the laptop — browsing to the main machine's
       address fails CORS, and Discord's login redirects back to the laptop's
@@ -74,6 +74,11 @@ the CORS origin and where Discord's OAuth callback returns to. So:
 - [ ] `--port 5173` is not a default and not optional. `vite preview` defaults
       to 4173, and on 4173 login and the Google connect flow both break in ways
       that look like app bugs.
+- [ ] **`--strictPort` with it, every time.** If 5173 is already taken — a
+      `npm run dev` from earlier, a previous preview — `--port 5173` alone
+      quietly starts on 5174, and the tab on 5173 keeps showing the old app.
+      `--strictPort` makes it fail with *Port 5173 is already in use*. Stop
+      the old server (Ctrl+C in its window) and run it again.
 
 **Cloudflare credentials**, in a PowerShell window `cd`'d into
 `C:\Users\Michael\Documents\GitHub\Jedi-Party-Scheduler\worker`:
@@ -136,7 +141,7 @@ formality**:
 
 ```
 npm run build
-npx vite preview --port 5173
+npx vite preview --port 5173 --strictPort
 ```
 
 - [ ] **0.4** The built app loads.
@@ -269,7 +274,7 @@ it — it pairs naturally with the Phase 4 cron wait.
 IDEAS 94. The newest and least-reviewed code in the build: route tests are
 revert-verified, but nothing has seen it in a browser and the reviewer has not
 read it. **Rebuild the frontend before these** (`git pull`, then
-`npm run build` + `npx vite preview --port 5173`) — the sandbox Worker
+`npm run build` + `npx vite preview --port 5173 --strictPort`) — the sandbox Worker
 deploys itself, the frontend you run locally does not.
 
 - [ ] **2.21** Open one date of the recurring series from 2.2 *from the

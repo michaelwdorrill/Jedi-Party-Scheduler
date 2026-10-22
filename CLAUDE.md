@@ -142,7 +142,7 @@ cd frontend
 $env:VITE_API_BASE_URL = "<sandbox worker url>"
 
 npm run dev                              # 1. iterate
-npm run build; npx vite preview --port 5173   # 2. the bundle users actually get
+npm run build; npx vite preview --port 5173 --strictPort   # 2. the bundle users actually get
 ```
 
 Step 2 is not ceremony. `npm run dev` serves a *dev* build: React
@@ -159,6 +159,14 @@ CORS origin (`router.ts`) and where the Discord and Google OAuth callbacks
 redirect back to. Serve the built output anywhere else — `vite preview`
 defaults to 4173 — and login and the calendar connect flow both break in ways
 that look like app bugs.
+
+**And `--strictPort` is load-bearing alongside it.** `--port 5173` only asks
+for 5173: if anything already holds it — a `npm run dev` left running from
+earlier, a previous preview — `vite preview` quietly starts on 5174 instead,
+and the tab still open on 5173 goes on showing the *old* app. That cost a round
+trip on the first browser walkthrough, where a freshly built feature "wasn't
+there". With `--strictPort` it refuses with "Port 5173 is already in use", which
+is the error you want. Checked on Vite 8.2.2.
 
 Two related traps worth knowing before assuming a push ran something:
 `ci.yml` triggers on `push` to `main` and on `pull_request`, so a feature

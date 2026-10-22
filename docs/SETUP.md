@@ -675,7 +675,7 @@ environments). What's actually separate is the *data* and the *bot*.
    the same env var still set:
    ```powershell
    npm run build
-   npx vite preview --port 5173
+   npx vite preview --port 5173 --strictPort
    ```
    `npm run dev` is a *dev* build: React `StrictMode` double-invokes every
    effect, nothing is minified, and modules load differently — so it is not
@@ -688,6 +688,9 @@ environments). What's actually separate is the *data* and the *bot*.
    4173, and `FRONTEND_URL` is a single origin serving as both the CORS
    origin and the OAuth redirect target — so on any other port, login and the
    Google connect flow break in ways that look like application bugs.
+   **`--strictPort` matters as much:** without it, a 5173 already in use —
+   an earlier `npm run dev` still running — sends the preview quietly to
+   5174 while the browser goes on showing the old app on 5173.
 
    This two-step local run is the *settled* route for frontend verification,
    not a stopgap (IDEAS item 23, closed Sept 2026). A hosted sandbox frontend
