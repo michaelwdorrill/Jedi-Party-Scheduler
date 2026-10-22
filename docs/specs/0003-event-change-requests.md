@@ -462,8 +462,10 @@ Worker-side, in the style of the existing `passN.test.ts` files:
   all (with vote tallies on `time_change` rows, no per-voter breakdown).
 - `target_user_id` outside the guild → 403/400, and already-invited → 400.
 - Both open-request bounds enforced, and a resolved request frees a slot.
-- Filing a `time_change` as the event's only invitee resolves it immediately
-  (threshold of 1, requester's own implicit vote meets it).
+- ~~Filing a `time_change` as the event's only invitee resolves it immediately
+  (threshold of 1, requester's own implicit vote meets it).~~ Reversed 22 Oct
+  2026 (see above): it stays pending with no threshold and no deadline, and the
+  deadline sweep never resolves it — only the organizer's accept or decline.
 - A second invitee's `yes` vote crossing the majority threshold applies the
   write and marks the request accepted, synchronously in the vote handler.
 - Accepting (via organizer override) a `time_change` after the event was

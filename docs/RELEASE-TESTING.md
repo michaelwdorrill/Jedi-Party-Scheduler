@@ -313,6 +313,28 @@ deploys itself, the frontend you run locally does not.
       walkthrough: the page treated the organizer as an invitee, because idea
       26 gave every organizer an invite row.)*
 
+### Moving a start takes the end with it
+
+Asked for on the first walkthrough, and applied to **every** start/end picker
+so they all behave one way. The rule: the end keeps the range's *length*. If
+the range has no length yet (an end not typed, or an end before the start),
+nothing is rewritten beyond the old nudge of an end date up to the start date.
+
+- [ ] **2.28** Create-event form: start 7:00 pm, end 11:00 pm. Change the
+      start **time** to 9:30 pm. → End reads **1:30 am the next day**. Then
+      change the start **date** forward two days. → End date moves two days
+      too, still 1:30 am.
+- [ ] **2.29** The same on a **poll option row** (a fixed-slot poll), and on a
+      **personal time block**. → Each row's end follows its own start; moving
+      one row's start leaves the other rows alone.
+- [ ] **2.30** Open **Move this occurrence** (2.22) and change the start time.
+      → End follows. *(The invitee's request form uses the same fields — 3.9
+      sees it from the other side.)*
+- [ ] **2.31** Now type an end **earlier** than the start, then change the
+      start. → The end is **not** silently fixed for you, and the form still
+      says the end must be after the start. *(Deliberate: with no length to
+      keep, rewriting it would be a guess.)*
+
 ---
 
 ## Phase 3 — two accounts
@@ -336,7 +358,14 @@ Second browser profile, alt account, log in.
 
 ### Change requests — brief yourself first
 
-- [ ] **3.9** Alt requests a **time change** on the one-off event.
+- [ ] **3.9** Alt requests a **time change** on the one-off event (the alt
+      is its only invitee). While filling the form in, change the start —
+      the end follows (2.28). → After sending, the request **stays pending**
+      under the alt's *My requests*. It does **not** resolve on the alt's own
+      say-so. *(Before 22 Oct a sole invitee's request was carried instantly
+      by their own implicit yes, so there was nothing for main to accept —
+      which is how the first walkthrough found it. Now the organizer decides
+      whenever there is only one invitee, and no deadline auto-resolves it.)*
 - [ ] **3.10** Main sees the request and **accepts** it.
 - [ ] **3.11** The event has actually moved, for both accounts.
 
@@ -395,7 +424,9 @@ opened, not when it was queued or linked.**
 ### The organizer decides; they do not vote
 
 - [ ] **3.21** With the alt's time-change request pending, main sees **Accept**
-      and **Decline** only — **no vote buttons**. *(The same idea-26 cause as
+      and **Decline** only — **no vote buttons**. *(Unreachable on the first
+      walkthrough, because the sole-invitee request had already resolved
+      itself; 3.9 now leaves it pending, so this can be checked.)* *(The same idea-26 cause as
       2.27. Before the fix the server also counted an organizer's vote toward a
       threshold computed without them, so one invitee plus the organizer could
       carry a request.)*
@@ -535,12 +566,12 @@ the right shape for walking the product but the wrong shape for answering
 user-observable change across the **98 commits since `main`**, and the step
 that would notice if it regressed.
 
-**What the sandbox adds over the test suite, stated honestly.** 848 worker
-tests and 131 frontend tests cover most of the *logic* below, and each fix was
+**What the sandbox adds over the test suite, stated honestly.** 863 worker
+tests and 142 frontend tests cover most of the *logic* below, and each fix was
 revert-verified — the test was watched failing before the fix and passing
 after, so these are not tests that pass vacuously. What no test can see is:
 
-- **The frontend.** 131 tests against a component tree, and until this
+- **The frontend.** 142 tests against a component tree, and until this
   walkthrough, zero browser runs of any kind.
 - **Real Discord.** Every DM test stubs `fetch`. Nothing has proved a real
   interaction round trip.
@@ -582,6 +613,8 @@ table, and therefore how hard to look here.
 | **Access** | Private events stay private | **3.6** | Good |
 | **Change requests** | The recovery arm that re-admitted removed guests was **deleted** | **3.9–3.13** | Good |
 | **Change requests** | Resolution prices its branches and reserves before claiming; the accept path stops acting on stale reads | **3.10, 3.11** | Good. **P21-09 is still open** — see the warning at 3.10 |
+| **Change requests** | **New (22 Oct):** a sole invitee's time change waits for the organizer instead of carrying itself; the organizer is refused a vote and no longer DMed to vote | **3.9, 3.10, 3.21** | Revert-verified; **not yet reviewed** |
+| **Forms** | **New (22 Oct):** moving a start takes the end with it, in every start/end picker | **2.28–2.31, 3.9** | Logic revert-verified; **wiring is browser-only** |
 | **Discord** | P21-04 — a one-session cancel took a converted series with it | **4.12** | Good logic, **never a real button press** |
 | **Discord** | A cancel that changed nothing no longer reports success | **4.13** | Good |
 | **Discord** | Outbox eligibility on the retry query; a failed organizer RSVP notice retries | **4.10** | Medium. Timing-dependent |
@@ -611,6 +644,6 @@ Ranked by (no automated coverage) × (how bad it is if broken):
   with its own findings still open (F60-A/B, P21-11, P21-12).
 - **Load or abuse testing.** Related to IDEAS 92 and not a friend-group
   concern.
-- **Anything already covered by the 848 worker and 131 frontend tests.** This
+- **Anything already covered by the 863 worker and 142 frontend tests.** This
   plan is for what those cannot see: whether the product makes sense to a
   person using it.

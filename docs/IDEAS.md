@@ -1269,6 +1269,63 @@ would need its own review pass.
   occurrence* beside *Cancel this occurrence*, gated the same way on
   `?occurrence=`.
 
+### 95. A sole invitee's time-change request carried itself, so the organizer never saw it
+
+**Built for 1.0 on 22 October 2026 (`5f00a5e`), at Michael's call** ("You
+decide when solo"). Not yet through the reviewer pass or the walkthrough
+(3.9–3.11, 3.14, 3.21), so it stays here until both have happened.
+
+Found on the first browser walkthrough, Phase 3: the alt, as the one-off
+event's only invitee, asked to move it, and the event simply moved -- there
+was nothing for main to accept at 3.10, and 3.21's "the organizer sees no vote
+buttons" was unreachable. Spec 0003 had decided this on purpose (threshold
+`floor(1/2)+1 = 1`, met by the requester's own implicit yes), so it was a
+design decision being reversed, not a bug: with one invitee the "majority" is
+one person agreeing with themselves, and the organizer's event moves without
+them.
+
+**What changed:** with at most one invitee, a `time_change` gets no
+`vote_threshold_count` and no `vote_deadline_at`; `tryAutoResolve` is skipped
+at filing, and the deadline sweep, which keys on the deadline, never touches
+it. Spec 0003 records the reversal. Three invitees and up are unchanged.
+
+**Two found alongside it, fixed in the same commit**, both from idea 26 giving
+the organizer an `event_invites` row: `voteOnChangeRequest` accepted the
+organizer's vote and counted it toward a threshold computed *without* them (so
+with three invitees, the requester's implicit yes plus the organizer's carried
+it), and the reminder sweep's "a request is open for your vote" DM went to the
+organizer. Both revert-verified.
+
+**Known and left alone:** someone invited *after* a solo request was filed
+sees it under *Open for your vote* and can vote. The vote is recorded and shows
+in the organizer's tally, but cannot resolve anything (no threshold). Harmless
+-- arguably useful as advice to the organizer -- but the voter is not told
+their vote is advisory. Small, 1.0.1.
+
+### 96. Changing a start left the end where it was
+
+**Built for 1.0 on 22 October 2026 (`901dcc3`), at Michael's call** ("Every
+start/end picker"). Not yet through the reviewer pass or walkthrough steps
+2.28–2.31, so it stays here until both have happened.
+
+Found on the first browser walkthrough, Phase 3, using the change-request
+form: changing a start should move the end by the same amount. Before this, the
+only coupling anywhere was a date-level nudge -- moving a start *date* past the
+end date dragged the end date up to it -- and a changed start *time* never
+touched the end, so a 7–11pm session moved to 9:30pm read as 9:30–11pm.
+
+`endFollowingStart` (`frontend/src/lib/timeRange.ts`) keeps the range's
+**elapsed** length, so a session moved across a DST change keeps its duration
+and may read an hour different on the clock -- what a calendar does. A range
+with no positive length (half-typed, or backwards) keeps only the old date
+nudge, so nothing a person is midway through typing is rewritten. Applied to
+the event form's own times, each poll option row, a personal time block, the
+invitee's request form and the organizer's *Move this occurrence*.
+
+The logic is unit-tested and revert-checked; the wiring into five forms is
+not (there is no component test for any of them), which is what 2.28–2.31 are
+for.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
