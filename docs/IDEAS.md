@@ -1390,6 +1390,39 @@ has always cancelled without warning; that page also states the minimum now.
 - **A day called off is final.** Re-confirming it would mean un-cancelling an
   event people were told is off; it stays called off, struck through.
 
+### 98. Converting a one-off into a series drops the answers already given
+
+Found on the first browser walkthrough, 22 October 2026, while running step
+4.12 (which was written without saying how to reach its button -- see that
+step's rewrite). The alt pressed *Can't make it* on a one-off, main converted
+the event to a weekly series, and the alt's answer then showed as **no answer**
+on every date. Confirmed with a test rather than inferred:
+
+- **The answer is orphaned, not deleted.** A one-off's attendance is keyed on
+  `occurrence_date = ''`; a series' on each date. `updateEvent`'s conversion
+  touches neither, so the `''` row survives and nothing reads it. The person
+  who said they could not come is asked again by the ladder for the first
+  session, and the organizer sees them as unanswered.
+- **The one-off's old DM buttons then say the control "looks corrupted".**
+  `recordRsvp` returns `invalid_occurrence` for a `''` answer on a recurring
+  event, and `interactions.ts` maps that to *"That control looks corrupted"*
+  under a comment calling it unreachable from a bot-authored button. A
+  conversion makes it reachable, and the message is false -- nothing is
+  corrupted; the event changed shape.
+
+**Proposed fix**, following spec 0014 decision 3 (a schedule edit clears
+attendance only if the local date actually moves): on conversion, re-key the
+`''` answers to the one-off's own local date if that date is one of the new
+series' dates, and clear them otherwise -- exactly what moving the date would
+have done. The DM refusal becomes *"This is a repeating event now -- answer
+each date on the site"*, matching the cancel button's wording for the same
+situation (P21-04).
+
+Not a category-1/2 finding on its own reading -- no wrong value is written; an
+answer stops counting -- but the false error message is text a person is asked
+to rely on. **Recommendation: 1.0.1**, unless Michael wants it in the same
+reviewer pass as 94-97.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.

@@ -459,11 +459,26 @@ catches up.
 
 ### The one that needs care
 
-- [ ] **4.12** Take an event that is **one-off**, wait for its cancel DM
-      button to exist, then **convert it to a recurring series**, then press
-      the old **"Cancel this session"** button in the DM. → It **refuses**,
-      says it is a repeating event now, and points you at the site. **All
-      dates survive.**
+- [ ] **4.12** The button this is about exists in **one DM only**: the one
+      telling the organizer an event has dropped below its minimum and asking
+      whether to cancel it. *(Rewritten 22 Oct: the first version never said
+      how to get it, and the red* Can't make it *on an invite DM looks just
+      like it.)*
+      1. As main, create a **one-off** event a few days out, invite the alt,
+         set **Minimum attendees 2**, leave **Cancel automatically**
+         *unticked* and **Check attendance by** *blank*.
+      2. As the alt, press **Can't make it** (site or DM). → Within a tick,
+         **main** gets *"… has dropped below its minimum of 2. Cancel it?"*
+         with a red **Cancel this session** button. Don't press it yet.
+      3. As main, edit the event and turn on **Repeats** (weekly). A repeating
+         event's minimum needs a check time, so the form will ask for
+         **Check attendance __ hours before each session** — enter 24. Save.
+      4. Press the old **Cancel this session** button in main's DM. → It
+         **refuses**, says it is a repeating event now, and points you at the
+         site. **Every date survives.**
+
+      Expect, and don't report: after step 3 the alt's answer from step 2 shows
+      as **no answer** on every date of the new series (IDEAS 98).
 
 > This was P21-04: that button used to cancel the whole series. It is the only
 > Discord check here that is testing a real fix rather than a feature.
