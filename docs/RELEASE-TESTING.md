@@ -114,6 +114,17 @@ deployed sandbox Worker **is** the candidate.
       pushed worker changes since, push them to `sandbox`
       (`git push -u origin HEAD:sandbox --force-with-lease`) and wait for the
       run before starting.
+- [ ] **0.0c** **Your local clone is the candidate.** `git branch --show-current`
+      prints `claude/practical-ptolemy-xqv8nj`; `git log --oneline -1` matches the
+      newest commit on that branch on GitHub; and after building,
+      `Select-String -Path dist\assets\*.js -Pattern "Move this occurrence" -List`
+      in `frontend\` prints a file. *(Added 22 Oct: the first walkthrough ran a
+      morning of checks on a 10 September branch, 83 commits behind, because a
+      locally changed `worker/package-lock.json` blocked `git checkout` and
+      nothing asked whether it had worked. The sandbox Worker is deployed by CI
+      and is always current; the frontend is whatever your clone builds. If the
+      checkout is blocked, `git stash push worker/package-lock.json`, check out
+      again, then `npm ci` in `worker\` and `frontend\`.)*
 - [ ] **0.0b** The OAuth callback rate limiter is live (item 92). There is
       nothing to click — it is a Worker binding and Cloudflare does not surface
       bindings in the dashboard. Deploy Sandbox run #72 succeeding is the proof
