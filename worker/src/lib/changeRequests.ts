@@ -181,11 +181,31 @@ export async function createChangeRequest(
 
   const id = newId();
   const now = Date.now();
+  // A sole invitee's time change waits for the organizer -- decided 22 Oct
+  // 2026, reversing the spec's original call.
+  //
+  // Spec 0003 said: if the requester is the only invitee, the threshold is 1,
+  // their own implicit yes meets it, and the request applies the instant it is
+  // filed -- "there's no one else to ask". There is: the organizer. Found on
+  // the first browser walkthrough, where the alt moved Michael's event before
+  // he saw a request at all. With one invitee, "the invitees agree" and "this
+  // one person wants it" are the same statement, so majority voting decides
+  // nothing and only removes the organizer's say.
+  //
+  // So no threshold and no deadline: the request waits for Accept or Decline,
+  // exactly as an add_invitee request already does. tryAutoResolve returns on
+  // a NULL threshold and the deadline sweep selects on vote_deadline_at <= now,
+  // which NULL never satisfies -- so neither can apply it behind the
+  // organizer's back. Frozen at filing like the threshold always was: inviting
+  // someone afterwards does not turn it back into a vote.
+  //
+  // Two or more invitees vote exactly as before.
+  const organizerDecides = isTimeChange && inviteeCount <= 1;
   // Simple majority of the invitee count read above, frozen on the row --
   // see "Who votes, and the threshold" in the spec for why this is
   // system-computed rather than something the requester supplies.
-  const voteThreshold = isTimeChange ? Math.max(1, Math.floor(inviteeCount / 2) + 1) : null;
-  const voteDeadline = isTimeChange ? now + LIMITS.CHANGE_REQUEST_VOTE_WINDOW_MS : null;
+  const voteThreshold = isTimeChange && !organizerDecides ? Math.max(1, Math.floor(inviteeCount / 2) + 1) : null;
+  const voteDeadline = isTimeChange && !organizerDecides ? now + LIMITS.CHANGE_REQUEST_VOTE_WINDOW_MS : null;
 
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
@@ -235,7 +255,9 @@ export async function createChangeRequest(
     throw new ConflictError('This event already has too many open change requests -- resolve or withdraw one first');
   }
 
-  if (isTimeChange) await tryAutoResolve(env, event, id);
+  // Skipped, not merely a no-op, for a request the organizer decides: there is
+  // no threshold for it to read, and it would spend a query to find that out.
+  if (isTimeChange && !organizerDecides) await tryAutoResolve(env, event, id);
 
   return id;
 }

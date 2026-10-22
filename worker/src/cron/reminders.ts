@@ -840,7 +840,8 @@ async function notifyChangeRequestOnce(
 // one a row is, and the columns each branch doesn't use are NULL.
 //
 // "opened" notifies the organizer of every new request, and every other
-// current invitee when it's a time_change (they're being asked to vote).
+// current invitee -- never the organizer twice -- when it's a time_change
+// that is actually going to a vote (they're being asked to vote).
 // "decision" notifies the requester once their own request is decided
 // (withdrawn excluded -- that's self-initiated, there's no one to tell).
 // Both are shaped like sweepNewInvites -- one flat, uncursored global scan
@@ -857,10 +858,25 @@ async function sweepChangeRequestNotifications(env: Env, budget: TickBudget): Pr
        SELECT ecr.id AS request_id, e.organizer_id AS user_id, 1 AS is_organizer
        FROM event_change_requests ecr JOIN events e ON e.id = ecr.event_id
        UNION
+       -- The voters. Two exclusions beyond the requester, both found on the
+       -- first browser walkthrough:
+       --
+       -- The organizer. Idea 26 gave every organizer an invite row, so they
+       -- matched this arm as well as the one above. The two rows differ only
+       -- in is_organizer, so UNION kept both; the outbox's per-key claim then
+       -- sent whichever the query returned first -- which could be the
+       -- voter's "vote here" wording, to the one person who cannot vote.
+       --
+       -- A request with no threshold. A sole invitee's time change waits for
+       -- the organizer instead of going to a vote (createChangeRequest), so
+       -- anyone invited afterwards has nothing to vote on.
        SELECT ecr.id AS request_id, ei.user_id AS user_id, 0 AS is_organizer
        FROM event_change_requests ecr
+       JOIN events e ON e.id = ecr.event_id
        JOIN event_invites ei ON ei.event_id = ecr.event_id
        WHERE ecr.kind = 'time_change' AND ei.user_id != ecr.requester_id
+         AND ei.user_id != e.organizer_id
+         AND ecr.vote_threshold_count IS NOT NULL
      )
      SELECT 'change_request_opened' AS kind_notif, r.request_id, r.user_id, r.is_organizer,
             ecr.kind, ecr.event_id, e.title, ecr.proposed_start_at,
