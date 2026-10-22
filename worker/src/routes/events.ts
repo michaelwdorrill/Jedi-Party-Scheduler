@@ -3,13 +3,22 @@ import { DateTime } from 'luxon';
 import type { AppEnv } from '../lib/authMiddleware';
 import type { Env } from '../env';
 import type { EventRow } from '../lib/events';
-import { OVERRIDE_ADMISSION_SQL, loadOverridesForEvents } from '../lib/events';
-import { expandOccurrencesForEvent } from '../lib/recurrence';
+import { OVERRIDE_ADMISSION_SQL, loadOverridesForEvents, writeOccurrenceMove } from '../lib/events';
+import { expandOccurrencesForEvent, isSeriesOccurrence, loadRecurrenceRulesForEvents } from '../lib/recurrence';
 import { requireActiveGuildMember } from '../lib/db';
 import { recordRsvp, type RsvpStatus } from '../lib/attendance';
 import { newId } from '../lib/ids';
 import { addInvitesToEvent, updateEvent, type EventWriteInput } from '../lib/eventWrites';
-import { assertIsoDate, assertOneOf, assertStringArray, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
+import {
+  assertIsoDate,
+  assertOneOf,
+  assertSafeInt,
+  assertStringArray,
+  assertTimeRange,
+  LIMITS,
+  readJsonBody,
+  ValidationError,
+} from '../lib/validate';
 
 export const eventRoutes = new Hono<AppEnv>();
 
@@ -456,6 +465,61 @@ eventRoutes.post('/:eventId/occurrences/:date/cancel', async (c) => {
     .bind(newId(), eventId, date, eventId, date, eventId)
     .run();
   if (written.meta.changes === 0) {
+    throw new ValidationError(
+      `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`,
+    );
+  }
+  return c.json({ ok: true });
+});
+
+// IDEAS 94. Move one occurrence of a series to a new time.
+//
+// Until this existed the organizer could cancel one date but not move it,
+// while an invitee could get one moved by filing a change request the
+// organizer accepted -- and createChangeRequest refuses the organizer on their
+// own event. Spec 0003 justified that refusal with "they can edit it", which
+// holds for a one-off event and not for one date of a series, because Edit is
+// series-wide. Nobody decided the organizer should be unable to do this.
+//
+// The write is writeOccurrenceMove, the same statement an accepted change
+// request uses, so the two cannot disagree about what a move means: answers
+// carry over, a cancelled date comes back at the new time, and nothing is
+// sent. See its comment in lib/events.ts for each of those, checked.
+//
+// Not guarded on events.revision, following the cancel route above and the
+// accept path: an occurrence override has never been tracked by that column.
+eventRoutes.post('/:eventId/occurrences/:date/move', async (c) => {
+  const userId = c.get('userId');
+  const eventId = c.req.param('eventId');
+  const date = assertIsoDate(c.req.param('date'), 'date');
+  const body = await readJsonBody<{ startAt?: unknown; endAt?: unknown }>(c);
+  const startAt = assertSafeInt(body.startAt, 'startAt');
+  const endAt = assertSafeInt(body.endAt, 'endAt');
+  // The same bound an invitee's proposed time is held to.
+  assertTimeRange(startAt, endAt, 'new', LIMITS.MAX_EVENT_DURATION_MS);
+
+  const event = await loadOwnedActiveEvent(c.env, eventId, userId);
+  if (!event) return c.text('Not found', 404);
+  if (!event.is_recurring) {
+    throw new ValidationError('Only one date of a repeating event can be moved -- edit the event to change its time');
+  }
+  // loadOwnedActiveEvent's "active" is about the organizer's membership, not
+  // the event. Moving a date of a cancelled series would write an override
+  // nothing ever reads.
+  if (event.status !== 'active') return c.text('This event is no longer active', 409);
+
+  // A date the rule does not produce is refused here rather than written. The
+  // expander already ignores such an override (P14-13), so this is not about
+  // correctness on read -- it is that the row would count against the
+  // per-event cap while doing nothing, and that "moved" would be reported for
+  // a date that was never a session. isSeriesOccurrence is the walk itself,
+  // the one definition of membership.
+  const rule = (await loadRecurrenceRulesForEvents(c.env, [event.id])).get(event.id);
+  if (!rule || !isSeriesOccurrence(rule, event.timezone, date)) {
+    throw new ValidationError(`${date} is not one of this event's dates`);
+  }
+
+  if (!(await writeOccurrenceMove(c.env, event.id, date, startAt, endAt))) {
     throw new ValidationError(
       `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`,
     );

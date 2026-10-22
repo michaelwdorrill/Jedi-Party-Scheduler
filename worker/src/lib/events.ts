@@ -1,5 +1,6 @@
 import type { Env } from '../env';
 import { chunkIds, placeholders } from './d1';
+import { newId } from './ids';
 import { LIMITS } from './validate';
 
 export interface EventRow {
@@ -284,3 +285,46 @@ export const OVERRIDE_ADMISSION_SQL = `(
   EXISTS (SELECT 1 FROM event_occurrence_overrides WHERE event_id = ? AND occurrence_date = ?)
   OR (SELECT COUNT(*) FROM event_occurrence_overrides WHERE event_id = ?) < ${LIMITS.MAX_OVERRIDES_PER_EVENT}
 )`;
+
+// The one write that moves a single occurrence of a recurring series to a new
+// time. Shared by an accepted invitee change request and, since IDEAS 94, the
+// organizer's own POST /:eventId/occurrences/:date/move -- so there is one way
+// an occurrence moves rather than two that can drift apart. It is the accept
+// path's statement moved here unchanged, so that path's behaviour is exactly
+// what it was.
+//
+// Three consequences, each checked against the code rather than assumed:
+//
+// - Moving an occurrence that was cancelled RESTORES it at the new time
+//   (is_cancelled = 0). This is the only write in the app that un-cancels an
+//   occurrence, and an organizer moving a date they cancelled is asking for it
+//   back -- the same reading an accepted request has always had.
+// - Answers already given carry over. event_attendance is keyed on the
+//   occurrence's nominal date (recurrence.ts: ExpandedOccurrence.date is
+//   pre-override), and a move never changes that key.
+// - Nothing is sent. Per-occurrence changes to a series are deliberately
+//   silent -- see the cancellation notice's comment in cron/reminders.ts and
+//   IDEAS 54 -- and every reminder reads the moved time, because the cron
+//   expands occurrences with their overrides applied.
+//
+// Admission travels inside the statement (OVERRIDE_ADMISSION_SQL above), so a
+// move of an already-changed date is admitted at the cap. Resolves false when
+// admission refused it; each caller turns that into its own error.
+export async function writeOccurrenceMove(
+  env: Env,
+  eventId: string,
+  occurrenceDate: string,
+  startAt: number,
+  endAt: number,
+): Promise<boolean> {
+  const written = await env.DB.prepare(
+    `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled, override_start_at, override_end_at)
+     SELECT ?, ?, ?, 0, ?, ?
+     WHERE ${OVERRIDE_ADMISSION_SQL}
+     ON CONFLICT(event_id, occurrence_date) DO UPDATE SET
+       is_cancelled = 0, override_start_at = excluded.override_start_at, override_end_at = excluded.override_end_at`,
+  )
+    .bind(newId(), eventId, occurrenceDate, startAt, endAt, eventId, occurrenceDate, eventId)
+    .run();
+  return written.meta.changes > 0;
+}

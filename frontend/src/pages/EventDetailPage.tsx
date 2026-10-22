@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { formatDuration, formatTimeRange } from '../lib/datetime';
 import ChangeRequestSection from '../components/ChangeRequestSection';
+import MoveOccurrenceForm from '../components/MoveOccurrenceForm';
 import PollOptionRow from '../components/PollOptionRow';
 import RsvpButtons from '../components/RsvpButtons';
 import WindowAvailabilityPicker from '../components/WindowAvailabilityPicker';
@@ -54,6 +55,12 @@ export default function EventDetailPage() {
   const navigate = useNavigate();
   const [windowDrafts, setWindowDrafts] = useState<WindowDrafts>({});
   const [linkCopied, setLinkCopied] = useState(false);
+  // Which occurrence the Move form was opened FOR, rather than a bare open/closed
+  // flag. A flag would stay set while ?occurrence= changed under it -- the
+  // P19-04 shape, where this page kept one date's state and acted on another's.
+  // Keyed this way, opening one date's form can never show on another date.
+  const [movingFor, setMovingFor] = useState<string | null>(null);
+  const moveKey = `${eventId ?? ''}:${occurrenceDate ?? ''}`;
 
   const { data, error, loading, reload } = useAsync<EventBundle | null>(async () => {
     if (!eventId) return null;
@@ -203,6 +210,17 @@ export default function EventDetailPage() {
     });
   };
 
+  // IDEAS 94. Stays on the page and reloads it, rather than leaving for the
+  // calendar as the cancel below does: a moved date still exists, and the page
+  // showing its new time is the confirmation.
+  const handleMoveOccurrence = async (range: { startAt: number; endAt: number }) => {
+    if (!occurrenceDate) return;
+    if (await action.run(() => api.post(`/events/${event.eventId}/occurrences/${occurrenceDate}/move`, range))) {
+      setMovingFor(null);
+      reload();
+    }
+  };
+
   const handleCancelOccurrence = async () => {
     if (!occurrenceDate) return;
     if (!confirm(`Cancel just the ${occurrenceDate} occurrence?`)) return;
@@ -238,7 +256,7 @@ export default function EventDetailPage() {
           {event.guildName && <p className="text-sm text-faint">On {event.guildName}</p>}
         </div>
         {isOrganizer && event.status !== 'cancelled' && (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
             <button
               onClick={handleCopyInviteLink}
               className={buttonClass('secondary')}
@@ -252,6 +270,15 @@ export default function EventDetailPage() {
               >
                 Edit
               </Link>
+            )}
+            {event.status === 'active' && event.isRecurring && occurrenceDate && event.startAt != null && (
+              <button
+                onClick={() => setMovingFor(movingFor === moveKey ? null : moveKey)}
+                aria-expanded={movingFor === moveKey}
+                className={buttonClass('secondary')}
+              >
+                Move this occurrence
+              </button>
             )}
             {event.status === 'active' && event.isRecurring && occurrenceDate && (
               <button
@@ -270,6 +297,19 @@ export default function EventDetailPage() {
           </div>
         )}
       </div>
+
+      {movingFor === moveKey && occurrenceDate && event.startAt != null && event.endAt != null && (
+        <MoveOccurrenceForm
+          key={moveKey}
+          startAt={event.startAt}
+          endAt={event.endAt}
+          occurrenceDate={occurrenceDate}
+          eventZone={event.timezone}
+          viewerZone={zone}
+          onSubmit={handleMoveOccurrence}
+          onClose={() => setMovingFor(null)}
+        />
+      )}
 
       {action.error && <InlineError message={action.error} onDismiss={action.clearError} />}
 

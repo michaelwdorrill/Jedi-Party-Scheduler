@@ -1,5 +1,5 @@
 import type { Env } from '../env';
-import { OVERRIDE_ADMISSION_SQL, type EventRow } from './events';
+import { writeOccurrenceMove, type EventRow } from './events';
 import { requireActiveGuildMember } from './db';
 import { chunkIds, placeholders, queryInChunks } from './d1';
 import { addInvitesToEvent, updateEvent } from './eventWrites';
@@ -387,29 +387,21 @@ async function applyChangeRequest(env: Env, event: EventRow, request: ChangeRequ
       // path's price is measured against the Free-plan ceiling (P13-05) and
       // must not move -- and so two concurrent acceptances cannot both pass a
       // preflight that neither of them then honours (the P13-10 lesson).
-      const written = await env.DB.prepare(
-        `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled, override_start_at, override_end_at)
-         SELECT ?, ?, ?, 0, ?, ?
-         WHERE ${OVERRIDE_ADMISSION_SQL}
-         ON CONFLICT(event_id, occurrence_date) DO UPDATE SET
-           is_cancelled = 0, override_start_at = excluded.override_start_at, override_end_at = excluded.override_end_at`,
-      )
-        .bind(
-          newId(),
-          event.id,
-          request.occurrence_date,
-          request.proposed_start_at,
-          request.proposed_end_at,
-          event.id,
-          request.occurrence_date,
-          event.id,
-        )
-        .run();
+      //
+      // The statement itself now lives in lib/events.ts as writeOccurrenceMove,
+      // shared with the organizer's own move (IDEAS 94), unchanged.
+      const written = await writeOccurrenceMove(
+        env,
+        event.id,
+        request.occurrence_date,
+        request.proposed_start_at!,
+        request.proposed_end_at!,
+      );
       // Keeping acceptance honest when admission fails, the same way P14-11
       // made it honest when the invite could not be added: a request that
       // changed nothing must not be reported as accepted. ConflictError
       // releases the claim.
-      if (written.meta.changes === 0) {
+      if (!written) {
         throw new ConflictError(
           `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`,
         );

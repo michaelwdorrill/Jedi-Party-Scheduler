@@ -1,7 +1,13 @@
 import { useState } from 'react';
-import { DateTime } from 'luxon';
-import { formatTimeRange, isValidRange } from '../lib/datetime';
+import { formatTimeRange } from '../lib/datetime';
+import {
+  seedTimeRangeDraft,
+  timeRangeDraftOrdered,
+  timeRangeDraftToMillis,
+  type TimeRangeDraft,
+} from '../lib/timeRange';
 import InviteePicker from './InviteePicker';
+import TimeRangeFields from './TimeRangeFields';
 import type { ChangeRequestView, EventDetail, Friend, PollVote } from '../types';
 import { buttonClass, cardClass, controlClass } from './ui';
 
@@ -28,26 +34,22 @@ function MoveRequestForm({
   onCancel: () => void;
 }) {
   const zone = event.timezone;
-  const seedStart = event.startAt ? DateTime.fromMillis(event.startAt).setZone(zone) : DateTime.now().setZone(zone);
-  const seedEnd = event.endAt ? DateTime.fromMillis(event.endAt).setZone(zone) : seedStart.plus({ hours: 1 });
-  const [date, setDate] = useState(seedStart.toFormat('yyyy-MM-dd'));
-  const [startTime, setStartTime] = useState(seedStart.toFormat('HH:mm'));
-  const [endDate, setEndDate] = useState(seedEnd.toFormat('yyyy-MM-dd'));
-  const [endTime, setEndTime] = useState(seedEnd.toFormat('HH:mm'));
+  const [draft, setDraft] = useState<TimeRangeDraft>(() => seedTimeRangeDraft(event.startAt, event.endAt, zone));
   const [occDate, setOccDate] = useState(occurrenceDate ?? '');
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const rangeValid = isValidRange(date, startTime, endDate, endTime, zone);
+  const rangeValid = timeRangeDraftOrdered(draft, zone);
   const canSubmit = rangeValid && (!event.isRecurring || occDate.length > 0) && !submitting;
 
   const submit = async () => {
     if (!canSubmit) return;
     setSubmitting(true);
     try {
+      const { startAt, endAt } = timeRangeDraftToMillis(draft, zone);
       await onSubmit({
-        proposedStartAt: DateTime.fromISO(`${date}T${startTime}`, { zone }).toMillis(),
-        proposedEndAt: DateTime.fromISO(`${endDate}T${endTime}`, { zone }).toMillis(),
+        proposedStartAt: startAt,
+        proposedEndAt: endAt,
         occurrenceDate: event.isRecurring ? occDate : undefined,
         message: message.trim() || null,
       });
@@ -69,44 +71,13 @@ function MoveRequestForm({
           />
         </div>
       )}
-      <div className="flex flex-wrap gap-3">
-        <div className="flex-1 min-w-[8rem]">
-          <label className="mb-1 block text-xs text-muted">Proposed start</label>
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            className={controlClass('lg', 'w-full')}
-          />
-        </div>
-        <div className="w-24">
-          <label className="mb-1 block text-xs text-muted">at</label>
-          <input
-            type="time"
-            value={startTime}
-            onChange={(e) => setStartTime(e.target.value)}
-            className={controlClass('lg', 'w-full')}
-          />
-        </div>
-        <div className="flex-1 min-w-[8rem]">
-          <label className="mb-1 block text-xs text-muted">Proposed end</label>
-          <input
-            type="date"
-            value={endDate}
-            onChange={(e) => setEndDate(e.target.value)}
-            className={controlClass('lg', 'w-full')}
-          />
-        </div>
-        <div className="w-24">
-          <label className="mb-1 block text-xs text-muted">at</label>
-          <input
-            type="time"
-            value={endTime}
-            onChange={(e) => setEndTime(e.target.value)}
-            className={controlClass('lg', 'w-full')}
-          />
-        </div>
-      </div>
+      <TimeRangeFields
+        draft={draft}
+        onChange={setDraft}
+        startLabel="Proposed start"
+        endLabel="Proposed end"
+        idPrefix="change-request-time"
+      />
       {!rangeValid && <p className="text-xs text-danger-text">End must be after the start.</p>}
       <textarea
         value={message}
