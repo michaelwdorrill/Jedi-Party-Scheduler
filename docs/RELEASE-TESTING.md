@@ -263,6 +263,34 @@ it — it pairs naturally with the Phase 4 cron wait.
 - [ ] **2.20** In a **private window**, paste a URL to one of your events while
       logged out. → Login screen or refusal, never the event.
 
+### Moving one date — new on 22 Oct, built after the walkthrough found it missing
+
+IDEAS 94. The newest and least-reviewed code in the build: route tests are
+revert-verified, but nothing has seen it in a browser and the reviewer has not
+read it. **Rebuild the frontend before these** (`git pull`, then
+`npm run build` + `npx vite preview --port 5173`) — the sandbox Worker
+deploys itself, the frontend you run locally does not.
+
+- [ ] **2.21** Open one date of the recurring series from 2.2 *from the
+      calendar*, so the page is about that date. → **Move this occurrence**
+      sits beside **Cancel this occurrence**. Press it. → A form opens with
+      that session's own start and end already filled in.
+- [ ] **2.22** Move it later **the same day** and press *Move this date*. → The
+      page stays put and shows the new time. The calendar shows that date at
+      the new time; next week's is untouched.
+- [ ] **2.23** Move a different date **onto the next day**. → The calendar shows
+      it on the new day, not the old one. Open it from there
+      and **reload** — the moved time, not a 404 and not the old date. *(What
+      2.12 and 2.13 were trying to test, now that the organizer can.)*
+- [ ] **2.24** Edit the **series** title. → Both moved dates keep their moved
+      times and take the new title.
+- [ ] **2.25** Open the Move form on one date, then go to a *different* date
+      from the calendar. → The form is **not** open there. *(The page has kept
+      one date's state while showing another's once before — P19-04.)*
+- [ ] **2.26** Read the form's text as a user. It says answers carry over,
+      nobody gets a message, and reminders still to come will show the new
+      time. **Is that what you'd want to know, and is any of it surprising?**
+
 ---
 
 ## Phase 3 — two accounts
@@ -334,6 +362,13 @@ opened, not when it was queued or linked.**
       just removed from. → Refused. Knowing the id is not permission.
 - [ ] **3.19** On the noticeboard, an event's organiser shows as **attending**,
       the same as in every other view.
+
+### The organizer's move, seen from the other side
+
+- [ ] **3.20** The alt answers **Accepted** for one date of the series. Main
+      moves that date (2.22's control). → As the alt, that date shows the new
+      time and **still shows Accepted**. No DM about the move arrives — that is
+      by design, and the form told main so.
 
 ---
 
@@ -501,6 +536,7 @@ table, and therefore how hard to look here.
 | **Recurrence** | Expansion seeded by overrides, not only nominal dates; moved occurrences findable and ordered | **3.14–3.16** | Good logic coverage |
 | **Recurrence** | Series count their own occurrences; long occurrences found in narrow windows | **2.2, 2.3, 2.11** | Good |
 | **Recurrence** | Stored overrides bounded at every writer | **3.14** | Good |
+| **Recurrence** | **New:** the organizer moves one occurrence (IDEAS 94) — shares its write with the accept path | **2.21–2.26, 3.20** | **Route only.** 11 tests, revert-verified; never seen, not yet reviewed |
 | **Noticeboard** | P17-07/P19-01/P20-03 — three consecutive regressions, finally fixed by deleting the pager for a single snapshot | **3.6, 2.14** | Medium. **The most-rewritten file in the codebase** — look hard |
 | **Noticeboard** | Finished series no longer empty it; resolved polls appear; organiser shows as attending | **2.14, 3.19, 5.7** | Good |
 | **Polls** | Editing a poll deleted the votes cast on it | **5.6** | Good |
@@ -527,7 +563,7 @@ table, and therefore how hard to look here.
 | **Assets** | Webfonts self-hosted | **0.4** | Visible immediately if broken |
 | *(excluded)* | ~20 Google Calendar commits | — | Out of scope: `GOOGLE_SYNC_MODE = "off"` in production |
 
-### The five to do first if you only have an hour
+### The six to do first if you only have an hour
 
 Ranked by (no automated coverage) × (how bad it is if broken):
 
@@ -536,6 +572,7 @@ Ranked by (no automated coverage) × (how bad it is if broken):
 3. **2.17/2.18** — two tabs. A whole class of bug that only exists in a browser.
 4. **4.12** — the Discord cancel on a converted series. The one Discord check testing a real fix, and its failure destroys a series.
 5. **3.17** — a removed invitee still getting DMs. Logic is covered; the delivery path is entirely stubbed.
+6. **2.21–2.25** — moving one date. Built on 22 Oct, after everything else here was reviewed: the newest code in the build and the least looked at.
 
 ## What this plan does not cover, deliberately
 

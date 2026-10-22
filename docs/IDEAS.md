@@ -1205,6 +1205,15 @@ is cheap in effort, and the thing it would buy is not a marginal convenience.
 
 ### 94. The organizer cannot move one occurrence of their own series — an invitee can
 
+**Built for 1.0 on 22 October 2026 (`2bc0c1c`), at Michael's call** — after the
+recommendation below was 1.0.1. Not yet through the reviewer pass or the
+walkthrough's steps for it (2.21–2.26, 3.20), so it stays here until both have
+happened. What shipped follows the design notes at the end of this entry: one
+shared write (`writeOccurrenceMove`, extracted unchanged from the accept path),
+`POST /events/:eventId/occurrences/:date/move`, and *Move this occurrence*
+beside *Cancel this occurrence*.
+
+
 Found on the first browser walkthrough, 22 October 2026, by release-testing
 step 2.12 failing: *"I can't change date on a single occurrence, it's only able
 to edit the series."* The step was wrong — it described a control that has
