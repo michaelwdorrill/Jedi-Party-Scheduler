@@ -22,6 +22,18 @@ import {
 
 export const eventRoutes = new Hono<AppEnv>();
 
+// IDEAS 97: the viewer's answer for a poll day that has its own event, read
+// from that event in the poll's own terms -- an RSVP there is what counts now,
+// and the organizer with no answer is implicitly in, as everywhere else.
+const RSVP_AS_VOTE: Record<string, 'yes' | 'no' | 'maybe'> = { accepted: 'yes', declined: 'no', tentative: 'maybe' };
+function sessionAnswer(
+  opt: { my_session_rsvp: string | null; session_organizer_id: string | null },
+  userId: string,
+): 'yes' | 'no' | 'maybe' | null {
+  if (opt.my_session_rsvp) return RSVP_AS_VOTE[opt.my_session_rsvp] ?? null;
+  return opt.session_organizer_id === userId ? 'yes' : null;
+}
+
 export async function loadEventIfVisible(env: Env, eventId: string, userId: string): Promise<EventRow | null> {
   const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
   if (!event) return null;
@@ -186,12 +198,31 @@ eventRoutes.get('/:eventId', async (c) => {
   // longer branches on poll_mode -- a migrated window poll has exactly one.
   let pollOptions = null;
   if (event.event_type === 'poll') {
+    // IDEAS 97: a confirmed day that has become its own event is answered and
+    // counted there, so the row reports that event's state rather than the
+    // poll's frozen record of it. The viewer's own answer there rides along on
+    // the same read rather than costing a fifth query below.
     const { results: options } = await c.env.DB.prepare(
-      `SELECT id, start_at, end_at, display_order, confirmed_at FROM event_poll_options
-       WHERE event_id = ? ORDER BY display_order`,
+      `SELECT o.id, o.start_at, o.end_at, o.display_order, o.confirmed_at,
+              c.id AS session_event_id, c.status AS session_status, c.organizer_id AS session_organizer_id,
+              mine.rsvp_status AS my_session_rsvp
+       FROM event_poll_options o
+       LEFT JOIN events c ON c.created_from_option_id = o.id
+       LEFT JOIN event_attendance mine ON mine.event_id = c.id AND mine.occurrence_date = '' AND mine.user_id = ?
+       WHERE o.event_id = ? ORDER BY o.display_order`,
     )
-      .bind(eventId)
-      .all<{ id: string; start_at: number; end_at: number; display_order: number; confirmed_at: number | null }>();
+      .bind(userId, eventId)
+      .all<{
+        id: string;
+        start_at: number;
+        end_at: number;
+        display_order: number;
+        confirmed_at: number | null;
+        session_event_id: string | null;
+        session_status: string | null;
+        session_organizer_id: string | null;
+        my_session_rsvp: string | null;
+      }>();
 
     // Three fixed queries for the whole option set, not one per option.
     //
@@ -228,14 +259,32 @@ eventRoutes.get('/:eventId', async (c) => {
       // Only confirmed options display their attendee list, so the join
       // filters on confirmed_at rather than loading every yes-voter and
       // discarding most of them.
+      //
+      // IDEAS 97: for a day that has its own event, "going" is that event's
+      // answer -- accepted, plus the organizer unless they declined, the same
+      // rule as ORGANIZER_UNLESS_DECLINED -- not the votes it started from.
       c.env.DB.prepare(
         `SELECT ev.option_id, ev.user_id, u.username, u.global_name FROM event_poll_votes ev
          JOIN event_poll_options o ON o.id = ev.option_id
          JOIN users u ON u.id = ev.user_id
          WHERE o.event_id = ? AND o.confirmed_at IS NOT NULL AND ev.vote = 'yes'
-         ORDER BY u.username`,
+           AND NOT EXISTS (SELECT 1 FROM events c WHERE c.created_from_option_id = o.id)
+         UNION
+         SELECT o.id, a.user_id, u.username, u.global_name FROM event_poll_options o
+         JOIN events c ON c.created_from_option_id = o.id
+         JOIN event_attendance a ON a.event_id = c.id AND a.occurrence_date = '' AND a.rsvp_status = 'accepted'
+         JOIN users u ON u.id = a.user_id
+         WHERE o.event_id = ?
+         UNION
+         SELECT o.id, c.organizer_id, u.username, u.global_name FROM event_poll_options o
+         JOIN events c ON c.created_from_option_id = o.id
+         JOIN users u ON u.id = c.organizer_id
+         WHERE o.event_id = ?
+           AND NOT EXISTS (SELECT 1 FROM event_attendance a WHERE a.event_id = c.id AND a.occurrence_date = ''
+                             AND a.user_id = c.organizer_id AND a.rsvp_status = 'declined')
+         ORDER BY username`,
       )
-        .bind(eventId)
+        .bind(eventId, eventId, eventId)
         .all<{ option_id: string; user_id: string; username: string; global_name: string | null }>(),
       // IDEAS item 49: every voter on every option, not just the confirmed
       // yes-voters above -- "who voted for what" while the poll is still
@@ -253,7 +302,9 @@ eventRoutes.get('/:eventId', async (c) => {
          FROM event_poll_votes ev
          JOIN event_poll_options o ON o.id = ev.option_id
          JOIN users u ON u.id = ev.user_id
-         LEFT JOIN event_attendance att ON att.event_id = o.event_id AND att.occurrence_date = '' AND att.user_id = ev.user_id
+         LEFT JOIN events c ON c.created_from_option_id = o.id
+         LEFT JOIN event_attendance att ON att.event_id = COALESCE(c.id, o.event_id) AND att.occurrence_date = ''
+           AND att.user_id = ev.user_id
          WHERE o.event_id = ?
          ORDER BY u.username`,
       )
@@ -319,7 +370,11 @@ eventRoutes.get('/:eventId', async (c) => {
       // which is the normal case before resolution).
       voters: votersByOption.get(opt.id) ?? [],
       tally: talliesByOption.get(opt.id) ?? { yes: 0, no: 0, maybe: 0 },
-      myVote: myVoteByOption.get(opt.id) ?? null,
+      myVote: opt.session_event_id ? sessionAnswer(opt, userId) ?? myVoteByOption.get(opt.id) ?? null : myVoteByOption.get(opt.id) ?? null,
+      // IDEAS 97: the day's own event, once it has one, and whether it was
+      // called off for dropping below the threshold.
+      sessionEventId: opt.session_event_id,
+      sessionStatus: opt.session_status,
     }));
   }
 

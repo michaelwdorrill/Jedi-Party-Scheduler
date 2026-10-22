@@ -30,7 +30,7 @@ import {
 import { editBotDm } from '../lib/discord';
 import { cancelButton, cancelOccurrenceButton, linkButton, pollSelect, rsvpButtons } from '../lib/dmComponents';
 import { LIMITS } from '../lib/validate';
-import { chunkIds, chunkRows, placeholders } from '../lib/d1';
+import { chunkIds, chunkRows, conditionalRowsSql, placeholders } from '../lib/d1';
 import { planFrom, TickBudget } from './budget';
 import { googleSyncDue, sweepGoogleCalendar } from './googleSync';
 import {
@@ -1686,6 +1686,8 @@ async function sweepMultiWinnerPollClosedNotifications(
 // SQL `INSERT ... SELECT`: every id in this app is minted in the Worker
 // (lib/ids.ts), never SQL-side, so a literal copy would have no correct way
 // to produce fresh invite ids.
+const ATTENDANCE_SEED_COLUMNS = ['id', 'event_id', 'occurrence_date', 'user_id', 'rsvp_status', 'responded_at'] as const;
+
 async function createFannedOutEvent(
   env: Env,
   budget: TickBudget,
@@ -1701,6 +1703,8 @@ async function createFannedOutEvent(
     voice_channel_id: string | null;
     voice_channel_name: string | null;
     is_private: number;
+    poll_threshold_count: number | null;
+    window_block_minutes: number | null;
   },
 ): Promise<RowOutcome> {
   if (!budget.trySpend(1)) return 'incomplete';
@@ -1721,10 +1725,46 @@ async function createFannedOutEvent(
     rsvpStatus: row.user_id === opt.organizer_id ? 'accepted' : 'pending',
   }));
 
+  // IDEAS 97: a fixed-slot day stays on only while it keeps the poll's
+  // threshold. Rather than a second cancel path, the day's event carries the
+  // threshold as its own minimum with auto-cancel on, so the ordinary
+  // minimum-attendees cascade in recordRsvp -- reviewed, and already telling
+  // everyone still coming -- is what calls it off. That only means something
+  // if the people who said "I'm in" for this day start out counted, so their
+  // yes is carried over as an accepted answer; before this the day's event
+  // started with nobody but the organizer and asked everyone again.
+  //
+  // Windowed polls keep the old shape: their answers are ranges, and how a
+  // withdrawn range should un-confirm a day is a separate question (IDEAS 97).
+  const keepsThreshold = opt.window_block_minutes == null && opt.poll_threshold_count != null;
+  let yesVoters: string[] = [];
+  if (keepsThreshold) {
+    if (!budget.trySpend(1)) return 'incomplete';
+    const { results } = await env.DB.prepare(
+      `SELECT v.user_id FROM event_poll_votes v
+       WHERE v.option_id = ? AND v.vote = 'yes'
+         AND EXISTS (SELECT 1 FROM event_invites i WHERE i.event_id = ? AND i.user_id = v.user_id)`,
+    )
+      .bind(opt.id, opt.event_id)
+      .all<{ user_id: string }>();
+    yesVoters = results.map((row) => row.user_id);
+  }
+
   const newEventId = newId();
   const now = Date.now();
   const inviteStmts = inviteStatements(env, newEventId, invitees, true);
-  if (!budget.trySpend(1 + inviteStmts.length)) return 'incomplete';
+  const attendanceStmts = chunkRows(yesVoters, ATTENDANCE_SEED_COLUMNS.length, 1).map((chunk) =>
+    env.DB.prepare(
+      conditionalRowsSql(
+        'event_attendance',
+        ATTENDANCE_SEED_COLUMNS,
+        chunk.length,
+        'events',
+        'ON CONFLICT(event_id, occurrence_date, user_id) DO NOTHING',
+      ),
+    ).bind(...chunk.flatMap((userId) => [newId(), newEventId, '', userId, 'accepted', now]), newEventId),
+  );
+  if (!budget.trySpend(1 + inviteStmts.length + attendanceStmts.length)) return 'incomplete';
 
   await env.DB.batch([
     env.DB.prepare(
@@ -1732,9 +1772,9 @@ async function createFannedOutEvent(
          start_at, end_at, status, poll_strategy, poll_threshold_count, poll_deadline_at,
          poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
          is_recurring, voice_channel_id, voice_channel_name, created_from_poll_id, created_from_option_id,
-         is_private, created_at, updated_at)
+         is_private, minimum_attendees, auto_cancel_below_minimum, created_at, updated_at)
        SELECT ?, ?, ?, ?, NULL, NULL, 'single', ?, ?, ?, 'active', NULL, NULL, NULL,
-         'options', 'single_winner', NULL, NULL, NULL, 0, ?, ?, ?, ?, ?, ?, ?
+         'options', 'single_winner', NULL, NULL, NULL, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE NOT EXISTS (SELECT 1 FROM events WHERE created_from_option_id = ?)`,
     ).bind(
       newEventId,
@@ -1756,11 +1796,14 @@ async function createFannedOutEvent(
       // consistent with 0038's promise that an organiser can keep any event
       // off the noticeboard.
       opt.is_private,
+      keepsThreshold ? opt.poll_threshold_count : null,
+      keepsThreshold ? 1 : 0,
       now,
       now,
       opt.id,
     ),
     ...inviteStmts,
+    ...attendanceStmts,
   ]);
 }
 
@@ -1790,13 +1833,16 @@ async function sweepConfirmedMultiWinnerOptions(
     voice_channel_id: string | null;
     voice_channel_name: string | null;
     is_private: number;
+    poll_threshold_count: number | null;
+    window_block_minutes: number | null;
   }>(
     env,
     budget,
     cursors,
     'confirmed_options',
     `SELECT epo.id AS id, epo.event_id, epo.start_at, epo.end_at, e.title, e.guild_id, e.organizer_id,
-            e.timezone, e.voice_channel_id, e.voice_channel_name, e.is_private
+            e.timezone, e.voice_channel_id, e.voice_channel_name, e.is_private,
+            e.poll_threshold_count, e.window_block_minutes
      FROM event_poll_options epo
      JOIN events e ON e.id = epo.event_id
      WHERE e.poll_resolution_mode = 'multi_winner' AND epo.confirmed_at IS NOT NULL

@@ -1,6 +1,7 @@
 import type { Env } from '../env';
 import type { EventRow } from './events';
 import { requireActiveGuildMember } from './db';
+import { recordRsvp, type RsvpStatus } from './attendance';
 import { LIMITS } from './validate';
 
 interface OptionTally {
@@ -191,6 +192,25 @@ async function confirmOption(env: Env, event: EventRow, optionId: string): Promi
   return result.meta.changes > 0;
 }
 
+// The reverse of confirmOption, for a day that drops back below the threshold
+// in the window before the reminder sweep turns it into its own event. Same
+// revision guard, for the same reason. The NOT EXISTS is what keeps the two
+// halves of IDEAS 97 apart: once the day has an event, attendance there is
+// what counts, and clearing the parent's confirmation under it would leave a
+// live session hanging off a candidate the poll no longer shows as decided.
+async function unconfirmOption(env: Env, event: EventRow, optionId: string): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE event_poll_options SET confirmed_at = NULL
+     WHERE id = ? AND confirmed_at IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM events c WHERE c.created_from_option_id = event_poll_options.id)
+       AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_poll_options.event_id
+                     AND e.status = 'active' AND e.revision = ?)`,
+  )
+    .bind(optionId, requireRevision(event))
+    .run();
+  return result.meta.changes > 0;
+}
+
 // Called synchronously after a vote is cast. For 'single_winner' events,
 // mirrors the original behavior: the first option to cross the threshold
 // resolves the whole event. For 'multi_winner' events, every option is
@@ -215,6 +235,13 @@ export async function checkThresholdAndResolve(env: Env, event: EventRow): Promi
     for (const t of tallies) {
       if (!t.confirmedAt && t.yes >= event.poll_threshold_count) {
         if (await confirmOption(env, event, t.id)) newlyConfirmed.push(t.id);
+      } else if (t.confirmedAt && t.yes < event.poll_threshold_count) {
+        // IDEAS 97. Only reaches a day that has not become its own event yet
+        // (unconfirmOption's NOT EXISTS) -- nobody has been told about it, so
+        // it simply goes back to being a candidate and can confirm again. A day
+        // that HAS its own event is called off there instead, by that event's
+        // inherited minimum (createFannedOutEvent).
+        await unconfirmOption(env, event, t.id);
       }
     }
     return newlyConfirmed;
@@ -729,6 +756,12 @@ async function loadVotablePoll(
   return { status: 'recorded', event };
 }
 
+const VOTE_AS_RSVP: Record<'yes' | 'no' | 'maybe', RsvpStatus> = {
+  yes: 'accepted',
+  no: 'declined',
+  maybe: 'tentative',
+};
+
 // One vote on one candidate -- what the website's poll screen submits, where
 // yes/no/maybe are all expressible.
 export async function recordPollVote(
@@ -740,6 +773,25 @@ export async function recordPollVote(
 ): Promise<VoteOutcome> {
   const loaded = await loadVotablePoll(env, userId, eventId, [optionId]);
   if (loaded.status !== 'recorded') return loaded;
+
+  // IDEAS 97. Once a confirmed day has become its own event, that event's
+  // attendance is what counts (IDEAS 88), so an answer given on the poll's row
+  // for it is recorded there -- otherwise "Can't make it" here changes a
+  // display and nothing else, while the real session goes on counting you. The
+  // decline is what lets that event's inherited minimum call the day off.
+  const session = await env.DB.prepare(`SELECT id, status FROM events WHERE created_from_option_id = ?`)
+    .bind(optionId)
+    .first<{ id: string; status: string }>();
+  if (session) {
+    if (session.status === 'cancelled') {
+      return { status: 'closed', reason: 'This day was called off -- too few people were still in for it' };
+    }
+    const answered = await recordRsvp(env, userId, session.id, '', VOTE_AS_RSVP[vote]);
+    if (answered === 'event_not_active') {
+      return { status: 'closed', reason: 'This day was called off -- too few people were still in for it' };
+    }
+    if (answered !== 'recorded') return { status: 'forbidden' };
+  }
 
   await env.DB.prepare(
     `INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES (?, ?, ?, ?)
