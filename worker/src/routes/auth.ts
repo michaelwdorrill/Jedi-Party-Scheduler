@@ -223,7 +223,12 @@ authRoutes.get('/callback', async (c) => {
           .bind(Date.now(), discordUser.id)
           .run();
       } else {
-        console.warn(`Login refused for Discord id ${discordUser.id}: shares no allow-listed server. No record kept.`);
+        // No id in this line (Pass 24 review, D-11). This person has no
+        // account, F-24 made sure nothing is stored about them, and logging
+        // their Discord id would be a record of them in Cloudflare's logs
+        // whenever Workers Logs is on -- the one place that promise did not
+        // reach.
+        console.warn('Login refused: shares no allow-listed server. No record kept.');
       }
       c.header('Cache-Control', NO_STORE);
       return c.text("You're not a member of any server this app is set up for.", 403);

@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { describeError } from '../lib/async';
 import { downloadMyData } from '../lib/dataExport';
 import { InlineError, buttonClass, cardClass } from '../components/ui';
+import { DELETE_ACCOUNT_CONFIRMATION } from '../lib/deleteAccount';
 
 // Shown after logging in when the Terms or Privacy Policy have changed since
 // this person last agreed (docs/specs/0012-policy-reacceptance.md).
@@ -63,9 +64,7 @@ export default function PolicyGatePage() {
 
   const handleDelete = async () => {
     if (
-      !confirm(
-        'Permanently delete your account?\n\nThis removes your profile, personal time blocks, RSVPs, votes, group memberships, and every event you organised — including from the calendars of everyone you invited. It cannot be undone.',
-      )
+      !confirm(DELETE_ACCOUNT_CONFIRMATION)
     ) {
       return;
     }

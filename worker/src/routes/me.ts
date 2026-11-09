@@ -109,7 +109,19 @@ meRoutes.get('/export', async (c) => {
     // a timestamp the app records about the person, including for attempts
     // that were refused, which makes it exactly the sort of thing an access
     // request is for.
-    profile: `SELECT ${PROFILE_COLUMNS}, created_at, updated_at, last_login_at, last_login_attempt_at
+    //
+    // Pass 24 review (D-07, Michael's call: "extend the export"). Both reviewers
+    // found the policy's "everything the service holds about you" still short
+    // of the schema: dm_channel_id here, three session columns, three Google
+    // connection columns, the ids that tie a Google link to the entry it made,
+    // the Google pending/orphan rows, and group_activity_nudges. All of them now
+    // come out, and test/exportCompleteness.test.ts compares every projection
+    // below against the live schema, so a column added later fails CI until it
+    // is exported or excluded on purpose. The only exclusions are credentials
+    // (*_ciphertext, *_iv) and the user_id that is the export's own key.
+    // dm_channel_id is the id of the Discord DM channel the bot uses to reach
+    // you: an address, not a credential -- nothing can be sent with it alone.
+    profile: `SELECT ${PROFILE_COLUMNS}, dm_channel_id, created_at, updated_at, last_login_at, last_login_attempt_at
               FROM users WHERE id = ?`,
     serverMemberships: `SELECT guild_id, nickname, is_member, verified_at FROM user_guild_membership WHERE user_id = ?`,
     personalEvents: `SELECT * FROM personal_events WHERE user_id = ?`,
@@ -128,10 +140,21 @@ meRoutes.get('/export', async (c) => {
     // to themselves. An export is a right of access to *your data*, not to the
     // app's keys for acting on your behalf.
     googleCalendar: `SELECT google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
-                       last_synced_at, last_error, connected_at, updated_at
+                       last_synced_at, last_error, connected_at, updated_at, access_token_expires_at,
+                       disconnect_attempts, authorization_failed_at
                      FROM google_calendar_connections WHERE user_id = ?`,
-    googleCalendarLinks: `SELECT event_id, occurrence_date, synced_title, synced_start_at, synced_end_at, synced_at
+    // google_event_id and calendar_id say which entry in which of your Google
+    // calendars this service wrote -- what you would need to find and remove it.
+    googleCalendarLinks: `SELECT id, event_id, occurrence_date, google_event_id, calendar_id, synced_title,
+                            synced_start_at, synced_end_at, synced_at
                           FROM google_event_links WHERE user_id = ?`,
+    // A Google connection awaiting your choice of calendar (expires in minutes),
+    // credentials left out for the same reason as googleCalendar's.
+    googlePendingConnections: `SELECT id, google_account_email, access_token_expires_at, created_at, expires_at
+                               FROM google_pending_connections WHERE user_id = ?`,
+    // Entries written to your Google calendar whose link could not be recorded,
+    // kept so they can be found and removed. No credential in the table.
+    googleOrphanedEntries: `SELECT * FROM google_orphaned_inserts WHERE user_id = ?`,
 
     // Pass-11 review (F-21 / R13), found by both reviewers. Everything below
     // was held about the caller and left out of the download, against a policy
@@ -164,7 +187,13 @@ meRoutes.get('/export', async (c) => {
     // chain, so one login's rotations group together instead of reading as
     // separate sign-ins. Both are as inert as the id -- no key, no
     // credential -- and the privacy page now says the predecessors are kept.
-    sessions: `SELECT created_at, last_used_at, expires_at, revoked_at, superseded_at, family_id
+    //
+    // Pass 24 (D-07): id, successor_id and policy_version too. successor_id
+    // names the row a session was rotated into, which reads as nothing without
+    // the ids it points at; policy_version is which policy you had agreed to
+    // when it was issued.
+    sessions: `SELECT id, created_at, last_used_at, expires_at, revoked_at, superseded_at, family_id,
+                 successor_id, policy_version
                FROM sessions WHERE user_id = ?`,
 
     // The free-text `message` on a change request is the person's own writing,
@@ -181,6 +210,11 @@ meRoutes.get('/export', async (c) => {
     rsvpNoticesSentToYou: `SELECT * FROM organizer_rsvp_notice_log WHERE organizer_id = ?`,
 
     groupNudges: `SELECT * FROM group_nudge_log WHERE user_id = ?`,
+    // When the service last checked a group you created for inactivity and
+    // reminded it. The group's state rather than yours, but you created the
+    // group, and it is deleted with your account for that reason (lib/db.ts).
+    groupIdleChecks: `SELECT n.* FROM group_activity_nudges n
+                      JOIN groups g ON g.id = n.group_id WHERE g.created_by = ?`,
     inactivityWarnings: `SELECT * FROM account_purge_warnings WHERE user_id = ?`,
     // Includes the server name the person typed, which is their own input.
     serverRequests: `SELECT * FROM guild_add_requests WHERE requested_by = ?`,

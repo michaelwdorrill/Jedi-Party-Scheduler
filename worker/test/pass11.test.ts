@@ -2549,13 +2549,20 @@ describe('an emailed decision needs a person, and a refused login leaves nothing
     const challenge = base64UrlEncode(
       new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('verifier'))),
     );
+    // Pass 24 review, D-11: nor a log line naming them. With Workers Logs on,
+    // the old warning ("Login refused for Discord id stranger") was a record
+    // of exactly the person this test promises leaves nothing.
+    const logged: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => void logged.push(args.join(' ')));
     const res = await call(env, `/auth/callback?code=abc&state=${encodeURIComponent(state)}`, {
       headers: { Cookie: `oauth_state=${nonce}:${challenge}` },
     });
+    warnSpy.mockRestore();
 
     expect(res.status).toBe(403);
     // The whole finding: no row at all for someone who cannot use the app.
     expect(await countRows(db, 'users', 'id = ?', 'stranger')).toBe(0);
+    expect(logged.some((line) => line.includes('stranger')), 'the refused person is not named in the log').toBe(false);
   });
 
   // The other half of the same decision. Migration 0018 exists so the owner

@@ -132,9 +132,20 @@ export async function pruneStaleSessions(env: Env): Promise<void> {
 // signature and expiry alone can't be revoked, so this row is what makes
 // logout, account deletion, and a leaked-token response take effect
 // immediately instead of waiting out the token's lifetime.
+// How stale last_used_at may get before an authenticated request refreshes it.
+// Pass 24 review, D-01: the privacy policy and the data export both said a
+// session records when it was last used, and nothing ever updated the column
+// after the insert -- every row's "last used" was its creation time. Michael
+// chose to make it true rather than drop the claim. Writing on every request
+// would add a statement to each one; touching only when the stored value is
+// five minutes old costs nothing on most requests (the row is already read
+// here), and since an access token lives thirty minutes before a refresh
+// starts a new row, a row is touched at most about six times.
+export const SESSION_TOUCH_INTERVAL_MS = 5 * 60 * 1000;
+
 export async function isSessionActive(env: Env, sessionId: string, userId: string): Promise<boolean> {
   const row = await env.DB.prepare(
-    `SELECT user_id, expires_at, revoked_at, policy_version, superseded_at FROM sessions WHERE id = ?`,
+    `SELECT user_id, expires_at, revoked_at, policy_version, superseded_at, last_used_at FROM sessions WHERE id = ?`,
   )
     .bind(sessionId)
     .first<{
@@ -143,6 +154,7 @@ export async function isSessionActive(env: Env, sessionId: string, userId: strin
       revoked_at: number | null;
       policy_version: number;
       superseded_at: number | null;
+      last_used_at: number;
     }>();
   if (!row || row.user_id !== userId || row.revoked_at != null) return false;
   // A session that has been rotated away from (F-20) keeps working just long
@@ -156,7 +168,18 @@ export async function isSessionActive(env: Env, sessionId: string, userId: strin
   // -- no mass write, no deploy step, nothing to run twice. It rides on a row
   // this function already reads, so it costs no extra query.
   if (row.policy_version !== CURRENT_POLICY_VERSION) return false;
-  return row.expires_at > Date.now();
+  const now = Date.now();
+  if (row.expires_at <= now) return false;
+  if (row.last_used_at < now - SESSION_TOUCH_INTERVAL_MS) {
+    // Bookkeeping, never a reason to refuse a request that authenticated: a
+    // failed write leaves the value stale by one interval more, and is logged.
+    try {
+      await env.DB.prepare(`UPDATE sessions SET last_used_at = ? WHERE id = ?`).bind(now, sessionId).run();
+    } catch (err) {
+      console.warn('Could not record session use:', err instanceof Error ? err.message : String(err));
+    }
+  }
+  return true;
 }
 
 // Used by /auth/refresh only. Refresh, done properly (F-20 in the Pass-11

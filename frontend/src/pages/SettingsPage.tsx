@@ -9,6 +9,7 @@ import { InlineError, buttonClass, cardClass } from '../components/ui';
 import { describeError } from '../lib/async';
 import { downloadMyData } from '../lib/dataExport';
 import { getScenery, setScenery, type Scenery } from '../lib/scenery';
+import { DELETE_ACCOUNT_CONFIRMATION } from '../lib/deleteAccount';
 
 export default function SettingsPage() {
   const { user, refreshUser, logout } = useAuth();
@@ -55,9 +56,7 @@ export default function SettingsPage() {
 
   const handleDelete = async () => {
     if (
-      !confirm(
-        'Permanently delete your account?\n\nThis removes your profile, personal time blocks, RSVPs, votes, group memberships, and every event you organised. It cannot be undone.\n\nSessions already added to your Google calendar stay there — deleting your account revokes this app\u2019s access, so it cannot reach them afterwards. Disconnect Google first if you want them removed.',
-      )
+      !confirm(DELETE_ACCOUNT_CONFIRMATION)
     ) {
       return;
     }
