@@ -13,11 +13,52 @@ roadmap gets revisited between phases.
 
 ## How this file is kept
 
-Two sections: **Still open**, and **Already built** below it. When something
-ships, its entry is annotated with the version and moved down. It is not
-deleted, because for several of these the most valuable part is the record of
-a decision and *why the alternative was rejected* — which is worth more after
-shipping than before.
+Three sections: **Still open**, **Parked until after 1.0**, and **Already
+built**. When something ships, its entry is annotated with the version and
+moved to the bottom section. It is not deleted, because for several of these
+the most valuable part is the record of a decision and *why the alternative was
+rejected* — which is worth more after shipping than before.
+
+**The middle section's rule is narrow, though it does less work than it used
+to.** It was added when `ROADMAP.md` defined 1.0 as "when `IDEAS.md`'s *Still
+open* section is empty" — under that test anything sitting in *Still open*
+pushed 1.0 further away, which was the intended behaviour for work we actually
+intend to do and the wrong behaviour for work we had deliberately decided comes
+*after* 1.0. Before this section existed there was nowhere to put the second
+kind, and the only options were to let it hold 1.0 hostage or to not write it
+down at all.
+
+**That test was retired on 13 September 2026.** 1.0 is now defined by the
+release bar — its five clauses hold, and nothing still open is a category-1 or
+category-2 finding — so an open entry no longer counts against 1.0 merely by
+existing, and every open entry carries a version assignment instead. Two things
+follow for this file, and the second is the important one:
+
+- **Parking no longer exempts anything from a release test**, so the incentive
+  to sweep is gone. The section stays because decided-for-after and
+  scheduled-for-next are genuinely different states worth distinguishing.
+- **The tax on capture is gone.** Under the old test every note written here
+  was a release blocker, which argued quietly against writing anything down —
+  in a file whose entire purpose is being cheap to add to. That was the worse
+  of the two failures the old test could cause.
+
+An entry qualifies for **Parked** only if all three are true:
+
+1. There is a **recorded decision** that it belongs after 1.0, not merely an
+   absence of enthusiasm for doing it now.
+2. Nothing already scheduled depends on it.
+3. It is written up to the same standard as anything else here, so that
+   whoever picks it up later inherits the reasoning rather than a stub.
+
+**Parked is not a synonym for avoided.** The original failure mode — a section
+the 1.0 test does not read is a place inconvenient items can be filed to make a
+number go green — is largely historical now that no number goes green by
+filing. What survives is the version of it that never depended on the test:
+a parked item is one nobody is planning around, so parking something other work
+quietly depends on still produces a list that misleads, which is item 29's
+lesson that a list which stops saying where things stand stops being worth
+keeping. The old tell still finds it: if this section starts growing faster
+than *Still open* shrinks, look at why.
 
 That matters more than housekeeping usually does, because `ROADMAP.md`
 defines 1.0 as "when `IDEAS.md` is empty, we leave Beta". For the first four
@@ -34,7 +75,1977 @@ identity, not a position — it never changes and is never reused.
 
 ## Still open
 
-### 2. Google Calendar sync
+This section emptied for the first time in v0.8.1 and did not stay empty,
+which is the definition working as intended rather than a problem with it:
+these three were found by the Pass-11 security review and are the parts of it
+that were deliberately *not* fixed in the same pass. Everything else it found
+was.
+
+### 66. The Google import has a forty-event horizon and no way past it
+
+The pull half reads the chosen calendar about two months ahead and keeps the
+first forty events, dropping the rest. Forty-one events over two months is
+ordinary calendar usage, not a pathological case, and the ones past the cap
+never become busy blocks -- so the scheduling assistant reports those times as
+free.
+
+Pass 11 (R16) fixed the half of this that actively misled: truncation is now
+detected (either the cap bit, or Google returned a `nextPageToken`), it is
+surfaced in `last_error` where Settings shows it, and reconciliation no longer
+deletes rows on the strength of a response it knows to be partial. What is
+still open is the horizon itself.
+
+Doing it properly means paging across ticks: a per-connection cursor, a
+persisted "this window is complete" marker, and reconciliation that only
+deletes once a full pass has actually finished. That is a migration and a
+chunk of state machine, and it was deliberately not smuggled into a security
+fix. The constant is `MAX_IMPORTED_EVENTS_PER_SYNC` in `cron/googleSync.ts`,
+and it moves together with `tryPersonalEventImport`'s reservation in
+`cron/budget.ts` -- see both comments before changing either.
+
+### 67. A retried voice DM does not re-check attendance
+
+`sweepDueNotificationRetries` now requires the recipient to still be invited to
+the event (Pass 11, R09 -- before that, a queued DM could be delivered for the
+first time *after* someone's invite was removed, carrying a private event's
+title or a live voice-channel link). That closes the privacy boundary.
+
+The narrower case left open: `voice_channel_invite` is only ever sent to
+confirmed attendees, and someone who declines between the DM being queued and
+the retry running will still get a "join the voice channel" ping. They are
+still an invitee, so nothing is disclosed that they could not already see in
+the app -- it is a wrong message, not a leak.
+
+It is open rather than fixed because the definition of "confirmed" lives in
+`getConfirmedAttendeeIds` and is genuinely intricate (window polls matched on
+the resolved span, an RSVP overriding a prior vote, organizer-unless-declined).
+Restating it in the retry consumer's SQL would fork the one definition of
+attendance in the codebase, which is a worse failure than the thing it fixes.
+The honest fix is to make that predicate callable for a single (user,
+occurrence) pair and have the consumer ask it.
+
+### 68. Login still has no rate limit -- code half fixed in Pass 21; the control is an edge rule
+
+Carried forward from the Pass-11 review, which noted it as an already-known
+open item rather than a new discovery (it is F-06 in the earlier register).
+`login_attempts` is record-keeping only -- nothing reads it to refuse anything.
+Real rate limiting needs somewhere to keep counters that is not D1, which is
+the piece of infrastructure this app does not have yet; `lib/sessions.ts`'s
+`MAX_SESSIONS_PER_USER` comment records the same reasoning for the storage
+consequence it caps instead.
+
+**Pass-21 review (F-59) made this precise, and half of it is now fixed.** The
+item said "no rate limit" and left it there; the review said what that actually
+costs. `/auth/login` is cheap, but `/auth/callback` and
+`/guild-requests/callback` compared `?state=` against a cookie the same client
+sets, so **one unauthenticated request reached `exchangeCodeForToken`** -- a
+POST to Discord's token endpoint carrying this app's client secret, against a
+per-client rate limit, with no session and no database write in the way.
+Reproduced: no `/auth/login` first, a self-minted cookie, and the outbound call
+to `discord.com/api/v10/oauth2/token` happened.
+
+Nothing is disclosed by it and no account is affected except by being unable to
+log in, which is exactly why the release bar's first two clauses could not see
+it. The bar has an abuse-resistance clause now, and this is the instance that
+earned it.
+
+**Fixed in code:** both callbacks now sign the `state` and verify it before
+spending anything, mirroring `routes/google.ts`, which already had the right
+shape forty lines away. The cookie stays and still does the CSRF binding -- a
+signed state proves *we* issued it, not that *this browser* asked for it, and
+there is a test for each half.
+
+**Still open, and it is the actual control:** signing only raises the price to
+one real `/auth/login` per attempt. It does not bound the rate, and nothing in
+the Worker throttles anything. That wants a Cloudflare rate-limiting rule on
+`/auth/*` and `/guild-requests/*`, which needs no code and is available on the
+plan this already runs on. Written up with the exact steps, and the trap about
+not catching `/auth/refresh` with a path prefix, in `docs/SETUP.md`.
+
+### 69. A removed invitee's poll vote still counts toward the tally
+
+Found while fixing P12-01 in the Pass-12 review. Removing someone from an event
+deletes their `event_invites` and `event_attendance` rows and nothing else --
+their `event_poll_votes` and `event_window_availability` rows survive, on both
+removal paths (`DELETE /events/:id/invites/:userId` and the bulk replace in
+`replaceInviteStatements`).
+
+The privacy half of that is closed: `membershipJoin` in `lib/attendance.ts` now
+requires a current invite before anyone is selected as a DM recipient, so a
+removed person receives nothing regardless of what historical rows they left
+behind. This item is the half that is left.
+
+A poll's tallies still count the departed vote. So a threshold poll can resolve
+on a night that only reaches its bar because someone no longer on the event
+voted for it, and the organizer sees a count they cannot reconcile against the
+invite list. Nobody is harmed and nothing leaks -- it is a wrong number, not an
+exposure, which is why it is here rather than fixed in that pass.
+
+Not fixed on the spot because deleting the votes is not obviously right either:
+re-inviting someone would silently lose an answer they did give, and the bulk
+replace path would need two more statements per chunk, which is the part of
+`inviteStatements` already sitting closest to D1's per-statement parameter
+ceiling. The alternative -- having the tally join `event_invites` the way
+recipient selection now does -- is the cleaner shape and costs nothing at write
+time, but it changes resolution behaviour for polls that are mid-flight, so it
+wants doing deliberately rather than as a rider on a security fix.
+
+### 70. Accepting a change request is not atomic with applying it -- REOPENED after Pass 16
+
+From the Pass-13 review (P13-11), re-raised as P14-12 and P15-08, "closed" in
+Pass 15, **and reopened by Pass 16, which found that the Pass-15 fix introduced
+a P1 privacy failure.** The whole arc is kept because the mistake is more
+instructive than the finding.
+
+`applyAndAccept` claims the decision and then applies it. If the process dies
+between the two, or the apply and its compensating release both fail, the
+request reads `accepted` over an event that never moved.
+
+**What Pass 15 built, and why it was wrong.** Migration 0044 added a nullable
+`applied_at`, the apply path stamped it, and the resolver grew an arm that
+re-applied any accepted row left unstamped for ten minutes. The idempotence
+argument was that the override write is an upsert and `updateEvent` is
+revision-guarded, so replaying an identical change is a no-op.
+
+That argument is true and beside the point. **Replay is not idempotent against
+a world that has changed its mind.** Pass 16 demonstrated:
+
+- an `add_invitee` acceptance replayed after the organizer had REMOVED that
+  person re-admitted them -- to an event whose private title and description
+  had been edited in between, so it handed back access the organizer had
+  deliberately revoked. That is the only P1 in five passes, and it was
+  introduced by a fix for a finding two independent reviewers had both called
+  non-blocking;
+- a recurring `time_change` replayed after the organizer had CANCELLED that
+  occurrence set `is_cancelled` back to 0;
+- a replay that errored (an invite acceptance at the 25-invite cap) escaped
+  the resolver and starved unrelated deadline work, with no failure counter
+  advancing.
+
+The test written to justify the idempotence claim asserted that re-applying an
+invite which had already landed was a no-op. It was. It proved idempotence
+against an unchanged world and was read as safety.
+
+**What is kept.** The `applied_at` column and its stamp, and the decision-notice
+gate that only announces an accepted request once it is stamped. That gate is
+the half of Pass 15's work that was worth having: the worst consequence of this
+finding was never the stranded row, it was the DM telling the requester
+"accepted" for a change that had not happened. It carries no replay risk.
+
+**What is removed.** The recovery arm. A stranded row is now left strictly
+alone: accepted, unstamped, silent, and visible to anyone who looks.
+
+**What a real fix needs**, and why it is still not a rider:
+
+- Durable evidence of what the effect DID, not just that a decision was made --
+  enough to distinguish "never applied" from "applied and since superseded by
+  an authorized decision". Comparing the current value against the request is
+  not enough, because a mismatch is equally evidence of a NEWER correct
+  decision.
+- Effect and completion recorded in one transaction where the tables allow it,
+  and an explicit operation state with conditional reconciliation where they
+  do not.
+- Never a blind re-apply of an invitation or an occurrence override.
+
+**The backfill, and a claim made here that was wrong.** This entry previously
+said the migration's backfill was "harmless for correctness because it only
+feeds the notice gate". The Pass-17 review showed that plainly false: the
+notice is a message telling the requester their change was ACCEPTED, so
+stamping a row whose effect never landed makes the app assert a success that
+did not happen, to the one person who will act on it. The reviewer demonstrated
+the outgoing payload.
+
+The backfill is therefore gone (migration 0044 no longer writes `applied_at`),
+which was still possible because 0044 had reached the sandbox and never `main`.
+Legacy accepted rows keep a NULL stamp, the gate reads that as unconfirmed, and
+they stay quiet. The bounded cost is that an accepted-but-not-yet-announced
+request at deploy time never gets its DM -- a handful of rows, once.
+
+What remains open is the same thing: there is no evidence left in the database
+of whether a 2026 acceptance took effect, so historical reconciliation is
+unsolved. What is no longer true is that the app pretends otherwise.
+
+**And a failure adjacent to it, fixed in Pass 16:** the stamp originally sat
+inside the same `try` as the mutation, so failing to RECORD an application was
+handled as failing to apply -- the compensating release ran, the request went
+back to pending over an event that had already moved, and the next deadline
+pass declined it on a stale revision. The stamp's failure is now contained; the
+cost is a row that applied and does not say so, which the gate keeps quiet.
+
+### 70a. Make accept-and-apply one transaction (the agreed design for item 70)
+
+Michael's call, 13 September 2026, on how to close P21-09: **the change should
+be made first, and marked accepted only once it has been.**
+
+The literal ordering cannot be used, and the reason is written into
+`changeRequests.ts` at the claim itself. Apply-then-mark is what this code did
+until Pass 12, and P12-18 changed it: a decline landing between the route's
+snapshot read and the accept's write meant the accept moved the event and then
+found nothing to mark, so the stored request read **declined**, complete with
+the organizer's decline note, over a schedule that had already moved. Claiming
+first is what makes `pending` the thing accept and decline compete for, so
+exactly one of them can win it.
+
+So the requirement is right and the sequencing is the wrong lever. What
+delivers it is **atomicity**: claim, effect and completion stamp in ONE D1
+batch. Then the request is marked accepted *if and only if* the change landed
+-- which is a stronger form of what was asked for, and it keeps P12-18's race
+arbitration because the claim's `WHERE status = 'pending'` is still in there.
+
+It also dissolves the rest of the item rather than patching it:
+
+- the compensating release disappears, because there is nothing to compensate;
+- `applied_at` becomes atomic with the effect, closing the P16-02 residual
+  (a change that applied but could not record that it had);
+- and P21-09 stops existing, because the interruption window it needs is gone
+  rather than made smaller.
+
+**It is mechanical, and that was worth checking before proposing it.** All
+three effect paths already build a statement array and end in exactly one
+`env.DB.batch(...)`: `updateEvent` (eventWrites.ts, one batch at the end, then
+an interpretation of `results[0].meta.changes`), `addInvitesToEvent` (same
+shape), and the recurring-occurrence override, which is a single statement
+already. The work is to split each into a `build…Statements()` half and a thin
+`execute` half, then have `applyAndAccept` prepend its claim, append its stamp,
+and run one batch.
+
+**Not landed with the Pass-23 acceptance candidate, deliberately.** That
+candidate passed all six release gates, and this refactors the most heavily
+guarded write path in the app -- the one whose revision guard doubles as the
+concurrency control for three other features. Dropping an unreviewed change of
+that shape onto a package that has just been accepted is precisely how the only
+P1 of this cycle happened: unrequested work, on a finding two reviewers had
+called non-blocking, landing without a reviewer seeing it.
+
+So it is the first thing in 1.0.1, with the acceptance reviewer verifying it,
+and item 70's other half -- surfacing an uncertain state in the UI -- becomes
+unnecessary if this lands, because there will be no uncertain state to surface.
+
+### 71. A same-account reconnect can still race the tail of a disconnect
+
+From the Pass-14 review (P14-08), **narrowed in Pass 15 (P15-07) and no longer
+the design problem this entry originally described.** The history is worth
+keeping, because the reasoning that made it look unfixable was correct at the
+time and stopped being correct for a reason nobody planned.
+
+Revoking a token at Google revokes the **grant** it belongs to, not that token.
+So a same-account reconnect landing inside a running disconnect had its
+brand-new credential revoked along with the one being discarded. The database
+half was never the problem -- it has been compare-and-swap guarded since P13-07
+-- and there is no provider operation that revokes one token and spares its
+siblings.
+
+The obvious guard is to re-read the connection immediately before revoking and
+skip when the stored credential has changed. **This entry originally rejected
+that**, because it would be wrong for a connection whose Google account was
+never identified: `storeConnection` does not revoke on that branch either, so
+skipping would leave a live grant that nothing would ever tear down, against
+what the Privacy Policy says in as many words.
+
+**P15-05 removed that branch at the door.** The OAuth callback now refuses to
+park a grant it cannot attribute to a conclusively identified account -- a
+successful calendar list with no primary entry on it is refused and the grant
+revoked, not stored with a NULL email. With that shape gone, the guard is
+correct wherever it applies, and Pass 15 implemented it: the revoke is skipped
+only when a replacement exists AND both sides carry the same known account
+email. No replacement, a different account, or an identity that is not known on
+both sides all still revoke.
+
+**What is left is genuinely small.** The window is now between that read and
+the revoke request rather than the whole multi-tick disconnect, and closing it
+completely still needs one of the two designs below:
+
+- refuse an OAuth callback while `status = 'disconnecting'` -- the safer of the
+  two, and the one to build if this is ever built. "Let a reconnect cancel a
+  pending disconnect" only works for the same account, and the callback cannot
+  know the account until after the code exchange;
+- serialise the disconnect/finalize lifecycle behind an explicit state, rather
+  than another unguarded read before a network call.
+
+Neither is scheduled. The residual needs a reconnect to land in the
+milliseconds between one read and one HTTPS request, it is recoverable by
+reconnecting, and nothing is lost or disclosed.
+
+**A cousin worth recording while it is in view:** `storePendingConnection`
+deletes expired pending grants (`google_pending_connections`) without revoking
+them, which is the same shape as F-44 -- an abandoned grant at Google that the
+app holds no token for. It is short-lived in practice, since revocation is
+grant-level and any later disconnect of the same account kills it. Closing it
+means decrypting each expired row and making a network call from a request
+path, which is why it was not done as a rider on F-44.
+
+### 72. Cross-tab login identity is not enforceable without a shared lock
+
+From the Pass-15 review (P15-02) and **corrected in scope by Pass 16 (P16-05),
+which showed the description here was too narrow.**
+
+The auth identity marker moved into `localStorage` in Pass 14 so two tabs agree
+on who is signed in, with an in-memory fallback for browsers that refuse
+storage. Pass 15 fixed the half that was simply wrong: the fallback was
+consulted when the read *threw* and not when it succeeded and found nothing,
+so the guard compared null to null and every refresh looked like the same
+identity.
+
+This entry then claimed the remainder was confined to storage refusing writes.
+**That was wrong.** Pass 16 reproduced the overwrite with *fully writable*
+shared storage: the identity read and the token write are two separate
+operations, and another tab can adopt a different account between them. The
+request-level check afterwards correctly rejects the stale request, but by then
+the shared credential has already been replaced, and a subsequent `/me` with
+what is in storage authenticates the wrong account.
+
+So there are two residuals, not one:
+
+1. **The check/write race**, on any storage. Narrow -- microseconds between two
+   operations -- and it needs two legitimate sessions in one browser.
+2. **The per-tab fallback**, when the marker cannot be persisted at all. Two
+   tabs then hold different in-memory values and neither can see the other's.
+
+Neither is an anonymous-takeover route: both need two real sessions in the same
+browser, and a stale refresh can only install a credential its own account
+already held.
+
+**The fix for both is the same and is not a rider:** serialise auth mutations
+behind `navigator.locks`, so the identity check and the credential replacement
+are one critical section, and handle a failed identity write explicitly rather
+than proceeding. That is a rewrite of the auth client's control flow and wants
+doing when someone can give the whole file their attention.
+
+Rejected: failing the refresh closed whenever the marker is unavailable. It
+would log out every private-mode and full-storage browser on every refresh
+cycle, which is a large certain cost against a small conditional one.
+
+### 73. An in-flight Google revoke can still outrun a reconnect
+
+From the Pass-16 review (P16-06), the residue of item 71 after Pass 15 narrowed
+it. The disconnect sweep now re-reads the connection immediately before
+revoking and skips when a known same-account replacement is already stored --
+which covers a replacement finalized before that read. It cannot cover one
+finalized *after* the read while the revoke request is in flight, and an OAuth
+flow already open in another tab supplies exactly that overlap.
+
+Nothing local can undo a remote grant-level revocation, so more checks after
+the fact do not help. The fix is the one item 71 already names as the safer of
+its two: refuse a finalize while the connection's status is `disconnecting`, so
+the lifecycle is serialised rather than raced. Recoverable by reconnecting,
+nothing lost or disclosed, and it needs the reconnect to land inside one
+in-flight HTTPS request.
+
+### 74. A failed organizer RSVP notice is never retried -- fixed in Pass 16
+
+From the Pass-16 review (P16-08). `sweepOrganizerRsvpNotices` selected
+candidates with `l.id IS NULL` -- no log row at all -- but the outbox writes a
+log row even when a send FAILS, because that is where the attempt count and the
+backoff live. So one transient Discord error created a row the query then
+excluded forever, and nothing else drains that table: the recorded
+`next_attempt_at` passed and was read by nothing.
+
+Fixed by widening the candidate query to also select undelivered, unfailed rows
+that are due, including P13-13's abandoned-claim arm -- the shape the
+notification and group-nudge consumers already use. Kept here because of the
+reasoning about HOW: widening the existing query rather than adding a third
+retry consumer avoids a new fixed per-tick query, which is the cost
+`cron/budget.ts` records three incidents of, and which the Pass-15 recovery arm
+tripped over as well.
+
+### 75. A successful Google insert whose mapping is refused is duplicated -- fixed in Pass 19
+
+From the Pass-16 review (P16-07), pre-existing and newly reachable through the
+Pass-15 destination-move path. The push half creates the remote event and then
+writes its mapping under a credential guard. When a same-account reconnect
+replaces the credential while the create is in flight, the create succeeds and
+the mapping is correctly refused -- leaving a real calendar entry with nothing
+in the database pointing at it. The next sweep creates a second copy and maps
+only that one, so the first is orphaned and invisible to later edits and
+cancellation.
+
+Both copies are the same account and the same calendar, so this is duplication
+and orphaning rather than disclosure. The honest fix is provider-side
+idempotency (a stable client-supplied id) or durable reconciliation of creates
+whose mapping was rejected. A re-read before creating narrows nothing that
+matters, because the create is already away.
+
+**Closed in Pass 19, with its impact corrected upward first.** The Pass-19
+review traced this through an actual completed disconnect and found it is not
+only a duplicate: because disconnect enumerates `google_event_links`, and this
+event has no link row, **disconnect could not remove it** -- while the confirm
+dialog, the disconnecting state and the Privacy Policy all promise, without
+qualification, that disconnecting removes the upcoming entries this service
+added. That made it the one open finding whose consequence contradicted
+published product text rather than merely inconveniencing someone.
+
+The mapping guard stays exactly as it is: refusing to record a mapping under a
+credential or destination that has moved is correct, and weakening it would
+restore the older, worse class of bug where an in-flight insert reattached
+itself to the wrong account. What changes is what happens when it refuses. A
+refused mapping is now an obligation: the push path tries to delete the remote
+event immediately, which also removes the duplicate, and only if that cannot
+happen -- the delete fails, or the calendar-write allowance is spent -- does it
+record a row in `google_orphaned_inserts` (migration 0045). Disconnect drains
+that table alongside the link rows, and account erasure deletes it explicitly
+in the same batch as the rest, per the rule F-15 established.
+
+Deliberately no new per-tick query: the obligation write only happens on the
+refused-mapping branch, which is the rare race, so the fixed cost of a sweep is
+unchanged. Three recorded incidents in this project came from a new fixed
+per-tick statement starving `sweepPurgeTerminalHistory`, and that was not going
+to be the fourth.
+
+Unlike the link rows, obligations are drained with no date filter. That is not
+a change of policy about history: a link row records a session someone actually
+played and is worth keeping, whereas one of these is a duplicate the user never
+asked for and cannot trace. Leaving it as "history" would be leaving litter.
+### 76. The development-dependency audit cannot be cleared by `npm audit fix` alone
+
+From the Pass-16 review's dependency table, and an attempt at it in the same
+pass. Production dependencies are clean in both packages. The development
+tooling is not: seven affected entries in the worker (five high, two moderate)
+and one in the frontend, through Vitest/mocker, the Wrangler/Miniflare chain
+(sharp, undici), nanoid, and js-yaml. No exploit or affected deployed request
+path has been established for any of them -- the worker tests run in Node with
+no public mocker server, and the frontend has no runtime YAML parser -- but
+Wrangler and Miniflare are the real deploy toolchain and warrant maintenance.
+
+**What was tried:** plain `npm audit fix` in `worker/`. It resolves the five
+high entries, touches only the lockfile (no declared version changes), and the
+whole test suite still passes -- but it moves `@cloudflare/workers-types` and
+the **test** typecheck then fails with `TS2554` in `test/stage3.test.ts`, where
+a `.toString('hex')` on a crypto signature stops type-checking. The remaining
+two moderate entries need `--force` regardless.
+
+So this is a real piece of work with type fallout to resolve, not a rider to be
+slipped in before a review package, and it was reverted on that basis. Worth
+doing deliberately: run the fix, resolve the typing changes, and check that
+`wrangler deploy` still works on the sandbox before trusting it -- the sandbox
+deploy is the only thing in this project that exercises Wrangler for real.
+
+### 77. The demo seed plants events that DM the operator, on some days
+
+Found while preparing the Pass-17 package, by a test that had started failing
+with nothing relevant changed. `test/googleDemoSeed.test.ts` asserted that a
+full reminder sweep over the seeded fixture sends **no DMs at all**. It passes
+or fails depending on the day of the week: the seed plants a weekly session
+whose times are computed from SQLite's own `now`, so whether that session sits
+inside a reminder rung's window depends on when the suite runs. The DM it was
+failing on was an ordinary "Weekly Session is coming up" reminder -- correct
+behaviour for an event that exists.
+
+Pinning the clock cannot fix it, because the fixture writes its timestamps
+through the same clock the app reads. The assertion was narrowed to what the
+test is named for -- no invite DM, and no invite row added beyond the two the
+seed plants to suppress -- which is deterministic.
+
+The product question is left open: should the demo seed plant events that DM a
+real operator at all? Options are to suppress reminders the way it already
+suppresses invites (a `notification_log` row per rung, which is brittle), or to
+place the seeded sessions far enough out that no rung is due (which weakens the
+fixture's usefulness for testing reminders). Worth deciding rather than
+rediscovering.
+
+### 78. A stranded acceptance is presented as a plain success
+
+From the Pass-17 review (P17-03), the presentation half of item 70. With replay
+removed, a request whose claim committed and whose effect did not stays
+`accepted` with a NULL `applied_at`. The review walked the consequence through
+the real router and the shipped React component:
+
+- the requester sees a bare **accepted**, with no uncertainty and no way to
+  withdraw;
+- the organizer's API response contains the request, but the rendered section
+  omits the accepted row and offers no reconciliation action;
+- retrying the acceptance returns 409, because it is no longer pending.
+
+The event page still shows the real original time and the organizer saw the
+original 500, so the failure is not invisible -- but nothing afterwards says
+"this may not have applied".
+
+The fix is a state, not a stamp: expose completion uncertainty in the API
+projection and both views, and give the organizer an explicit way to reconcile.
+That is the same design item 70 needs, approached from the UI end, and it
+should be built with item 70 rather than before it.
+
+### 79. The noticeboard's candidate limit cannot prove completeness -- fixed in Pass 19
+
+From the Pass-17 review (P17-07). **Half fixed; the half that is left is the
+harder half and is stated here so it is not mistaken for done.**
+
+The candidate query admitted every active recurring series with no reference to
+the requested window, and a recurring event has a NULL `start_at`, so
+`ORDER BY COALESCE(start_at, from)` sorted them all to the front. The
+hundred-event cut was then applied before anything expanded. A hundred series
+that finished last month filled the page, expanded to nothing, and left an
+event happening tomorrow outside it -- measured as a noticeboard returning zero
+occurrences while the same user's personal calendar showed the event, rendered
+by the frontend as "nothing scheduled" because the response carries no cursor
+or truncation flag.
+
+**Fixed:** the query now excludes a series whose rule cannot overlap the window
+-- ended before it opened, or beginning after it closes. That is provable from
+stored dates, closes the demonstrated case, and is conservative: both date
+bounds are widened by a day, because the rule's dates are local to the event's
+timezone while the window is epoch milliseconds, so widening can only admit a
+series that turns out to have nothing in range, never exclude one that does.
+
+**That paragraph was wrong twice when it was written, and the Pass-18 review
+(P18-01) proved it by returning three real occurrences from the tree BEFORE
+the fix and an empty noticeboard after it.** "Conservative" was an argument,
+not a proof, and it was false in two independent ways:
+
+- It compared `end_date` against the window start as if an occurrence were a
+  point. An occurrence is an interval, and `duration_minutes` may be up to a
+  year, so a series whose last occurrence *starts* before the window can still
+  be running inside it. A six-day occurrence beginning on the 12th was dropped
+  from a window opening on the 15th. The ordinary-event arm of the same query
+  has always used interval overlap; the recurring arm did not, and a recurring
+  event's NULL `start_at` means that arm never rescued one.
+- It read nominal rule dates only, and overrides are not loaded until thirty
+  lines later -- so at that point the rule's dates do not know where its
+  occurrences actually are. A series that ended on the 12th, whose occurrence
+  an accepted change request moved to the 16th, was excluded from a window
+  containing the 16th. So was one moved the other way, out of October back
+  into September.
+
+Both are now closed: the end bound is widened by the rule's duration rounded
+up to whole days, and a second `EXISTS` admits any series holding an
+uncancelled override that overlaps the window, which is decidable in SQL
+because an override stores absolute instants rather than rule dates. Both
+additions only ever *admit* candidates, so neither can reintroduce the P17-07
+crowding this item exists for. All three cases are revert-verified in
+`test/pass18.test.ts`.
+
+The lesson is the one this cycle keeps teaching: a narrowing justified by an
+argument about what it "can only" do is a claim, and claims in this project
+have a bad record. The clause that widened by a day to be safe about timezones
+was written in the same breath as two exclusions that were not safe at all.
+
+**Still open, and it is the part that needs a design:** a hundred *currently
+active* series with no occurrence in a narrow window still fill the page.
+Deciding that needs the expander, not SQL -- a daily series is live all year and
+may still have nothing inside a two-day window once overrides and cancellations
+are applied. The shape of the answer is to page through bounded candidate
+batches until enough eligible results are found, and to return an explicit
+overflow condition when the budget cannot establish completeness, so the
+frontend can say "there may be more" instead of "nothing scheduled".
+
+Raising `MAX_NOTICEBOARD_EVENTS` is not the fix. It moves the threshold and
+weakens the bound the limit exists for.
+
+**Closed in Pass 19, and the third correction to this item is the interesting
+one.** The Pass-18 fix carried its own false claim -- "both additions only ever
+ADMIT candidates, so neither can reintroduce the P17-07 crowding" -- and the
+Pass-19 review disproved it in one move: **admitting IS the crowding
+mechanism.** The crowd is bounded by the candidate limit, so a predicate that
+admits more spends that limit faster. The override arm added for P18-01
+admitted series holding overrides that a whole-series edit had orphaned; the
+expander correctly refuses those dates (`isSeriesOccurrence`, P14-13), so they
+expand to nothing, and a hundred of them emptied the board again. Measured:
+the same fixture returns the real event on the Pass-18 tree and ZERO
+occurrences on the Pass-19 one.
+
+That is the same error as Pass 18's, one pass apart: reason carefully about
+dimension A (can this wrongly exclude a valid occurrence?), then state a
+conclusion about dimension B (can this crowd the page?). Both times the
+sentence was in the commit message, this item, and the code comment.
+
+So the fix is no longer in the predicate at all, which is what this item asked
+for from the start. Candidates are read in pages with a deterministic total
+order, each page is expanded, and only events that actually have an occurrence
+in the window count against `MAX_NOTICEBOARD_EVENTS`. A series that expands to
+nothing now costs a candidate slot and no event slot -- so P17-07 (finished
+series), P18-02 (`after_count` series with no `end_date`, which no date filter
+can ever exclude) and P19-01 (orphaned overrides) all close together, because
+they were always one bug wearing three hats.
+
+The scan is bounded by `MAX_CANDIDATES_SCANNED` rather than by the event cap,
+and when it stops early the response says so: `buildNoticeboard` returns
+`{ occurrences, complete }`, the route returns that, and the frontend renders
+"couldn't check the whole server" or "there may be more" instead of "nothing
+scheduled". That flag is the half of this item that SQL could never supply, and
+its absence is precisely what let three regressions reach a user looking like a
+quiet Tuesday.
+
+Two costs, both measured rather than argued. Paging spends three statements per
+page instead of one for the whole query, so `test/pass19.test.ts` carries a
+guard that the worst case stays under D1's Free ceiling of 50 per invocation --
+this is a request path, so that limit is real. And the candidate `ORDER BY`
+gained `id` as a tiebreak, because `COALESCE(start_at, from)` ties every
+recurring event in a guild and paging over an undefined order is meaningless.
+That tie was never harmless: it is why the "soonest hundred" promise was untrue
+for any guild whose candidates were mostly series, and it is the same undefined
+ordering that made a P17-01 fixture pass with its defect present.
+
+### 80. Changing only the occurrence in the URL leaves the page showing the old one -- fixed in Pass 19
+
+From the Pass-18 review (P18-03). Pre-existing -- the frontend files involved
+are byte-identical to Pass 17 -- and newly demonstrated rather than newly
+introduced.
+
+`EventDetailPage` reads `occurrenceDate` out of the URL but lists only
+`eventId` in its loader's dependency array
+(`frontend/src/pages/EventDetailPage.tsx:52-74`). Keep the page mounted and
+change only the occurrence query and no fetch happens: the rendered date stays
+on the old occurrence while the freshly created RSVP callback closes over the
+new one. The reviewer drove the shipped component, hooks and API client
+against real signed Worker routes and confirmed at both the database and the
+endpoint that answering "declined" marked 13 September declined while
+12 September -- the date on screen when the button was pressed -- stayed
+accepted.
+
+This is worse than an ordinary staleness bug because it attributes an answer
+to a person that they did not give, and it does it silently: the reload that
+follows the callback finally shows the occurrence they actually answered, by
+which point the RSVP is already recorded.
+
+What keeps it from being higher is the precondition and the evidence boundary.
+The page must be *retained* while its query changes; a fresh mount and an
+explicit reload both load correctly, so ordinary navigation that remounts is
+not shown faulty. The driver is a deterministic hook-lifecycle harness with
+substituted router inputs, not React DOM or a live browser, so how often real
+navigation retains the page is not established.
+
+The fix is to make event *and* occurrence part of the loader's identity, and
+to tie the displayed data and the action to the same resolved selection --
+disabling or deferring the action while a different selection is in flight,
+without losing the existing protection against a delayed old response landing
+last. Verify retained-query navigation as well as fresh mounts; only the
+second is covered today.
+
+**Closed in Pass 19, along with the reason it was reachable.** `EventFormPage`
+now runs its load through `latestOnly()`, a generation gate extracted from
+`useAsync` into `lib/async.ts` -- the point being that the protection already
+existed and had been implemented exactly once, in the hook this page predates.
+The same guard written twice is the same guard missing once, so there is now a
+single copy, used by both, with its own tests.
+
+Item 80's own case (`EventDetailPage` omitting `occurrenceDate` from its loader
+identity) is a one-token fix. The systemic half is more useful:
+`react-hooks/exhaustive-deps` never checked it, because the rule only inspects
+hooks it knows about and `useAsync` is this app's own. Naming it via
+`additionalHooks` in `.eslintrc.cjs` makes the rule flag exactly this finding --
+verified by reverting the fix and watching it error -- and it immediately found
+a second instance of the same class in `HomePage`, whose `useAsync` listed
+`monthStart.toMillis()` (an expression the rule cannot check) and a redundant
+`zone`. Neither was a live defect; both were the shape that becomes one.
+
+And `npm run lint` had never run in CI at all, on any branch, so even a
+correctly configured rule could only fire if somebody remembered to run it. It
+is a CI step now. Errors block; the two known cosmetic react-refresh warnings
+do not.
+### 81. The live-lease fixture can pass without exercising the lease -- fixed in Pass 19
+
+From the Pass-18 review (P18-08), and it is mine. Test confidence only: the
+reviewer's matched-key control establishes that the runtime behaves correctly
+on both inputs.
+
+`seedNotice` in `test/pass17.test.ts` captures the attendance `responded_at`
+from one `Date.now()` and then inserts the live-leased outbox row using
+another. That timestamp is part of the notification's identity -- the sweep
+joins attendance to log on it (`cron/reminders.ts:2872`) -- so if the two
+writes cross a millisecond boundary the attendance no longer joins the seeded
+lease, and cron correctly sees a different, brand-new notification. The
+assertion only checks that the *old* row's delivery stamp is still NULL, which
+a new-key delivery satisfies. A deterministic one-millisecond reproduction
+passes the test while the sweep makes a claim and delivers.
+
+The fix is to read back the stored attendance timestamp and key the log with
+it, assert that the two actually join *before* running the sweep, and count
+claim attempts and all deliveries rather than checking one row's stamp -- a
+delivery-only assertion cannot establish selection exclusion when the claim
+layer may be refusing the candidate for its own reasons.
+
+Worth recording beyond the fix: this is the same millisecond-boundary defect
+found and repaired in P17-01's seeding two fixtures earlier in the same
+session. Knowing about a fixture failure mode did not prevent writing it
+again. That is an argument for a shared seeding helper that returns the
+timestamps it wrote, rather than for being more careful.
+
+**Closed in Pass 19.** `seedNotice` returns the `responded_at` it wrote and the
+live-lease fixture keys its log row with that exact value; the join is asserted
+before the sweep rather than assumed; and the outcome is measured as claim
+attempts plus total deliveries instead of one row's delivery stamp -- a
+delivery-only assertion cannot tell selection exclusion apart from the claim
+layer refusing a candidate for its own reasons. Re-verified by reintroducing
+the one-millisecond skew, which now fails on the join assertion rather than
+passing silently.
+### 82. Migration 0044's index outlived the code that needed it
+
+Housekeeping, found while reconciling Pass 18 rather than reported by it, and
+exactly the "dead mechanism" the Pass-17 brief asked to be watched for.
+
+`idx_change_requests_unapplied` is documented in
+`worker/migrations/0044_change_request_applied.sql` as "the recovery arm's
+predicate", partial on `status = 'accepted' AND applied_at IS NULL`. The
+recovery arm was removed in P16-01 because it re-admitted removed guests, and
+nothing in the tree queries that shape any more: the only two readers of
+`applied_at` are the stamp write in `lib/changeRequests.ts:367` and the
+decision-notice gate in `cron/reminders.ts:907`, and neither uses it.
+
+The column still earns its place -- the notice gate needs it -- but the index
+does not. Dropping it needs a migration, so it is not free, and an unused
+partial index on a table this size costs approximately nothing, which is why
+this is recorded rather than done. The reason to do it eventually is the
+comment, not the bytes: a stored object whose documented purpose no longer
+exists is how the next person is misled.
+
+### 83. Poll resolution had no concurrency token, and three other writers still do not -- fixed in Pass 20
+
+From the Pass-19 review (P19-02), and the **fix is in** -- this entry is the
+part that outlives it.
+
+`markResolved` committed a poll's winner under `WHERE id = ? AND status =
+'active'`. That is a real compare-and-set, and it correctly stopped a poll
+resolving twice, which is what it was written for. What it never checked is
+whether the world the winner was computed FROM still existed. An organizer can
+edit a poll's candidates through the ordinary authorized route while it is
+active and collecting votes, so between the tally read and the UPDATE the
+winning option can be deleted -- and `resolved_option_id` is plain TEXT with no
+foreign key, so the id committed anyway. The event ended up resolved to a time
+that was no longer a candidate, pointing at an option that no longer existed,
+and the noticeboard advertised that time to the server.
+
+It now commits against `events.revision`, the token the event write path
+already maintains, plus an EXISTS on the option as defence in depth. The
+revision is the mechanism rather than option existence, because it catches
+every edit and not only the deletion -- a raised threshold or a moved candidate
+invalidates the decision just as thoroughly, and the test for that case is the
+one that would have been missed. Losing the race is not an error: the vote is
+recorded, the poll stays active, and the next vote or the deadline sweep
+decides again from current state.
+
+**Closed in Pass 20, one pass after being predicted, which is the lesson.** The
+audit this item asked for was left for v1.0.1; the Pass-20 review then
+demonstrated two of the writers it names, and the whole class is now guarded --
+`confirmOption`, `confirmWindowedOption`, `markCancelled` and the multi-winner
+deadline closure all carry the parent event's revision, via one shared
+`requireRevision`. Two shapes were reproduced and revert-verified: a threshold
+raised from one to two immediately before a confirmation, and a deadline
+extended into the future immediately before a cancellation.
+
+Recording a predicted class and scheduling it for later cost a full review
+round. When a fix reveals that its neighbours share the defect, the neighbours
+are part of the fix.
+
+**The general question, for the record:** This project has an
+optimistic-concurrency token on events and uses it inconsistently. The event
+write path guards with it; poll resolution did not until now. Worth an audit
+rather than a guess: `confirmOption` and `confirmWindowedOption` both write
+poll state under their own narrower CAS, and the multi-winner deadline branch
+marks an event resolved under `status = 'active'` alone. None of those is known
+to be wrong -- confirming an option that survived an edit is arguably fine --
+but "not known to be wrong" is exactly what was true of `markResolved` through
+eighteen review passes.
+
+### 84. A fixture that models a race has to model where the race actually is
+
+Process, not product, and recorded because it is the sixth instance in this
+cycle and the first one caught before it was committed.
+
+The first version of the P19-02 reproduction deleted the poll candidate and
+then called the resolver. It passed on the unfixed tree. The reason is that
+`getOptionTallies` runs INSIDE the resolver, so deleting beforehand meant the
+tally never saw the option, there was no winner to commit, and the poll stayed
+active for a reason with nothing to do with the guard under test. The finding
+is about an edit landing BETWEEN the tally read and the commit, and a fixture
+that puts it anywhere else is testing something adjacent.
+
+The fix was to fire the edit from the tally statement's own completion, so the
+interleaving is the one the finding describes. The general rule this adds to
+the five already recorded: **for a race, the fixture must place the interfering
+write at the exact point the finding names, and the way to check that is to
+revert the fix and confirm the test fails for the stated reason** -- not merely
+that it fails.
+
+Related, from the same session: the first crowding control written for
+`test/pass19.test.ts` depended on tie order among rows with a NULL `start_at`,
+which the candidate query does not define. Both were caught by revert-verifying
+rather than by review, which is the argument for revert-verifying every
+reproduction rather than only the ones that look risky.
+
+### 85. A Google insert is only recoverable across a failed statement, not a lost process
+
+From the Pass-20 review (P20-04), and recorded rather than fixed because the
+honest scope of what was fixed is narrower than "durable".
+
+The push half creates the event in Google and then writes the local mapping.
+Between those two points the remote object exists and nothing local knows it.
+Pass 19 handled the mapping being REFUSED; Pass 20 handled it THROWING, by
+recording the obligation from a catch before rethrowing. Both are statement-level
+failures.
+
+What neither covers is the process not surviving to run the catch at all -- a
+Worker evicted, a request cancelled, an isolate torn down between Google's 200
+and any local write. The obligation table cannot help, because writing to it is
+itself the thing that did not happen.
+
+The reviewer's own framing is right: closing this needs the creation to be
+idempotent, not the bookkeeping to be more careful. Google's Events resource
+accepts a client-supplied `id`, so a deterministic id derived from
+(user, event, occurrence) would make a retried insert converge on the same
+remote object instead of making a second one -- and then a lost process costs
+nothing, because the next sweep's insert IS the recovery.
+
+Not done here, deliberately. It changes the payload of every insert, Google
+constrains the id format (base32hex, length bounds) and rejects collisions
+across the calendar including deleted events, and getting it wrong duplicates or
+refuses real sessions. That is a design with its own failure modes, and this
+release's rule is to prefer the smaller answer -- the smaller answer being an
+honest record of what the current one does not cover, which is this item.
+
+**Do not "fix" this by widening the catch.** There is no catch that runs when
+the process is gone.
+
+### 86. Connecting a second Google account was a disconnect without the cleanup -- fixed in Pass 21
+
+From the Pass-21 whole-application review (F-60), and it is the finding that
+justifies whole-application review on its own: it is in code nobody had changed
+in months, and no diff-scoped pass could have seen it, because seeing it means
+reading `storeConnection`'s switch branch against the disconnect sweep and
+against the Privacy Policy at the same time.
+
+`storeConnection`, on a switch, revoked the old grant, then dropped every
+mapping and import. Its own comment said the entries were "left in the old
+account ... nothing this app can do about them from here" and called that
+unavoidable. It is unavoidable *from there* -- because the revoke three
+statements earlier threw away the authority that could have removed them.
+Disconnect does the opposite and revokes last, which is why disconnect can keep
+the promise the confirm dialog and the policy both make.
+
+So a person who connected a second account had, in effect, disconnected the
+first with none of the cleanup, and nothing on screen said so.
+
+**Fixed by refusing rather than by reordering.** `/google/finalize` returns 409
+when an active connection for a different account exists, and revokes the
+pending grant rather than leaving it lying around. Reordering the switch to
+delete-then-revoke would have meant a second copy of the disconnect sweep --
+its budget, its retry accounting, its partial-failure handling -- inside a
+request handler with none of them. Refusing routes every path that ends a
+connection through the one path that already keeps the promise, and makes the
+destructive branch unreachable from the ordinary flow.
+
+**A wrong assumption corrected on the way, and the test is what caught it.**
+There is no `unauthorized` connection status: migration 0036 CHECKs `status`
+into `('active', 'disconnecting')`, and a grant Google has rejected is marked
+`sync_enabled = 0` with a `last_error` while *staying* `'active'`. A guard keyed
+on status alone would have trapped the person most likely to be switching
+accounts -- someone whose grant just died -- behind a disconnect they would
+have to wait out. The exemption is the pair, `sync_enabled = 0 AND last_error
+IS NOT NULL`, because `sync_enabled = 0` alone is also what turning sync off
+deliberately looks like, and there the grant is fine and the entries really are
+still removable.
+
+### 87. A member cannot leave a group
+
+Noted in passing by the Pass-21 review while reading `routes/groups.ts` for
+authorization, and explicitly not a security finding: only the owner can remove
+someone, and group membership confers nothing that can be used against a member
+-- invitations can be declined, and free/busy visibility is a separate setting
+the person controls themselves. Nothing is disclosed by staying in a group.
+
+It is a product gap, and a slightly rude one: the only exit from a group you
+have lost interest in is asking its owner. `DELETE /groups/:id/members/me`, with
+the owner refused (they must transfer or delete the group instead, which is the
+same rule the roster cap already implies), and a line in the group view.
+
+### 88. Materialized poll sessions keep their parent's commitment -- fixed in Pass 22
+
+From the Pass-21 executable review, and the reason it is not merely cosmetic:
+the stale entry is non-provisional, so it makes the person **actually busy** at
+a time nothing is happening.
+
+When a confirmed poll option is fanned out into a real child event, the
+projections keep reading the parent. A confirmed option and its old yes-votes
+are still counted as current scheduled time by `lib/calendar.ts`,
+`lib/events.ts` and `lib/freeBusy.ts`, none of which hand authority to the child
+through the `created_from_option_id` relationship that `cron/reminders.ts`
+records at fanout. So moving the child to a new date leaves the old parent time
+still busy alongside it, and explicitly declining the child leaves the
+historical parent vote making the old slot busy anyway. The window counterpart
+clears correctly on decline, which is what makes the fixed-slot behaviour a bug
+rather than a policy.
+
+The design: before materialization the confirmed option IS the commitment;
+afterwards the child's own schedule, cancellation and attendance are, and the
+parent must stop being consulted. A cancelled child must not fall back to
+reactivating its parent. Votes can stay as history -- they simply must not be a
+second, independent obligation.
+
+**Fixed in Pass 22, and it was one clause, not the change we feared.** The
+scheduling to 1.0.1 was refused by the acceptance reviewer -- RG-06 was already
+on the agreed checklist, and our rationale for deferring it did not override
+that. They were right, and the estimate behind the deferral was wrong: the
+handover is `created_from_option_id`, which migration 0027 already records and
+which the fanout itself already uses as `NOT EXISTS (...)` to avoid
+materializing twice. The reading half is the same clause added to
+`loadConfirmedOptionsForEvents` and to free/busy's confirmed-vote query.
+
+A CANCELLED child still satisfies the NOT EXISTS -- the row exists -- so
+cancelling cannot resurrect the historical parent commitment. That was a
+requirement the reviewer named, and it falls out of the shape rather than
+needing its own clause, which is the sign the clause is in the right place.
+
+The lesson is about the deferral, not the code. "It touches three readers every
+scheduling surface depends on" was true and led to the wrong conclusion: the
+right response to a wide blast radius is to find the narrow mechanism, not to
+schedule the wide change for later. We had already written down that this
+project should prefer removal to mechanism; this is the same instinct applied
+to estimating.
+
+### 89. A confirmed window session is invisible to free/busy until fanout -- P21-07
+
+The sibling of item 88 at the other end. `lib/freeBusy.ts`'s confirmed
+commitment query joins fixed yes-votes and never window availability, so between
+a window candidate being confirmed and the cron materializing its child, the
+person's own calendar shows the session while free/busy reports them free.
+A fixed-slot candidate is busy immediately; only the window path has the gap.
+
+Reviewer's disposition: a bounded pre-materialization gap that can be recorded
+as an availability limitation if consciously accepted. It is accepted, here,
+and it should be fixed together with item 88 -- the two are the same handover
+seen from before and after, and fixing either alone leaves the projection
+inconsistent in the other direction.
+
+### 90. Guild verification costs one query per administered server -- P21-08
+
+The guild-verification callback checks whether the user is known and then issues
+one lookup per administered guild, not limited to allow-listed ones. Fifty
+eligible guilds is 51 statements; `Promise.all` runs them concurrently but D1
+counts them all. Measured against the documented Free-plan ceiling of 50 per
+invocation, the callback's catch path returns 500 instead of the picker
+redirect. Forty-nine works, at exactly 50.
+
+The prerequisite is administering or owning fifty servers -- not fifty
+memberships -- so nobody using this app today is close. Fix by fetching active
+status for the eligible ids in chunked set-based queries, exactly as
+`chunkIds` already does everywhere else; the shape is routine and the reason it
+was missed is that nothing else in this app fans out per-guild.
+
+Availability only, outside clauses 1 and 2, consciously scheduled.
+
+### 91. A guard must read state, not infer it from a message
+
+Process, recorded because this project made the same mistake twice in
+consecutive passes, in the same forty lines, in opposite directions.
+
+The account-switch guard needs to know whether a Google grant is dead. It has
+now been wrong two ways:
+
+- **Too broad (Pass 22 → F-60 residual):** `sync_enabled = 0 AND last_error IS
+  NOT NULL`. A transient Calendar 503 writes `last_error` on a perfectly
+  healthy connection, a later disconnect sets `sync_enabled = 0`, and the pair
+  read as "Google rejected this grant".
+- **Too narrow (Pass 23 → F60-B):** `last_error = <one exact sentence>`. Two
+  paths record an authorization failure and word it differently -- the Calendar
+  401 path says "revoked", the token-refresh path says "revoked or expired" --
+  so a genuinely dead grant reached by refresh stopped qualifying, and its
+  owner was trapped on a connection that could never work again.
+
+Both attempts were inferences about a lifecycle state from a field that is not
+one. `last_error` is prose for a person: localisable, rewordable, and edited by
+anyone improving a message. Two readers agreeing on its text is a coincidence
+waiting to be broken by a copy-editing commit.
+
+Migration 0047 adds `authorization_failed_at`, written by both paths that
+observe the failure and cleared on a successful reconnect. The guard reads the
+column. **The rule: if a guard depends on a state, that state gets a field of
+its own.** A message is an output, never an input.
+
+The companion mistake, from the same pass (F60-A): adding `status = 'active'`
+to that guard *to be conservative* made it strictly weaker, because a signed
+disconnect sets the row to `'disconnecting'` and the whole refusal then
+stopped applying to the exact sequence it existed to catch. A narrowing
+justified as caution needs the same scrutiny as a widening -- more, because it
+does not feel like one.
+
+### 92. Bounding the OAuth callbacks, and two remediations written from memory
+
+From the Pass-21 review (F-59). Scheduled to v1.0.1 on 13 September 2026 and
+then **pulled back into 1.0 the same day** once the assumptions behind the
+deferral were actually checked -- see the decision below. The reason it stayed
+open this long is worth more than either schedule.
+
+The code half is done: both Discord callbacks sign their `state` and verify it
+before spending anything, so a fabricated one costs an HMAC instead of a POST
+to Discord's token endpoint. What that does NOT do is bound the rate. An
+attacker now pays one `/auth/login` per attempt to obtain a valid signed state
+and cookie -- two requests per token call instead of one, with the rate still
+unlimited.
+
+**And the control we wrote down for it could never have been applied.**
+`docs/SETUP.md` said to add a Cloudflare rate limiting rule "on the zone serving
+the Worker". Rate limiting rules are zone-scoped, and this Worker runs on its
+default `*.workers.dev` subdomain -- `wrangler.toml` declares no `routes` and no
+`custom_domain`. `workers.dev` is Cloudflare's zone. `uncleowen.space` is ours
+and the Worker is not on it.
+
+That stood through two review passes. One reviewer verified the rule was not
+configured; nobody asked whether it *could* be. The lesson is the same one item
+91 records for guards, applied to operations: **a remediation written from
+memory is a claim, and this project's own rule is to check claims.** The step
+that was skipped is the cheapest one -- open the dashboard and look.
+
+**Closed in v1.0 by an exact count in D1** -- not by the Workers rate-limiting
+binding this entry first shipped, which the walkthrough showed never refusing
+anything. Getting there took three reversals; the second and third are the
+ones that matter.
+
+**Reversal 1 -- deferral to 1.0.1 was wrong.** Michael pushed back: "option 1
+doesn't seem that hard, I can do it fine." The objection on record had been
+that a remote session cannot verify a dashboard change, which is a fact about
+the session rather than about the change. He was right and it moved into 1.0.
+
+**Reversal 2 -- and this one is on this project, again, in this entry, about
+this exact class of claim.** The write-up for reversal 1 asserted three
+"checked" facts. Two really were checked against primary sources: Worker Custom
+Domains need an active zone and the free zone plan suffices, and the Free plan
+includes one rate limiting rule. The third -- **"`uncleowen.space` is already a
+zone in the `uncleowen` account"** -- was never checked at all. It was inferred
+from `FRONTEND_URL = "https://uncleowen.space"` in `wrangler.toml` and written
+down in the same voice as the two that were verified.
+
+Michael's screenshots settled it in seconds. **Cloudflare's Domains page is
+empty -- there is no zone.** `uncleowen.space` is registered and DNS-hosted at
+Namecheap, the site is on GITHUB Pages (`185.199.108-111.153`, `www ->
+michaelwdorrill.github.io`), and the SPF record points at Namecheap's email
+forwarding, so there are MX records riding along too.
+
+This is the second time this single entry has carried an unchecked platform
+claim -- the first was the WAF rule "on the zone serving the Worker" that could
+never have been applied. The failure is identical and it is not really about
+Cloudflare: **an inference and a verified fact were written in the same
+register, so the reader could not tell them apart, and neither could the
+author a day later.** Item 91 records the code version of this rule ("a guard
+must read state, not infer it from a message"). This is the prose version, and
+it needs saying separately because prose has no type checker: if a claim was
+not checked, the sentence has to say so.
+
+**What that does to the options.** Adding only `api.uncleowen.space` as a zone
+is [Enterprise-only](https://developers.cloudflare.com/dns/zone-setups/subdomain-setup/)
+-- Free and Pro get full setup only. So a zone-level WAF rule requires moving
+the nameservers for the WHOLE domain to Cloudflare, dragging a live site and
+mail forwarding through a DNS migration for a control unrelated to either, days
+before a release. Option 1's cost went from "four lines in `wrangler.toml`" to
+"change DNS providers". Michael chose the binding.
+
+**Reversal 3 -- the binding shipped, passed its tests, and limited nothing.**
+Walkthrough step R92 (9 November 2026) drove real callbacks at the sandbox from
+one machine: 25, then 60 at one a second, then 25 more with a temporary log
+open in `wrangler tail --env sandbox`. Every call reached Discord's token
+exchange (the HTTP 500 each one printed is Discord rejecting the fake code --
+which is to say, the spend happened). The log settled what the binding was
+doing: every call carried the same key, and the binding answered
+`success: true` to every one, though the deploy listed it at 20 per 60 seconds.
+Cloudflare documents the binding as approximate and per-location, which
+explains leakage, not zero refusals. Why it never refused here was not
+investigated further -- it did not need to be, only replaced.
+
+**How it got through.** The seven tests ran against a fake binding that
+counted exactly -- that is, against the documented contract rather than the
+platform. They were a faithful test of this code's *use* of the binding and
+said nothing at all about whether the binding limits. This is the third
+platform claim in this one entry carried by something that assumed it (a WAF
+rule that could not be applied; a zone that did not exist; a limiter that did
+not limit), and the rule it adds is specific: **a test double for a platform
+service tests your use of its contract, not the contract. A guard whose whole
+job is an operational effect is not shown to work until that effect has been
+reproduced once against the real deployment.** R92 was that reproduction, which
+is the reason it exists, and the reason it is kept.
+
+Michael chose, from three options, to count in D1: an exact count in the
+database the app already uses, rather than a second attempt at configuring the
+binding or a move to the custom domain.
+
+**What shipped** (commit `6775e54`):
+
+- Migration `0048_oauth_callback_counts.sql`: `oauth_callback_counts(bucket
+  PRIMARY KEY, window_start, count)`.
+- `src/lib/rateLimit.ts` -- `oauthCallbackAllowed(env, headers)`. The bucket
+  is an HMAC-SHA256 of the caller's `CF-Connecting-IP` under the Worker's
+  `JWT_SIGNING_KEY`, truncated to 16 bytes -- **never the address itself**, and
+  nothing links it to an account. The window is the current calendar minute.
+  Each call deletes rows from earlier minutes, then runs one atomic
+  `INSERT ... ON CONFLICT(bucket) DO UPDATE ... RETURNING count`, and refuses
+  above **20 per address per minute** with a 429 before any token exchange. A
+  missing `RETURNING` row is treated as a fault, not as a count of zero (that
+  distinction is how the first draft failed open silently against the test
+  shim).
+- Called in all three callbacks (`/auth/callback`, `/guild-requests/callback`,
+  `/google/callback`), **after** the signature check and **before** the token
+  exchange. After, because a forged state already costs nothing and must not be
+  able to burn a real address's allowance; before, because the exchange is the
+  spend.
+- Google included even though production ships `GOOGLE_SYNC_MODE = "off"`.
+  Bounding two of three and leaving the third is the exact shape of P21-05:
+  one rule, three implementations, and the one nobody updated is the one that
+  lets an answer through.
+- **A cron-tick prune** (`pruneOAuthCallbackCounts`, beside the session prune),
+  added after `6775e54` while rewriting the privacy policy: the callback's own
+  `DELETE` only runs when someone calls back, so on a quiet day the last
+  caller's row stayed until the next login -- and the migration's comment said
+  "nothing here outlives about two minutes". It is now true to say *at most
+  about fifteen*. One more uncharged statement per tick; the empty-tick
+  assertion in `pass9.test.ts` caught it (32 -> 33) and the full-tick ceiling and
+  pass6 purge fit still pass. Revert-verified.
+- **Fails open**, logging, if the database cannot be written. That is
+  defensible here in a way it was not for the binding: login writes D1 anyway
+  (the user upsert and membership sync), so a D1 outage that disables the limiter has
+  already disabled what the limiter protects.
+- The binding is **removed** -- from `wrangler.toml`, `env.ts` and
+  `check:env-parity` -- rather than left in place looking like protection. So is
+  the temporary diagnostic log.
+- Twelve tests driving the real counter through the D1 shim: 21 calls and the
+  21st is refused; each of the three routes refuses once an address is full and
+  spends nothing; a new minute starts afresh; another address is unaffected;
+  the address is never stored and the bucket is keyed; earlier minutes are
+  removed, by a callback and by the cron tick; a forged state costs nothing;
+  fail-open is pinned. Revert-verified: never refusing fails six; ignoring the address, storing it, and skipping the
+  clean-up each fail their own. The `CASE` reset inside the upsert is backed up
+  by the `DELETE` and so not separately testable, which the code comment says.
+
+**Seen working, 10 November 2026** (walkthrough 0.0b, timetable R92): the same
+25-callback loop that the binding let straight through, against the sandbox
+running the counter -- lines 1-20 reached Discord's token exchange (its 500 on
+the dummy code), lines 21-25 were refused with *"Too many login attempts from
+this address"* and a 429. Exactly the bound, the first time it was ever
+observed refusing anything.
+
+**Limitations, stated because they will not be visible later:**
+
+- **Fixed window.** A burst straddling a minute boundary can get up to 40 in
+  quick succession; the steady-state bound is 20 per address per minute. A
+  sliding window would close that and is not worth the extra writes.
+- **Per address.** Callers behind one NAT share 20 a minute. One human login
+  spends one callback, so this is generous. IPv6 is keyed on the full address,
+  so a caller with a whole prefix can rotate -- the same was true of the
+  binding, and clause 3 asks for a bound on a source, not on an adversary
+  with a /64.
+- **Two D1 writes per callback.** Negligible at this scale and well inside the
+  free plan; noted because it is a cost the binding did not have, in exchange
+  for a count that is exact and global rather than per-location.
+- **Visible only in `wrangler tail`** (as a 429 on the callback), not in any
+  dashboard.
+
+**Still worth doing eventually, but on its own merits and its own schedule:**
+the custom domain. It would let the WAF rule replace this counter (blocking
+before the Worker is invoked, at no invocation cost, visible in the dashboard),
+and it makes Worker and frontend same-site. It is not release work, it is DNS
+work, and it should happen when nothing is riding on it. The Worker needs no
+code change for it either way: `redirectUri()` in both Discord routes is
+`` `${new URL(c.req.url).origin}/...` `` and `googleRedirectUri` takes the
+request URL, so the redirect URI follows whatever hostname the request arrived
+on -- register both in the Discord application and `workers.dev` and the custom
+domain serve correctly at once. Two traps recorded for whoever does it: adding
+`routes` infers `workers_dev = false` on the next deploy and silently kills the
+`workers.dev` URL, and a Custom Domain cannot be created on a hostname that
+already has a CNAME record.
+
+### 93. Most of the cron's budget machinery exists to fit a plan we may not need
+
+Noticed while answering a question about paying for rate limiting, and recorded
+because the saving is much larger than the thing that prompted it.
+
+`WORKERS_PLAN` is already a config flag: `budget.ts` reads it and switches
+between `FREE_D1_QUERIES` and `PAID_D1_QUERIES` (and the subrequest ceilings).
+Both `[vars]` and `[env.sandbox.vars]` currently say `"free"`. **Switching is a
+one-line change and a redeploy, not a refactor** -- the code has supported it
+since the budget was written.
+
+What the Free plan's 50-statement-per-invocation ceiling has cost this project,
+by contrast: `TickBudget` and `WorkBudget` and everything that reserves against
+them; the chunking in `chunkIds`/`chunkRows`; the "reserving the two binds
+guardedStatement appends" arithmetic; the noticeboard's statement-count guard;
+the whole design of the outbox's per-tick fixed cost; and **three separate
+recorded incidents** in which a newly added fixed per-tick query starved
+`sweepPurgeTerminalHistory`. Every one of those is a Free-plan artifact.
+
+None of it can simply be deleted -- a budget you are not enforcing is still a
+budget you should measure, and the machinery also documents intent. But the
+constant fear of adding one statement, which has shaped several designs in this
+codebase and caused three incidents, is a Free-plan fear.
+
+Not a recommendation to switch, and deliberately not costed here: this
+project's write-ups have twice asserted platform facts from memory and been
+wrong (item 92, and the D1 comment the Pass-20 reviewer corrected). Check the
+current Workers pricing page. The point to carry is only that the switch itself
+is cheap in effort, and the thing it would buy is not a marginal convenience.
+
+### 94. The organizer cannot move one occurrence of their own series — an invitee can
+
+**Built for 1.0 on 22 October 2026 (`2bc0c1c`), at Michael's call** — after the
+recommendation below was 1.0.1. Not yet through the reviewer pass or the
+walkthrough's steps for it (2.21–2.26, 3.20), so it stays here until both have
+happened. What shipped follows the design notes at the end of this entry: one
+shared write (`writeOccurrenceMove`, extracted unchanged from the accept path),
+`POST /events/:eventId/occurrences/:date/move`, and *Move this occurrence*
+beside *Cancel this occurrence*.
+
+
+Found on the first browser walkthrough, 22 October 2026, by release-testing
+step 2.12 failing: *"I can't change date on a single occurrence, it's only able
+to edit the series."* The step was wrong — it described a control that has
+never existed — but what it ran into is a real gap.
+
+**What exists.** Per occurrence, the organizer has *Cancel this occurrence*,
+beside the series-level *Edit* and *Cancel event* (the shape spec 0014
+records). There is no *Edit this occurrence*. The one route in the app that
+moves a single occurrence is an invitee's `time_change` change request on a
+recurring event, accepted by the organizer — `applyChangeRequest` writes an
+`event_occurrence_overrides` row with `override_start_at`/`override_end_at`.
+And the organizer cannot use that route on their own event:
+`createChangeRequest` refuses with *"The organizer cannot file a change request
+on their own event."*
+
+**It was never decided; it fell through a gap between two specs.** Spec 0003
+blocks the organizer from filing change requests with this reasoning: *"They
+can edit it. Allowing it would create a second, weirder path to the same
+write."* For a one-off event that holds. For one date of a series it does not
+-- the organizer's Edit is series-wide, so "they can edit it" quietly assumed
+Edit could do everything a change request can, and it cannot. Spec 0014 later
+built per-occurrence cancel and per-occurrence answers without revisiting it.
+Neither spec is wrong about what it considered; nobody considered this.
+
+**So the asymmetry:** someone with less authority over an event can get one of
+its dates moved, and its owner cannot. For a friend group's weekly game night,
+"just this week, start an hour later" is the commonest edit there is.
+
+**The 1.0 workaround** is to cancel that occurrence and create a one-off event
+at the new time, re-inviting people. It works and it is clumsy: answers given
+for that date do not carry over, because it is a different event.
+
+**Under the release bar this is a feature gap, not a defect** — it writes no
+wrong data, discloses nothing, and no published statement claims the ability
+exists. So it is scheduled rather than blocking, and the recommendation is
+**v1.0.1**. Adding a new write path and UI after the acceptance review passed
+is the shape that has produced most of this project's late regressions, and it
+would need its own review pass.
+
+**Design notes for whoever builds it:**
+
+- **One way an occurrence moves, not two.** The override write already exists,
+  carrying its admission check (`OVERRIDE_ADMISSION_SQL`, P15-06) inside the
+  statement. An organizer route should reuse that write, not grow a second
+  copy of it — the same reasoning that refused a second copy of the disconnect
+  sweep in F-60.
+- **The accept path already had to answer the hard questions**, and a direct
+  move must give the same answers rather than new ones: who is told that a
+  date moved, what happens to answers already given for that date (spec 0014
+  makes them per occurrence), and how reminders keyed on that occurrence
+  follow it.
+- **The control's place is fixed by the existing shape:** *Move this
+  occurrence* beside *Cancel this occurrence*, gated the same way on
+  `?occurrence=`.
+
+### 95. A sole invitee's time-change request carried itself, so the organizer never saw it
+
+**Built for 1.0 on 22 October 2026 (`5f00a5e`), at Michael's call** ("You
+decide when solo"). Not yet through the reviewer pass or the walkthrough
+(3.9–3.11, 3.14, 3.21), so it stays here until both have happened.
+
+Found on the first browser walkthrough, Phase 3: the alt, as the one-off
+event's only invitee, asked to move it, and the event simply moved -- there
+was nothing for main to accept at 3.10, and 3.21's "the organizer sees no vote
+buttons" was unreachable. Spec 0003 had decided this on purpose (threshold
+`floor(1/2)+1 = 1`, met by the requester's own implicit yes), so it was a
+design decision being reversed, not a bug: with one invitee the "majority" is
+one person agreeing with themselves, and the organizer's event moves without
+them.
+
+**What changed:** with at most one invitee, a `time_change` gets no
+`vote_threshold_count` and no `vote_deadline_at`; `tryAutoResolve` is skipped
+at filing, and the deadline sweep, which keys on the deadline, never touches
+it. Spec 0003 records the reversal. Three invitees and up are unchanged.
+
+**Two found alongside it, fixed in the same commit**, both from idea 26 giving
+the organizer an `event_invites` row: `voteOnChangeRequest` accepted the
+organizer's vote and counted it toward a threshold computed *without* them (so
+with three invitees, the requester's implicit yes plus the organizer's carried
+it), and the reminder sweep's "a request is open for your vote" DM went to the
+organizer. Both revert-verified.
+
+**Known and left alone:** someone invited *after* a solo request was filed
+sees it under *Open for your vote* and can vote. The vote is recorded and shows
+in the organizer's tally, but cannot resolve anything (no threshold). Harmless
+-- arguably useful as advice to the organizer -- but the voter is not told
+their vote is advisory. Small, 1.0.1.
+
+### 96. Changing a start left the end where it was
+
+**Built for 1.0 on 22 October 2026 (`901dcc3`), at Michael's call** ("Every
+start/end picker"). Not yet through the reviewer pass or walkthrough steps
+2.28–2.31, so it stays here until both have happened.
+
+Found on the first browser walkthrough, Phase 3, using the change-request
+form: changing a start should move the end by the same amount. Before this, the
+only coupling anywhere was a date-level nudge -- moving a start *date* past the
+end date dragged the end date up to it -- and a changed start *time* never
+touched the end, so a 7–11pm session moved to 9:30pm read as 9:30–11pm.
+
+`endFollowingStart` (`frontend/src/lib/timeRange.ts`) keeps the range's
+**elapsed** length, so a session moved across a DST change keeps its duration
+and may read an hour different on the clock -- what a calendar does. A range
+with no positive length (half-typed, or backwards) keeps only the old date
+nudge, so nothing a person is midway through typing is rewritten. Applied to
+the event form's own times, each poll option row, a personal time block, the
+invitee's request form and the organizer's *Move this occurrence*.
+
+The logic is unit-tested and revert-checked; the wiring into five forms is
+not (there is no component test for any of them), which is what 2.28–2.31 are
+for.
+
+### 97. A confirmed poll day did not notice people leaving it
+
+**Built for 1.0 on 22 October 2026 (`5881e91`, `5f18ee9`), at Michael's call**
+-- "un-confirm below threshold", chosen over the recommended "point the row at
+the day's event". Not yet through the reviewer pass or walkthrough steps
+5.10-5.14, so it stays here until both have happened.
+
+Found on the first browser walkthrough: main and the alt confirmed a day on a
+multi-winner poll, main pressed *Can't make it*, and it stayed *Confirmed*. A
+throwaway test showed it was worse than the label. Within a cron tick a
+confirmed day becomes its own event (spec 0014), and from then on that event's
+attendance is what counts (item 88) -- but the poll row kept its buttons, and
+its text promised you could "join a confirmed day" any time. So the answer was
+recorded on the poll and reached nothing: the real session went on counting
+main, and would have reminded him about a night he had said he could not make.
+That made a sentence on the page false on the ordinary path, which is clause 2.
+
+**What shipped.** Two halves, because a confirmed day has two shapes:
+
+- *Before fan-out* (at most a tick), nobody has been told. When the yes count
+  falls below the threshold, `checkThresholdAndResolve` clears `confirmed_at`
+  and the day can confirm again.
+- *After*, the day's event inherits the threshold as `minimum_attendees` with
+  auto-cancel on, and the yes-voters start out accepted. The existing
+  minimum-attendees cascade in `recordRsvp` is what calls the day off, and its
+  existing notice tells everyone still coming -- no second cancel path, which
+  is the "prefer removal to mechanism" guardrail applied. A vote on the poll row
+  for that day is recorded as an RSVP on the day's event, so the buttons mean
+  what they say, and the row reads its going list and your answer from there.
+
+A *Can't make it* that would call a day off is confirmed first and the
+confirmation says it cannot be put back on (clause 4). The same check now
+guards every one-off event with a minimum and auto-cancel on, whose decline
+has always cancelled without warning; that page also states the minimum now.
+
+**Things this changes that were true before**, worth the reviewer's attention:
+
+- A fanned-out day's event used to start with nobody accepted but the
+  organizer, and asked everyone again. The yes-voters are now carried over.
+  That treats "I'm in" on a *confirmed* day as attendance, which spec 0014's
+  "a vote and an RSVP are two statements" did not -- defensible because the
+  button says *I'm in* about one specific night, but it is a reading of that
+  principle, not an application of it.
+- The day's event counts the organizer unless they declined, as every event
+  does, while the poll's threshold counted them only if they voted yes. So an
+  organizer who never voted makes a fanned-out day survive one more dropout
+  than the poll's arithmetic suggests.
+- P21-05's "a confirmed candidate stays joinable forever" now means joinable
+  on the day's event; a called-off day refuses answers with a reason.
+
+**Known and left alone (1.0.1):**
+
+- **Windowed multi-winner polls are unchanged.** Their answers are ranges, and
+  what withdrawing a range should do to a confirmed day is its own question.
+- **The Discord poll select does not reach a fanned-out day.** Ticking or
+  unticking it there changes the poll's record only; the day's own invite DM,
+  with RSVP buttons, is where that day is answered. Unticking was never "can't
+  make it" (see `recordPollSelection`), so nothing is silently cancelled.
+- **Someone invited to the poll after a day fanned out** is not on that day's
+  event and is refused there (pre-existing: poll invites are not propagated to
+  fanned-out days).
+- **A day called off is final.** Re-confirming it would mean un-cancelling an
+  event people were told is off; it stays called off, struck through.
+
+### 98. Converting a one-off into a series drops the answers already given
+
+Found on the first browser walkthrough, 22 October 2026, while running step
+4.12 (which was written without saying how to reach its button -- see that
+step's rewrite). The alt pressed *Can't make it* on a one-off, main converted
+the event to a weekly series, and the alt's answer then showed as **no answer**
+on every date. Confirmed with a test rather than inferred:
+
+- **The answer is orphaned, not deleted.** A one-off's attendance is keyed on
+  `occurrence_date = ''`; a series' on each date. `updateEvent`'s conversion
+  touches neither, so the `''` row survives and nothing reads it. The person
+  who said they could not come is asked again by the ladder for the first
+  session, and the organizer sees them as unanswered.
+- **The one-off's old DM buttons then say the control "looks corrupted".**
+  `recordRsvp` returns `invalid_occurrence` for a `''` answer on a recurring
+  event, and `interactions.ts` maps that to *"That control looks corrupted"*
+  under a comment calling it unreachable from a bot-authored button. A
+  conversion makes it reachable, and the message is false -- nothing is
+  corrupted; the event changed shape.
+
+**Proposed fix**, following spec 0014 decision 3 (a schedule edit clears
+attendance only if the local date actually moves): on conversion, re-key the
+`''` answers to the one-off's own local date if that date is one of the new
+series' dates, and clear them otherwise -- exactly what moving the date would
+have done. The DM refusal becomes *"This is a repeating event now -- answer
+each date on the site"*, matching the cancel button's wording for the same
+situation (P21-04).
+
+Not a category-1/2 finding on its own reading -- no wrong value is written; an
+answer stops counting -- but the false error message is text a person is asked
+to rely on. **Recommendation: 1.0.1**, unless Michael wants it in the same
+reviewer pass as 94-97.
+
+### 99. Cancelling a multi-winner poll leaves its confirmed days on, and tells invitees the wrong reason
+
+Found 8 November 2026, by accident: walkthrough setup that landed on production
+was cleaned up by cancelling two multi-winner polls, and the DMs that followed
+were wrong. Confirmed in the candidate's code, not only production's:
+
+- `DELETE /events/:eventId` sets the poll's own status and nothing else. A day
+  that already became its own event (spec 0014's fan-out) stays **active**,
+  with its invitees, reminders and cascade, and the organizer's confirmation
+  ("Cancel this event for everyone?") says nothing about it.
+- `sweepMultiWinnerPollClosedNotifications` fires for `status IN
+  ('resolved','cancelled')` and words its notice for a deadline: with no
+  confirmed days, *"didn't get enough interest on any day and was
+  cancelled"* -- false when the organizer cancelled it; with confirmed days,
+  *"Voting has closed. N day(s) got confirmed -- check the event"*, which
+  reads as if those days are still on (they are) without the organizer ever
+  having chosen that.
+
+**Under the release bar this is clause 4** (a destructive action's
+confirmation must say what it does not undo) and arguably clause 2 for the
+false reason. IDEAS 55 already drew the same line for single events: an
+organizer cancel gets its own wording, distinct from "dropped below the
+minimum".
+
+**Design needed, not just wording:** when an organizer cancels a multi-winner
+poll, should its confirmed days go too? Either answer is defensible; the bug
+is that nobody chose. Options: (a) cancel the confirmed days with it and say
+so in the dialog; (b) leave them on and say so in the dialog, and word the
+notice as "the organizer closed the poll; these days are still happening".
+Either way the notice for an organizer cancel needs its own wording.
+
+**Decided and built 9 November 2026: the days stay on** (Michael's call). The
+cancel dialog on a multi-winner poll now names the days that are already
+their own events and says they will still happen and how to cancel them too;
+the poll-closed notice for an organizer cancel says "The organizer closed the
+poll ... N day(s) already confirmed are still happening", or "was cancelled by
+the organizer" when none are. Telling an organizer cancel from a deadline one
+needed no new state -- see `pollClosedMessage` in `cron/reminders.ts`. A day
+confirmed but not yet its own event goes with the poll (the fan-out skips
+cancelled polls), and neither the dialog nor the notice counts it. Stays here
+until the reviewer pass and walkthrough 5.15-5.16.
+
+### 100. Small things from the 8 November re-run
+
+All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
+5.10-5.14, all of which passed). None is a release-bar finding; all are
+1.0.1 unless noted.
+
+- **The sandbox frontend looks exactly like production.** The first attempt
+  at the timetable's setup was done on uncleowen.space by mistake, because the
+  guide said "your normal browser" and that browser had production open. Real
+  DMs went out from the production bot (only to DM MD and SchedulerTest) and
+  four test items had to be cancelled there. A visible **SANDBOX** banner
+  whenever `VITE_API_BASE_URL` points at the sandbox Worker would make that
+  impossible to miss. Cheap, and the cost of not having it was real tonight
+  -- worth doing early in 1.0.1.
+- **[Built for 1.0, 10 Nov] "1 people".** "Called off automatically if fewer than 1 people are in"
+  on the event page, and "Confirm once 1 people say yes" on the poll form.
+  *Built:* `frontend/src/lib/plural.ts`; a threshold of 1 reads "nobody" ("Called off automatically if nobody is in"). Tested in `frontend/test/walkthroughFinds.test.ts`.
+- **Button refusals link to the front page.** The 4.12 refusal ends "Open it
+  on the site: http://localhost:5173/" -- `siteLink` everywhere in
+  `interactions.ts`. Linking the event itself would save the person a search.
+- **A new poll's voting deadline defaults to yesterday.** Seen on the 10 Nov
+  batch re-check: a fresh poll showed candidate days on the 10th and 11th and a
+  deadline of 11/08. `EventFormPage.tsx` sets it to `prefillDate` minus one day,
+  and opened without a clicked date `prefillDate` is today. Default it to the
+  day before the earliest candidate instead, and never before today. Same
+  family as the next item.
+- **A new event's default start can already be past.** After 7pm the form
+  defaults to tonight 7-11pm and says "This starts in the past". Defaulting to
+  tomorrow evening once tonight's 7pm has gone would be friendlier.
+- **The sandbox can't list voice channels.** `GET /guilds/:id/voice-channels`
+  returns 502 on every event form in the sandbox -- Discord refuses
+  SandboxBot's channel listing (a role permission or the bot's presence in
+  that server; check the response's status code). The form degrades as
+  designed. A sandbox setup gap, not a code one: worth fixing so the voice
+  channel picker can be exercised before release.
+- **A cancel prompt arrived one tick late.** 4.12's organizer prompt came at
+  10:00, not 9:45, with its setup confirmed identical to 4.13's by query --
+  the per-tick delivery cap deferring it while the same tick fanned out two
+  poll days. By design (cron/budget.ts); recorded so the next person who sees
+  it doesn't chase it.
+- **The organizer is told about their own cancel.** Pressing "Cancel this
+  session" on 4.13 was followed by a DM to the same organizer saying it "has
+  been cancelled -- attendance dropped below the minimum". The organizer
+  counts as coming unless they decline, so the notice reaches them. Same
+  family as IDEAS 99: cancellation notices don't know who cancelled.
+- **[Built for 1.0, 10 Nov] An event ending at exactly midnight is also drawn on the next day.**
+  Found in R94 (10 Nov): a session moved to 8 PM-12 AM showed on Sunday *and*
+  Monday in the month grid. `MonthCalendarGrid.tsx` buckets an occurrence on
+  every day from `startOf('day')` of its start to `startOf('day')` of its end,
+  so an end at 00:00 lands on the following day. Old (July 2026), not from the
+  move feature, but item 96 makes it more common: shifting a 7-11 PM session an
+  hour now carries its end to midnight. Fix: treat the end as exclusive (bucket
+  on `endAt - 1` when `endAt > startAt`). Display only; the event itself is right.
+  *Built:* `frontend/src/lib/calendarDays.ts` (`dayRange`, end exclusive), used by the month grid; revert-checked.
+- **[Built for 1.0, 10 Nov] A cancelled event's invite DM keeps its RSVP buttons.** Seen in 5.16:
+  the called-off P24 day's invite still offered I'm in / Maybe / Can't make it.
+  Only poll DMs are edited when they settle (`editSettledPollDms`); a one-off
+  event's invite is never edited on cancellation, so its buttons stay, and a
+  press is refused with "not active" (4.12). Safe, untidy: edit the invite to
+  the cancellation text and drop its controls, the way poll DMs already are.
+  *Built:* `sendCancelledEventNotice` now edits every invitee's invite DM to the cancellation text with no controls, after the notices (`editSettledPollDms` renamed `editSettledInviteDms`). `worker/test/cancelledInviteEdit.test.ts`, revert-checked. Series cancellations are unchanged.
+  **Regression in the first version, caught on the re-check (B9) and fixed the
+  same day.** As shipped in `f908add` the edit pass charged the tick's budget
+  once per recently cancelled one-off on *every* tick, edited or not, and it
+  runs before the new-invites sweep. The sandbox had enough cancellations from
+  the day's testing that it sent nothing at all from 17:05 to after 18:30 UTC --
+  an invite for B9 never arrived, and a read-only query showed no
+  notification_log row of any kind since the deploy. Reproduced in a test (16+
+  recent cancellations starve a new invite; without the edit, 25 don't). Fix:
+  the cancellation sweep's one discovery statement now computes
+  `invite_edit_due`, and only events with an invite still waiting for its edit
+  pay for the pass; edited events cost nothing more. Revert-checked. The note
+  this entry used to carry -- "one budgeted query per recently cancelled event
+  per tick" -- was the bug, stated as a cost and accepted without measuring.
+- **[Built for 1.0, 10 Nov] The Discord night picker doesn't reach a day that is its own event.** Seen
+  on the 10 Nov batch re-check (B4): SchedulerTest's invite to the still-open
+  poll "P24 organizer no" offers "Pick every night that works", and its only
+  day had already become its own event and been called off. On the site, an
+  answer on such a day is recorded on the day's event (`recordPollVote` →
+  `recordRsvp`, item 97; that is what called the day off in 5.18). The picker
+  (`recordPollSelection`) never routes: a pick is saved against the poll row and
+  the day's attendance never hears it, so "I'm in" from Discord on a confirmed,
+  fanned-out day looks accepted and counts for nothing. Older than this batch --
+  the Discord half item 97 didn't wire. Fix: route picked options that have a
+  day event through the same `recordRsvp` path (refusing a called-off one, as
+  the site does), or leave fanned-out days out of the picker's options.
+  *Built:* `recordPollSelection` answers each picked day that is its own event
+  with `recordRsvp(accepted)` before saving the poll row, as the site does;
+  unpicked days are left alone ("left blank, not refused"); a called-off day in
+  the pick refuses the whole answer before anything is written. Two
+  reproductions plus a labelled guard in `confirmedDayThreshold.test.ts`,
+  revert-checked. Walkthrough B9.
+- **An empty "Change Requests" box on a cancelled event.** Seen on the 10 Nov
+  batch re-check (SchedulerTest on the called-off P24 day): the heading renders
+  with nothing under it. `ChangeRequestSection` returns null only for someone
+  neither invited nor organizing, or for the organizer with no requests; an
+  invitee on a cancelled event gets the heading and no buttons. Hide the section
+  when the event isn't active and there are no requests to show. Cosmetic, 1.0.1.
+- **[Built for 1.0, 10 Nov] A poll day's own event has no way back to its poll.** Michael, 10 Nov,
+  during 5.15: from a day that became its own event you can't get to the poll
+  -- the other candidate days and everyone's votes. `events.created_from_poll_id`
+  already holds the link; `GET /events/:id` doesn't return it. Return the poll's
+  id and title (joined, so a poll purged after 90 days simply yields no link
+  rather than a 404) and show "From the poll …" on the page. Same audience:
+  the day's event copies the poll's invite list.
+  *Built:* `GET /events/:id` returns `createdFromPoll` (only for someone who can open the poll); the page shows "From the poll …". Tested both ways, revert-checked.
+
+### 101. What the Pass 24 reviews found, and what was done with it
+
+Two static reviews of the 1.0 candidate at `d945a36` (9 November 2026): Astra
+on the policy and terms draft, and a Fable model on both the draft and the
+Pass 24 code changes (its report, `REVIEW-1.0-POLICY-AND-PASS-24.md`, came with
+two SQL reproductions). Every finding below was re-checked at the current head
+before anything changed, and the code fixes were reproduced through the real
+routes and sweeps -- not only the reviewer's copied SQL -- and revert-verified.
+
+**Fixed for 1.0:**
+- **P24-01 (category 2).** An accepted change request un-cancelled a date the
+  organizer had cancelled after it was filed -- by the organizer's Accept, by
+  votes, or by the 72-hour sweep with nobody deciding. `writeOccurrenceMove`
+  now takes `restoreCancelled`; only the organizer's own move restores. Item
+  94 had moved the statement into a shared helper and written the restore
+  down as intended for both callers, which is the moment it stopped being an
+  accident. Walkthrough 3.22.
+- **P24-02.** Fan-out carried only yes-votes, so an organizer who voted no
+  counted as going by default, was shown "yes", and kept a day alive below
+  its threshold. Every answer is carried now (Michael's call). 5.17-5.18;
+  spec 0014 amended.
+- **D-01** sessions' `last_used_at` was never updated (Michael: make it true,
+  touched at most every five minutes); **D-07** the export was not
+  "everything" (Michael: extend it; a schema-coverage test now guards it);
+  **D-09** the deletion dialog didn't say what it does to invitees (one shared
+  string for both dialogs now); **D-11** a refused stranger's Discord id was
+  logged. The policy draft's text findings are applied as draft 2.
+
+**Left for 1.0.1, each a known shape:**
+- **P24-03 (request-length race).** A no landing between the fan-out sweep's
+  SELECT and its INSERT un-confirms the option and the INSERT still lands,
+  leaving a day event under an unconfirmed option until the next yes. Fix: add
+  `AND EXISTS (... confirmed_at IS NOT NULL)` to the fan-out INSERT's WHERE.
+- **[Built for 1.0, 10 Nov] P24-04.** A cancelled multi-winner poll still accepts (meaningless) votes
+  on unconfirmed candidates. Answer `closed` instead. **Correction, 10 Nov
+  (walkthrough 5.15):** the review rated this API-only because "the site hides
+  the buttons" -- it doesn't. The multi-winner rows close only when a day is
+  unconfirmed *and* the deadline has passed (`EventDetailPage.tsx`,
+  `votingDisabled`), never on the poll's status, so a cancelled poll's
+  unconfirmed days still offer I'm in / Maybe / Can't make it, and a press is
+  saved and shown as your vote while doing nothing. Fix both sides: close the
+  rows once the poll isn't active (a day that is its own event keeps its
+  buttons, since they answer that event), and answer `closed` on the server.
+  *Built for 1.0, 10 Nov:* the server answers `closed` on the vote and the Discord picker paths; the page's rows use `pollRowVotingClosed`. Revert-checked each.
+- **D-16's predicate.** The inactivity stake treats `start_at IS NULL` as
+  upcoming, and every series has it, so organizing or holding an invite to a
+  finished-but-uncancelled series pauses account deletion forever. Over-
+  retention, now stated in the policy; the fix is to read the rule's end.
+- **95 residual.** `inviteeCount` counts invitees who have declined, so a
+  three-invitee event with two declines still votes rather than waiting for
+  the organizer.
+- **97 residual.** A no on a confirmed-but-not-fanned-out day of a poll the
+  deadline sweep has just resolved does not un-confirm it, so the day is born
+  below threshold. Window: two sweeps in one tick.
+- **[Built for 1.0, 10 Nov] P24-01's page.** A recurring request's page gives no sign its date was
+  cancelled (`stale` is computed for one-off events only); the accept is now
+  refused with a reason, but the organizer finds out by pressing it. And a
+  sweep-declined request tells the requester only "declined", not why --
+  telling them would mean reading state the decline path doesn't have, not
+  matching an error message (item 91).
+  *Built for 1.0, 10 Nov (the page half):* a pending request whose date is cancelled carries `dateCancelled`; the organizer sees "You've cancelled that date since" with Decline only, voters see no vote buttons. The sweep's bare "declined" DM is unchanged.
+- **The 429 page** on a rate-limited callback is bare text in the middle of an
+  OAuth redirect (cosmetic; item 100's family).
+
+**Declined, with the reason:** trimming the email stub's log line. Both
+deployed environments run `EMAIL_MODE = "stub"`, so production cannot be told
+apart from the sandbox, the sandbox workflow reads that log, and everything in
+it is already stored and shown on the admin page. The policy discloses
+operational logs instead (F8).
+
+**On the reviews themselves.** Both were static -- no code executed apart from
+SQL against the migrations -- and both said so. Release clearance follows the
+executing reviewer; the walkthrough steps named above are where these become
+evidence.
+
+### 102. A server the bot isn't in made everyone in it "leave"
+
+**Found on the 10 November walkthrough, fixed for 1.0.** The 4.12 test series
+vanished from both accounts' calendars, though it was active and nothing had
+touched it. Read-only queries against the sandbox found both accounts marked
+`is_member = 0` on its server ("DM MD") within an hour of creating it. Michael
+confirmed SandboxBot is not in that server and both accounts are.
+
+**Cause.** `checkGuildMembership` read every 404 from Discord's member lookup as
+"not a member". Discord also answers 404 -- "Unknown Guild", code 10004 -- when
+the *bot* is not in the server, so the membership sweep marked everyone there
+as departed. A 404 logged nothing (only 401/403 did), so in production a server
+that removed the bot would have emptied its members' calendars of it with no
+trace; the operations table in SETUP.md never fired. The test suite encoded the
+same assumption: its "bot removed from guild" case was a 403.
+
+**Fix.**
+- Only 404 with Discord's "Unknown Member" (10007) means the person left.
+  Unknown Guild, and any 403, is a new `bot_not_in_guild`: logged as an error,
+  nobody marked gone, members keep access for the 24-hour grace. A 404 Discord
+  doesn't explain counts as "could not check", not as a departure.
+- The cron's revalidation stopped at the first "bot can't check" answer, which
+  is right for a bad token (every server fails) and wrong for one server: those
+  rows are never refreshed, so they stay oldest, and read oldest-first they
+  would take all ten checks every tick and starve every other server into
+  lockout. Servers now take turns (`ROW_NUMBER() OVER (PARTITION BY guild_id)`,
+  still one statement) and a server the bot can't see is skipped for the rest
+  of the tick after one check.
+- Tests: the two unexplained-404 shapes join the existing "Discord cannot
+  confirm" table (grace, no refresh, lockout after grace, and a new "not marked
+  gone"), plus the sweep cases. Revert-checked separately: the old 404 reading
+  fails 10, dropping the turns fails the starvation test, dropping the skip
+  fails it too. The test helper's default 404 is now an explicit Unknown Member.
+
+**Nothing was lost:** departure only ever set `is_member = 0`, and a login
+re-syncs it. **The sandbox still needs setting right** -- add SandboxBot to that
+server, or deactivate it there -- or after 24 hours its members are refused as
+unverifiable, which is now the intended (and logged) behaviour. The voice-channel
+502 in item 100 is very likely the same missing bot.
+
+**Related -- built for 1.0, 10 Nov:** the add-bot page marks a server **"Already added"** from the
+allow-list alone, so a server the bot was removed from (or, in the sandbox,
+never joined) can't be re-requested there -- Michael hit this setting the
+sandbox right and needed a direct invite link. Now that the membership check
+can tell "bot not in this server" apart, the page could use the same signal.
+*Built:* the list asks Discord whether the bot is in each allow-listed server it
+shows (`botGuildPresence`, `GET /guilds/{id}`); where it isn't, the row says so
+and offers **Add it back**, a direct invite link (already approved, so no new
+request). A Discord error keeps the old "Already added". Tested three ways.
+
+### 103. Dependencies: what 1.0 updated and what it deliberately didn't
+
+10 Nov 2026, alongside the walkthrough batch. **Updated:** Hono 4.13.7 -> 4.13.17
+(the one package that ships in the Worker; its advisory was in `serveStatic`,
+which this Worker doesn't use, but it shouldn't ship 1.0 with a known one), Vite
+8.2.2 -> 8.2.6 in the frontend (the dev/preview server; its advisories include
+Windows-specific ones and Michael runs Windows), and in-range test-tooling
+patches in the worker (Vite 7.3.8, nanoid, source-map-js). Production audits:
+**0** in both.
+
+**Not updated, on purpose, for 1.0.1:**
+- **Wrangler** (4.114.0; 4.159.0 available). `npm audit fix` would take it
+  forward 45 versions and pull in a *beta* of Miniflare 5 -- the deploy tool,
+  swapped just before a release. Its advisories (undici, sharp) are in tooling
+  that runs on Michael's machine and in CI, not in the deployed Worker. Upgrade
+  it on its own, deploy to the sandbox, and watch one release go through.
+- **Vitest 4 -> 5** (tinypool, @vitest/mocker): a major version of the test
+  runner.
+- **The frontend's ESLint / Tailwind transitive chain** (brace-expansion,
+  minimatch, js-yaml, postcss-selector-parser): `npm update` crashes with
+  npm 10.9.4's arborist bug ("Cannot read properties of null (reading
+  'edgesOut')") on this tree; needs a lockfile refresh, which is its own change.
+None of these is in anything a user's browser or the deployed Worker runs.
+
+### 104. Many recent cancellations still delay invites (older than 1.0's batch)
+
+Found while measuring item 100's regression (10 Nov 2026). Even with the edit
+pass gated, the cancellation sweep's notice arm does work per cancelled event in
+its three-day window, and it runs before new invites: at about 25 recent
+cancellations a new invite waits an extra tick, and at about 40 it waits for
+several. A friend group won't see this; a sandbox after a day of testing nearly
+did. Not 1.0: the fix is to give the notice arm the same "is there anything
+left to do" flag in its discovery query (a notice already sent to everyone
+costs nothing), or to move it after new invites. Measure with the test shape in
+`cancelledInviteEdit.test.ts`.
+
+**Related, fixed for 1.0 (B9 re-check, 9 Nov 2026):** the invite-message edit
+for a cancelled one-off (5.16) was still charged ahead of new invites when an
+edit *was* due, so the pile of unedited cancellations that existed when it
+first deployed held the sandbox's invites back for about an hour (B9's poll
+invite went at 19:30 instead of 18:30). The edits now run as their own step
+after new invites, fed from the cancellation sweep's existing discovery query,
+so they add no fixed query to a tick (pass9's empty-tick ceiling). Test:
+`cancelledInviteEdit.test.ts`, "cancelled invite edits wait behind new
+invites". What this item still describes -- notices themselves ranking ahead
+of invites -- is unchanged and still 1.0.1.
+
+### 105. The 1.0 launch announcement — built for 1.0, comes out in 1.1
+
+Michael's request (9 Nov 2026): when 1.0 launches, everyone gets a Discord DM
+with the "We've hit 1.0!" picture (Uncle Owen and Aunt Beru) and the text
+*"Uncle Owen and Aunt Beru are proud to announce that we are feature
+complete! Feel free to use Uncle Owen for all your scheduling needs!"*, and
+the same picture pops up the first time each person opens the app
+afterwards (X, click outside, or Escape to close).
+
+His answers: the DM respects the notifications toggle (the pop-up still
+reaches people who turned DMs off); only people still in an allow-listed
+server get the DM, like every other DM; the pop-up is once per account, for
+everyone, new sign-ups included.
+
+**This is a launch thing, not a feature. 1.0.x keeps it; 1.1 removes it.**
+What comes out in 1.1:
+
+- `worker/src/lib/launchAnnouncement.ts`, `launchAnnouncementImage.ts`, and
+  `worker/scripts/gen-launch-image.mjs`
+- `sweepLaunchAnnouncement` and its line in `runReminderSweep`
+  (`worker/src/cron/reminders.ts`), the `launch_announcement` cursor name
+- the `attachment` parameter on `sendBotDm` and `deliverThroughOutbox`, and
+  `'announcement_log'` in `OutboxTable`
+- `unseenAnnouncement` and `POST /me/announcement-seen` in
+  `worker/src/routes/me.ts`; `LAUNCH_ANNOUNCEMENT` in `env.ts` and both
+  `[vars]` blocks of `wrangler.toml`
+- `frontend/src/components/LaunchAnnouncement.tsx`, its line in `Layout.tsx`,
+  `unseenAnnouncement` on `User`, and `frontend/public/announcements/`
+- `test/launchAnnouncement.test.ts` and the `forms` capture in
+  `test/helpers.ts` if nothing else uses it
+
+What stays, deliberately: migration 0049's `announcement_log` table and
+`users.announcement_seen` column. Dropping them is a migration for no gain.
+The rows are people's own records, and they stay in the export and are
+removed on deletion like any other DM log. Retire them in a later cleanup
+if ever. The privacy policy's mention of the announcement DM should come
+out with 1.1's policy text, whenever that next changes.
+
+Built and tested 9 Nov 2026 (6 worker tests, revert-checked; pop-up driven
+in the built bundle).
+
+**Moved to the front of the tick, capped at 4 a tick (B10, 9 Nov).** It first
+ran last. On the sandbox, a temporary per-step budget trace showed every tick
+reaching it with nothing left, five ticks running, so no DM was sent. It now
+runs right after membership revalidation and takes at most
+`LAUNCH_ANNOUNCEMENT_PER_TICK` deliveries, so it always makes progress and
+leaves most of the tick for invites and reminders. Test: "the 1.0 launch DM on
+a busy tick" (30 pending invites; revert-checked for both the position and the
+cap).
+
+### 106. Re-check Workers Logs retention after 1 December 2026 (keeps the Privacy Policy true)
+
+The 1.0 Privacy Policy says Cloudflare keeps the Worker's own log lines for
+**3 days** (`LOG_RETENTION_DAYS` in `frontend/src/lib/legal.ts`). That was
+confirmed on 9 Nov 2026 from Cloudflare's Workers Logs documentation (Pricing:
+Workers Free 3 days, Paid 7). The same page says that **from 1 December
+2026 Workers Logs moves to "Cloudflare Observability pricing"**, which may
+change the retention on Free without any change here.
+
+On or after 1 Dec: open
+https://developers.cloudflare.com/workers/observability/logs/workers-logs/
+(Pricing) or the new Observability pricing page, read the Free plan's
+retention, and if it is no longer 3 days change `LOG_RETENTION_DAYS`. The
+number appears in the policy's "Who it is shared with" and "How long it is
+kept". A different number is a factual correction, not a material change,
+so no version bump. Note it in `docs/POLICY-DRAFT-1.0.md` Part F, F8.
+
+### 107. The sandbox's fake seed accounts spend a third of every cron tick
+
+Seen in the B10 budget trace (9 Nov 2026). `membershipRevalidation` re-checks
+the stale memberships of the seed and Google-demo accounts (`seed-user-*`,
+`gdemo-user-dm`) on every tick. Their IDs aren't real Discord snowflakes, so
+Discord answers **400**, `checkGuildMembership` treats that as "temporarily
+unavailable", and the rows stay stale and are retried forever: eight checks,
+about 4 of the tick's 13 deliveries' worth of budget, every 15 minutes. It is
+sandbox-only, because production has no fake accounts, but it makes the
+sandbox a harsher budget test than production and hid the announcement's
+starvation behind more noise.
+
+Two fixes, not exclusive: delete the seed and demo accounts from the sandbox
+(the clean-sandbox script exists for this; it writes to the sandbox, so it's
+Michael's call), and/or have a 400 for a malformed ID count as "not a member"
+rather than "try again". The second needs care, because a 400 for any other
+reason must not remove a real person. Not 1.0.
+
+### 108. A general review of Discord notifications, for 1.0.2 (Michael, 9 Nov 2026)
+
+Michael's call, after one day of the 1.0 walkthrough found four separate
+delivery problems in the same machinery:
+
+1. Invites starved behind cancelled-invite edits (`bd0d957`).
+2. Then behind a one-time pile of those edits (`f44ed2c`).
+3. The launch announcement starved at the end of the tick (`9ff1210`).
+4. A scheduled run executing a version replaced eleven minutes earlier
+   (below).
+
+On top of that come IDEAS 104 (cancellation notices ahead of invites) and
+107 (sandbox seed accounts burning a third of every tick). The common thread
+is ordering and budget. About thirty sweeps share one Free-plan allowance of
+roughly 13 deliveries a tick. Their order was set feature by feature, and a
+sweep near the end can be starved indefinitely without anything saying so.
+The only signal is the generic "Cron tick exhausted" warning.
+
+What the review should cover:
+
+- **Priority:** an explicit order for every sweep, written down with the
+  reason for each position, instead of order of arrival.
+- **Fairness:** caps per sweep, or a reserved share, so no sweep can take
+  everything and none can be starved indefinitely. The launch announcement's
+  per-tick cap is the pattern.
+- **Visibility:** a permanent, compact per-tick budget line (what the
+  temporary trace in `59d137f` showed), now that Workers Logs keeps three
+  days, so starvation shows up in the logs rather than as "no DM arrived".
+- **Scan costs:** sweeps that pay per event to find nothing (multi-winner
+  closed, confirmed options) could fold their discovery into fewer queries,
+  the way the cancellation cascade's invite-edit flag did.
+- **IDEAS 104 and 107** folded in.
+
+**Operational gotcha found along the way (9 Nov, 5:45 PM run).** The sandbox's
+scheduled run executed version `778ea481` (the 5:21 deploy) although
+`cd1416e6` had deployed at 5:34. GitHub and wrangler both reported success.
+So after a deploy, don't infer from the clock what code a cron run executed:
+read `$workers.scriptVersion.id` on a log line from that run and compare it to
+the deploy's "Current Version ID". This matters for the 1.0 production deploy,
+whose first runs send the launch announcement.
+
+## Parked until after 1.0
+
+Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
+
+**This section no longer exempts anything, because since 13 September 2026 the
+1.0 test does not read against an empty list.** Exempting was the entire reason
+it was created; what it does now is record a real distinction —
+decided-for-after versus scheduled-for-next — and its entry bar stays where it
+is because that is what keeps the distinction meaningful rather than
+decorative.
+
+### 64. Get the Google OAuth app verified, so users stop seeing the unverified warning
+
+Anyone connecting a Google calendar meets a Google interstitial first. Which
+one depends on the app's publishing status, and neither of the two available
+without verification is friendly:
+
+| Publishing status | What the user sees | Refresh tokens | Cap |
+|---|---|---|---|
+| Testing | "an app that's currently being tested — only continue if you know the developer that invited you" | **expire after 7 days** | 100 test users |
+| In production, unverified | "Google hasn't verified this app", behind an **Advanced → (unsafe)** link | don't expire | 100 users |
+| In production, verified | nothing | don't expire | none |
+
+**Verification is the only thing that removes the warning.** Publishing does
+not — it swaps the wording, arguably for the worse, since the production
+variant is the one that says "unsafe". Time and usage do nothing at all.
+
+**The encouraging part, confirmed against the real console and then re-checked
+against Google's current documentation (Sept 2026):** both scopes this app
+requests (`calendar.events`, `calendar.readonly`) appear under *"Your sensitive
+scopes"*, with *"Your restricted scopes"* empty. Sensitive-scope verification
+is the ordinary review — consent screen, scope justifications, a demo of the
+app. It does **not** require the annual third-party security assessment that
+*restricted* scopes (Gmail, Drive) trigger. So this is a process cost, not a
+money cost.
+
+**The cap is stricter than "100 users" suggests, though, and that is worth
+knowing before parking this forever:** it is cumulative over the project's
+entire lifetime and cannot be reset — 100 people who *ever* connect, not 100
+at once. Still comfortably above this app's supported profile, but it is a
+one-way budget rather than a ceiling that empties.
+
+What it typically wants: domain ownership verified in Search Console, a
+homepage and privacy policy on that domain, a written justification per scope,
+and a demo video of the consent flow. Most of that already exists —
+uncleowen.space is real and the Privacy Policy is thorough. One wrinkle to
+check first: the policy lives at a HashRouter URL (`/#/privacy`), and reviewers
+sometimes want a plain path, so confirm it loads cleanly for someone arriving
+cold with no session.
+
+**Why this is parked rather than open (decided Sept 2026, Michael).** Every
+user of this app personally knows the person who built it — that is the whole
+premise of a private friend-group scheduler — so "only continue if you know the
+developer" is a warning whose condition is actually satisfied. The 100-user
+ceiling is far above the supported profile, which `validate.ts` already pegs at
+about a guild's active population. Verification is a meaningful amount of
+process for a benefit measured in one slightly alarming screen, seen once per
+person, and it can be started at any time without changing a line of code.
+
+**The one thing that is NOT parked**, and must not be confused with this:
+production has to run at publishing status **"In production"**, not Testing.
+That is the middle row above, warning and all. Shipping production in Testing
+mode would silently break every user's sync a week after they connect, and
+that is a correctness issue rather than a cosmetic one.
+
+### 65. The scheduling assistant can show someone busy from a server they can no longer see on their own calendar
+
+Found during 0.8.1 sandbox verification, chasing what looked like a phantom
+busy block: a weekly recurring event, organized in one server, correctly made
+its organizer show as busy to someone inviting them from a *different*
+server -- but that same event had silently dropped off the organizer's own
+calendar.
+
+The cause is a real asymmetry, not a data bug. `GET /me/events`
+(`buildCalendarOccurrences`) joins `user_guild_membership` and applies the
+same `MEMBERSHIP_GRACE_MS` freshness bound the cron's recipient queries use --
+an organizer whose membership row in that guild has gone stale stops seeing
+their own event there. `computeBusyBlocksForUsers`' native-event source
+(`lib/freeBusy.ts`) applies no such filter at all: an event's organizer and
+invitees count as busy purely from `events`/`event_invites`, regardless of
+whether their membership in that event's guild is current, fresh, or even
+still active.
+
+**Probably the right behavior, not a bug to fix reflexively.** `freeBusy.ts`'s
+own header argues the direction of error this module should prefer: "over-
+reporting busy costs someone a slot they could have taken; under-reporting
+schedules a game over a real commitment... an omitted commitment is
+indistinguishable from free time." A stale membership row doesn't un-happen a
+real-world commitment, so continuing to count it as busy is consistent with
+that stated philosophy. What's inconsistent is only the *display* side: the
+organizer can no longer see the event that's still shaping how others
+schedule around them, which is confusing to debug (as this entry's own
+discovery proves) but not a privacy leak -- both reads are computing the
+organizer's own data, for the organizer's own benefit in one case and for
+someone scheduling with them in the other.
+
+If this gets revisited: either `/me/events` could stop hiding an event the
+caller still organizes (membership lapsing arguably shouldn't hide someone's
+own creation from themselves, whatever it does for invitees), or
+`computeBusyBlocksForUsers` could adopt the same freshness join for
+symmetry's sake. Leaving both as they are is also a legitimate answer -- nothing
+here is unsafe in the direction that matters, just a rough edge that cost real
+debugging time once.
+
+## Already built
+
+Kept for the reasoning, not as a to-do list. Nothing below counts against the
+1.0 test above: where an entry argues its way to a decision and rejects an
+alternative, that argument is why the entry is still here at all.
+
+### 2. Google Calendar sync — shipped in full (push v0.8, pull v0.8.1, reworked same release)
 
 Pull a single chosen Google calendar (not all of them — e.g. just "D&D
 Scheduling", not "Family" or "Fulham FC") in as read-only availability on
@@ -65,7 +2076,94 @@ goal. Three further calls made at the same time:
   this app's scale, and the Privacy Policy revision is accepted as part
   of the cost.
 
-### 5. Calendar-first, not server-first — partly shipped in v0.3
+**The push half shipped in v0.8** (`specs/0017-google-calendar-sync.md`), and
+the two-halves decision above turned out to be load-bearing for a reason this
+capture did not anticipate. The obstacle to pulling is not `freebusy.query`
+itself — that is one POST — it is *where its answer belongs*.
+`computeBusyBlocksForUsers` (`worker/src/lib/freeBusy.ts:46`) runs
+**synchronously inside a request**, for up to 25 users at once. One Google call
+per connected user is up to 25 outbound subrequests in a single invocation,
+against a Free-plan ceiling of 50, in the one function whose own design note is
+about how its cost is a product and every factor has to be small. So the pull
+half needs a cached busy table refreshed by the cron, a staleness rule, and an
+answer for what the scheduling assistant shows while that cache is cold. That
+is a second design, not a second endpoint — **v0.8.1**.
+
+Three things about what did ship, worth keeping:
+
+- **`calendar.readonly` was requested in v0.8 even though only v0.8.1 needs
+  it.** Narrower would have been `calendar.calendarlist.readonly` (enough for
+  the calendar picker), but `freebusy.query` needs the broader one, and asking
+  later means sending everyone who already connected back through a Google
+  consent screen. A slightly larger ask now beats a worse moment later, and the
+  account is inside the read/write `calendar.events` grant either way.
+- **Occurrences are pushed individually rather than as an RRULE series.**
+  Fewer API calls and fewer rows would have argued for the series, but it needs
+  a faithful translation of `event_recurrence_rules` — including the
+  `0=Mon..6=Sun` `by_weekday` encoding `specs/0001` already records as the trap
+  in this area — plus overrides as EXDATE/RECURRENCE-ID exceptions. A
+  translation bug writes *wrong dates into someone's real calendar*, which is
+  the least recoverable failure this feature can have. Per-occurrence also
+  matches `specs/0014`: a per-occurrence decline is exactly the case a
+  series-level push gets wrong.
+- **The one long-lived third-party credential this app has ever stored**, which
+  scoped a sentence in `ARCHITECTURE.md` that had been written as a claim about
+  the whole app rather than about Discord. It is encrypted at rest under its
+  own secret, never returned by any route, and revoked at Google on disconnect
+  and on deletion. This is also what took the Privacy Policy to version 3.
+
+**The pull half shipped in v0.8.1**, and the design held up: `freebusy.query`
+against exactly one nominated calendar, cached hourly by the sweep that was
+already running, merged into `computeBusyBlocksForUsers` at the very end so it
+goes through the same `merge()` and comes out indistinguishable from busy time
+this app computed itself.
+
+Two things worth keeping from building it:
+
+- **The cache is a JSON column, not a table**, and that is a decision about
+  *where it is read* rather than about modelling. `computeBusyBlocksForUsers`
+  runs synchronously inside a request for up to 25 users, and its own header
+  records a bug where per-user follow-up reads took a valid request past the
+  Free plan's ceiling. A blob means one chunked SELECT serves everyone.
+- **Every failure direction was chosen deliberately, because the two are not
+  symmetric.** Over-reporting busy costs someone a slot they could have taken;
+  under-reporting books a game over a real commitment. So a transient Google
+  failure keeps the stale cache rather than dropping it, a calendar that has
+  been deleted switches reading off and says so rather than caching an empty
+  array that would read as "completely free", and a cache older than a week is
+  ignored because by then it is noise rather than evidence.
+
+The limitation that cannot be engineered away, and which the Privacy Policy now
+states in plain words: **Google's calendar permissions are per account, not per
+calendar.** There is no scope for "just this one". That only one is read is
+enforced by the query this app chooses to send, not by the grant Google issued.
+
+**Reworked within the same v0.8.1, before it left the branch — `specs/0017`,
+"The pull half, twice over" has the full record.** The two bullets above
+("The cache is a JSON column"; "Every failure direction was chosen
+deliberately") describe a design that shipped and then didn't survive contact
+with a real calendar. `freebusy.query` only reports events Google itself
+considers Busy — an all-day event defaults to Free the moment it's created,
+with no parameter to ask otherwise — and sandbox verification hit that
+directly: a genuine all-day commitment produced an empty answer, no error,
+because Google had correctly answered a question nobody actually meant to
+ask. In the same conversation, once Google's own Busy/Free flag stopped
+deciding the answer, the natural next question — what should an imported
+event actually *become* — landed on Personal Time (no server, no invite list,
+no RSVP, already exactly that shape), not on caching a slightly-differently-
+sourced opaque interval.
+
+So as of the same release: `events.list` replaces `freebusy.query`, and every
+event on the chosen calendar counts as busy regardless of Google's own flag on
+it. What it produces is real, read-only `personal_events` rows (title, time,
+description), not a JSON blob — editable only by editing the source event in
+Google. The JSON-column reasoning above is no longer how this works, but it's
+left in place rather than deleted: it was the right call for the question it
+was answering, and the record of *why a blob beat a table* for a synchronous,
+request-scoped read is worth keeping even though the mechanism it justified
+was replaced the same day it shipped.
+
+### 5. Calendar-first, not server-first — shipped in full (v0.3, noticeboard v0.8.1)
 
 (was: "calendar landing view"). Land on "just your calendar" with no
 guild-switcher tab up front. Then offer views for: a specific server's
@@ -124,71 +2222,87 @@ attendee list. Design and the blockers (the Privacy Policy currently
 promises the exact opposite) are in
 `specs/0007-server-noticeboard.md`. Still open.
 
+**Shipped in v0.8.1**, with all four locked decisions intact: visible by
+default with a per-event private toggle, new events only, descriptions never
+shown, and no way for an invitee to hide from the attendee list.
 
-### 23. The sandbox has no frontend, so the sandbox-first rule has a blind spot for frontend-only changes — partly shipped in v0.4.1
+The whole feature rests on one line of migration 0038 — `UPDATE events SET
+is_private = 1` — and it is worth saying why. `ADD COLUMN ... DEFAULT 0` would
+have made every event that already existed publicly visible to its server the
+instant this deployed, silently breaking a Privacy Policy that said in as many
+words that "sharing a Discord server with someone does not let you see their
+events". The backfill is what makes this a new rule for new events rather than
+a retroactive change of terms, and it is the reason the policy bump is
+defensible at all. There is a test asserting that statement is still in the
+migration, because its absence would be invisible in review and catastrophic
+in production.
+
+The query got its own file rather than a widened `buildCalendarOccurrences`,
+exactly as spec 0007's blocker 3 predicted: that function is bounded by what
+the *caller* is attached to, and this one is scoped by guild membership, so the
+bound that makes the personal calendar cheap simply does not exist here. Own
+range cap, own event limit, own shared occurrence ceiling.
+
+
+### 23. The sandbox has no frontend, so the sandbox-first rule has a blind spot for frontend-only changes — closed in v0.8.1
 
 `deploy-sandbox.yml` is worker-only — every step runs with
-`working-directory: worker` — and `deploy-pages.yml` publishes the frontend
-from `main` and nowhere else. So pushing a frontend-only branch to `sandbox`
-deploys a Worker that didn't change and puts the actual diff nowhere anyone
-can click.
+`working-directory: worker`, and its push trigger carries
+`paths: ['worker/**', '.github/workflows/deploy-sandbox.yml']` — and
+`deploy-pages.yml` publishes the frontend from `main` and nowhere else. So a
+frontend-only push to `sandbox` is not merely unhelpful, it is a complete
+no-op: the Actions tab shows no run at all. That path filter is *correct*
+(deploying an unchanged Worker achieves nothing), which is what made this a
+design gap rather than a bug.
 
-`SETUP.md` and CLAUDE.md already say the intended route is
-`VITE_API_BASE_URL=<sandbox worker url> npm run dev` locally, and for a
-worker change that's clearly right — a second Pages deployment would be
-cost for no benefit. But v0.4 is three branches of almost entirely
-frontend work (`specs/0009`), which is the first time the gap really
-bites: "verify it on the sandbox" turns into "run it on your own machine",
-which only Michael can do, and which leaves no artifact anyone else can
-look at.
+Worth knowing alongside it: `ci.yml` runs on `push: branches: [main]` and on
+`pull_request`, so a feature branch with no PR open gets no CI either. A
+frontend branch therefore has *zero* automated verification until a PR
+exists — fine if you know it, misleading if you assume pushing a branch ran
+something.
 
-Sharper than first written: `deploy-sandbox.yml`'s push trigger also
-carries `paths: ['worker/**', '.github/workflows/deploy-sandbox.yml']`, so
-a frontend-only push to `sandbox` is not merely unhelpful — it is a
-complete no-op, and the Actions tab shows no run at all. That path filter
-is *correct* (deploying an unchanged Worker achieves nothing), which is
-what makes this a design gap rather than a bug: there is simply no branch
-you can push a frontend change to and have anything happen.
+Found while pushing v0.4 branch 1. Three options were on the table: a sandbox
+Pages project, a downloadable preview bundle from CI, or leaving it and
+making the rule explicit. The third shipped in v0.4.1 and the item stayed
+open on the grounds that writing a rule down is not closing a gap.
 
-Worth knowing alongside it: `ci.yml` runs on `push: branches: [main]` and
-on `pull_request`, so a feature branch with no PR open gets no CI either.
-A frontend branch therefore has *zero* automated verification until a PR
-exists — which is fine if you know it, and misleading if you assume
-pushing a branch ran something.
+**Closed in v0.8.1, and the reason it took two years to close is that the gap
+was smaller than this entry claimed.** Verifying a frontend change against
+the sandbox was never actually impossible — `VITE_API_BASE_URL=<sandbox>
+npm run dev` does it, and every frontend release since v0.4 was verified that
+way. What that misses is only two things:
 
-Found while pushing v0.4 branch 1. Worth deciding between:
-- **A sandbox Pages project.** Cleanest, and makes "go look at it" a link
-  rather than a local build. Cost is a second Pages deployment plus the
-  env-parity surface that `check:env-parity` would want extending to.
-- **A preview build artifact on CI.** Cheaper — upload `frontend/dist`
-  from the existing CI run so any branch has something downloadable — but
-  it's a static bundle with no API base URL baked in, so it needs one
-  configured at build time to be useful.
-- **Leave it, and make the rule explicit.** Say plainly in CLAUDE.md that
-  frontend-only changes are verified locally, so nobody reads
-  "sandbox-first" as promising something it can't do for them.
+- **It is a dev build, not the bundle users get.** React `StrictMode`
+  double-invokes effects, nothing is minified, modules load differently.
+  This is the real gap, and it is a *correctness* one rather than a
+  convenience one. v0.8's own verification is the worked example: the tail
+  showed every API request firing twice, which looked like a polling bug and
+  was StrictMode — behaviour that does not exist in production at all.
+- **Nobody but Michael can look.** No link, no artifact.
 
-The third is free and should happen regardless of whether the first two do.
+The first needs no infrastructure whatsoever. `npm run build` followed by
+`npx vite preview --port 5173` serves the real bundle on the same origin the
+dev server uses, so CORS and the OAuth redirects keep working untouched. That
+is now written into CLAUDE.md and `docs/SETUP.md` as the second half of the
+local route, and it closes the only part of this item that could produce a
+wrong answer.
 
-**Partially done** — the third option shipped in v0.4.1: CLAUDE.md now
-says plainly that the sandbox is the Worker only, that a frontend-only
-push to `sandbox` produces no workflow run at all, and that frontend
-changes are verified locally against the deployed sandbox Worker. It also
-records the two adjacent traps (no CI on a branch without a PR; a mixed
-branch deploys its worker half only, which is the more confusing of the
-two because something *does* run).
+**A sandbox Pages project was considered and rejected, and the reason is
+worth keeping** because it is not the one this entry originally assumed
+(cost). `FRONTEND_URL` in `[env.sandbox.vars]` is a *single* origin doing
+double duty: `router.ts` derives the CORS origin from it, and both the
+Discord and Google OAuth callbacks redirect back to it. A hosted sandbox
+frontend cannot simply be added alongside `npm run dev` — one of them would
+have to lose, or CORS and the OAuth redirect handling would have to accept a
+*list* of origins. That is widening auth-adjacent code to buy convenience,
+and the decision landed immediately before a security review, which made it
+an easy call.
 
-**This stays open.** Writing the rule down is not closing the gap — there
-is still no branch you can push a frontend change to and have anything
-happen, and the choice between a sandbox Pages project and a CI preview
-bundle is still unmade.
-
-
-## Already built
-
-Kept for the reasoning, not as a to-do list. Nothing below counts against the
-1.0 test above: where an entry argues its way to a decision and rejects an
-alternative, that argument is why the entry is still here at all.
+The second gap — letting someone other than Michael look at a frontend
+change — is real and remains unaddressed. A CI preview bundle (upload
+`frontend/dist` from the existing run) is the cheap answer if it ever bites.
+In two years it has not, and an unbuilt option is cheaper than an unused
+feature.
 
 ### 36. Should a group be server-agnostic, requiring only that people share a server? — shipped in v0.7.2
 

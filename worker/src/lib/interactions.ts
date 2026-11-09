@@ -2,9 +2,12 @@ import type { Env } from '../env';
 import { boundContent } from './discord';
 import { newId } from './ids';
 import { recordRsvp, type RsvpStatus } from './attendance';
+import { requireActiveGuildMember } from './db';
 import { recordPollSelection } from './polls';
 import { rsvpButtons } from './dmComponents';
 import { CURRENT_POLICY_VERSION } from './policy';
+import { OVERRIDE_ADMISSION_SQL } from './events';
+import { LIMITS } from './validate';
 
 // Discord interactions (specs/0010). This is the first thing in the app whose
 // caller is not a browser holding one of our JWTs: there is no cookie, no
@@ -411,9 +414,11 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
   }
 
   if (parsed.kind === 'cancel') {
-    const event = await env.DB.prepare(`SELECT organizer_id, status FROM events WHERE id = ?`)
+    const event = await env.DB.prepare(
+      `SELECT organizer_id, status, is_recurring, guild_id FROM events WHERE id = ?`,
+    )
       .bind(parsed.eventId)
-      .first<{ organizer_id: string; status: string }>();
+      .first<{ organizer_id: string; status: string; is_recurring: number; guild_id: string }>();
     if (!event) return ephemeral(`That event no longer exists. ${siteLink(env)}`);
     // Re-checked from the database rather than trusted from the fact that
     // this DM was only ever sent to the organizer -- the presser is the
@@ -423,14 +428,62 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
     if (event.organizer_id !== userId) {
       return ephemeral(`Only the organizer can cancel this one. ${siteLink(env)}`);
     }
+    // Pass-14 review (P14-02). Identity is not the whole of the website's
+    // rule, and this is the same action: loadOwnedActiveEvent requires the
+    // organizer to still be a current active member of the event's guild,
+    // "leaving/removal revokes control too, not just visibility". Without it
+    // the two surfaces disagree -- the website answers 404 while a control
+    // still sitting in an old DM cancels the session for everyone.
+    //
+    // A Discord press being authentic says who pressed it, not that they may
+    // still act. The signature proves the former; this proves the latter.
+    if (!(await requireActiveGuildMember(env, userId, event.guild_id))) {
+      return ephemeral(`You're no longer in that server, so you can't change this one. ${siteLink(env)}`);
+    }
     if (event.status !== 'active') {
       return ephemeral(`That session isn't active any more. ${siteLink(env)}`);
     }
-    await env.DB.prepare(
-      `UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND organizer_id = ? AND status = 'active'`,
+    // Pass-21 review (P21-04). Authority was re-derived correctly here and
+    // SCOPE was not. This button says "Cancel this session" and is only ever
+    // sent for a one-off, but the owner can convert that event into a
+    // recurring series afterwards -- and the handler then applied a
+    // one-session control to the whole series, taking every occurrence with
+    // it. Measured: three occurrences to zero, from a button the app really
+    // did send, with a real signature and a real organizer pressing it.
+    //
+    // Nothing about identity was wrong, which is why reading the custom-id
+    // parser and the authorization checks did not reveal it: a signature
+    // proves who pressed, and the guard above proves they may still act. What
+    // neither proves is that the thing they are acting on is still the thing
+    // the control was issued for.
+    //
+    // The mirror of this check already existed one handler down --
+    // cancel_occurrence refuses when `!event.is_recurring` -- so this is the
+    // pair being completed rather than a new rule. A stale control is refused
+    // and the owner is sent to the current UI, which offers the per-occurrence
+    // cancel this event now actually needs.
+    if (event.is_recurring) {
+      return ephemeral(
+        `This is a repeating event now, so this button can't cancel it -- it would take every date with it. Cancel a single date, or the whole series, on the site. ${siteLink(env)}`,
+      );
+    }
+    // Pass-22 acceptance review noted the response could still say "cancelled"
+    // when the guarded UPDATE changed nothing -- a conversion landing between
+    // the shape read above and this write. The series is protected either way,
+    // which is why they filed it as presentation rather than reopening the
+    // gate; but telling someone their session is cancelled when it is not is
+    // its own small harm, and the affected-row count already knows.
+    const cancelled = await env.DB.prepare(
+      `UPDATE events SET status = 'cancelled', updated_at = ?
+       WHERE id = ? AND organizer_id = ? AND status = 'active' AND is_recurring = 0`,
     )
       .bind(Date.now(), parsed.eventId, userId)
       .run();
+    if (cancelled.meta.changes === 0) {
+      return ephemeral(
+        `That session changed while you were pressing this, so nothing was cancelled. Take a look on the site. ${siteLink(env)}`,
+      );
+    }
     // No components after -- a fired cancel button must not be pressable
     // twice. Everyone still marked as coming is told through the outbox
     // (sweepCancelledEventNotices), same as an auto-cancel.
@@ -438,12 +491,20 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
   }
 
   if (parsed.kind === 'cancel_occurrence') {
-    const event = await env.DB.prepare(`SELECT organizer_id, status, is_recurring FROM events WHERE id = ?`)
+    const event = await env.DB.prepare(
+      `SELECT organizer_id, status, is_recurring, guild_id FROM events WHERE id = ?`,
+    )
       .bind(parsed.eventId)
-      .first<{ organizer_id: string; status: string; is_recurring: number }>();
+      .first<{ organizer_id: string; status: string; is_recurring: number; guild_id: string }>();
     if (!event) return ephemeral(`That event no longer exists. ${siteLink(env)}`);
     if (event.organizer_id !== userId) {
       return ephemeral(`Only the organizer can cancel this one. ${siteLink(env)}`);
+    }
+    // The sibling of the guard above, and the reason P14-02 named two
+    // handlers: cancelling one occurrence is the same authority as cancelling
+    // the series, and was checked the same incomplete way.
+    if (!(await requireActiveGuildMember(env, userId, event.guild_id))) {
+      return ephemeral(`You're no longer in that server, so you can't change this one. ${siteLink(env)}`);
     }
     // The series itself has to still be active; an individual occurrence's
     // own cancelled-ness lives in event_occurrence_overrides; see below.
@@ -452,13 +513,24 @@ async function handleComponent(env: Env, interaction: Interaction): Promise<Inte
     }
     // Same primitive POST /events/:eventId/occurrences/:date/cancel already
     // uses -- one occurrence, not the whole series.
-    await env.DB.prepare(
+    // Pass-15 review (P15-06): the same admission the website's cancel route
+    // applies, which this one never did. Inside the write so it is atomic, and
+    // an existing key is admitted at capacity because re-cancelling an
+    // occurrence already overridden adds no row.
+    const written = await env.DB.prepare(
       `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled)
-       VALUES (?, ?, ?, 1)
+       SELECT ?, ?, ?, 1
+       WHERE ${OVERRIDE_ADMISSION_SQL}
        ON CONFLICT(event_id, occurrence_date) DO UPDATE SET is_cancelled = 1`,
     )
-      .bind(newId(), parsed.eventId, parsed.occurrenceDate)
+      .bind(newId(), parsed.eventId, parsed.occurrenceDate, parsed.eventId, parsed.occurrenceDate, parsed.eventId)
       .run();
+    if (written.meta.changes === 0) {
+      return ephemeral(
+        `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences, so this one ` +
+          `could not be cancelled here. ${siteLink(env)}`,
+      );
+    }
     return updateMessage(original, 'this session is cancelled.', []);
   }
 

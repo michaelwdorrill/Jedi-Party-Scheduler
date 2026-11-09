@@ -129,9 +129,26 @@ groupRoutes.post('/', async (c) => {
 // only source of truth an editor has for "would this roster actually be
 // valid", since the real check (assertValidRoster) only runs on save.
 groupRoutes.post('/common-servers', async (c) => {
+  const userId = c.get('userId');
   const body = await readJsonBody<{ member_user_ids: string[] }>(c);
   const memberIds = assertStringArray(body.member_user_ids ?? [], 'member_user_ids', LIMITS.MAX_GROUP_MEMBERS, 64);
-  return c.json({ servers: await commonServerSet(c.env, memberIds) });
+
+  // Pass-11 review (F-26 / R07): the caller goes into the intersection, which
+  // is what POST / above already does before it validates a roster for real
+  // (`rosterIds`). Without it this route answered a question group creation
+  // never asks -- "which servers do these people share?" rather than "which
+  // servers would this group have?" -- and answering the first one leaks.
+  // Any authenticated user could post any Discord ids and be told the id and
+  // name of every active server those people share, including servers the
+  // caller has no part in and could not otherwise see; lib/db.ts's
+  // FriendWithGuilds comment says exactly that must never happen. It also
+  // doubled as an oracle for whether a given Discord id has an account here.
+  //
+  // Including the caller fixes both in the query itself rather than by
+  // filtering afterwards, and it cannot drift from the creation path's answer
+  // the way a second, parallel rule would.
+  const rosterIds = memberIds.includes(userId) ? memberIds : [userId, ...memberIds];
+  return c.json({ servers: await commonServerSet(c.env, rosterIds) });
 });
 
 groupRoutes.patch('/:groupId', async (c) => {
@@ -185,29 +202,77 @@ groupRoutes.patch('/:groupId', async (c) => {
     setClauses.push('idle_reminder_days = ?');
     values.push(days);
   }
+  // Pass-21 review (P21-03). The ownership check at the top of this handler is
+  // a read, and the writes happen later. Ownership can change in between --
+  // legitimately, through this same person's own handover -- and the stale
+  // request then replaced the roster, removing the NEW owner from it. What was
+  // left was a group whose stored owner was not a member: they got 404 on
+  // every route (the loader scopes by membership), and the remaining members
+  // got 403 on every administrative one. Nobody could administer it, and
+  // nothing had failed.
+  //
+  // The batch being atomic did not help. Atomicity guarantees the statements
+  // apply together; it says nothing about whether the authority they were
+  // authorised under still holds when they run. That is the same distinction
+  // migration 0013 draws for events, and the same `guardedStatement` idiom
+  // eventWrites.ts uses -- borrowed here rather than reinvented.
+  //
+  // `created_by` is the version token. It is not a counter, but it is exactly
+  // the fact this request was authorised on, so a change to it is precisely
+  // the change that must invalidate the request.
+  const groupId = c.req.param('groupId');
+  const ownerGuard = ` AND EXISTS (SELECT 1 FROM groups WHERE id = ? AND created_by = ?)`;
+  const guardBinds = [groupId, userId];
+  const guardedStatement = (sql: string, ...binds: unknown[]) =>
+    c.env.DB.prepare(`${sql}${ownerGuard}`).bind(...binds, ...guardBinds);
+
+  // First in the batch, and its `changes` is how the handler learns whether
+  // the guard held: a self-assignment that touches the row when ownership
+  // still matches and touches nothing when it does not. Cheaper and more
+  // honest than re-reading afterwards, which would be another check-then-act.
+  statements.push(
+    c.env.DB.prepare(`UPDATE groups SET created_by = created_by WHERE id = ? AND created_by = ?`).bind(
+      groupId,
+      userId,
+    ),
+  );
+
   if (setClauses.length > 0) {
-    values.push(c.req.param('groupId'));
-    statements.push(c.env.DB.prepare(`UPDATE groups SET ${setClauses.join(', ')} WHERE id = ?`).bind(...values));
+    values.push(groupId);
+    statements.push(guardedStatement(`UPDATE groups SET ${setClauses.join(', ')} WHERE id = ?`, ...values));
   }
   if (memberIds !== undefined) {
     const now = Date.now();
-    const groupId = c.req.param('groupId');
-    statements.push(c.env.DB.prepare(`DELETE FROM group_members WHERE group_id = ?`).bind(groupId));
+    statements.push(guardedStatement(`DELETE FROM group_members WHERE group_id = ?`, groupId));
     // Multi-row inserts: a roster may hold MAX_GROUP_MEMBERS people, and one
-    // statement each would put that many queries in a single batch.
-    for (const chunk of chunkRows(memberIds, 3)) {
+    // statement each would put that many queries in a single batch. Two binds
+    // reserved for the guard the helper appends.
+    for (const chunk of chunkRows(memberIds, 3, guardBinds.length)) {
       statements.push(
-        c.env.DB.prepare(
+        guardedStatement(
           `INSERT INTO group_members (group_id, user_id, added_at)
-           VALUES ${chunk.map(() => '(?, ?, ?)').join(', ')}`,
-        ).bind(...chunk.flatMap((memberId) => [groupId, memberId, now])),
+           SELECT * FROM (${chunk
+             .map((_, i) =>
+               i === 0
+                 ? 'SELECT ? AS group_id, ? AS user_id, ? AS added_at'
+                 : 'SELECT ?, ?, ?',
+             )
+             .join(' UNION ALL ')})
+           WHERE 1 = 1`,
+          ...chunk.flatMap((memberId) => [groupId, memberId, now]),
+        ),
       );
     }
   }
   // One batch for the whole request -- a failure partway through leaves
   // nothing applied, rather than scalar fields changed with a stale roster
   // (or vice versa).
-  if (statements.length > 0) await c.env.DB.batch(statements);
+  const results = await c.env.DB.batch(statements);
+  if ((results[0]?.meta.changes ?? 0) === 0) {
+    // Every statement was a no-op, so there is nothing to undo. The person is
+    // told rather than left believing a rename or a roster change landed.
+    return c.text('This group changed owner while you were editing it. Reload to see who owns it now.', 409);
+  }
   return c.json({ ok: true });
 });
 
@@ -251,11 +316,26 @@ groupRoutes.post('/:groupId/members', async (c) => {
     : [...existing.map((m) => m.id), targetId];
   await assertValidRoster(c.env, proposedRoster);
 
-  await c.env.DB.prepare(
-    `INSERT OR IGNORE INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`,
+  // Pass-13 review (P13-10). The cap is enforced in the write as well as in
+  // assertValidRoster above, because the check above is a read-then-act: two
+  // additions in flight together both validate the same 24-member roster and
+  // both insert, reaching 26. Owner-only means that is one person
+  // double-submitting rather than two racing, which bounds the overshoot --
+  // but a cap every downstream fan-out is sized against should not depend on
+  // nobody double-clicking.
+  const inserted = await c.env.DB.prepare(
+    `INSERT OR IGNORE INTO group_members (group_id, user_id, added_at)
+     SELECT ?, ?, ?
+     WHERE (SELECT COUNT(*) FROM group_members WHERE group_id = ?) < ?`,
   )
-    .bind(groupId, targetId, Date.now())
+    .bind(groupId, targetId, Date.now(), groupId, LIMITS.MAX_GROUP_MEMBERS)
     .run();
+
+  if (inserted.meta.changes === 0 && !existing.map((m) => m.id).includes(targetId)) {
+    throw new ValidationError(
+      `A group can have at most ${LIMITS.MAX_GROUP_MEMBERS} members, including you`,
+    );
+  }
   return c.json({ ok: true });
 });
 

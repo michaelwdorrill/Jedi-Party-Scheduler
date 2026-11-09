@@ -145,6 +145,68 @@ describe('GET /guild-requests/callback', () => {
   });
 });
 
+// IDEAS 102, found setting the sandbox right on 10 Nov: the page said "Already
+// added" from the allow-list alone, so a server the bot had left (or never
+// joined) could not be fixed from here. An allow-listed server whose bot is
+// missing now comes back with a direct invite link -- it was approved already,
+// so no new request is needed.
+describe('the add-bot list checks the bot is really there', () => {
+  async function listFor(env: Env, botAnswer: { status: number; body: unknown }) {
+    const connectRes = await call(env, '/guild-requests/connect', { redirect: 'manual' });
+    const state = new URL(connectRes.headers.get('location')!).searchParams.get('state')!;
+    const cookie = setCookieValue(connectRes);
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      guildsRule([{ id: 'already-active', name: 'Already Active', owner: true }]),
+      userRule('requester'),
+      { match: '/guilds/already-active', ...botAnswer },
+    ]);
+    const res = await call(env, `/guild-requests/callback?code=abc&state=${state}`, {
+      headers: { Cookie: cookie },
+      redirect: 'manual',
+    });
+    const hashQuery = new URLSearchParams(res.headers.get('location')!.split('?')[1] ?? '');
+    return JSON.parse(decodeURIComponent(escape(atob(hashQuery.get('data')!))));
+  }
+
+  it('offers to add the bot back to an allow-listed server it is not in', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'already-active');
+    await seedUser(db, 'requester');
+
+    const [row] = await listFor(env, { status: 404, body: { message: 'Unknown Guild', code: 10004 } });
+
+    expect(row.alreadyAdded).toBeUndefined();
+    expect(row.botMissing).toBe(true);
+    expect(row.botInviteUrl).toContain(`client_id=${env.DISCORD_CLIENT_ID}`);
+    expect(row.botInviteUrl).toContain('guild_id=already-active');
+    expect(row.botInviteUrl).toContain('disable_guild_select=true');
+    expect(row.token).toBeUndefined();
+  });
+
+  it('still says "Already added" when the bot is there', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'already-active');
+    await seedUser(db, 'requester');
+
+    const [row] = await listFor(env, { status: 200, body: { id: 'already-active' } });
+
+    expect(row.alreadyAdded).toBe(true);
+    expect(row.botMissing).toBeUndefined();
+  });
+
+  // INVARIANT GUARD: a Discord hiccup is not evidence the bot left.
+  it('says "Already added" when Discord cannot be asked', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'already-active');
+    await seedUser(db, 'requester');
+
+    const [row] = await listFor(env, { status: 503, body: {} });
+
+    expect(row.alreadyAdded).toBe(true);
+  });
+});
+
 describe('POST /guild-requests', () => {
   async function verifyToken(env: Env, guildId = 'new-guild', guildName = 'New Guild', requestedBy = 'requester') {
     return signToken(GUILD_VERIFY_TOKEN_PURPOSE, { guildId, guildName, requestedBy }, env.JWT_SIGNING_KEY, 600);
@@ -227,13 +289,17 @@ async function createPendingRequest(db: ShimDatabase, env: Env, guildId = 'g1'):
   return row!.id;
 }
 
-describe('GET /guild-requests/:token/decide', () => {
+// POST, not GET, since the Pass-11 review's F-19: the emailed link now opens
+// a confirmation page and this is what the button on it submits. See
+// pass11.test.ts for the finding itself -- that a bare GET used to decide, and
+// mail scanners fetch links.
+describe('POST /guild-requests/:token/decide', () => {
   it('approving adds the guild to the allow-list', async () => {
     const { db, env } = setup();
     const requestId = await createPendingRequest(db, env);
     const token = await signToken(DECISION_TOKEN_PURPOSE, { requestId, action: 'approve' }, env.JWT_SIGNING_KEY, 600);
 
-    const res = await call(env, `/guild-requests/${token}/decide`);
+    const res = await call(env, `/guild-requests/${token}/decide`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(await countRows(db, 'guilds', "id = 'g1' AND is_active = 1")).toBe(1);
     expect(await countRows(db, 'guild_add_requests', "guild_id = 'g1' AND status = 'approved'")).toBe(1);
@@ -244,7 +310,7 @@ describe('GET /guild-requests/:token/decide', () => {
     const requestId = await createPendingRequest(db, env, 'g2');
     const token = await signToken(DECISION_TOKEN_PURPOSE, { requestId, action: 'reject' }, env.JWT_SIGNING_KEY, 600);
 
-    const res = await call(env, `/guild-requests/${token}/decide`);
+    const res = await call(env, `/guild-requests/${token}/decide`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(await countRows(db, 'guilds', "id = 'g2'")).toBe(0);
     expect(await countRows(db, 'guild_add_requests', "guild_id = 'g2' AND status = 'rejected'")).toBe(1);
@@ -256,8 +322,8 @@ describe('GET /guild-requests/:token/decide', () => {
     const approveToken = await signToken(DECISION_TOKEN_PURPOSE, { requestId, action: 'approve' }, env.JWT_SIGNING_KEY, 600);
     const rejectToken = await signToken(DECISION_TOKEN_PURPOSE, { requestId, action: 'reject' }, env.JWT_SIGNING_KEY, 600);
 
-    await call(env, `/guild-requests/${approveToken}/decide`);
-    const secondRes = await call(env, `/guild-requests/${rejectToken}/decide`);
+    await call(env, `/guild-requests/${approveToken}/decide`, { method: 'POST' });
+    const secondRes = await call(env, `/guild-requests/${rejectToken}/decide`, { method: 'POST' });
     expect(secondRes.status).toBe(200);
     // Still approved -- the first decision wins, the second is a no-op.
     expect(await countRows(db, 'guilds', "id = 'g3' AND is_active = 1")).toBe(1);
@@ -267,7 +333,7 @@ describe('GET /guild-requests/:token/decide', () => {
   it('an unknown request id is a 404', async () => {
     const { env } = setup();
     const token = await signToken(DECISION_TOKEN_PURPOSE, { requestId: 'nope', action: 'approve' }, env.JWT_SIGNING_KEY, 600);
-    const res = await call(env, `/guild-requests/${token}/decide`);
+    const res = await call(env, `/guild-requests/${token}/decide`, { method: 'POST' });
     expect(res.status).toBe(404);
   });
 });

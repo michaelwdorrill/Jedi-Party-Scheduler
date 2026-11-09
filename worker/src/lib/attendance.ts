@@ -33,6 +33,31 @@ export interface PendingFor {
 // deactivated) since the event was created, including the organizer, who
 // isn't exempt from having left. The background revalidation sweep is what
 // keeps rows inside that window.
+// Pass-12 review (P12-01) adds the second half of that: still authorized on
+// this *event*, not merely still in its server.
+//
+// Removing someone from an event deletes their event_invites and
+// event_attendance rows and nothing else -- their poll votes and window
+// submissions stay, which is right in itself, but the two poll branches below
+// select recipients straight out of those historical records. So a removed
+// invitee stayed "confirmed" for a poll they had been dropped from, and
+// sweepVoiceChannelInvites sent them a new DM carrying a private event's
+// title, its start time and a link into its voice channel.
+//
+// R09 closed exactly this on the retry consumer, and its comment names this
+// same removal route as the cause; the initial send was left open, which is
+// the worse half -- a retry re-delivers something already sent, this leaks
+// something new.
+//
+// Applied here rather than in each branch so every recipient query gets it,
+// including the fixed-time one where it is currently redundant (attendance
+// rows are deleted on removal). Redundant is the point: it makes the
+// guarantee structural instead of dependent on every future removal path
+// remembering to clear the right tables.
+//
+// The organizer is exempt by id, not assumed to hold an invite row. Idea 26
+// gives them one, but they are the event's owner either way and a missing row
+// must not silently stop their own event's DMs.
 function membershipJoin(idsSubquery: string): string {
   return `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
           FROM users u
@@ -41,6 +66,9 @@ function membershipJoin(idsSubquery: string): string {
           JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
           ${PENDING_NOTIFICATION_JOIN}
           WHERE u.id IN (${idsSubquery})
+            AND (u.id = ? OR EXISTS (
+              SELECT 1 FROM event_invites ei WHERE ei.event_id = ? AND ei.user_id = u.id
+            ))
             AND ${PENDING_NOTIFICATION_WHERE}
           ORDER BY u.id
           LIMIT ?`;
@@ -48,7 +76,8 @@ function membershipJoin(idsSubquery: string): string {
 
 // Bind order matches the SQL text above: guild/cutoff for the membership
 // join, then the notification key for the pending join, then the caller's own
-// id-subquery parameters, then the pending predicate's, then the limit.
+// id-subquery parameters, then the event-access pair, then the pending
+// predicate's, then the limit.
 function attendeeBinds(
   event: EventRow,
   pending: PendingFor,
@@ -59,6 +88,8 @@ function attendeeBinds(
     membershipCutoff(),
     ...pendingNotificationJoinBinds(event.id, pending.notificationType, pending.occurrenceDate),
     ...subqueryBinds,
+    event.organizer_id,
+    event.id,
     ...pendingNotificationWhereBinds(),
     pending.limit,
   ];
@@ -86,6 +117,17 @@ function membershipCutoff(): number {
 // 10/21 one. Written as NOT EXISTS rather than a join so an occurrence
 // nobody has answered for -- which is every occurrence, for an
 // organizer who has never pressed anything -- behaves exactly like "there".
+// The event states in which an RSVP still means something (R20 in the Pass-11
+// review). 'resolved' belongs here because a single-winner poll that has
+// resolved deliberately keeps event_type='poll' and status='resolved' -- it is
+// a settled session people are still answering about, and the cron sends it
+// RSVP buttons on exactly that basis. Same set freeBusy.ts and noticeboard.ts
+// already use, for the same reason.
+//
+// Declared once and used in both the read and the write below, so the two can
+// never drift into disagreeing about which events accept an answer.
+const ACCEPTS_RSVP_STATUSES: readonly string[] = ['active', 'resolved'];
+
 const ORGANIZER_UNLESS_DECLINED = `UNION
        SELECT ? WHERE NOT EXISTS (
          SELECT 1 FROM event_attendance
@@ -412,7 +454,22 @@ export async function recordRsvp(
   // otherwise never be told the session isn't happening. Checked before the
   // occurrence guard below so the more specific "this event is over" answer
   // wins over "that date doesn't match" whenever both would apply.
-  if (event.status !== 'active') return 'event_not_active';
+  //
+  // Pass-11 review (R20): 'resolved' is a live state, not a terminal one, and
+  // the blanket `!== 'active'` broke every RSVP on a settled poll. A
+  // single-winner poll that resolves deliberately keeps event_type='poll' and
+  // status='resolved'; cron/reminders.ts sends rsvpControls for exactly that
+  // state, and the attendance reader is built so an RSVP overrides a prior
+  // vote. So the buttons the app itself puts in front of people all answered
+  // event_not_active: nobody could withdraw an earlier yes or join after
+  // resolution, and the attendee count that decides voice-channel invites and
+  // the minimum-attendees cascade stayed frozen on stale votes.
+  //
+  // Cancelled is what actually has to be refused, which is what the original
+  // guard was for (specs/0014 stage 3): an accept landing after the cascade
+  // already cancelled the event, and after the cancellation notices went out,
+  // would otherwise never be told the session is not happening.
+  if (!ACCEPTS_RSVP_STATUSES.includes(event.status)) return 'event_not_active';
 
   // A non-recurring event's only occurrence is '' and a recurring one's is
   // never ''. Guarding it here, not just at the callers that construct it,
@@ -427,10 +484,27 @@ export async function recordRsvp(
     `INSERT INTO event_attendance (id, event_id, occurrence_date, user_id, rsvp_status, responded_at)
      SELECT ?, ?, ?, ?, ?, ?
      WHERE EXISTS (SELECT 1 FROM event_invites WHERE event_id = ? AND user_id = ?)
+       -- R20: the same predicate as the read above, restated where the write
+       -- happens. The read cannot see a cancellation that lands between it
+       -- and this statement, and that gap is exactly the case the status
+       -- check exists for.
+       AND EXISTS (SELECT 1 FROM events
+                   WHERE id = ? AND status IN (${ACCEPTS_RSVP_STATUSES.map(() => '?').join(', ')}))
      ON CONFLICT(event_id, occurrence_date, user_id) DO UPDATE SET
        rsvp_status = excluded.rsvp_status, responded_at = excluded.responded_at`,
   )
-    .bind(newId(), eventId, occurrenceDate, userId, status, Date.now(), eventId, userId)
+    .bind(
+      newId(),
+      eventId,
+      occurrenceDate,
+      userId,
+      status,
+      Date.now(),
+      eventId,
+      userId,
+      eventId,
+      ...ACCEPTS_RSVP_STATUSES,
+    )
     .run();
 
   if (result.meta.changes === 0) return 'not_invited';

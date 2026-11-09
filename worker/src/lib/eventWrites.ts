@@ -43,6 +43,13 @@ export interface EventWriteInput {
   voiceChannelId?: string | null;
   voiceChannelName?: string | null;
 
+  // specs/0007's decision 1: an event on a server appears on that server's
+  // noticeboard unless the organiser marks it private. Absent means visible,
+  // which is the schema default for new rows -- and deliberately NOT what
+  // existing rows got, since migration 0038 backfilled every one of them to
+  // private rather than changing their visibility retroactively.
+  isPrivate?: boolean;
+
   // specs/0014 stage 3, decision 4. Optional; `null`/absent means no
   // minimum. Only settable on a non-recurring, non-poll event -- see
   // assertCoherentMergedEvent and assertCompleteEventShape for why the
@@ -147,6 +154,11 @@ async function resolveInviteeUserIds(
   // it is handed: a call site that forgot would not fail to add the row, it
   // would delete the existing one on the next edit.
   organizerId: string | null,
+  // Who is actually asking. Distinct from `organizerId`, which is null on the
+  // additive path and is about whose row gets folded into the result -- this
+  // one is about authority, and every caller has it (each route has already
+  // proven the caller owns the event). Pass-11 review, F-25 / R08.
+  actorId: string,
 ): Promise<ResolvedInvitee[]> {
   // `source` is `null` for a directly-chosen invitee and the winning group ID
   // for a group-derived one. Built up front, before any membership check
@@ -161,6 +173,29 @@ async function resolveInviteeUserIds(
   for (const userId of userIds) source.set(userId, null);
 
   if (groupIds.length > 0) {
+    // Pass-11 review (F-25 / R08): a group id is a capability to read that
+    // group's roster, so it has to be checked against the person holding it.
+    // Rosters are private everywhere else -- GET /groups/:id requires
+    // membership, and the per-guild listing was removed in v0.4.3 for exactly
+    // this reason -- but this resolver expanded any id it was handed. The ids
+    // are not secret either: `sourceGroupId` on GET /events/:id discloses one
+    // to every invitee of any event built from that group. So someone removed
+    // from a group could keep reading its roster by creating an event from
+    // it, and everyone still in it got an invite DM from a stranger.
+    //
+    // MAX_GROUP_IDS is 10, so one statement covers it with no chunking.
+    const { results: ownGroups } = await env.DB.prepare(
+      `SELECT group_id FROM group_members WHERE user_id = ? AND group_id IN (${placeholders(groupIds.length)})`,
+    )
+      .bind(actorId, ...groupIds)
+      .all<{ group_id: string }>();
+    const allowed = new Set(ownGroups.map((r) => r.group_id));
+    if (groupIds.some((id) => !allowed.has(id))) {
+      // Deliberately does not name which id was refused: that would confirm
+      // the existence of a group to someone probing for one.
+      throw new ValidationError('You can only invite through groups you belong to');
+    }
+
     // One roster query per chunk of groups, not one per group. specs/0011 /
     // IDEAS item 36: a group no longer belongs to one guild, so there is no
     // `g.guild_id = ?` left to filter on here -- every member of a selected
@@ -310,6 +345,10 @@ function validateEventWriteInput(input: Partial<EventWriteInput>, requireComplet
   if (input.timezone !== undefined) assertTimezone(input.timezone, 'timezone');
   if (input.voiceChannelId !== undefined) assertOptionalString(input.voiceChannelId, 'voiceChannelId', 64);
   if (input.voiceChannelName !== undefined) assertOptionalString(input.voiceChannelName, 'voiceChannelName', LIMITS.CHANNEL_NAME);
+  // specs/0007. Checked at runtime like every other client-supplied field:
+  // TypeScript's generic on readJsonBody is a compile-time annotation only, and
+  // a truthy string here would silently flip an event's visibility.
+  if (input.isPrivate !== undefined) assertBoolean(input.isPrivate, 'isPrivate');
   if (input.eventType !== undefined) assertOneOf(input.eventType, 'eventType', ['single', 'poll'] as const);
   // Typed as boolean but never checked at runtime until now: a string or a
   // number here silently reached the `input.eventType === 'single' &&
@@ -567,6 +606,32 @@ function assertCoherentMergedEvent(stored: EventRow, input: Partial<EventWriteIn
   if (input.isRecurring !== undefined) assertCompleteScheduleShape(input);
 }
 
+// Found in 0.8.1 sandbox verification: the form lets "Confirm once N people
+// say yes" be typed freely, with nothing stopping N from exceeding the
+// number of people actually invited. A threshold that high can never be
+// reached -- the poll can only ever hit its deadline -- and the range check
+// in validateEventWriteInput doesn't catch it, because it only bounds N
+// against the app-wide MAX_RESOLVED_INVITEES ceiling, not against *this
+// event's* invite list, which validateEventWriteInput has no DB access to
+// read. So this runs later, once the invitee count is actually known --
+// after resolveInviteeUserIds on create, and after either that or a stored-
+// count read on update (see updateEvent below).
+//
+// inviteeCount includes the organizer, who resolveInviteeUserIds always folds
+// in: they are one of the people whose "yes" the threshold is counting.
+function assertThresholdReachable(
+  pollStrategy: string | null | undefined,
+  pollThresholdCount: number | null | undefined,
+  inviteeCount: number,
+): void {
+  if (pollStrategy !== 'threshold' || pollThresholdCount == null) return;
+  if (pollThresholdCount > inviteeCount) {
+    throw new ValidationError(
+      `pollThresholdCount (${pollThresholdCount}) cannot exceed the number of people invited (${inviteeCount})`,
+    );
+  }
+}
+
 function assertCompleteEventShape(input: Partial<EventWriteInput>): void {
   assertString(input.title, 'title', LIMITS.TITLE);
   assertTimezone(input.timezone, 'timezone');
@@ -704,6 +769,13 @@ export function inviteStatements(
   invitees: ResolvedInvitee[],
   guarded: boolean,
   mutationToken: string | null = null,
+  // R21: when set, each statement refuses to write if the event's invite
+  // count has already reached this total. Evaluated at execution time inside
+  // the batch, so rows written by an earlier chunk of the same batch count --
+  // and so does a concurrent request that got there first, which is the part
+  // a preflight count cannot cover. Only the additive path passes it; a full
+  // replace is bounded by the resolved set it submits.
+  totalCap: number | null = null,
 ): D1PreparedStatement[] {
   const extraGuard = mutationToken === null ? '' : ' AND mutation_token = ?';
   const extraBinds = mutationToken === null ? [] : [mutationToken];
@@ -720,6 +792,37 @@ export function inviteStatements(
       now,
     ]);
     if (!guarded) {
+      if (totalCap !== null) {
+        const arms = chunk
+          .map((_, i) =>
+            i === 0
+              ? `SELECT ${INVITE_COLUMNS.map((c) => `? AS ${c}`).join(', ')}`
+              : `SELECT ${INVITE_COLUMNS.map(() => '?').join(', ')}`,
+          )
+          .join(' UNION ALL ');
+        // Pass-12 review (P12-12). The WHERE alone is a threshold, not a
+        // reservation: SQLite evaluates it once for the whole statement, so a
+        // count one below the cap admitted the ENTIRE chunk. Two concurrent
+        // additions to a 23-invitee event, one adding a person and the other
+        // adding two, both passed their preflight and both passed this guard,
+        // and the event ended with 26 against a cap of 25.
+        //
+        // The LIMIT is the reservation: at most the remaining capacity is
+        // taken, whatever the chunk holds. MAX(0, ...) because a negative
+        // LIMIT means "no limit" in SQLite, which would turn an over-capacity
+        // event into an unbounded insert -- the exact opposite of the guard.
+        //
+        // The WHERE stays. It is redundant against the LIMIT for correctness,
+        // but an INSERT ... SELECT followed directly by ON CONFLICT is
+        // ambiguous to SQLite's parser unless a WHERE separates them.
+        return env.DB.prepare(
+          `INSERT INTO event_invites (${INVITE_COLUMNS.join(', ')})
+           SELECT * FROM (${arms})
+           WHERE (SELECT COUNT(*) FROM event_invites WHERE event_id = ?) < ?
+           LIMIT MAX(0, ? - (SELECT COUNT(*) FROM event_invites WHERE event_id = ?))
+           ${conflict}`,
+        ).bind(...values, eventId, totalCap, totalCap, eventId);
+      }
       return env.DB.prepare(
         `INSERT INTO event_invites (${INVITE_COLUMNS.join(', ')})
          VALUES ${chunk.map(() => `(${INVITE_COLUMNS.map(() => '?').join(', ')})`).join(', ')}
@@ -741,17 +844,26 @@ const POLL_OPTION_COLUMNS = ['id', 'event_id', 'start_at', 'end_at', 'display_or
 // way inviteStatements' does -- the recurring-conversion PATCH passes
 // `is_recurring = 1` so replacement options are written only if that
 // conversion's quota admission actually applied.
+// `displayOrder` is explicit only for the reconciling edit path, which inserts
+// a subset of the desired candidates and so cannot derive each one's position
+// from its position in the array it was given. Omitting it keeps the original
+// behaviour -- position in the array is the display order.
 function pollOptionStatements(
   env: Env,
   eventId: string,
-  options: readonly { startAt: number; endAt: number }[],
+  options: readonly { startAt: number; endAt: number; displayOrder?: number }[],
   guarded: boolean,
   mutationToken: string | null = null,
 ): D1PreparedStatement[] {
   const extraGuard = mutationToken === null ? '' : ' AND mutation_token = ?';
   const extraBinds = mutationToken === null ? [] : [mutationToken];
-  let order = 0;
-  const rows = options.map((opt) => [newId(), eventId, opt.startAt, opt.endAt, order++]);
+  const rows = options.map((opt, index) => [
+    newId(),
+    eventId,
+    opt.startAt,
+    opt.endAt,
+    opt.displayOrder ?? index,
+  ]);
   return chunkRows(rows, POLL_OPTION_COLUMNS.length, guarded ? 1 : 0).map((chunk) => {
     const values = chunk.flat();
     if (!guarded) {
@@ -847,16 +959,79 @@ export async function addInvitesToEvent(
   guildId: string,
   userIds: string[],
   groupIds: string[],
-): Promise<void> {
+  // The event's organizer, which every caller has already established is the
+  // person asking (F-25 / R08). Needed even though the organizer's own invite
+  // row is not written here -- the group ids still have to be checked against
+  // somebody, and this path was previously the one with no actor at all.
+  actorId: string,
+): Promise<{ notAdded: string[] }> {
   assertStringArray(userIds, 'userIds', LIMITS.MAX_INVITEES, 64);
   assertStringArray(groupIds, 'groupIds', LIMITS.MAX_GROUP_IDS, 64);
   // `null`: additive-only, and the organizer's row was written at creation.
   // Folding them in here would be harmless (ON CONFLICT DO NOTHING) but would
   // also mean this path silently invites the organizer to an event they might
   // deliberately have been removed from -- so it stays out of it.
-  const invitees = await resolveInviteeUserIds(env, guildId, userIds, groupIds, null);
-  if (invitees.length === 0) return;
-  await env.DB.batch(inviteStatements(env, eventId, invitees, false));
+  const invitees = await resolveInviteeUserIds(env, guildId, userIds, groupIds, null, actorId);
+  if (invitees.length === 0) return { notAdded: [] };
+
+  // Pass-11 review (R21). resolveInviteeUserIds caps the set *this request*
+  // resolves, and nothing anywhere checked the existing-plus-new union -- so
+  // repeated calls to this endpoint walked an event past
+  // MAX_RESOLVED_INVITEES without ever tripping a limit. The cap is not
+  // decoration: every downstream query that fans out over an invite list
+  // (event detail, the noticeboard, vote tallies, DM fan-out) is sized on the
+  // assumption that it holds, and lib/changeRequests.ts already had to write
+  // its own preflight count because this function had none.
+  //
+  // Two layers, deliberately. The read-then-check gives a refusal the
+  // organizer can act on; the guard inside each INSERT is what actually holds
+  // under two concurrent additions, where both preflights can pass. Neither
+  // alone is enough -- a preflight is racy, and a bare guard would refuse with
+  // no explanation.
+  const { results: existing } = await env.DB.prepare(
+    `SELECT user_id FROM event_invites WHERE event_id = ?`,
+  )
+    .bind(eventId)
+    .all<{ user_id: string }>();
+  const alreadyInvited = new Set(existing.map((r) => r.user_id));
+  const union = new Set(alreadyInvited);
+  for (const invitee of invitees) union.add(invitee.userId);
+  if (union.size > LIMITS.MAX_RESOLVED_INVITEES) {
+    throw new ValidationError(
+      `This event would have ${union.size} invitees, more than the limit of ${LIMITS.MAX_RESOLVED_INVITEES}`,
+    );
+  }
+
+  // Pass-13 review (P13-09). People already on the event are removed BEFORE
+  // the capacity guard sees them, which is the regression P12-12's fix
+  // introduced.
+  //
+  // That guard is `LIMIT MAX(0, cap - count)` on an INSERT ... SELECT, and
+  // SQLite applies a LIMIT to the SELECT -- before ON CONFLICT gets to
+  // discard anything. So with 24 of 25 seats taken and a request naming one
+  // existing invitee and one new person, the single available row went to the
+  // existing one, the conflict clause dropped it, and the new person was never
+  // considered. Response 200, nobody added. No concurrency needed: inviting a
+  // group that overlaps the current invite list does it, which is an ordinary
+  // thing to do.
+  const genuinelyNew = invitees.filter((i) => !alreadyInvited.has(i.userId));
+  if (genuinelyNew.length === 0) return { notAdded: [] };
+
+  // And the outcome is inspected rather than assumed. Under two concurrent
+  // additions the guard can still admit fewer than asked -- that is what it is
+  // for -- but the caller was being told it had succeeded. Returning who did
+  // not make it is the honest answer, and cheap: meta.changes per statement.
+  const results = await env.DB.batch(
+    inviteStatements(env, eventId, genuinelyNew, false, null, LIMITS.MAX_RESOLVED_INVITEES),
+  );
+  const admitted = results.reduce((total, r) => total + r.meta.changes, 0);
+  if (admitted >= genuinelyNew.length) return { notAdded: [] };
+
+  const { results: nowInvited } = await env.DB.prepare(`SELECT user_id FROM event_invites WHERE event_id = ?`)
+    .bind(eventId)
+    .all<{ user_id: string }>();
+  const present = new Set(nowInvited.map((r) => r.user_id));
+  return { notAdded: genuinelyNew.filter((i) => !present.has(i.userId)).map((i) => i.userId) };
 }
 
 export async function createEventWithInvites(
@@ -885,7 +1060,9 @@ export async function createEventWithInvites(
     input.invites?.userIds ?? [],
     input.invites?.groupIds ?? [],
     organizerId,
+    organizerId,
   );
+  assertThresholdReachable(input.pollStrategy, input.pollThresholdCount, invitees.length);
 
   // Everything below is one D1 batch -- a failure partway through (a full
   // event with no recurrence rule, or no invites) is exactly the partial-
@@ -912,8 +1089,8 @@ export async function createEventWithInvites(
          poll_mode, poll_resolution_mode, window_start_at, window_end_at, window_block_minutes,
          is_recurring, voice_channel_id, voice_channel_name, minimum_attendees, auto_cancel_below_minimum,
          minimum_attendees_deadline_at, minimum_attendees_deadline_hours_before,
-         created_at, updated_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         is_private, created_at, updated_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE ${eventQuotaGuardSql(isRecurring)}`,
     ).bind(
       eventId,
@@ -951,6 +1128,10 @@ export async function createEventWithInvites(
       input.autoCancelBelowMinimum ? 1 : 0,
       input.minimumAttendeesDeadlineAt ?? null,
       input.minimumAttendeesDeadlineHoursBefore ?? null,
+      // specs/0007: visible on the server's noticeboard unless the organiser
+      // said otherwise. Written explicitly rather than left to the column
+      // default so the value is decided in one readable place.
+      input.isPrivate ? 1 : 0,
       now,
       now,
       ...eventQuotaGuardParams(guildId, organizerId, isRecurring),
@@ -1107,6 +1288,14 @@ export async function updateEvent(
     setClauses.push('voice_channel_id = ?', 'voice_channel_name = ?');
     values.push(input.voiceChannelId, input.voiceChannelName ?? null);
   }
+  // specs/0007. Changeable after creation in both directions: an organiser who
+  // realises a session is more private than they thought must be able to take
+  // it off the noticeboard, and hiding something is exactly the direction that
+  // should never require deleting and recreating it.
+  if (input.isPrivate !== undefined) {
+    setClauses.push('is_private = ?');
+    values.push(input.isPrivate ? 1 : 0);
+  }
   // specs/0014 stage 3. Coherence (non-recurring, non-poll) already checked
   // by assertCoherentMergedEvent against the merged shape, not just this
   // delta -- see its comment.
@@ -1195,8 +1384,26 @@ export async function updateEvent(
         input.invites.userIds,
         input.invites.groupIds,
         stored.organizer_id,
+        stored.organizer_id,
       )
     : null;
+
+  // assertThresholdReachable needs the invitee count either way, but this
+  // PATCH doesn't necessarily touch invites -- "raise the threshold" is a
+  // perfectly normal edit on its own. `invitees` above is only populated when
+  // the request also carries a new invite list; otherwise the count has to
+  // come from what's already stored, one extra read paid only on the PATCHes
+  // that actually need it (a poll, changing or already carrying a threshold).
+  const mergedPollStrategy = input.pollStrategy !== undefined ? input.pollStrategy : stored.poll_strategy;
+  const mergedThresholdCount =
+    input.pollThresholdCount !== undefined ? input.pollThresholdCount : stored.poll_threshold_count;
+  if (mergedPollStrategy === 'threshold' && mergedThresholdCount != null) {
+    const inviteeCount =
+      invitees !== null
+        ? invitees.length
+        : (await env.DB.prepare('SELECT COUNT(*) AS n FROM event_invites WHERE event_id = ?').bind(eventId).first<{ n: number }>())!.n;
+    assertThresholdReachable(mergedPollStrategy, mergedThresholdCount, inviteeCount);
+  }
 
   // Every conditional block below queues its statements instead of running
   // them immediately; one env.DB.batch() at the end makes the whole PATCH
@@ -1270,22 +1477,105 @@ export async function updateEvent(
   }
 
   if (input.pollOptions) {
-    // Replacing poll options resets any votes already cast on the old set --
-    // acceptable for v1 since editing a poll's candidate slots after voting
-    // has started is an edge case, not the common path.
-    const { pollMode, pollResolutionMode } = normalizePollModes(input);
-    statements.push(
-      guardedStatement(
-        `DELETE FROM event_poll_votes WHERE option_id IN (SELECT id FROM event_poll_options WHERE event_id = ?)`,
-        eventId,
-      ),
-      // Window submissions go with the candidates they were made on: they
-      // cascade from event_poll_options, so this DELETE clears them without
-      // a statement of its own. That is why the availability table keeps a
-      // foreign key on the option and not only on the event.
-      guardedStatement(`DELETE FROM event_poll_options WHERE event_id = ?`, eventId),
-    );
-    statements.push(...pollOptionStatements(env, eventId, input.pollOptions, true, mutationToken));
+    const { pollMode } = normalizePollModes(input);
+    // Pass-12 review (P12-15). normalizePollModes applies the CREATE-time
+    // default -- `?? 'single_winner'` -- which on this path means a PATCH that
+    // does not mention pollResolutionMode silently converts a multi-winner
+    // poll into a single-winner one. Same F-08-A preservation as the four
+    // fields below, and for the same reason: "the caller didn't send a mode"
+    // and "the caller wants the default" are not the same request. The current
+    // form always sends it, so the exposure is a partial API caller rather
+    // than an ordinary save -- but every other field in this UPDATE learned
+    // that lesson already.
+    const pollResolutionMode =
+      input.pollResolutionMode !== undefined ? input.pollResolutionMode : stored.poll_resolution_mode;
+
+    // Pass-11 review (R05). This block used to delete every vote on the event
+    // and then every candidate row, rebuilding the whole set from the request.
+    // EventFormPage sends `pollOptions` on *every* poll save -- it has no
+    // notion of "the candidates didn't change" -- so correcting a typo in the
+    // title, or just pressing Save changes, silently destroyed every vote
+    // already cast, with no warning and no confirmation. The option ids that
+    // existing Discord vote messages point at changed underneath them too.
+    //
+    // So candidates are now reconciled rather than replaced. Identity is the
+    // (start_at, end_at) pair, which is the only identity available: the
+    // request carries no ids, and two candidate slots with the same start and
+    // end *are* the same candidate to anyone voting on them. A row that
+    // survives keeps its id, and with it its votes, its window-availability
+    // submissions and its confirmed_at -- so an unrelated edit is now a no-op
+    // against all three, and an edit that changes one slot out of five no
+    // longer takes the votes on the other four with it.
+    const { results: existingOptions } = await env.DB.prepare(
+      `SELECT id, start_at, end_at, display_order FROM event_poll_options WHERE event_id = ?`,
+    )
+      .bind(eventId)
+      .all<{ id: string; start_at: number; end_at: number; display_order: number }>();
+
+    const slotKey = (startAt: number, endAt: number) => `${startAt}:${endAt}`;
+    const survivingByKey = new Map(existingOptions.map((row) => [slotKey(row.start_at, row.end_at), row]));
+    const desiredKeys = new Set(input.pollOptions.map((opt) => slotKey(opt.startAt, opt.endAt)));
+
+    // Candidates the organizer actually removed. Their votes and window
+    // submissions both cascade from event_poll_options (see that table's
+    // foreign keys), so deleting the row is enough to take them with it --
+    // which is correct here, unlike the blanket delete this replaces: these
+    // are the only candidates that genuinely stopped existing.
+    const removedIds = existingOptions
+      .filter((row) => !desiredKeys.has(slotKey(row.start_at, row.end_at)))
+      .map((row) => row.id);
+
+    // Pass-12 review (P12-16 / F-29). Once sweepConfirmedMultiWinnerOptions
+    // has turned a confirmed candidate into a real event, that event points
+    // back at the candidate through migration 0027's created_from_option_id,
+    // which has no ON DELETE action -- so deleting the candidate fails the
+    // foreign key, the batch rolls back, and an edit the UI offered comes back
+    // as "Internal error". Retiming reaches it the same way: (start_at,
+    // end_at) is the identity here, so a moved slot is a removal plus an add.
+    //
+    // Refused rather than cascaded. The generated event is a real session that
+    // has been DMed about, may be on Google calendars, and may already have
+    // RSVPs against it; deleting it as a side effect of editing the poll it
+    // came from would be a far worse answer than declining the edit. The
+    // organizer can cancel that session directly if that is what they meant.
+    if (removedIds.length > 0) {
+      const materialized = await env.DB.prepare(
+        `SELECT 1 FROM events WHERE created_from_option_id IN (${placeholders(removedIds.length)}) LIMIT 1`,
+      )
+        .bind(...removedIds)
+        .first();
+      if (materialized) {
+        throw new ValidationError(
+          'One of the times you removed has already been confirmed and scheduled as its own session, so it can no longer be changed here. Cancel that session if it is not going ahead.',
+        );
+      }
+    }
+
+    // Reserving the two binds guardedStatement appends, the same way
+    // chunkRows' callers reserve theirs.
+    for (const chunk of chunkIds(removedIds, guardBinds.length)) {
+      statements.push(
+        guardedStatement(`DELETE FROM event_poll_options WHERE id IN (${placeholders(chunk.length)})`, ...chunk),
+      );
+    }
+
+    // Reordering the candidate list has to move the surviving rows with it, or
+    // the poll would render in its old order while claiming the new one.
+    const added: { startAt: number; endAt: number; displayOrder: number }[] = [];
+    input.pollOptions.forEach((opt, index) => {
+      const surviving = survivingByKey.get(slotKey(opt.startAt, opt.endAt));
+      if (!surviving) {
+        added.push({ startAt: opt.startAt, endAt: opt.endAt, displayOrder: index });
+        return;
+      }
+      if (surviving.display_order !== index) {
+        statements.push(
+          guardedStatement(`UPDATE event_poll_options SET display_order = ? WHERE id = ?`, index, surviving.id),
+        );
+      }
+    });
+
+    statements.push(...pollOptionStatements(env, eventId, added, true, mutationToken));
     statements.push(
       guardedStatement(
         `UPDATE events SET poll_strategy = ?, poll_threshold_count = ?, poll_deadline_at = ?,

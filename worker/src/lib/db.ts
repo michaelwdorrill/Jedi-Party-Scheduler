@@ -3,6 +3,7 @@ import { CURRENT_POLICY_VERSION } from './policy';
 import { chunkIds, chunkRows, placeholders } from './d1';
 import { checkGuildMembership } from './discord';
 import { revokeAllSessionsForUser } from './sessions';
+import { revokeGoogleAccess } from './googleCalendar';
 
 // How long a cached membership row is trusted before a request forces a live
 // Discord check. Bounds how long someone who left a guild can keep acting on
@@ -440,6 +441,13 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
   // still leaves the account locked out rather than usable.
   await revokeAllSessionsForUser(env, userId);
 
+  // Before the batch, because it needs to read the stored credential the batch
+  // is about to delete (IDEAS item 2 / specs/0017). Deleting our copy of a
+  // Google refresh token is not the same promise as Google no longer honouring
+  // it, and erasure should mean the stronger one. Best-effort inside: a Google
+  // outage must not be able to stop an account deletion, so this never throws.
+  await revokeGoogleAccess(env, userId);
+
   const organisedEvents = `SELECT id FROM events WHERE organizer_id = ?`;
   const ownedGroups = `SELECT id FROM groups WHERE created_by = ?`;
 
@@ -455,6 +463,34 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
       `DELETE FROM event_poll_votes WHERE option_id IN
          (SELECT id FROM event_poll_options WHERE event_id IN (${organisedEvents}))`,
     ).bind(userId),
+    // Pass-12 review (P12-06). Migration 0027's created_from_option_id is a
+    // fanned-out event's pointer back to the multi-winner poll candidate it
+    // came from, and it carries no ON DELETE action. The options delete below
+    // is its own statement, and SQLite checks an immediate foreign key at the
+    // conclusion of each statement -- so at that point the generated event is
+    // still present, still pointing at a candidate that has just gone, and the
+    // whole batch fails on a bare "FOREIGN KEY constraint failed".
+    //
+    // That made DELETE /me a 500 for any organizer who had ever run a
+    // multi-winner poll to its ordinary conclusion -- and a 500 *after*
+    // revokeAllSessionsForUser above, so the person was logged out of an
+    // account that still existed and that they could no longer reach the
+    // delete button for. sweepPurgeTerminalHistory has cleared this pointer
+    // since IDEAS item 56; this path never learned the same lesson.
+    //
+    // Only this pointer, not created_from_poll_id as well, which is the one
+    // asymmetry with the purge path and is deliberate: created_from_poll_id
+    // references events(id), and a fanned-out event always carries its poll's
+    // organizer, so both rows leave in the single `DELETE FROM events WHERE
+    // organizer_id = ?` below -- one statement, so nothing is dangling when it
+    // concludes. The purge path clears both because there the parent poll can
+    // be terminal while its generated event is still live, and so not in the
+    // same delete at all.
+    env.DB.prepare(
+      `UPDATE events SET created_from_option_id = NULL
+       WHERE created_from_option_id IN
+         (SELECT id FROM event_poll_options WHERE event_id IN (${organisedEvents}))`,
+    ).bind(userId),
     env.DB.prepare(`DELETE FROM event_poll_options WHERE event_id IN (${organisedEvents})`).bind(userId),
     env.DB.prepare(`DELETE FROM event_window_availability WHERE event_id IN (${organisedEvents})`).bind(userId),
     env.DB.prepare(`DELETE FROM event_invites WHERE event_id IN (${organisedEvents})`).bind(userId),
@@ -462,6 +498,14 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
     env.DB.prepare(`DELETE FROM event_recurrence_rules WHERE event_id IN (${organisedEvents})`).bind(userId),
     env.DB.prepare(`DELETE FROM event_occurrence_overrides WHERE event_id IN (${organisedEvents})`).bind(userId),
     env.DB.prepare(`DELETE FROM notification_log WHERE event_id IN (${organisedEvents})`).bind(userId),
+    // Every sync link to an event this user organised, including links owned
+    // by *other* people -- an invitee who syncs their own calendar holds one
+    // for an event they did not organise, and google_event_links.event_id is a
+    // real FK with no ON DELETE action, so the events delete below fails
+    // without this. Their Google entries are orphaned rather than removed,
+    // which is the unavoidable cost of the organiser erasing the event itself;
+    // the owning user's own sweep has no occurrence to match them to any more.
+    env.DB.prepare(`DELETE FROM google_event_links WHERE event_id IN (${organisedEvents})`).bind(userId),
     env.DB.prepare(`DELETE FROM events WHERE organizer_id = ?`).bind(userId),
 
     // Groups this user created. event_invites.source_group_id references
@@ -489,12 +533,79 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
     env.DB.prepare(`DELETE FROM group_members WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM group_nudge_log WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM account_purge_warnings WHERE user_id = ?`).bind(userId),
+    // The 1.0 launch announcement DM (LAUNCH-ONLY, removed in 1.1).
+    env.DB.prepare(`DELETE FROM announcement_log WHERE user_id = ?`).bind(userId),
     // IDEAS item 9 / specs/0015: requested_by has no ON DELETE action, same
     // reasoning as every other child table here -- the request's own record
     // is this person's, not the guild's, so it goes with them rather than
     // being reassigned or left dangling.
     env.DB.prepare(`DELETE FROM guild_add_requests WHERE requested_by = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM notification_log WHERE user_id = ?`).bind(userId),
+    // Pass-11 review (F-15 / R04): four tables reference users(id) with no ON
+    // DELETE action and were missing here, so `DELETE FROM users` failed for
+    // anyone who had ever answered someone else's event, or filed, voted on or
+    // been told about a change request on one. Where the user *organised* the
+    // event these cascade from events(id) above; where they merely took part,
+    // nothing cleared them. organizer_rsvp_notice_log made that the common
+    // case rather than an edge one -- sweepOrganizerRsvpNotices writes a row
+    // per RSVP to someone else's event and never removes it (it is the dedupe
+    // record), so since migration 0035 pressing one RSVP button was enough to
+    // make an account undeletable.
+    //
+    // Children before parents, as everywhere else in this batch: the log and
+    // votes for requests this person filed or was the target of go before the
+    // requests themselves.
+    env.DB.prepare(
+      `DELETE FROM change_request_log
+       WHERE user_id = ?
+          OR request_id IN (SELECT id FROM event_change_requests WHERE requester_id = ? OR target_user_id = ?)`,
+    ).bind(userId, userId, userId),
+    env.DB.prepare(
+      `DELETE FROM event_change_request_votes
+       WHERE user_id = ?
+          OR request_id IN (SELECT id FROM event_change_requests WHERE requester_id = ? OR target_user_id = ?)`,
+    ).bind(userId, userId, userId),
+    // A request this person filed is theirs and goes with them. One where they
+    // were the target goes too: an add_invitee request names exactly one person
+    // to add, so with that person erased the request has no subject left to
+    // act on -- there is no meaningful row to keep for the organiser.
+    env.DB.prepare(`DELETE FROM event_change_requests WHERE requester_id = ? OR target_user_id = ?`).bind(
+      userId,
+      userId,
+    ),
+    // decided_by is normally the organiser, whose own events cascade above;
+    // this is the belt for any row that is not. NULL is already this column's
+    // "resolved without an organiser decision" value and decided_at still
+    // says the request was decided, so the surviving request stays readable to
+    // everyone else on an event that is not this user's to delete.
+    env.DB.prepare(`UPDATE event_change_requests SET decided_by = NULL WHERE decided_by = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM organizer_rsvp_notice_log WHERE responder_id = ? OR organizer_id = ?`).bind(
+      userId,
+      userId,
+    ),
+    // IDEAS item 2 / specs/0017. Links before the connection, children before
+    // parents like everything else in this batch. The entries already written
+    // to the person's Google calendar are deliberately left where they are:
+    // they are in an account this app no longer has any authorisation to touch
+    // (revoked just above), and they are that person's own record of sessions
+    // they actually played.
+    env.DB.prepare(`DELETE FROM google_event_links WHERE user_id = ?`).bind(userId),
+    // Migration 0045's obligations (P19-08). ON DELETE CASCADE would carry
+    // these anyway, but the rule this batch exists to enforce is that a table
+    // referencing users(id) is deleted here explicitly, in child-before-parent
+    // order -- three separate FK failures were caused by trusting that
+    // something else would handle it. The same reasoning as the links above
+    // applies to what stays in Google: this app has just revoked its own
+    // access, so it could not remove them now even if that were the policy.
+    env.DB.prepare(`DELETE FROM google_orphaned_inserts WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM google_calendar_connections WHERE user_id = ?`).bind(userId),
+    // Migration 0040's pending grants (F-16 / R01). Another REFERENCES
+    // users(id) with no ON DELETE action, so this is here for the same reason
+    // the four statements above are -- and added in the same commit as the
+    // table itself, which is the rule F-15 exists to establish: a migration
+    // that points a new column at users(id) belongs in this batch before it
+    // ships, not after a review finds it.
+    env.DB.prepare(`DELETE FROM google_pending_connections WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM user_guild_membership WHERE user_id = ?`).bind(userId),
     // revokeAllSessionsForUser() above only sets revoked_at, so the rows (and
     // their FK to users) are still here -- delete them for real, or the final
@@ -508,6 +619,29 @@ export async function deleteUserCompletely(env: Env, userId: string): Promise<vo
 // updates the membership cache: allow-listed guilds they're currently in are
 // marked is_member=1, previously-cached memberships they're no longer in
 // (left the server, or it dropped off the allow-list) are marked is_member=0.
+// Which of the guilds Discord just reported for someone are on this app's
+// active allow-list. A pure read.
+//
+// Extracted for F-24 (Pass-11 review): routes/auth.ts needs this answer
+// *before* it writes anything, so a login it is going to refuse creates no
+// record of the person. Shared with syncGuildMembership below rather than
+// duplicated, since two copies of an admission-control intersection is how
+// they end up disagreeing.
+export async function activeAllowListedGuildIds(env: Env, discordGuildIds: string[]): Promise<string[]> {
+  // Discord returns up to 200 guilds for one account, past D1's per-statement
+  // parameter ceiling, so the intersection against the allow-list is chunked.
+  const found: string[] = [];
+  for (const chunk of chunkIds(discordGuildIds)) {
+    const { results } = await env.DB.prepare(
+      `SELECT id FROM guilds WHERE is_active = 1 AND id IN (${placeholders(chunk.length)})`,
+    )
+      .bind(...chunk)
+      .all<{ id: string }>();
+    found.push(...results.map((r) => r.id));
+  }
+  return found;
+}
+
 export async function syncGuildMembership(
   env: Env,
   userId: string,
@@ -515,17 +649,7 @@ export async function syncGuildMembership(
 ): Promise<void> {
   const now = Date.now();
 
-  // Discord returns up to 200 guilds for one account, past D1's per-statement
-  // parameter ceiling, so the intersection against the allow-list is chunked.
-  const currentlyMemberOf: string[] = [];
-  for (const chunk of chunkIds(discordGuildIds)) {
-    const { results } = await env.DB.prepare(
-      `SELECT id FROM guilds WHERE is_active = 1 AND id IN (${placeholders(chunk.length)})`,
-    )
-      .bind(...chunk)
-      .all<{ id: string }>();
-    currentlyMemberOf.push(...results.map((r) => r.id));
-  }
+  const currentlyMemberOf = await activeAllowListedGuildIds(env, discordGuildIds);
 
   // Which cached memberships need clearing is computed here rather than with a
   // `NOT IN (...)` list: NOT IN can't be chunked (each chunk would clear every
@@ -600,11 +724,20 @@ export async function revalidateStaleMemberships(
   budget?: MembershipCheckBudget,
 ): Promise<number> {
   const cutoff = Date.now() - MEMBERSHIP_FRESHNESS_MS;
+  // Servers take turns: each server's stalest row, then each server's second,
+  // and so on (IDEAS 102). Plain oldest-first let one server whose rows can
+  // never be refreshed -- the bot is not in it -- fill every tick's batch, so
+  // every other server's memberships aged past the grace window and locked
+  // their members out. ROW_NUMBER is one statement, so the price is unchanged.
   const { results } = await env.DB.prepare(
-    `SELECT m.user_id, m.guild_id, m.verified_at FROM user_guild_membership m
-     JOIN guilds g ON g.id = m.guild_id
-     WHERE m.is_member = 1 AND g.is_active = 1 AND m.verified_at < ?
-     ORDER BY m.verified_at ASC
+    `SELECT user_id, guild_id, verified_at FROM (
+       SELECT m.user_id, m.guild_id, m.verified_at,
+              ROW_NUMBER() OVER (PARTITION BY m.guild_id ORDER BY m.verified_at) AS turn
+       FROM user_guild_membership m
+       JOIN guilds g ON g.id = m.guild_id
+       WHERE m.is_member = 1 AND g.is_active = 1 AND m.verified_at < ?
+     )
+     ORDER BY turn, verified_at
      LIMIT ?`,
   )
     .bind(cutoff, limit)
@@ -612,9 +745,13 @@ export async function revalidateStaleMemberships(
 
   const confirmed: [string, string][] = [];
   const departed: [string, string][] = [];
+  // Servers the bot cannot see this tick: one refusal says the same about
+  // every other row there, so the rest are skipped rather than re-asked.
+  const unreachable = new Set<string>();
   let checked = 0;
 
   for (const row of results) {
+    if (unreachable.has(row.guild_id)) continue;
     // Each check is an outbound Discord call, and the tick has a finite
     // allowance shared with the DM sends that follow. Refreshing the cache
     // matters, but not more than actually delivering the notifications that
@@ -628,9 +765,11 @@ export async function revalidateStaleMemberships(
       confirmed.push([row.user_id, row.guild_id]);
     } else if (status === 'not_member') {
       departed.push([row.user_id, row.guild_id]);
+    } else if (status === 'bot_not_in_guild') {
+      unreachable.add(row.guild_id);
     } else if (status === 'bot_unauthorized') {
-      // Every subsequent check this tick would fail the same way, and each
-      // one costs a round trip. Stop and let the next tick retry.
+      // A bad token fails the same way for every server, and each check
+      // costs a round trip. Stop and let the next tick retry.
       break;
     }
     checked++;

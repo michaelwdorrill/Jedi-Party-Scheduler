@@ -46,14 +46,28 @@ export interface FetchRule {
   headers?: Record<string, string>;
   // Throw instead of responding, modelling a network failure.
   networkError?: boolean;
+  // Runs while this request is "in flight", before its response is produced.
+  // The point is to model a real interleaving rather than a doctored database
+  // state: code that awaits a network call is genuinely suspended there, and
+  // anything the app can do in that window (R10's read opt-out landing during
+  // a Google fetch) really can happen between the request and its answer.
+  before?: () => Promise<void>;
 }
 
 export interface FetchStub {
   calls: string[];
   // The request bodies, in the same order as `calls`, so a test can assert on
-  // what was actually sent rather than only on where. Non-string bodies (none
-  // today) record as null.
+  // what was actually sent rather than only on where. URLSearchParams bodies
+  // (Google's token and revoke endpoints use them) are recorded in their
+  // serialised form -- without that, "revoke was called" and "the *superseded*
+  // token was revoked" are indistinguishable, and only the second one is the
+  // property worth having. Anything else records as null.
   bodies: (string | null)[];
+  // multipart/form-data bodies, in the same order (null for every other
+  // kind). Only the launch announcement's DM sends one -- its picture is a
+  // file upload -- and its JSON part is also recorded in `bodies`, as
+  // payload_json, so the usual body assertions read it unchanged.
+  forms: (FormData | null)[];
   restore: () => void;
 }
 
@@ -62,14 +76,26 @@ export interface FetchStub {
 export function stubFetch(rules: FetchRule[]): FetchStub {
   const calls: string[] = [];
   const bodies: (string | null)[] = [];
+  const forms: (FormData | null)[] = [];
   const original = globalThis.fetch;
 
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     calls.push(url);
-    bodies.push(typeof init?.body === 'string' ? init.body : null);
+    const form = init?.body instanceof FormData ? init.body : null;
+    forms.push(form);
+    bodies.push(
+      typeof init?.body === 'string'
+        ? init.body
+        : init?.body instanceof URLSearchParams
+          ? init.body.toString()
+          : form
+            ? String(form.get('payload_json'))
+            : null,
+    );
     const rule = rules.find((r) => url.includes(r.match));
     if (!rule) throw new Error(`Unstubbed fetch to ${url}`);
+    if (rule.before) await rule.before();
     if (rule.networkError) throw new TypeError('network failure');
     return new Response(rule.body === undefined ? '' : JSON.stringify(rule.body), {
       status: rule.status,
@@ -80,6 +106,7 @@ export function stubFetch(rules: FetchRule[]): FetchStub {
   return {
     calls,
     bodies,
+    forms,
     restore: () => {
       globalThis.fetch = original;
     },
@@ -92,8 +119,17 @@ export const DM_CHANNEL_RULE: FetchRule = {
   body: { id: 'dm-channel-1' },
 };
 
-export function membershipRule(status: number, body: unknown = {}): FetchRule {
-  return { match: '/members/', status, body };
+// A 404 defaults to Discord's "Unknown Member" body -- the one 404 that means
+// the person is not in the server. Before the walkthrough found otherwise
+// (IDEAS 102), any bare 404 was read as that, and so was Discord's 404
+// "Unknown Guild" for a server the bot is not in; a test wanting that case
+// now has to say so.
+export function membershipRule(
+  status: number,
+  body: unknown = status === 404 ? { message: 'Unknown Member', code: 10007 } : {},
+  match = '/members/',
+): FetchRule {
+  return { match, status, body };
 }
 
 export function dmSendRule(status: number, headers?: Record<string, string>): FetchRule {
@@ -248,4 +284,32 @@ export async function loadEventRow(db: ShimDatabase, eventId: string): Promise<E
   const row = await db.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
   if (!row) throw new Error(`test fixture: no event ${eventId}`);
   return row;
+}
+
+// Backdates a session so a refresh is past MIN_ROTATION_INTERVAL_MS and
+// actually rotates (Pass-14 review, P14-05).
+//
+// A real client refreshes when its thirty-minute access token expires, which
+// is far outside the one-minute coalescing window. A test that logs in and
+// refreshes in the same millisecond is the hammering case that window exists
+// to bound, so tests about ROTATION have to age the session the way the
+// passage of time would.
+// THE RULE, learned the expensive way (Pass-15 review, F-42): any test that
+// calls `rotateSession` more than once must move the clock between the calls
+// -- with this, or with fake timers -- or it is testing the coalescing floor
+// and nothing else.
+//
+// `MIN_ROTATION_INTERVAL_MS` hands the same session back when it is younger
+// than a minute, so an un-aged rotation loop returns the id it was given,
+// every time. Five tests were written before that floor existed. The four that
+// started FAILING were noticed and backdated; the five that kept PASSING were
+// not -- and they were the ones asserting the family-revocation and
+// session-cap properties, over tables that by then contained a single row.
+// A test that cannot fail is worse than a missing one, because it reads as
+// coverage.
+export async function ageSession(db: ShimDatabase, sessionId: string, byMs = 5 * 60 * 1000): Promise<void> {
+  await db
+    .prepare(`UPDATE sessions SET created_at = created_at - ? WHERE id = ?`)
+    .bind(byMs, sessionId)
+    .run();
 }

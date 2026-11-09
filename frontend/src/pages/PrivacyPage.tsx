@@ -1,257 +1,468 @@
 import LegalLayout, { Bullets, Section } from '../components/LegalLayout';
-import { CONTACT_EMAIL, OPERATOR, SERVICE_NAME } from '../lib/legal';
+import { CONTACT_EMAIL, LOG_RETENTION_DAYS, OPERATOR, RECOVERY_DAYS, SERVICE_NAME } from '../lib/legal';
 
+// Policy version 6 (1.0). Written from docs/POLICY-DRAFT-1.0.md, which carries
+// the claims ledger tying each statement here to the code that makes it true,
+// and the decisions Michael made on 9 Nov 2026 (Part F). Change a claim here
+// and the ledger should change with it.
 export default function PrivacyPage() {
   return (
     <LegalLayout title="Privacy Policy">
       <p>
-        {SERVICE_NAME} is a small, non-commercial scheduling tool for private Discord friend groups.
-        This policy explains exactly what it stores, why, who can see it, and how to get rid of it.
-        It is deliberately specific rather than generic — if something isn't listed here, the service
-        doesn't collect it.
+        <strong>The short version.</strong> {SERVICE_NAME} is a free scheduling tool for private
+        Discord friend groups, run by one person as a hobby. It stores what it needs to schedule
+        sessions and remind people about them, and nothing for advertising, analytics or sale. You
+        can download everything it holds about you, or delete your account, from Settings at any
+        time. The rest of this page is the detail, and it is meant to be complete: if something
+        isn't listed here, {SERVICE_NAME} doesn't collect it. (The companies that host it also handle
+        ordinary technical information about each request, such as your IP address, in order to
+        deliver it — see "Who it is shared with".)
       </p>
 
       <Section heading="Who is responsible">
         <p>
-          {OPERATOR} is the data controller for the information described below. For any privacy
-          question or request, contact <strong>{CONTACT_EMAIL}</strong>.
+          {SERVICE_NAME} is run by {OPERATOR}, who is responsible for the information described here
+          (the "data controller", in data-protection terms). Contact:{' '}
+          <strong>{CONTACT_EMAIL}</strong>.
         </p>
       </Section>
 
-      <Section heading="What is collected">
+      <Section heading="What is collected, and why">
         <p>
-          <strong>From Discord, when you log in.</strong> {SERVICE_NAME} uses Discord's OAuth2 with
-          only the <code>identify</code> and <code>guilds</code> scopes, which provide:
+          <strong>When you log in with Discord.</strong> {SERVICE_NAME} asks Discord only for the{' '}
+          <code>identify</code> and <code>guilds</code> permissions. From those it keeps:
         </p>
         <Bullets
           items={[
-            'Your Discord user ID, username, display name, and avatar reference.',
-            'The list of Discord servers you belong to — used only to check which of them are on this app’s allow-list. Servers that are not allow-listed are discarded immediately and never written to the database.',
+            'Your Discord user ID, username, display name and avatar reference.',
+            'Which of your Discord servers are on this app’s allow-list, when that was last checked, and — if you leave one — that you used to be in it. The rest of your server list is used once, to make that check, and never stored.',
           ]}
         />
         <p>
-          <strong>What you create in the app.</strong> Your timezone, notification and availability
-          preferences, events (titles, descriptions, games, times), groups you make, invitations,
-          RSVPs, poll votes, submitted availability, and any personal time blocks you add.
+          It never asks for your email address, and it never sees your Discord messages or your
+          password. The bot can list a server's voice channels, to offer one for an event, and checks
+          from time to time that you are still a member of the servers you use here; it cannot read
+          messages.
         </p>
         <p>
-          <strong>Operational records.</strong> The ID of the direct-message channel between you and
-          the bot (so it isn't re-created on every notification), and a log of which notifications
-          have already been sent to you, which exists solely to stop the service from messaging you
-          twice about the same thing — including the two-week and one-week inactivity notices
-          described under "How long it is kept" below. Also a record of your active login sessions —
-          creation time, last-used time, and expiry — which is what lets a session be revoked
-          immediately (by you logging out, or by deleting your account) rather than staying valid
-          until it naturally expires.
+          <strong>What you create.</strong> Your timezone and settings; events (title, description,
+          game, time, voice channel, and options such as a minimum number of attendees); polls and
+          their candidate times; groups; invitations; your answers — RSVPs, poll votes, and the
+          availability ranges you submit; requests to change an event (a proposed time or person to
+          add, an optional message, and votes on them); and personal time blocks.
         </p>
         <p>
-          <strong>If you ask to add the bot to a server.</strong> The server's ID and name, your
-          Discord user ID, and when the request was made and decided. Requesting also repeats the
-          Discord permission check above for that specific server, to confirm you actually administer
-          it — this uses the same <code>identify</code>/<code>guilds</code> scopes already described,
-          at a separate moment from login, and is discarded the same way once the check is made.
+          <strong>Records {SERVICE_NAME} keeps to work properly.</strong>
+        </p>
+        <Bullets
+          items={[
+            <>
+              <strong>Messages it has sent you.</strong> The text of each Discord direct message, when
+              it was sent, and whether it was delivered — so that nothing is sent to you twice, and so
+              that a message can be updated later (for example to show the answer you pressed). Also
+              the ID of the direct-message channel between you and the bot, recorded the first time it
+              messages you. This includes the one announcement sent when version 1.0 launched, which
+              went only to people with notifications switched on.
+            </>,
+            <>
+              <strong>Login sessions.</strong> When each was created, roughly when it was last used (to
+              within a few minutes), when it expires, which version of this policy it was issued
+              under, and whether it was revoked or replaced. Replaced sessions are kept until they
+              would have expired anyway, which is how the service notices a copied session being
+              reused.
+            </>,
+            <>
+              <strong>Which version of this policy you agreed to, and when.</strong>
+            </>,
+            <>
+              <strong>When you last logged in</strong>, and when a login was last refused (for example
+              because you no longer share a server with the app).
+            </>,
+            <>
+              <strong>Whether you've seen the 1.0 launch picture</strong> that appears once when you
+              first open the app after the release, so it isn't shown to you again.
+            </>,
+          ]}
+        />
+        <p>
+          <strong>Your IP address, briefly.</strong> The three places where signing in or connecting
+          an account costs the service a request to Discord or Google are rate-limited, so a script
+          can't hammer them. To count attempts, {SERVICE_NAME} turns your IP address into a scrambled
+          code that can't be turned back into the address without a secret key only the service
+          holds, and keeps that code with a count for the current minute. It is not linked to your
+          account, and it is deleted from the live database within about fifteen minutes (recovery
+          copies, below, keep it no longer than anything else). Your IP address itself is never
+          written to {SERVICE_NAME}'s database, and is never used for anything else.
+        </p>
+        <p>
+          <strong>If you ask to add the bot to a server.</strong> That server's ID and name, your
+          Discord user ID, and when the request was made and decided. The request repeats the Discord
+          permission check above for that server, to confirm you administer it.
+        </p>
+        <p>
+          <strong>If you connect a Google calendar.</strong> This is optional, off unless you choose
+          it, and can be disconnected at any time. Connecting asks Google for permission to manage
+          events (<code>calendar.events</code>) and to read your calendars (
+          <code>calendar.readonly</code>). {SERVICE_NAME} then stores a long-lived Google credential,
+          the email address of the Google account you connected, which calendar you chose, and a
+          record of which sessions it has written there so nothing is written twice. The credential
+          is <strong>encrypted before it is stored</strong>, with a key kept separately, and is never
+          shown to anyone or included in "Download my data". Google will warn you when you connect
+          that it hasn't verified {SERVICE_NAME}; that is expected for a project this small.
+        </p>
+        <p>
+          <strong>What is written to your Google calendar</strong> is limited on purpose: sessions
+          in the next two months that you organize or have been invited to and haven't declined —
+          including ones you haven't answered yet and ones you've said "maybe" to — with their title,
+          times, the name of the Discord server and a link back here.{' '}
+          <strong>Never descriptions</strong>, never a poll's proposed dates, never an event you've
+          declined, and never your personal time.
+        </p>
+        <p>
+          <strong>Reading a calendar is a separate choice, off by default.</strong> You can choose{' '}
+          <em>one</em> of your Google calendars to be read, so people scheduling with you can see when
+          you're busy. Its upcoming events — about two months ahead, up to forty at a time — are then
+          copied into your own {SERVICE_NAME} calendar as read-only personal time,{' '}
+          <strong>with their titles, times and descriptions</strong>, visible only to you; anyone else
+          still sees only plain blocks of busy time. Cancelled events, and the sessions{' '}
+          {SERVICE_NAME} itself wrote to that calendar, are left out. If there are more than forty,
+          Settings tells you. Switching reading off, or choosing a different calendar, deletes every
+          entry it created. Google's permission covers all your calendars,
+          not just the one you choose — that only one is read is enforced by {SERVICE_NAME}'s own
+          code, not by Google — so if that matters to you, leave reading off.
+        </p>
+        <p>
+          <strong>Disconnecting</strong> removes the upcoming entries {SERVICE_NAME} wrote (if Google
+          refuses, it keeps trying for about an hour, then stops) and asks Google to revoke its
+          access. If Google can't confirm that at the time, the credential is
+          still deleted here, but the permission may stay on your Google account until you remove it
+          in your Google account's third-party access settings.{' '}
+          <strong>
+            Deleting your account revokes access too, but does not remove entries already written to
+            your Google calendar
+          </strong>{' '}
+          — disconnect first if you want them gone.
+        </p>
+        <p>
+          {SERVICE_NAME}'s use and transfer to any other app of information received from Google APIs
+          will adhere to the{' '}
+          <a
+            href="https://developers.google.com/terms/api-services-user-data-policy"
+            className="underline"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Google API Services User Data Policy
+          </a>
+          , including the Limited Use requirements.
         </p>
       </Section>
 
       <Section heading="What is deliberately not collected">
+        <p>
+          Your email address (other than the address of a Google account you choose to connect — see
+          above), your Discord messages, your Discord password or login tokens (used once during
+          sign-in, in memory, then discarded), payment details, location, device fingerprints,
+          advertising identifiers, or analytics of any kind. There are no third-party trackers, ad
+          networks or tracking cookies.
+        </p>
+      </Section>
+
+      <Section heading="What the site keeps in your browser">
+        <Bullets
+          items={[
+            'Your sign-in, in your browser’s local storage, so you stay logged in, plus a marker of which account is signed in so that several tabs agree.',
+            'A short-lived login check while you sign in, and a list of sign-outs waiting to be sent if you logged out while offline.',
+            'Small preferences: the server you last selected, your calendar view, and the background scenery.',
+            'Three cookies, each lasting ten minutes, set only while you sign in, ask to add the bot, or connect Google. They hold a one-time check value, are readable only by Uncle Owen’s server, and are not used for tracking.',
+          ]}
+        />
+        <p>Nothing here is shared with anyone. Logging out removes your sign-in.</p>
+      </Section>
+
+      <Section heading="Who can see what">
+        <p>Access is checked by the server on every request, not just hidden in the page.</p>
         <Bullets
           items={[
             <>
-              <strong>Your email address.</strong> The <code>email</code> scope is not requested, so
-              Discord never provides it.
+              <strong>An event's full details</strong>, including its description, are visible to its
+              organizer and the people invited.
             </>,
             <>
-              <strong>Your Discord messages.</strong> The bot has no message intents and does not read
-              any channel or the content of any message you send. It DMs you directly, and can update
-              those DMs afterward — for example, showing your RSVP once you press it. All it ever
-              receives back is which button you pressed, never free text.
+              <strong>Your answers are visible to the other people invited</strong> to the same
+              event: your RSVP, your poll votes with your name, and the availability ranges you
+              submit.
             </>,
             <>
-              <strong>Discord access or refresh tokens.</strong> These are used once, in memory,
-              during login to read your profile and server list, then discarded. They are not written
-              to the database.
+              <strong>The server noticeboard.</strong> Other members of a server can see a limited
+              view of its events even if they weren't invited: the title, game, when it is, and who is
+              invited with their answers. Never the description. An organizer can keep any event off
+              the noticeboard; events created before the noticeboard existed were made private when
+              it arrived, and stay off it unless their organizer later chooses to show them.
             </>,
-            'Payment details, location data, device fingerprints, advertising identifiers, or analytics of any kind. There are no third-party trackers, cookies for tracking, or ad networks in this service.',
+            <>
+              <strong>Change requests.</strong> If you ask to change an event, the organizer sees your
+              request and its message. A request to move the time is also shown to the other invitees
+              while it is open — with your name and your message — so they can vote on it; everyone
+              sees the running total, and nobody sees who voted which way. Once it is decided, only
+              you and the organizer can see it. A request to add someone is seen only by you and the
+              organizer.
+            </>,
+            <>
+              <strong>Groups.</strong> A group's members can see its name, game, owner and member
+              list.
+            </>,
+            <>
+              <strong>Personal time blocks</strong> are visible only to you.
+            </>,
+            <>
+              <strong>Free/busy.</strong> Other members of a server you share can see when you are
+              busy, as plain blocks of time with no title or detail. A block comes from an event you
+              organize, an event you're invited to and haven't declined, a confirmed poll day you said
+              yes to, or personal time marked "Busy" ("Considering" and "Free" never show). For a
+              repeating event, a date you've declined can still show as busy. You can switch all of
+              this off in Settings, and then they see nothing.
+            </>,
+            <>
+              <strong>Your Discord profile</strong> (username, display name, avatar) is shown to other
+              signed-in members of servers you share, so people can find who to invite, and to the
+              other members of any group you are in, even after you stop sharing a server with them.
+            </>,
+            <>
+              <strong>The operator</strong> has an admin page listing every account with its Discord
+              ID, username, display name, whether notifications are on, when it last logged in and
+              when a login was last refused, and which servers it belongs to or has left; and the
+              requests to add the bot. There is no admin page showing anyone's events, answers or
+              personal time. The operator can technically query the database directly, as with any
+              service someone hosts: content is not end-to-end encrypted. The operator will only do so
+              to fix a fault or where the law requires it.
+            </>,
           ]}
         />
       </Section>
 
-      <Section heading="Who can see your information">
-        <p>
-          Visibility inside the app is intentionally narrow, and enforced server-side on every
-          request rather than merely hidden in the interface:
-        </p>
+      <Section heading="Things the service does automatically">
+        <p>So that nothing happens to your plans without you knowing it can:</p>
         <Bullets
           items={[
-            <>
-              <strong>Events.</strong> Only the organiser and the people invited to an event can see
-              its details. Sharing a Discord server with someone does not let you see their events.
-            </>,
-            <>
-              <strong>Personal time blocks.</strong> Visible only to you. Nobody else can retrieve
-              their name or description through any endpoint.
-            </>,
-            <>
-              <strong>Free/busy availability.</strong> Other members of a server you share can see
-              whether you are busy at a given time, as opaque blocks. They never receive the title,
-              description, game, participants, or origin of whatever is occupying that time — the API
-              returns only start and end timestamps. You can switch this off entirely in Settings, in
-              which case others see nothing at all for you.
-            </>,
-            <>
-              <strong>Your Discord profile.</strong> Your username, display name, and avatar are shown
-              to other logged-in members of servers you share, so people can identify who they're
-              inviting.
-            </>,
-            <>
-              <strong>Requests to add the bot to a server.</strong> If you ask to add the bot
-              somewhere, the operator sees your Discord username and which server you asked for, since
-              that's what they need to approve or reject the request.
-            </>,
+            'An organizer can set a minimum number of attendees, and either a deadline by which it must be met or none. If they switch on automatic cancellation, the event cancels itself — at the deadline, or as soon as someone’s “can’t make it” takes it below the minimum — and the service messages everyone still coming. Otherwise the organizer is messaged and decides.',
+            'On a poll where each day is confirmed separately, a confirmed day becomes its own event, and your answer for that day — “I’m in”, “can’t make it” or “maybe” — carries over as your answer for it. If that day later falls below the number of people the poll needed, it is called off and the service messages everyone still coming.',
+            'An account that hasn’t logged in for 365 days is deleted, exactly as if you’d pressed “Delete my account”. The service sends a Discord message two weeks and one week before. It is paused while you’re organizing, or invited to and haven’t declined, anything still to come — which includes any repeating event that hasn’t been cancelled, even one whose dates have all passed.',
           ]}
         />
-      </Section>
-
-      <Section heading="Operator access (stated plainly)">
         <p>
-          {SERVICE_NAME} runs on a database controlled by {OPERATOR}. The application's own rules
-          prevent one user from reading another user's event details, and there is no administrative
-          screen in the app for reading other people's data. However, whoever controls the hosting
-          account can technically query the underlying database directly, as is true of any
-          self-hosted service.
+          Messages are sent through Discord, and the service retries a failed delivery, but it cannot
+          guarantee you receive one: Discord may refuse it if you block the bot or don't accept
+          messages from server members, and you may have turned notifications off.
         </p>
-        <p>
-          This is stated explicitly rather than glossed over, because it is the honest limit of what
-          the service can promise. Content is not end-to-end encrypted; if that guarantee matters to
-          you for a particular plan, do not put it in this tool. The operator's commitment is not to
-          access other users' event content except where strictly necessary to fix a fault or comply
-          with law, and never for curiosity, profiling, or disclosure to anyone else.
-        </p>
-      </Section>
-
-      <Section heading="Why it is stored (legal bases)">
-        <p>
-          Where UK/EU data protection law applies, the legal bases are: <strong>performance of a
-          contract</strong> — storing your events, groups, and invitations is the service you asked
-          for by signing in; and <strong>legitimate interests</strong> — keeping a minimal
-          notification log so the bot doesn't message you repeatedly, and basic security and
-          abuse-prevention. Discord notifications can be turned off at any time in Settings.
-        </p>
+        <p>None of this involves profiling or decisions about you beyond these rules.</p>
       </Section>
 
       <Section heading="Who it is shared with">
         <p>
-          Your information is never sold, licensed, rented, or shared with data brokers, advertising
-          networks, or any monetisation service. It is processed only by the infrastructure needed to
-          run the service:
+          Never sold, rented or shared for advertising. It is processed only by the services needed
+          to run {SERVICE_NAME}:
         </p>
         <Bullets
           items={[
             <>
-              <strong>Cloudflare</strong> — hosts the application server and database (encrypted at
-              rest).
+              <strong>Cloudflare</strong> runs the application and its database. Like any host, it
+              receives your IP address with each request. It also keeps the application's own log
+              lines for {LOG_RETENTION_DAYS} days, for finding faults. They can include Discord user and
+              server IDs and error details, including parts of error messages from Google or Resend.{' '}
+              {SERVICE_NAME} is written not to log event titles, descriptions or the text of
+              messages, and the automatic per-request entry Cloudflare would otherwise add to those
+              logs is switched off.
             </>,
             <>
-              <strong>GitHub</strong> — serves the static website.
+              <strong>GitHub</strong> serves the website's files. Like any web host, it receives your
+              IP address when your browser loads the site.
             </>,
             <>
-              <strong>Discord</strong> — provides login and delivers the notification messages you
-              have opted into.
+              <strong>Discord</strong> handles login and delivers the messages you get from the bot,
+              including their text. Your browser also loads members' profile pictures directly from
+              Discord's image servers, which — like any site serving an image — see your IP address
+              when it does.
             </>,
             <>
-              <strong>Resend</strong> — sends the one email this service generates: telling the
-              operator about a pending request to add the bot to a new server, including the
-              requester's Discord username. Nothing else triggers an email, and this service does not
-              otherwise hold or use your email address (see "What is deliberately not collected"
-              above).
+              <strong>Resend</strong> delivers one kind of email, to the operator's inbox at{' '}
+              <strong>Proton Mail</strong>, when someone asks to add the bot to a server. It contains
+              that person's Discord display name, username and ID, the server's name and ID, and two
+              links to approve or reject the request, which expire after 7 days. Proton keeps it as the
+              operator's email provider. Nothing else ever triggers an email.
+            </>,
+            <>
+              <strong>Google</strong>, for people who connect a calendar, as described above. Google
+              handles that information under its own privacy policy.
             </>,
           ]}
         />
         <p>
-          Information may also be disclosed if required by law, or where you explicitly direct it to
-          be shared.
+          The site's fonts are served from {SERVICE_NAME}'s own site, so visiting it does not contact
+          Google or any font service. Profile pictures are the one exception to "everything comes
+          from {SERVICE_NAME}'s own site", as described under Discord.
+        </p>
+        <p>
+          Information may also be disclosed if the law requires it, or where you ask for it to be
+          shared.
         </p>
       </Section>
 
       <Section heading="How long it is kept">
-        <p>
-          Your information is retained while your account exists and for as long as it remains
-          necessary to run the service, and is deleted promptly when you ask, when the service shuts
-          down, or when it is no longer needed for the functionality described above.
-        </p>
-        <p>
-          <strong>An account can also close itself.</strong> If you haven't logged in for close to a
-          year, you'll get a DM two weeks and then one week before it happens, and the account —
-          including everything listed on this page — is deleted the same way "Delete my account"
-          would delete it. This is paused for as long as you're organizing, or invited and haven't
-          declined, anything not yet in the past — deleting you shouldn't quietly change plans other
-          people are relying on.
-        </p>
-      </Section>
-
-      <Section heading="Your rights and how to use them">
-        <p>Every one of these is available directly in the app, under Settings:</p>
         <Bullets
           items={[
             <>
-              <strong>Access / portability.</strong> "Download my data" returns everything the service
-              holds about you as a JSON file.
+              <strong>Your account, settings, groups, personal time and any requests you made to add
+              the bot:</strong> until you delete your account, or after 365 days without logging in.
             </>,
             <>
-              <strong>Erasure.</strong> "Delete my account" immediately and permanently removes your
-              profile, personal time blocks, votes, invitations, group memberships, notification
-              records, login sessions, and the events you organised. There is no soft-delete or grace
-              period, and nothing is retained for analytics. The automatic year-of-inactivity deletion
-              described above removes exactly the same things.
+              <strong>Google Calendar:</strong> the connection, its credential and the record of
+              entries written, until you disconnect or delete your account. Personal time imported
+              from a calendar you chose to read, until you switch reading off, choose a different
+              calendar or disconnect; while reading is on it is refreshed against the next two
+              months.
             </>,
             <>
-              <strong>Rectification.</strong> Edit your events, groups, and preferences at any time.
+              <strong>Events you organize, and everyone's answers on them:</strong> until you delete
+              your account (past events are not removed on their own).
             </>,
             <>
-              <strong>Objection / restriction.</strong> Turn off Discord notifications, or hide your
-              free/busy availability, in Settings.
+              <strong>Cancelled events and finished polls:</strong> 90 days after they were last
+              changed (normally the cancellation, or the poll closing).
+            </>,
+            <>
+              <strong>Messages the bot sent you (text and delivery record):</strong> until the event
+              or group they were about is removed, or your account is deleted. The two warnings
+              before inactivity deletion, and the 1.0 launch announcement, stay until your account is
+              deleted.
+            </>,
+            <>
+              <strong>Login sessions:</strong> 7 days after they start, or sooner if you log out.
+            </>,
+            <>
+              <strong>The scrambled code made from your IP address, for the login limit:</strong> at
+              most about fifteen minutes; the address itself is never stored.
+            </>,
+            <>
+              <strong>Sign-in cookies:</strong> 10 minutes.
+            </>,
+            <>
+              <strong>Database recovery copies (Cloudflare D1 "Time Travel"):</strong>{' '}
+              {RECOVERY_DAYS} days, after which deleted data can no longer be restored.
+            </>,
+            <>
+              <strong>Cloudflare's copies of the application's log lines:</strong>{' '}
+              {LOG_RETENTION_DAYS} days.
+            </>,
+          ]}
+        />
+      </Section>
+
+      <Section heading="Your rights, and how to use them">
+        <p>Everything below is available to everyone, in Settings, whatever the law where you live:</p>
+        <Bullets
+          items={[
+            <>
+              <strong>See and take your data:</strong> "Download my data" gives you a file with
+              everything {SERVICE_NAME} holds about you, apart from the encrypted Google credentials (if
+              you connected Google), which are never given out to anyone.
+            </>,
+            <>
+              <strong>Delete your account:</strong> "Delete my account" removes your profile,
+              personal time, answers, invitations, group memberships, the messages logged as sent to
+              you, your login sessions, and the events and groups you created, from {SERVICE_NAME}'s
+              database, immediately.{' '}
+              <strong>
+                Events you organised disappear for everyone invited, with their answers, and no
+                cancellation message is sent
+              </strong>{' '}
+              — tell people first if that matters. Cloudflare's recovery copies of the database still
+              hold it for {RECOVERY_DAYS} days, after which it can no longer be restored. Discord
+              messages already delivered stay in your Discord history, under Discord's own rules. If
+              you had connected Google Calendar, entries already written there are not removed (see
+              above).
+            </>,
+            <>
+              <strong>Correct it:</strong> edit your events, groups and settings at any time.
+            </>,
+            <>
+              <strong>Object or limit it:</strong> turn off Discord notifications, hide your
+              free/busy time, or disconnect Google, in Settings. The warnings before an inactive
+              account is deleted are still sent, because they exist to stop that deletion.
             </>,
           ]}
         />
         <p>
-          If you can no longer sign in, email <strong>{CONTACT_EMAIL}</strong> from an address you
-          control, or contact the operator via Discord, and the same requests will be handled
-          manually. Depending on where you live you may also have the right to complain to a data
-          protection authority, or (in California) to be free from discrimination for exercising
-          these rights — this service does not treat anyone differently for doing so.
+          If you can't sign in any more, email <strong>{CONTACT_EMAIL}</strong> and the same requests
+          will be handled by hand, normally within a month. An email address doesn't prove who owns a
+          Discord account, so you may be asked to confirm it is yours before anything is released or
+          deleted. You may also have the right to complain to your data-protection authority. Using
+          any of these rights never changes how the service treats you.
         </p>
+      </Section>
+
+      <Section heading="Why it is stored (legal bases)">
+        <p>Where UK or EU data-protection law applies, the legal bases are:</p>
+        <Bullets
+          items={[
+            <>
+              <strong>Performance of a contract</strong> — storing your account, events, polls,
+              groups, invitations, answers, change requests and personal time, connecting Google if you
+              choose to, and sending the messages you've chosen to get, is the service you asked for
+              by signing in.
+            </>,
+            <>
+              <strong>Legitimate interests</strong> — keeping a record of messages sent so you aren't
+              messaged twice; keeping replaced login sessions until they expire so a copied session can
+              be detected; the login rate limit and its short-lived counts; checking that you still
+              belong to the servers you use here; the warnings before an inactive account is deleted;
+              telling people with notifications on that 1.0 had launched; and basic security and
+              fault-finding, including the short-lived logs.
+            </>,
+            <>
+              <strong>Legal obligation</strong> — where the law requires information to be disclosed.
+            </>,
+          ]}
+        />
+        <p>Discord notifications can be turned off at any time in Settings.</p>
       </Section>
 
       <Section heading="Security">
         <p>
-          Traffic is served over HTTPS, the database is encrypted at rest by the hosting provider,
-          credentials are held as secrets outside the source code, and session tokens are short-lived
-          and signed. Long-lived Discord credentials are not stored at all. No system is perfectly
-          secure, and this is a hobby project run by one person rather than a company with a security
-          team — please weigh that when deciding what to put in it.
+          Traffic is encrypted (HTTPS); the database is encrypted at rest by Cloudflare; secrets are
+          kept outside the code; sign-in sessions are short-lived, revocable, and replaced when they
+          renew; Discord login tokens are never stored, and the Google credential is encrypted before
+          it is stored. This is a hobby project run by one person, not a company with a security team
+          — no system is perfectly secure, so please weigh that before putting anything sensitive in
+          it.
         </p>
       </Section>
 
       <Section heading="Age">
         <p>
-          {SERVICE_NAME} requires a Discord account and is not directed at children. Discord's own
-          minimum age is 13, and higher in some countries; you must meet the minimum age in your
-          country to use this service.
+          {SERVICE_NAME} needs a Discord account and is not aimed at children. You must meet Discord's
+          minimum age in your country (13 in most places, older in some).
         </p>
       </Section>
 
-      <Section heading="International transfers">
+      <Section heading="Where it is processed">
         <p>
-          The infrastructure providers above operate in the United States, so information may be
-          processed there regardless of where you live.
+          Cloudflare, GitHub, Discord, Resend and Google process information in the United States and
+          elsewhere, and Proton, the operator's email provider, is based in Switzerland. So it may be
+          handled outside your country and, while there, be accessible to authorities under local
+          law. Where information leaves the UK, the EU or Canada, these companies rely on their own
+          published safeguards — such as the EU–US Data Privacy Framework or standard contractual
+          clauses for the EU and UK, and contractual protections for Canada.
         </p>
       </Section>
 
-      <Section heading="Changes">
+      <Section heading="Changes to this policy">
         <p>
-          If this policy changes materially, the updated date at the top of this page will change and
-          a notice will be shown in the app. Continuing to use {SERVICE_NAME} after a change means
-          you accept it.
+          When this policy changes in a way that matters, its version number goes up and the app asks
+          everyone to read and agree to it before carrying on. Until you agree, the app shows only
+          that request — though "Download my data" and "Delete my account" stay available, so you can
+          leave instead. Small corrections that change nothing about your information update the date
+          without asking again.
         </p>
       </Section>
     </LegalLayout>

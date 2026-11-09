@@ -1,0 +1,71 @@
+-- Pass-15 security review (P15-08), which is P13-11 / P14-12 under its third
+-- number: accepting a change request and applying it are two writes, and
+-- nothing records whether the second one happened.
+--
+-- `applyAndAccept` claims the decision -- moves the request from 'pending' to
+-- 'accepted' -- and then mutates the event, with a compensating release if the
+-- mutation throws. If the isolate dies between those two writes, or the apply
+-- AND its release both fail, the request reads 'accepted' over an event that
+-- never moved. The resolver will not pick it up again, because it is no longer
+-- 'pending'. What makes that worse than a stuck row is the notice: the
+-- decision arm DMs the requester "accepted", so they plan around a time the
+-- invitees never saw, and it surfaces as a no-show rather than an error.
+--
+-- IDEAS item 70 recorded two candidate fixes and this is neither of them. An
+-- 'applying' status cannot be added without a full table rebuild, because the
+-- status column carries a CHECK constraint; threading a compare-and-set into
+-- `updateEvent`'s batch means surgery in the one write path every event edit
+-- goes through. This column is the third option, from the Pass-15 review:
+-- DETECTION rather than a new state.
+--
+--   * The apply path stamps `applied_at` once the change has landed.
+--   * The resolver gains a recovery arm for rows that are 'accepted' with
+--     `applied_at IS NULL` and have been that way for longer than any healthy
+--     window, and re-runs the apply -- which is idempotent, because the
+--     override write is an upsert and `updateEvent` is revision-guarded.
+--   * The decision notice only fires for an accepted request once
+--     `applied_at` is set, so "accepted" is never announced for a change that
+--     has not happened.
+--
+-- Nullable, no CHECK, no rebuild.
+ALTER TABLE event_change_requests ADD COLUMN applied_at INTEGER;
+
+-- NO BACKFILL, and this is the third version of this comment (Pass-17 review,
+-- P17-02). The first two got it wrong in opposite directions.
+--
+-- Version one copied `decided_at` into `applied_at` for every accepted row and
+-- justified it by asserting that legacy accepted rows "were applied by the code
+-- path that had no other outcome". That is false, and it contradicts the
+-- finding this migration exists for: P13-11/P15-08 is exactly the case where a
+-- decision committed and its effect did not.
+--
+-- Version two kept the backfill and re-justified it as harmless because
+-- `applied_at` now only feeds the decision-notice gate. That is also false, and
+-- the Pass-17 review demonstrated why: the notice is a message saying the
+-- change was ACCEPTED. Stamping a row whose effect never landed makes the app
+-- state a success that did not happen -- to the person who asked for it, who
+-- then plans around a time nobody else agreed to.
+--
+-- There is no evidence left in the database to tell the two apart. So this
+-- migration does not guess. Accepted rows that predate it keep a NULL
+-- `applied_at`, which the notice gate reads as "not confirmed" and stays quiet
+-- about.
+--
+-- The cost is real and bounded: an accepted request that exists when this
+-- deploys and has not yet been notified never gets its DM. A request is
+-- normally accepted and announced within a tick or two, so that is a handful of
+-- rows at most, once -- against permanently asserting success for changes
+-- nobody can verify. Already-announced requests are unaffected: the notice arm
+-- excludes anything with a `change_request_log` row, whatever `applied_at`
+-- says.
+--
+-- Nothing replays these rows (the recovery arm is gone -- P16-01), so an
+-- unstamped legacy row is inert and visible rather than dangerous. Historical
+-- reconciliation stays open; IDEAS item 70 carries it.
+
+-- The recovery arm's predicate, which runs on every resolver tick and must not
+-- scan the table. Partial, so the index holds only the rows that can ever
+-- match -- in a healthy database, none.
+CREATE INDEX idx_change_requests_unapplied
+  ON event_change_requests(decided_at)
+  WHERE status = 'accepted' AND applied_at IS NULL;

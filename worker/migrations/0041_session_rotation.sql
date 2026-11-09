@@ -1,0 +1,34 @@
+-- Pass-11 security review (F-20): real session rotation on refresh.
+--
+-- What was wrong. POST /auth/refresh accepts an expired JWT by design -- that
+-- is what refresh is for -- and rotateSession only bumped last_used_at. The
+-- `sid` never changed, so the token handed back was interchangeable with the
+-- one presented, and a captured token stayed usable for the whole seven-day
+-- session by simply being refreshed. lib/jwt.ts's own comment and README §4
+-- both describe the 30-minute access-token lifetime as what bounds a captured
+-- token's usefulness; it did not bound anything, because the holder could
+-- always trade it for a fresh one. The token lives in localStorage, so any
+-- script running on the frontend origin got a week rather than half an hour.
+--
+-- Rotation fixes that: each refresh mints a NEW session row and retires the
+-- old one, so a stolen token and the legitimate one cannot both keep working
+-- -- whichever refreshes second is holding a sid that no longer authenticates,
+-- and the theft ends at the next refresh instead of at the end of the week.
+--
+-- Why this column rather than just revoking the old row. Two browser tabs can
+-- hit a 401 at the same moment and both call refresh with the same token. One
+-- wins; the other would get a 401 from refresh itself, and the frontend's API
+-- client treats that as terminal -- it CLEARS the stored token and bounces to
+-- the login screen, throwing away the good token the winning tab had just
+-- written. So an immediate revoke turns an ordinary two-tab moment into both
+-- tabs being logged out. A retired session therefore stays usable for a short
+-- grace, and only then stops.
+--
+-- Deliberately NOT reusing revoked_at for this. Revocation has to stay
+-- immediate and absolute: logout, account deletion and the policy-version
+-- sweep all depend on `revoked_at IS NOT NULL` meaning dead right now, and
+-- teaching that column about grace periods would quietly soften all three.
+-- Superseded is a different fact from revoked and gets its own column.
+ALTER TABLE sessions ADD COLUMN superseded_at INTEGER;
+
+CREATE INDEX idx_sessions_superseded ON sessions(superseded_at) WHERE superseded_at IS NOT NULL;

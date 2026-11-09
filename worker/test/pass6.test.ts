@@ -65,7 +65,13 @@ describe('a maximum-size option poll fits inside one Free-plan invocation', () =
       pollMode: 'options',
       pollResolutionMode: 'single_winner',
       pollStrategy: 'threshold',
-      pollThresholdCount: 3,
+      // 1, not the earlier 3: this fixture invites nobody, so the organizer
+      // (idea 26's automatic fold-in) is the only person who could ever vote,
+      // and assertThresholdReachable now (correctly) rejects a threshold this
+      // event could never reach. Nothing in this describe block cares what
+      // the actual number is -- these tests are about query-budget and
+      // capacity at MAX_POLL_OPTIONS, not about resolution behaviour.
+      pollThresholdCount: 1,
       pollDeadlineAt: Date.now() + 24 * HOUR_MS,
       pollOptions: maxOptions(),
       invites: { userIds: [], groupIds: [] },
@@ -218,8 +224,11 @@ describe('overlapping maximum groups resolve without one query per group', () =>
       )
         .bind(groupId, `Group ${groupId}`, Date.now())
         .run();
-      for (const userId of members) {
-        await db.prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`)
+      // The creator included, as migration 0017 makes true of every real
+      // group -- and as F-25 in the Pass-11 review now requires, since an
+      // organizer can only invite through groups they belong to.
+      for (const userId of [...members, 'organizer']) {
+        await db.prepare(`INSERT OR IGNORE INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`)
           .bind(groupId, userId, Date.now())
           .run();
       }
@@ -258,8 +267,10 @@ describe('overlapping maximum groups resolve without one query per group', () =>
       )
         .bind(groupId, groupId, Date.now())
         .run();
-      for (const userId of members.slice(i * 200, (i + 1) * 200)) {
-        await db.prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`)
+      // The creator included, as migration 0017 makes true of every real
+      // group -- and as F-25 in the Pass-11 review now requires.
+      for (const userId of [...members.slice(i * 200, (i + 1) * 200), 'organizer']) {
+        await db.prepare(`INSERT OR IGNORE INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)`)
           .bind(groupId, userId, Date.now())
           .run();
       }

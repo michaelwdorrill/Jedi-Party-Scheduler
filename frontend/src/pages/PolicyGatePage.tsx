@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, API_BASE_URL } from '../api/client';
-import { clearToken, getToken } from '../auth/tokenStorage';
+import { api } from '../api/client';
+import { clearToken } from '../auth/tokenStorage';
 import { useAuth } from '../auth/AuthContext';
 import { describeError } from '../lib/async';
+import { downloadMyData } from '../lib/dataExport';
 import { InlineError, buttonClass, cardClass } from '../components/ui';
+import { DELETE_ACCOUNT_CONFIRMATION } from '../lib/deleteAccount';
 
 // Shown after logging in when the Terms or Privacy Policy have changed since
 // this person last agreed (docs/specs/0012-policy-reacceptance.md).
@@ -52,16 +54,7 @@ export default function PolicyGatePage() {
     setExporting(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE_URL}/me/export`, {
-        headers: { Authorization: `Bearer ${getToken()}` },
-      });
-      const blob = new Blob([JSON.stringify(await res.json(), null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `uncle-owen-data-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      await downloadMyData();
     } catch (e) {
       setError(describeError(e));
     } finally {
@@ -71,9 +64,7 @@ export default function PolicyGatePage() {
 
   const handleDelete = async () => {
     if (
-      !confirm(
-        'Permanently delete your account?\n\nThis removes your profile, personal time blocks, RSVPs, votes, group memberships, and every event you organised — including from the calendars of everyone you invited. It cannot be undone.',
-      )
+      !confirm(DELETE_ACCOUNT_CONFIRMATION)
     ) {
       return;
     }

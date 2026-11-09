@@ -1,4 +1,5 @@
 import { dmEmbeds } from './dmComponents';
+import type { DmAttachment } from './launchAnnouncement';
 
 const API_BASE = 'https://discord.com/api/v10';
 
@@ -73,6 +74,30 @@ export async function fetchGuildVoiceChannels(botToken: string, guildId: string)
   return channels.filter((c) => VOICE_CHANNEL_TYPES.has(c.type)).map((c) => ({ id: c.id, name: c.name }));
 }
 
+// IDEAS 102, follow-up: whether the bot is actually in a server, for the
+// add-bot page -- which used to say "Already added" from the allow-list alone,
+// so a server the bot had left, or never joined, could not be fixed from there.
+// GET /guilds/{id} answers 200 only for a server the bot is in; 404 Unknown
+// Guild or 403 means it is not. Anything else is `unknown`, and the caller
+// keeps its old answer: a Discord hiccup is not evidence the bot left.
+export async function botGuildPresence(botToken: string, guildId: string): Promise<'present' | 'absent' | 'unknown'> {
+  try {
+    const res = await fetch(`${API_BASE}/guilds/${guildId}`, { headers: { Authorization: `Bot ${botToken}` } });
+    if (res.status === 200) return 'present';
+    if (res.status === 403) return 'absent';
+    if (res.status === 404) {
+      const code = await res.json().then(
+        (body) => (body as { code?: unknown } | null)?.code,
+        () => undefined,
+      );
+      return code === UNKNOWN_GUILD ? 'absent' : 'unknown';
+    }
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 // IDEAS item 58: the self-service add flow (specs/0015) gives an admin a
 // one-click way to put the bot into their server; this is the other half.
 // DELETE /users/@me/guilds/{id} with the *bot's own* token makes the bot
@@ -91,20 +116,43 @@ export async function leaveGuild(botToken: string, guildId: string): Promise<voi
 }
 
 // Deliberately more granular than "yes / no / dunno". Only `member` and
-// `not_member` are answers about the *user*; the other two are answers about
+// `not_member` are answers about the *user*; the other three are answers about
 // our own ability to ask the question, and they have very different
 // operational meanings:
 //
-//   bot_unauthorized  the bot token is wrong/revoked (401), or the bot isn't
-//                     in this guild any more (403). Persistent, and nothing
-//                     resolves it except an operator fixing the Discord app.
-//   temporarily_unavailable  rate limit (429), Discord 5xx, or a network
-//                     failure. Expected to clear on its own.
+//   bot_unauthorized  the bot token is wrong/revoked (401). Persistent, the
+//                     same for every server, and nothing resolves it except an
+//                     operator fixing the Discord app.
+//   bot_not_in_guild  the bot cannot see THIS server: Discord's 404 "Unknown
+//                     Guild" (10004), which is what it sends when the bot is
+//                     not in the server, or a 403. Persistent, but only for
+//                     that server -- every other server is unaffected.
+//   temporarily_unavailable  rate limit (429), Discord 5xx, a network failure,
+//                     or a 404 Discord doesn't explain. Expected to clear.
+//
+// IDEAS 102 (found on the 10 November walkthrough): "not found" used to mean
+// "not a member" whatever was not found. SandboxBot was never added to one
+// allow-listed server, Discord answered 404 Unknown Guild for every member
+// check there, and both test accounts -- members of that server -- were
+// marked as having left it, so everything on it vanished from their
+// calendars, silently: a 404 logged nothing. Only Discord's own "Unknown
+// Member" (10007) now says the person left; anything unexplained is "could
+// not check", which the 24-hour grace already handles, rather than a guess
+// that removes someone.
 //
 // Collapsing these into one bucket is what made the previous version
 // indistinguishable in logs: a permanently broken bot looked exactly like a
 // thirty-second Discord blip. See docs/SETUP.md's operations note.
-export type GuildMembershipStatus = 'member' | 'not_member' | 'bot_unauthorized' | 'temporarily_unavailable';
+export type GuildMembershipStatus =
+  | 'member'
+  | 'not_member'
+  | 'bot_not_in_guild'
+  | 'bot_unauthorized'
+  | 'temporarily_unavailable';
+
+// Discord JSON error codes (https://discord.com/developers/docs/topics/opcodes-and-status-codes).
+const UNKNOWN_GUILD = 10004;
+const UNKNOWN_MEMBER = 10007;
 
 // Live check against Discord's own membership record, used to revalidate a
 // stale cache entry (see isGuildMember in db.ts). This single REST lookup
@@ -120,12 +168,33 @@ export async function checkGuildMembership(
       headers: { Authorization: `Bot ${botToken}` },
     });
     if (res.status === 200) return 'member';
-    if (res.status === 404) return 'not_member';
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 404) {
+      const code = await res.json().then(
+        (body) => (body as { code?: unknown } | null)?.code,
+        () => undefined,
+      );
+      if (code === UNKNOWN_MEMBER) return 'not_member';
+      if (code === UNKNOWN_GUILD) {
+        console.error(
+          `Discord membership check: the bot is not in guild ${guildId} (404 Unknown Guild). ` +
+            `Nobody there can be verified until the bot is added back; members keep access for the grace window.`,
+        );
+        return 'bot_not_in_guild';
+      }
+      console.warn(`Discord membership check: unexplained 404 (code ${String(code)}) for guild ${guildId}`);
+      return 'temporarily_unavailable';
+    }
+    if (res.status === 403) {
       console.error(
-        `Discord membership check rejected (${res.status}) for guild ${guildId}: ` +
-          `the bot token is invalid or the bot is no longer in this server. ` +
-          `Membership can no longer be verified until this is fixed.`,
+        `Discord membership check rejected (403) for guild ${guildId}: the bot cannot see this server. ` +
+          `Nobody there can be verified until that is fixed; members keep access for the grace window.`,
+      );
+      return 'bot_not_in_guild';
+    }
+    if (res.status === 401) {
+      console.error(
+        `Discord membership check rejected (401): the bot token is invalid. ` +
+          `Membership can no longer be verified anywhere until this is fixed.`,
       );
       return 'bot_unauthorized';
     }
@@ -304,6 +373,11 @@ export async function sendBotDm(
   // assembled them; this module does not build them (lib/dmComponents.ts
   // does) and does not interpret them.
   components?: unknown[] | null,
+  // One file sent with the message -- only the 1.0 launch announcement's
+  // picture (lib/launchAnnouncement.ts). Present means the request goes as
+  // multipart/form-data, Discord's only way to upload a file; the JSON part is
+  // unchanged and travels as `payload_json`.
+  attachment?: DmAttachment | null,
 ): Promise<{ result: DmSendResult; channelId: string | null; messageId: string | null }> {
   let channelId = existingChannelId ?? null;
 
@@ -337,16 +411,10 @@ export async function sendBotDm(
 
   let messageRes: Response;
   try {
-    messageRes = await fetch(`${API_BASE}/channels/${channelId}/messages`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bot ${botToken}`,
-        'Content-Type': 'application/json',
-      },
-      // allowed_mentions suppresses @everyone/@here/user/role pings that
-      // could otherwise be smuggled in through a user-controlled
-      // event/group/channel name and fired off by the trusted bot account.
-      body: JSON.stringify({
+    // allowed_mentions suppresses @everyone/@here/user/role pings that
+    // could otherwise be smuggled in through a user-controlled
+    // event/group/channel name and fired off by the trusted bot account.
+    const payload = JSON.stringify({
         // The text goes in the embed when there is one, and in `content`
         // otherwise. Never both: Discord renders each, so setting the two
         // would say everything twice.
@@ -358,7 +426,22 @@ export async function sendBotDm(
         // components) and this is a message-create, where there is nothing
         // to clear.
         ...(components && components.length > 0 ? { components } : {}),
-      }),
+        ...(attachment ? { attachments: [{ id: 0, filename: attachment.filename }] } : {}),
+      });
+    let body: string | FormData = payload;
+    const headers: Record<string, string> = { Authorization: `Bot ${botToken}` };
+    if (attachment) {
+      // No Content-Type header here: fetch sets it, boundary included.
+      body = new FormData();
+      body.append('payload_json', payload);
+      body.append('files[0]', new Blob([attachment.bytes], { type: attachment.contentType }), attachment.filename);
+    } else {
+      headers['Content-Type'] = 'application/json';
+    }
+    messageRes = await fetch(`${API_BASE}/channels/${channelId}/messages`, {
+      method: 'POST',
+      headers,
+      body,
       signal: AbortSignal.timeout(DISCORD_FETCH_TIMEOUT_MS),
     });
   } catch {

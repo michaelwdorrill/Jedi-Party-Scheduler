@@ -3,6 +3,7 @@ import { buildMonthGrid, hasEnded } from '../lib/datetime';
 import type { EventOccurrence } from '../types';
 import EventChip from './EventChip';
 import { cardClass } from './ui';
+import { dayRange } from '../lib/calendarDays';
 
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -31,8 +32,8 @@ export default function MonthCalendarGrid({
   const byDay = new Map<string, EventOccurrence[]>();
   for (const occ of occurrences) {
     if (occ.startAt == null) continue;
-    const start = DateTime.fromMillis(occ.startAt).setZone(zone).startOf('day');
-    const end = DateTime.fromMillis(occ.endAt ?? occ.startAt).setZone(zone).startOf('day');
+    // End exclusive, so a session ending at midnight stays on its own day.
+    const { first: start, last: end } = dayRange(occ.startAt, occ.endAt ?? null, zone);
     let cursor = start < gridStart ? gridStart : start;
     const last = end > gridEnd ? gridEnd : end;
     while (cursor <= last) {

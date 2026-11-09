@@ -9,9 +9,9 @@
 // possible way to state it.
 //
 // So the other end moves instead: start 6:00-8:30 with a 2.5-hour minimum,
-// drag the start to 6:30, and the end follows to 9:00. This is the same
-// convention `handleStartDateChange` already uses on the event form, where
-// moving a start date forward drags an earlier end date along with it.
+// drag the start to 6:30, and the end follows to 9:00. The event form's own
+// start/end pickers follow the same idea -- since 22 Oct 2026 every one of them
+// moves the end with the start (lib/timeRange.ts's endFollowingStart).
 //
 // Symmetric on purpose. Michael hit it dragging the start, but the end
 // handle had exactly the same dead zone, and a rule that applies to one

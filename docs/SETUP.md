@@ -670,6 +670,33 @@ environments). What's actually separate is the *data* and the *bot*.
    the OAuth redirect target and redirects back to whatever `FRONTEND_URL`
    says (ARCHITECTURE.md's auth section), so login lands back on your local
    dev server automatically.
+
+   **Before merging a frontend change, run the production bundle too**, with
+   the same env var still set:
+   ```powershell
+   npm run build
+   npx vite preview --port 5173 --strictPort
+   ```
+   `npm run dev` is a *dev* build: React `StrictMode` double-invokes every
+   effect, nothing is minified, and modules load differently — so it is not
+   what a user gets. v0.8's sandbox verification watched every API request
+   fire twice and that was StrictMode, absent from production entirely. The
+   frontend dependency upgrade in idea 17 records the same discipline, after
+   a Vite major that worked in dev and needed the built output checked too.
+
+   **`--port 5173` is required, not cosmetic.** `vite preview` defaults to
+   4173, and `FRONTEND_URL` is a single origin serving as both the CORS
+   origin and the OAuth redirect target — so on any other port, login and the
+   Google connect flow break in ways that look like application bugs.
+   **`--strictPort` matters as much:** without it, a 5173 already in use —
+   an earlier `npm run dev` still running — sends the preview quietly to
+   5174 while the browser goes on showing the old app on 5173.
+
+   This two-step local run is the *settled* route for frontend verification,
+   not a stopgap (IDEAS item 23, closed Sept 2026). A hosted sandbox frontend
+   was considered and rejected: it would require `FRONTEND_URL` to become a
+   list of origins, changing CORS and OAuth redirect handling to buy
+   convenience.
 8. **Seed some synthetic data** to exercise the cron sweep (an event ~1h
    out, one ~24h out, a past-deadline poll, an idle group) instead of
    starting from an empty database:
@@ -765,6 +792,106 @@ address for no real benefit. `wrangler tail --env sandbox` shows the stubbed
 content just as well as an inbox would, which is the verification step this
 feature actually wants from the sandbox.
 
+## 7. Google Calendar sync — optional, for pushing sessions to a Google calendar
+
+`specs/0017-google-calendar-sync.md` (idea 2) lets a user connect one Google
+account and have the sessions they're committed to written onto a calendar of
+their choosing. Like section 6, **everything ships dormant**: `GOOGLE_SYNC_MODE`
+is `"off"` in both `[vars]` and `[env.sandbox.vars]`, which makes the `/google`
+routes answer 503, hides the Settings card entirely, and makes the cron sweep
+return immediately. Do this section only when you want the feature live.
+
+**Unlike section 6, do the sandbox first.** This is a new outbound OAuth
+provider with a redirect URI that has to match exactly, and getting that wrong
+in production means a broken Settings page for everyone. The sandbox is where
+that gets found.
+
+1. Create a project at https://console.cloud.google.com (or reuse one).
+2. **Enable the Google Calendar API** for it: APIs & Services → Library →
+   "Google Calendar API" → Enable. Skipping this is the most common cause of
+   a connection that authorises fine and then 403s on the first write.
+3. Configure the OAuth consent screen:
+   - User type **External**, unless you have a Workspace org.
+   - Add the two scopes this app uses:
+     `https://www.googleapis.com/auth/calendar.events` and
+     `https://www.googleapis.com/auth/calendar.readonly`.
+   - Leave it in **Testing** and add the Google accounts you'll test with as
+     test users. Publishing is what triggers Google's verification review; see
+     the ceiling note below before you do it.
+4. Create credentials → **OAuth client ID** → *Web application*. Add the
+   authorised redirect URI, which must match the Worker's own origin exactly:
+   - production: `https://<your-worker>.workers.dev/google/callback`
+   - sandbox: `https://jedi-party-scheduler-worker-sandbox.<subdomain>.workers.dev/google/callback`
+
+   **Make two separate OAuth clients, one per environment.** A redirect URI is
+   registered per client, so production's client will simply refuse to redirect
+   back to the sandbox Worker — the same reason the two Discord applications
+   are separate.
+5. Generate an encryption key for the stored tokens. Any high-entropy string;
+   32+ bytes of randomness is plenty:
+   ```
+   openssl rand -base64 48
+   ```
+6. Set the two secrets (per environment — `--env sandbox` for the sandbox):
+   ```
+   npx wrangler secret put GOOGLE_CLIENT_SECRET
+   npx wrangler secret put GOOGLE_TOKEN_ENCRYPTION_KEY
+   ```
+7. Edit the matching `[vars]` block in `worker/wrangler.toml`: set
+   `GOOGLE_CLIENT_ID` to that environment's client id, and `GOOGLE_SYNC_MODE`
+   to `"live"`.
+8. Deploy and migrate (`npm run db:migrate:remote:sandbox` then
+   `npm run deploy:sandbox`, or the production pair).
+
+**Three things worth knowing before you turn this on in production, and the
+first one will break the feature if you get it wrong.**
+
+- **Production must be set to publishing status "In production", NOT
+  "Testing".** These are not two ways of saying the same thing, and an earlier
+  version of this section conflated them.
+
+  For an app whose publishing status is **Testing**, Google expires every
+  refresh token it issues after **7 days**. This app's entire mechanism is a
+  cron sweep presenting a stored refresh token with nobody logged in — so in
+  Testing mode, every user's sync silently stops working a week after they
+  connect. That is a correctness failure, not a cosmetic one.
+
+  Setting the app to **In production** removes that expiry. It does *not*
+  remove the "Google hasn't verified this app" warning, and it does not lift
+  the user cap for unverified sensitive scopes — see below. So the correct
+  production configuration is: **In production, unverified**, warning screen
+  and all.
+
+  **Your sandbox will stay in Testing**, which is fine and is what you want
+  while iterating — just expect to reconnect it roughly weekly. That is the
+  7-day clock, not a bug, and the app reports it honestly: the sweep marks the
+  connection as needing reconnection and Settings says so.
+
+- **The 100-user cap is accepted, and it is stricter than it sounds.** Both
+  scopes above are "sensitive" in Google's terms, so an unverified app is
+  capped at 100 users — and that cap is **cumulative over the project's
+  lifetime and cannot be reset**, not a limit on concurrent users. `IDEAS.md`
+  item 2 accepted it deliberately; this app's design profile is a handful of
+  friend groups, and `validate.ts` already pegs the supported population at
+  roughly a guild's active membership.
+
+  If it ever needs lifting, the good news is that these scopes are *sensitive*
+  rather than *restricted*: verification means a consent-screen review, scope
+  justifications and a demo of the app — **not** the annual third-party
+  security assessment that restricted scopes (Gmail, Drive) require. That is
+  process, not money. Parked as `IDEAS.md` item 64.
+
+- **Rotating `GOOGLE_TOKEN_ENCRYPTION_KEY` invalidates every existing
+  connection.** Stored tokens stop decrypting, the sweep marks those
+  connections as needing reconnection, and each user reconnects from Settings.
+  That's recoverable and visible rather than silent, but it is not a
+  zero-impact rotation — don't do it casually.
+
+*(Publishing-status behaviour, the cap's lifetime scope, and the
+sensitive-vs-restricted assessment split were all re-checked against Google's
+current documentation in Sept 2026 rather than carried from memory. Google
+revises these rules; re-check before relying on them.)*
+
 ## Running the tests
 
 From `worker/`:
@@ -803,12 +930,134 @@ different responses:
 | Log line | What it means | What to do |
 |---|---|---|
 | `Discord membership check rejected (401)` | The bot token is wrong or was regenerated | `npx wrangler secret put DISCORD_BOT_TOKEN` with the current token |
-| `Discord membership check rejected (403)` | The bot is no longer in that server | Re-invite the bot (step 1.6) |
+| `Discord membership check: the bot is not in guild … (404 Unknown Guild)` | The bot was never added to, or was removed from, an allow-listed server | Invite the bot to that server (step 1.6), or deactivate the server if it shouldn't be allow-listed |
+| `Discord membership check rejected (403) for guild …` | The bot is in the server but can't see it | Check the bot's role in that server |
+| `Discord membership check: unexplained 404` | Discord answered "not found" without saying what | Nothing at once — it is treated like an outage; look again if it repeats |
 | `Discord membership check unavailable (429/5xx)` | Rate limit or a Discord outage | Nothing — it clears on its own |
 | `Membership for user … is Nh stale … denying access` | Someone has actually been locked out by the above | Fix whichever of the first two rows applies |
 
-A 401 or 403 will not fix itself, and after 24 hours it locks everyone out.
-Those two are the ones worth alerting on.
+A 401, a 403 or an Unknown Guild will not fix itself, and after 24 hours it
+locks that server's members out. Those are the ones worth alerting on.
+
+**Until 10 November 2026 the Unknown Guild case logged nothing at all** (IDEAS
+102): the check read any 404 as "this person left", so a server the bot wasn't
+in quietly marked every member as gone and emptied their calendars of it. Only
+Discord's "Unknown Member" (10007) is read that way now.
+
+### Rate limiting the OAuth callbacks
+
+**Closed in v1.0** (IDEAS item 92), in the Worker rather than at the edge.
+
+**Three earlier versions of this section described things that did not work**,
+so the history is kept rather than overwritten:
+
+1. It said to add a Cloudflare rate limiting rule "on the zone serving the
+   Worker". Rate limiting rules are zone-scoped and this Worker is on
+   `*.workers.dev`, which is Cloudflare's zone, not ours.
+2. Corrected to "put the Worker on `api.uncleowen.space`, the zone is already
+   in the account". **There is no zone.** `uncleowen.space` is registered and
+   DNS-hosted at **Namecheap**, the site is on **GitHub Pages**
+   (`185.199.108-111.153`), and Cloudflare's Domains page is empty. That claim
+   was inferred from `FRONTEND_URL` and written in the same voice as facts that
+   had actually been checked.
+3. Then it described the
+   [Workers rate-limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
+   as deployed, at 20 per 60 seconds. It was deployed, and its tests passed --
+   against a fake binding that counted exactly. Against the real sandbox
+   (walkthrough R92, 9 November 2026) it **never refused once**: 25, 60 and 25
+   callbacks from one address, all sharing one key, every one answered
+   `success: true` and every one reaching Discord's token exchange. It has been
+   removed rather than left looking like protection.
+
+The lesson is one line and it is not about Cloudflare: **an unchecked claim has
+to be marked as unchecked.** A reader cannot tell an inference from a
+verification if both are written as statements, and neither can whoever wrote
+it a day later. And the third adds one: **a test double for a platform service
+tests your use of its contract, not the contract** -- a guard whose job is an
+operational effect is not shown to work until that effect has been reproduced
+once against the real deployment.
+
+**What the exposure is.** `/auth/callback`, `/guild-requests/callback` and
+`/google/callback` each spend one POST to a provider's token endpoint. Discord
+rate-limits that per *client*, so a sustained loop degrades login for everyone
+until the limit resets. Nothing is disclosed and no account is affected except
+by being unable to log in. F-59 made a *forged* state cost an HMAC instead of a
+token exchange; it did not bound a callback that verifies, since an attacker
+can call `/auth/login` for a real signed state and pay two requests per
+exchange rather than one.
+
+#### What is deployed
+
+An exact count in D1 (migration `0048_oauth_callback_counts.sql`), in
+`src/lib/rateLimit.ts` as `oauthCallbackAllowed(env, headers)`, called in all
+three callbacks **after** the signature check and **before** the token
+exchange. After, so a forged state cannot burn a real address's allowance;
+before, because the exchange is the spend.
+
+- **Key:** an HMAC-SHA256 of `CF-Connecting-IP` under `JWT_SIGNING_KEY`,
+  truncated to 16 bytes. The address itself is never stored, and nothing in the
+  table links a row to an account. Rotating `JWT_SIGNING_KEY` changes every
+  bucket, which at worst gives every address a fresh 20 for one minute.
+- **Window:** the current calendar minute. Each call deletes rows from earlier
+  minutes, then does one atomic
+  `INSERT ... ON CONFLICT(bucket) DO UPDATE ... RETURNING count`; above **20**
+  the callback returns **429** and spends nothing. The cron tick deletes
+  earlier minutes too (`pruneOAuthCallbackCounts`), so a row outlives its
+  minute by at most one tick, about fifteen minutes, even on a day nobody logs
+  in. The privacy policy states that figure; keep the two in step.
+- **Nothing to configure.** No `wrangler.toml` entry, no binding, no dashboard
+  setting; the migration is applied by both deploy workflows like any other,
+  and `db:verify` checks the table exists.
+
+**Properties worth knowing before trusting it:**
+
+- **Global and exact**, unlike the binding (which was per Cloudflare location
+  and approximate even when it worked).
+- **Fixed window.** A burst straddling a minute boundary can get up to 40 in
+  quick succession; the steady-state bound is 20 per address per minute.
+- **Per address.** Callers behind one NAT share 20 a minute -- generous, since
+  one login is one callback. IPv6 is keyed on the full address.
+- **Fails open**, with a `console.error`, if D1 cannot be written. Login itself
+  writes D1, so an outage that disables the limiter has already disabled what
+  it protects.
+- **Visible only in `wrangler tail`** as a 429 on a callback.
+- **Checking it by hand:** walkthrough step 0.0b in `docs/RELEASE-TESTING.md`
+  (25 callbacks from one machine; the first 20 print a login failure from
+  Discord, the last 5 the 429 page). Wait a minute before logging in afterwards.
+
+#### The custom domain, still worth doing, but not as release work
+
+Putting the Worker on `api.uncleowen.space` would let a WAF rule replace the
+D1 counter -- blocking before the Worker is invoked, at no invocation cost, and
+visible where it is configured -- and would make Worker and frontend same-site.
+
+It is **DNS work, not release work**, and it is bigger than it looks here:
+[subdomain-only zones are Enterprise](https://developers.cloudflare.com/dns/zone-setups/subdomain-setup/),
+so it means moving nameservers for the whole of `uncleowen.space` to
+Cloudflare, taking the GitHub Pages records and Namecheap's email forwarding
+(MX plus that SPF TXT) with them. Do it when nothing is riding on it.
+
+Notes for whoever does:
+
+- **The Worker needs no code change.** `redirectUri()` in both Discord routes
+  is `` `${new URL(c.req.url).origin}/...` `` and `googleRedirectUri` takes the
+  request URL, so the redirect URI follows the hostname the request arrived on.
+  Register both hostnames in the Discord application and `workers.dev` and the
+  custom domain serve correctly at the same time -- additive, and reversible by
+  pointing `VITE_API_BASE_URL` back.
+- **Adding `routes` infers `workers_dev = false` on the next deploy**, with no
+  warning, killing the existing `*.workers.dev` URL. Set `workers_dev = true`
+  explicitly alongside the route.
+- **A Custom Domain cannot be created on a hostname that already has a CNAME
+  record.**
+- `VITE_API_BASE_URL` is a **GitHub Actions repository variable** (Settings ->
+  Secrets and variables -> Actions -> Variables), read by
+  `.github/workflows/deploy-pages.yml`. Not a Cloudflare setting -- the
+  frontend is GitHub Pages.
+- The Free plan includes **one** rate limiting rule. It must catch
+  `/auth/callback` and `/guild-requests/callback` **without** catching
+  `/auth/refresh`; whether Free's rule permits a path expression at all is
+  unverified, so check the rule builder before planning around it.
 
 ### D1 plan limits
 

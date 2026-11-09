@@ -279,6 +279,16 @@ export async function computeBusyBlocksForUsers(
     for (const occ of occurrences) blocks.push({ startAt: occ.startAt, endAt: occ.endAt });
   }
 
+  // Busy time from a connected Google calendar needs no special case here any
+  // more (0.8.1 v2, specs/0017): it arrives as ordinary personal_events rows,
+  // imported by cron/googleSync.ts and indistinguishable from a hand-created
+  // personal time block by the time expandPersonalOccurrencesForUsers reads
+  // them above. The route-level privacy guarantee this used to state
+  // separately still holds for exactly the same reason it did before --
+  // routes/guilds.ts filters on free_busy_visible before calling this, so a
+  // user who hid their availability contributes no imported blocks either --
+  // it is just no longer a fact about *this* function specifically.
+
   for (const [userId, blocks] of out) out.set(userId, merge(blocks));
   return out;
 }
@@ -315,12 +325,19 @@ async function loadConfirmedYesVotesForEvents(
   // bound-parameter ceiling even at the maximum 25 requested users.
   for (const chunk of chunkIds(eventIds, userIds.length + 2)) {
     const { results } = await env.DB.prepare(
+      // Pass-22 acceptance review (RG-06). Same handover as
+      // loadConfirmedOptionsForEvents, and this is the reader where getting it
+      // wrong actually costs someone: a historical yes-vote on a confirmed
+      // option kept marking them BUSY at the old time after they had moved or
+      // declined the real session. The child event's own attendance is the
+      // answer once the child exists.
       `SELECT o.event_id, v.user_id, o.start_at, o.end_at
        FROM event_poll_options o
        JOIN event_poll_votes v ON v.option_id = o.id
        WHERE o.event_id IN (${placeholders(chunk.length)}) AND o.confirmed_at IS NOT NULL AND v.vote = 'yes'
          AND v.user_id IN (${placeholders(userIds.length)})
-         AND o.start_at <= ? AND o.end_at >= ?`,
+         AND o.start_at <= ? AND o.end_at >= ?
+         AND NOT EXISTS (SELECT 1 FROM events c WHERE c.created_from_option_id = o.id)`,
     )
       .bind(...chunk, ...userIds, toMs, fromMs)
       .all<ConfirmedVoteRow>();

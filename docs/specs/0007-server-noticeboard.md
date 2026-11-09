@@ -1,7 +1,7 @@
 # 0007 — The server noticeboard
 
-**Status:** Decisions locked, not yet designed
-**Covers:** `IDEAS.md` item 5 (second half) · **Phase:** TBD · **Ships in:** TBD
+**Status:** Built — v0.8.1
+**Covers:** `IDEAS.md` item 5 (second half) · **Phase:** 5 · **Ships in:** 0.8.1
 
 ## What this is
 
@@ -79,3 +79,84 @@ budget, not a widened `buildCalendarOccurrences`.
 **4. Interaction with personal time blocks.** Personal blocks are private by
 design and are not events on a server. They are out of scope here and must
 stay invisible on the noticeboard. Worth an explicit test.
+
+
+## How the blockers were resolved
+
+**1. The Privacy Policy** was rewritten in the same release, and the policy
+version bumped 3 → 4 so everyone re-accepts. The "Events" bullet split in two:
+full detail still goes only to the organiser and invitees, and a second bullet
+describes the limited view a server gets. Shipped alongside the Google pull
+half so both changes cost one re-acceptance rather than two.
+
+**2. `is_private` and the backfill** landed as migration 0038, taking the
+spec's own recommendation over the timestamp alternative. `ADD COLUMN ...
+DEFAULT 0` followed by `UPDATE events SET is_private = 1`: new rows visible,
+every existing row explicitly private. That single UPDATE is what makes this a
+new rule for new events rather than a retroactive change of terms, and there is
+a test asserting it is still present in the migration — its absence would be
+invisible in review and catastrophic in production.
+
+**3. Query shape** got `lib/noticeboard.ts` rather than a widened
+`buildCalendarOccurrences`, exactly as this spec predicted. The reasoning held
+up on contact: that function is bounded by what the *caller* is personally
+attached to, and 0006's whole cost argument rests on that bound; scoping by
+guild membership removes it. So this query has its own ~2-month range cap, its
+own 100-event limit ordered by start time, and its own shared occurrence
+ceiling for recurring expansion — the technique `lib/freeBusy.ts` uses, for the
+same reason. It refuses with a 422 rather than truncating, because a silently
+shortened noticeboard is indistinguishable from a quiet server.
+
+**4. Personal time blocks** never had to be filtered: they live in
+`personal_events`, which this query does not touch. There is a test asserting a
+personal block's title never appears in the response, checked against the raw
+serialised body rather than the parsed object.
+
+## The organiser's own answer
+
+Found in sandbox verification, not by a test: the board reported the organiser
+as "no answer" on their own session while the event page, `myRsvpStatus` and
+the reminder path all reported the same person as attending.
+
+`lib/attendance.ts` has a rule for this, `ORGANIZER_UNLESS_DECLINED`, and it
+predates this feature by several releases: someone running a session is there
+unless they have explicitly declined, because a poll's organiser has no vote to
+read and a single event's organiser may simply never have pressed anything.
+`routes/events.ts` applies it twice. The noticeboard applied it nowhere, which
+made it the one view in the app that disagreed with the others about the same
+row.
+
+That disagreement matters more here than it would elsewhere. The board exists
+to answer "who is going", so an organiser shown as undecided reads as a session
+nobody has committed to — the precise opposite of what the data says.
+
+The rule is the organiser's alone. An invitee who has not answered is genuinely
+undecided, and inflating them the same way would invent commitments; there is a
+test asserting the invitee beside the organiser stays null. And "unless
+declined" is load-bearing rather than decorative — an unconditional `'accepted'`
+would overwrite the one answer an organiser had actually gone to the trouble of
+giving, so there is a test for that too.
+
+## One thing the decisions did not cover
+
+Polls. An unresolved poll has no time yet and its candidate days are maybes, so
+listing either would advertise a session that may never happen — the same
+reasoning `lib/freeBusy.ts` applies to what counts as busy. Unresolved polls
+are excluded outright; a resolved one has a real `start_at` and appears like
+any other event.
+
+**The second half of that was wrong in the first build, and the test suite
+agreed with it.** A resolved poll's `status` is `'resolved'`, not `'active'`,
+so the query's `status = 'active'` threw every decided poll off the board —
+and in doing so made the poll clause after it unreachable, since nothing could
+survive to be tested by it. What hid this is that the only poll test asserted
+an *absence*: the unresolved poll was correctly missing from the board, but for
+the wrong reason, and a test that passes for the wrong reason cannot fail when
+the reason changes. The fix is `status IN ('active','resolved')`, the form
+`freeBusy.ts` was already using, plus the test asserting the resolved poll is
+*present* — which fails against the old query, checked rather than assumed.
+
+The general lesson is idea 31's again, from the other side: a filter tested
+only by what it excludes is half-tested. Every "must not appear" assertion here
+now has a paired "must appear" one, because absence is the answer a broken
+query gives too.

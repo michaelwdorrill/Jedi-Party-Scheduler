@@ -1,9 +1,15 @@
 # 0014 — Attendance per occurrence, and a reminder ladder that reads it
 
-**Status:** Draft — decisions locked (see below), one build question open
+**Status:** Built — all three stages (v0.6, v0.6.1, v0.6.2)
 **Covers:** `IDEAS.md` items 47 and 48. Absorbs item 46, which is one symptom
-of the same thing.
-**Phase:** 3.8x → **v0.6** (stage 1), 0.6.x (stages 2 and 3)
+of the same thing. Item 49 and item 51's option 1 close in stage 3.
+**Phase:** 3.8x → **v0.6** (stage 1), **v0.6.1** (stage 2), **v0.6.2** (stage 3)
+
+> Status corrected Sept 2026, having said "Draft — one build question open"
+> through all three of its own releases. The open question was a measurement,
+> not a decision — whether `expandOccurrencesForEvent` could carry the
+> attendance join cheaply per event per tick against `cron/budget.ts` — and
+> stage 2 shipping is what answered it.
 
 ## The change in one sentence
 
@@ -112,6 +118,26 @@ Four things the fan-out has to decide:
 4. **Single-winner stays as it is.** It resolves in place, which is already
    "one event, one time". Fanning out a single winner would mean creating an
    event to replace the one the person is already looking at.
+
+**Amended 22 October 2026 (IDEAS 97).** A fixed-slot day's event also
+inherits the poll's threshold as its `minimum_attendees`, with auto-cancel on,
+and the people who voted yes for that day start out accepted -- so a day that
+drops below the threshold after fanning out is called off by the ordinary
+minimum-attendees cascade (decision 4 below). Before fan-out it simply
+un-confirms. A vote on the poll's row for a fanned-out day is recorded as an
+RSVP on the day's event. Windowed days are unchanged.
+
+**Amended 9 November 2026 (IDEAS 99).** Cancelling the poll does not cancel
+the days that already became events: they stay on, and the organizer's
+dialog and the invitees' notice both say so. A confirmed day not yet fanned
+out goes with the poll.
+
+**Amended 9 November 2026 (Pass 24 review, P24-02; Michael's call).** Every
+answer on the day is carried onto its event, not only yes: yes, no and maybe
+become accepted, declined and tentative. Carrying only yes left an organizer
+who voted no with no attendance row, and an organizer without one counts as
+going -- so they were shown "yes" and the day survived a dropout that took it
+below the threshold.
 
 ## Recurring events: accept one at a time
 

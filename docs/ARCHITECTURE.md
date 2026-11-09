@@ -61,6 +61,25 @@ acts on Discord's behalf later, so retaining them would be keeping API Data
 past the point it's needed. The bot token is used for exactly one thing:
 sending DMs.
 
+**One exception, added in v0.8, and it is worth stating precisely because the
+paragraph above used to be a claim about the whole app rather than about
+Discord.** Google Calendar sync (`specs/0017`) stores a Google refresh token,
+because its entire mechanism is a cron sweep writing to someone's calendar with
+nobody logged in -- the one case "nothing acts on a third party's behalf later"
+does not cover. The rule is therefore scoped rather than weakened:
+
+> Discord tokens are still discarded at login. Google's refresh token is
+> retained, and it is the only long-lived third-party credential this app
+> stores.
+
+What pays for it: the token is encrypted at rest (`lib/crypto.ts`, AES-GCM
+under `GOOGLE_TOKEN_ENCRYPTION_KEY` -- deliberately a different secret from
+`JWT_SIGNING_KEY`, so one leaked value cannot both forge a session and decrypt
+stored credentials), no route ever returns it (`GET /me/export` lists the
+connection's existence and settings, never the credential), and it is revoked
+with Google on disconnect and on account deletion rather than merely deleted
+locally.
+
 ## Privacy model
 
 Two separate guarantees, worth keeping distinct:

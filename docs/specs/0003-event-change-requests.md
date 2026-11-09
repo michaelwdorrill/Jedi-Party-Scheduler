@@ -62,10 +62,32 @@ frozen on the request row (`vote_threshold_count`), not recomputed live —
 someone being invited or removed after the request was filed shouldn't retroactively
 change what it takes to pass.
 
-One consequence worth stating because it looks like an edge case but isn't:
+~~One consequence worth stating because it looks like an edge case but isn't:
 if the requester is the event's only invitee, the threshold is 1 and their own
 implicit vote already meets it — the request resolves the instant it's filed.
-That's correct, not a bug: there's no one else to ask.
+That's correct, not a bug: there's no one else to ask.~~
+
+**Reversed 22 October 2026, by Michael, after the first browser walkthrough.**
+There was someone else to ask: the organizer. With only the organizer and one
+invitee, the alt's request moved Michael's event before he saw it at all —
+"the invitees agree" and "this one person wants it" were the same statement, so
+the majority rule decided nothing except to remove the organizer's say.
+
+So **a sole invitee's `time_change` goes to the organizer, not to a vote**: it
+is filed with no `vote_threshold_count` and no `vote_deadline_at`, exactly as
+an `add_invitee` request always has, and waits for Accept or Decline. Neither
+auto-resolution path can apply it — the threshold check returns on a NULL, and
+the deadline sweep selects on `vote_deadline_at <= now`, which NULL never
+satisfies. The requester's implicit `yes` is still recorded. Like the
+threshold, the choice is frozen at filing: inviting someone later does not turn
+it into a vote, and nobody is asked to vote on it. Two or more invitees vote
+exactly as described above.
+
+"Invitees" here excludes the organizer even though idea 26 gave every
+organizer an invite row — which matters twice: counting them would make a sole
+invitee look like two, and it is also why the organizer used to be sent the
+voter's "vote here" DM for every time change (now excluded from that arm of the
+notice query).
 
 ### Deadline and fallback resolution
 
@@ -440,8 +462,10 @@ Worker-side, in the style of the existing `passN.test.ts` files:
   all (with vote tallies on `time_change` rows, no per-voter breakdown).
 - `target_user_id` outside the guild → 403/400, and already-invited → 400.
 - Both open-request bounds enforced, and a resolved request frees a slot.
-- Filing a `time_change` as the event's only invitee resolves it immediately
-  (threshold of 1, requester's own implicit vote meets it).
+- ~~Filing a `time_change` as the event's only invitee resolves it immediately
+  (threshold of 1, requester's own implicit vote meets it).~~ Reversed 22 Oct
+  2026 (see above): it stays pending with no threshold and no deadline, and the
+  deadline sweep never resolves it — only the organizer's accept or decline.
 - A second invitee's `yes` vote crossing the majority threshold applies the
   write and marks the request accepted, synchronously in the vote handler.
 - Accepting (via organizer override) a `time_change` after the event was

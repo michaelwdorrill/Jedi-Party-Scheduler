@@ -1,6 +1,6 @@
 # 0015 — Self-service "add this bot" link, gated by owner approval
 
-**Status:** Ready
+**Status:** Built — v0.7.1 (ships dormant: `EMAIL_MODE` is "stub" until Resend's sending domain is DNS-verified)
 **Covers:** `IDEAS.md` item 9
 **Phase:** 4 → **v0.7.1**
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/router';
 import { signJwt } from '../src/lib/jwt';
 import { createSession } from '../src/lib/sessions';
@@ -102,9 +102,20 @@ describe('filing a change request', () => {
     ).rejects.toThrow(/no single time/);
   });
 
-  it('resolves immediately when the requester is the event\'s only invitee (threshold of 1)', async () => {
+  // Reversed 22 Oct 2026. Spec 0003 had a sole invitee's request apply the
+  // instant it was filed -- "there's no one else to ask" -- which overlooked
+  // the organizer. Found on the first browser walkthrough, where the alt moved
+  // Michael's event before he saw a request at all. It now waits for the
+  // organizer, as an add_invitee request does.
+  //
+  // The organizer's own invite row is seeded because every real event has one
+  // since idea 26: inviteeCount must still exclude it, or a sole invitee would
+  // count as two and the old behaviour would come straight back through the
+  // threshold.
+  it("waits for the organizer when the requester is the event's only invitee", async () => {
     const { db, env } = setup();
     await seedBasicEvent(db);
+    await seedInvite(db, 'ev1', 'organizer');
     await seedUser(db, 'inv-a');
     await seedMembership(db, 'inv-a', 'guild-1');
     await seedInvite(db, 'ev1', 'inv-a');
@@ -118,13 +129,49 @@ describe('filing a change request', () => {
       proposedEndAt,
     });
 
-    const request = await loadChangeRequest(env, 'ev1', id);
-    expect(request!.status).toBe('accepted');
-    expect(request!.vote_threshold_count).toBe(1);
+    let request = await loadChangeRequest(env, 'ev1', id);
+    expect(request!.status, "a sole invitee's request applied without the organizer").toBe('pending');
+    expect(request!.vote_threshold_count).toBeNull();
+    expect(request!.vote_deadline_at).toBeNull();
+    expect((await loadEventRow(db, 'ev1')).start_at).not.toBe(proposedStartAt);
 
+    // The organizer's decision is what applies it.
+    await acceptChangeRequest(env, event, request!, 'organizer');
+    request = await loadChangeRequest(env, 'ev1', id);
+    expect(request!.status).toBe('accepted');
     const updated = await loadEventRow(db, 'ev1');
     expect(updated.start_at).toBe(proposedStartAt);
     expect(updated.end_at).toBe(proposedEndAt);
+  });
+
+  // The other way it could still apply without the organizer: the 72-hour
+  // fallback accepts when yes outnumbers no, and a sole requester's own yes
+  // always does. With no deadline the sweep never selects it.
+  it("is not resolved by the deadline sweep, however long the organizer takes", async () => {
+    const { db, env } = setup();
+    await seedBasicEvent(db);
+    await seedInvite(db, 'ev1', 'organizer');
+    await seedUser(db, 'inv-a');
+    await seedMembership(db, 'inv-a', 'guild-1');
+    await seedInvite(db, 'ev1', 'inv-a');
+    const event = await loadEventRow(db, 'ev1');
+    const proposedStartAt = Date.now() + 10 * HOUR_MS;
+    const id = await createChangeRequest(env, event, 'inv-a', {
+      kind: 'time_change',
+      proposedStartAt,
+      proposedEndAt: proposedStartAt + HOUR_MS,
+    });
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.now() + LIMITS.CHANGE_REQUEST_VOTE_WINDOW_MS * 10);
+      await resolvePastDeadlineChangeRequests(env);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect((await loadChangeRequest(env, 'ev1', id))!.status).toBe('pending');
+    expect((await loadEventRow(db, 'ev1')).start_at).not.toBe(proposedStartAt);
   });
 
   it('enforces the per-user open-request bound', async () => {
@@ -254,6 +301,43 @@ describe('voting and threshold resolution', () => {
     const id = await createChangeRequest(env, event, 'inv-a', { kind: 'add_invitee', targetUserId: 'target' });
     const request = await loadChangeRequest(env, 'ev1', id);
     await expect(voteOnChangeRequest(env, event, request!, 'inv-a', 'yes')).rejects.toThrow(/voted on/);
+  });
+
+  // The organizer decides a request; the spec has them accept or decline, not
+  // vote, and the threshold is computed without them. Since idea 26 every
+  // organizer has an invite row, which is all isCurrentInvitee asked -- so
+  // their vote was accepted and counted toward a threshold that excluded
+  // them. Found on the first browser walkthrough, where the page offered the
+  // organizer vote controls for the same reason.
+  it('refuses a vote from the organizer, so it cannot carry a request invitees did not', async () => {
+    const { db, env } = setup();
+    await seedBasicEvent(db);
+    // Idea 26: the organizer's own invite row, as every real event now has.
+    await seedInvite(db, 'ev1', 'organizer');
+    for (const id of ['inv-a', 'inv-b', 'inv-c']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+      await seedInvite(db, 'ev1', id);
+    }
+    const event = await loadEventRow(db, 'ev1');
+
+    const proposedStartAt = Date.now() + 20 * HOUR_MS;
+    const id = await createChangeRequest(env, event, 'inv-a', {
+      kind: 'time_change',
+      proposedStartAt,
+      proposedEndAt: proposedStartAt + HOUR_MS,
+    });
+    let request = await loadChangeRequest(env, 'ev1', id);
+    // Three invitees, organizer excluded -> majority of two. The requester's
+    // own yes is one.
+    expect(request!.vote_threshold_count, 'fixture: threshold should exclude the organizer').toBe(2);
+
+    await expect(voteOnChangeRequest(env, event, request!, 'organizer', 'yes')).rejects.toThrow(/organizer/i);
+
+    request = await loadChangeRequest(env, 'ev1', id);
+    expect(request!.status, "the organizer's vote carried a request only one of three invitees backed").toBe('pending');
+    expect(await countRows(db, 'event_change_request_votes', `request_id = '${id}' AND user_id = 'organizer'`)).toBe(0);
+    expect((await loadEventRow(db, 'ev1')).start_at).not.toBe(proposedStartAt);
   });
 });
 
@@ -475,6 +559,112 @@ describe('past-deadline vote resolution', () => {
   });
 });
 
+// Pass 24 review, P24-01 (category 2). An invitee asks to move one date of a
+// series; the organizer then cancels that date; the request is accepted
+// anyway -- by the organizer, by votes crossing the threshold, or by the
+// 72-hour deadline sweep with nobody deciding -- and writeOccurrenceMove's
+// ON CONFLICT ... SET is_cancelled = 0 put the date back on at the new time.
+// The organizer was not told. The organizer's OWN move still restores a date
+// they cancelled (occurrenceMove.test.ts); only the accept path refuses.
+describe('an accepted request never brings back a date the organizer cancelled (P24-01)', () => {
+  const DATE = '2026-09-01';
+
+  async function seedCancelledDateWithRequest(db: ShimDatabase, env: Env, invitees: string[]) {
+    await seedBasicEvent(db, { isRecurring: 1, startAt: null, endAt: null });
+    for (const invId of invitees) {
+      await seedUser(db, invId);
+      await seedMembership(db, invId, 'guild-1');
+      await seedInvite(db, 'ev1', invId);
+    }
+    const event = await loadEventRow(db, 'ev1');
+    const id = await createChangeRequest(env, event, invitees[0], {
+      kind: 'time_change',
+      proposedStartAt: Date.now() + 30 * HOUR_MS,
+      proposedEndAt: Date.now() + 31 * HOUR_MS,
+      occurrenceDate: DATE,
+    });
+    // What POST /events/:id/occurrences/:date/cancel writes.
+    await db
+      .prepare(
+        `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled) VALUES ('ov-c', 'ev1', ?, 1)
+         ON CONFLICT(event_id, occurrence_date) DO UPDATE SET is_cancelled = 1`,
+      )
+      .bind(DATE)
+      .run();
+    return { event, id };
+  }
+
+  async function overrideFor(db: ShimDatabase) {
+    return db
+      .prepare(`SELECT is_cancelled, override_start_at FROM event_occurrence_overrides WHERE event_id = 'ev1' AND occurrence_date = ?`)
+      .bind(DATE)
+      .first<{ is_cancelled: number; override_start_at: number | null }>();
+  }
+
+  it("refuses the organizer's accept, saying the date is no longer on, and leaves the request open", async () => {
+    const { db, env } = setup();
+    const { event, id } = await seedCancelledDateWithRequest(db, env, ['inv-a', 'inv-b', 'inv-c']);
+    const request = await loadChangeRequest(env, 'ev1', id);
+
+    await expect(acceptChangeRequest(env, event, request!, 'organizer')).rejects.toThrow(/cancelled/);
+
+    expect(await overrideFor(db)).toEqual({ is_cancelled: 1, override_start_at: null });
+    expect((await loadChangeRequest(env, 'ev1', id))!.status).toBe('pending');
+  });
+
+  it('is declined by the deadline sweep, not accepted, when only the requester voted', async () => {
+    const { db, env } = setup();
+    const { id } = await seedCancelledDateWithRequest(db, env, ['inv-a', 'inv-b', 'inv-c']);
+    await db.prepare(`UPDATE event_change_requests SET vote_deadline_at = ? WHERE id = ?`).bind(Date.now() - 1000, id).run();
+
+    await resolvePastDeadlineChangeRequests(env);
+
+    expect((await loadChangeRequest(env, 'ev1', id))!.status).toBe('declined');
+    expect(await overrideFor(db)).toEqual({ is_cancelled: 1, override_start_at: null });
+  });
+
+  it('is not applied when the votes cross the threshold', async () => {
+    const { db, env } = setup();
+    const { event, id } = await seedCancelledDateWithRequest(db, env, ['inv-a', 'inv-b', 'inv-c']);
+    const request = await loadChangeRequest(env, 'ev1', id);
+    expect(request!.vote_threshold_count).toBe(2);
+
+    await voteOnChangeRequest(env, event, request!, 'inv-b', 'yes');
+
+    expect(await overrideFor(db)).toEqual({ is_cancelled: 1, override_start_at: null });
+    expect((await loadChangeRequest(env, 'ev1', id))!.status).toBe('pending');
+  });
+
+  // Walkthrough 3.22 (10 Nov): after the cancel, the request still offered a
+  // plain Accept with no sign its date was gone; you found out by pressing it.
+  it('marks the request as being for a cancelled date, so the page can say so', async () => {
+    const { db, env } = setup();
+    const { event, id } = await seedCancelledDateWithRequest(db, env, ['inv-a', 'inv-b', 'inv-c']);
+
+    const [asOrganizer] = await listChangeRequests(env, event, 'organizer', true);
+    expect(asOrganizer.id).toBe(id);
+    expect(asOrganizer.dateCancelled).toBe(true);
+    const [asVoter] = await listChangeRequests(env, event, 'inv-b', false);
+    expect(asVoter.dateCancelled).toBe(true);
+
+    await db.prepare(`UPDATE event_occurrence_overrides SET is_cancelled = 0 WHERE event_id = 'ev1'`).run();
+    expect((await listChangeRequests(env, event, 'organizer', true))[0].dateCancelled).toBe(false);
+  });
+
+  // INVARIANT GUARD: the accept path still moves a date that is on.
+  it('still moves a date that has an override but is not cancelled', async () => {
+    const { db, env } = setup();
+    const { event, id } = await seedCancelledDateWithRequest(db, env, ['inv-a', 'inv-b', 'inv-c']);
+    await db.prepare(`UPDATE event_occurrence_overrides SET is_cancelled = 0 WHERE event_id = 'ev1'`).run();
+    const request = await loadChangeRequest(env, 'ev1', id);
+
+    await acceptChangeRequest(env, event, request!, 'organizer');
+
+    expect((await overrideFor(db))!.is_cancelled).toBe(0);
+    expect((await overrideFor(db))!.override_start_at).toBe(request!.proposed_start_at);
+  });
+});
+
 describe('GET asymmetry and notification dedupe', () => {
   it('an invitee sees only their own requests; the organizer sees all, with aggregate tallies only', async () => {
     const { db, env } = setup();
@@ -564,6 +754,76 @@ describe('GET asymmetry and notification dedupe', () => {
       "notification_type = 'change_request_opened' AND user_id = 'organizer' AND delivered_at IS NOT NULL",
     );
     expect(delivered).toBe(2);
+  });
+});
+
+describe("the organizer's notice of a request", () => {
+  // Since idea 26 the organizer has an invite row, so they matched the voter
+  // arm of the "opened" query as well as the organizer arm. The outbox's
+  // per-key claim kept it to one DM, but WHICH one depended on row order --
+  // and the voter wording invites them to vote, which they cannot do. With a
+  // sole invitee's request now waiting on the organizer, that DM is how they
+  // learn there is a decision to make, so it has to be the right one.
+  it('is the "asked to move" message, never the voter\'s "vote here"', async () => {
+    const { db, env } = setup();
+    await seedBasicEvent(db);
+    await seedInvite(db, 'ev1', 'organizer');
+    await seedUser(db, 'inv-a');
+    await seedMembership(db, 'inv-a', 'guild-1');
+    await seedInvite(db, 'ev1', 'inv-a');
+    await seedUser(db, 'inv-b');
+    await seedMembership(db, 'inv-b', 'guild-1');
+    await seedInvite(db, 'ev1', 'inv-b');
+    const event = await loadEventRow(db, 'ev1');
+    // Two invitees, so this one DOES go to a vote: inv-b must still be asked.
+    const id = await createChangeRequest(env, event, 'inv-a', {
+      kind: 'time_change',
+      proposedStartAt: Date.now() + 20 * HOUR_MS,
+      proposedEndAt: Date.now() + 21 * HOUR_MS,
+    });
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    // Several ticks: on the Free-plan budget one tick spends itself on the
+    // seeded invites' own DMs first and defers the rest -- the cron working as
+    // designed. Every delivery is claimed at most once, so extra ticks are safe.
+    for (let tick = 0; tick < 4; tick++) await runReminderSweep(env);
+
+    const sent = fetchStub.bodies.filter((b): b is string => !!b);
+    const toOrganizer = sent.filter((b) => b.includes('asked to move'));
+    const voteAsks = sent.filter((b) => b.includes('vote here'));
+    expect(toOrganizer.length, 'the organizer was not told about the request').toBe(1);
+    expect(voteAsks.length, 'exactly one voter (inv-b) should be asked to vote -- not the organizer too').toBe(1);
+    expect(
+      await countRows(db, 'change_request_log', `request_id = '${id}' AND notification_type = 'change_request_opened'`),
+    ).toBe(2);
+  });
+
+  it('asks nobody to vote on a sole invitee\'s request, even someone invited after it, and tells the organizer', async () => {
+    const { db, env } = setup();
+    await seedBasicEvent(db);
+    await seedInvite(db, 'ev1', 'organizer');
+    await seedUser(db, 'inv-a');
+    await seedMembership(db, 'inv-a', 'guild-1');
+    await seedInvite(db, 'ev1', 'inv-a');
+    const event = await loadEventRow(db, 'ev1');
+    await createChangeRequest(env, event, 'inv-a', {
+      kind: 'time_change',
+      proposedStartAt: Date.now() + 20 * HOUR_MS,
+      proposedEndAt: Date.now() + 21 * HOUR_MS,
+    });
+    // Invited AFTER filing. The request stays the organizer's to decide --
+    // frozen at filing, like the threshold always was -- so inv-b has nothing
+    // to vote on and must not be asked to.
+    await seedUser(db, 'inv-b');
+    await seedMembership(db, 'inv-b', 'guild-1');
+    await seedInvite(db, 'ev1', 'inv-b');
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    for (let tick = 0; tick < 4; tick++) await runReminderSweep(env);
+
+    const sent = fetchStub.bodies.filter((b): b is string => !!b);
+    expect(sent.filter((b) => b.includes('asked to move')).length).toBe(1);
+    expect(sent.filter((b) => b.includes('vote here')).length, 'someone was asked to vote on a request with no vote').toBe(0);
   });
 });
 

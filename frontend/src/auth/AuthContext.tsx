@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState, ReactNode 
 import { api } from '../api/client';
 import { describeAuthError } from '../lib/async';
 import type { User } from '../types';
-import { clearToken, getToken, setToken } from './tokenStorage';
+import { adoptSession, clearToken, getToken } from './tokenStorage';
 import { revokeOrQueue, startRevocationRetries, type LogoutOutcome } from './pendingRevocation';
 
 interface AuthContextValue {
@@ -75,7 +75,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(
     async (token: string) => {
-      setToken(token);
+      // A login is a new identity, so it moves the auth epoch -- that is what
+      // lets an in-flight refresh for the previous account recognise itself as
+      // obsolete instead of overwriting this one (P12-05 / P13-06).
+      adoptSession(token);
       setLoading(true);
       await refreshUser();
     },

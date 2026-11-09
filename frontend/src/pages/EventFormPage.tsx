@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { DateTime } from 'luxon';
+import { scheduleFieldsFromRecurrence } from '../lib/recurrenceFields';
 import { api, ApiError } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { useGuild } from '../auth/GuildContext';
@@ -9,8 +10,9 @@ import RecurrenceForm, { RecurrenceFormValue } from '../components/RecurrenceFor
 import TimezoneSelect from '../components/TimezoneSelect';
 import SchedulingAssistant, { type AssistantSlot } from '../components/SchedulingAssistant';
 import { isValidRange, startsInPast } from '../lib/datetime';
+import { endFollowingStart } from '../lib/timeRange';
 import type { EventDetail, Friend, Group, PollStrategy, VoiceChannel } from '../types';
-import { describeError } from '../lib/async';
+import { describeError, editTargetReady, latestOnly } from '../lib/async';
 import { ErrorState, InlineError, buttonClass, cardClass, controlClass } from '../components/ui';
 
 // Module scope on purpose: the availability memo below needs this during the
@@ -31,6 +33,21 @@ interface PollSlotDraft {
   endDate: string;
   endTime: string;
 }
+
+// What the form guesses when you haven't said otherwise.
+//
+// 7pm-11pm rather than the 1pm-5pm this used to open on, because this app
+// schedules evening game sessions among people with day jobs -- an afternoon
+// default made almost every event a two-field correction. The duration is
+// unchanged at four hours, which was never the part that was wrong.
+//
+// Named rather than inlined because the same pair appears in three places
+// (the single-event fields, the first poll slot, and every slot added after
+// it) and three literals drift. Deliberately not derived from the user's
+// timezone or their past events: a default that moves is a default nobody
+// can predict, and the fields are right there to change.
+const DEFAULT_START_TIME = '19:00';
+const DEFAULT_END_TIME = '23:00';
 
 export default function EventFormPage() {
   const { user } = useAuth();
@@ -62,8 +79,8 @@ export default function EventFormPage() {
   // Single-event fields
   const [date, setDate] = useState(prefillDate);
   const [endDate, setEndDate] = useState(prefillDate);
-  const [startTime, setStartTime] = useState('13:00');
-  const [endTime, setEndTime] = useState('17:00');
+  const [startTime, setStartTime] = useState(DEFAULT_START_TIME);
+  const [endTime, setEndTime] = useState(DEFAULT_END_TIME);
   const [isRecurring, setIsRecurring] = useState(false);
   // specs/0014 stage 3, decision 4 / IDEAS item 54. '' means "no minimum
   // set", distinct from 0 (which the server rejects anyway). Available on
@@ -101,7 +118,7 @@ export default function EventFormPage() {
 
   // Poll fields ('options' mode)
   const [pollSlots, setPollSlots] = useState<PollSlotDraft[]>([
-    { key: crypto.randomUUID(), date: prefillDate, startTime: '13:00', endDate: prefillDate, endTime: '17:00' },
+    { key: crypto.randomUUID(), date: prefillDate, startTime: DEFAULT_START_TIME, endDate: prefillDate, endTime: DEFAULT_END_TIME },
   ]);
   const [multiWinner, setMultiWinner] = useState(false);
 
@@ -133,12 +150,21 @@ export default function EventFormPage() {
   const effectiveGuildId = isEdit ? loadedGuildId : formGuildId;
   const [voiceChannels, setVoiceChannels] = useState<VoiceChannel[]>([]);
   const [voiceChannelId, setVoiceChannelId] = useState('');
+  // specs/0007. Default false = visible on the server's noticeboard, matching
+  // the server default, so the form and the schema agree about what "left
+  // alone" means.
+  const [isPrivate, setIsPrivate] = useState(false);
 
   // The revision this form was loaded at (F-08-B). Sent back unchanged on
   // PATCH so the server can tell this edit apart from one built on top of a
   // since-superseded read, rather than the two of them racing to overwrite
   // each other's changes in whatever order their requests happen to land.
   const [loadedRevision, setLoadedRevision] = useState<number | null>(null);
+
+  // Which event the fields above actually came from (P20-01). Without it the
+  // form knows WHAT it loaded but not WHAT FOR, and Save submits to whatever
+  // the route currently names.
+  const [loadedEventId, setLoadedEventId] = useState<string | null>(null);
 
   // Every slot being proposed, so the availability strip can show all of them
   // rather than only the first (idea 39). One entry for a fixed-time event,
@@ -196,9 +222,46 @@ export default function EventFormPage() {
       .catch(() => setVoiceChannels([])); // e.g. bot not yet invited to this server
   }, [effectiveGuildId]);
 
+  // Pass-19 review (P19-03). This loader writes a dozen pieces of component
+  // state AND `loadedRevision`, while Save below PATCHes whatever event the
+  // ROUTE currently names. With no obsolete-response guard, a late response
+  // for the event you were editing a moment ago repopulated all of it, and the
+  // next Save wrote those values over the event you had moved on to -- with
+  // the wrong revision attached. The server's optimistic-concurrency check
+  // could not catch it, because two different events are legitimately both at
+  // revision 0; the association between loaded data and target identity had
+  // already been lost on the client.
+  //
+  // `useAsync` in lib/async.ts has carried exactly this guard since it was
+  // written, and EventDetailPage uses it. This effect predates that and hand
+  // rolls its own fetch, so it never got one. Same generation counter, applied
+  // where the state actually lands.
+  const loadGate = useRef(latestOnly());
   useEffect(() => {
-    if (!isEdit || !eventId) return;
+    // Pass-21 review (P21-02). The gate is advanced BEFORE the early return,
+    // and the order is the whole fix. It used to return first, so leaving an
+    // edit for the create route never invalidated the in-flight load: the held
+    // response for the old event was still "current", landed on the create
+    // form, and replaced the draft the person had just typed -- and Create
+    // then POSTed that old event's fields as a brand new event.
+    //
+    // `editTargetReady` could not catch it either, because a creation form
+    // legitimately has nothing loaded and is always ready to submit. The
+    // identity guard answers "may these fields be written to this record"; this
+    // answers "are these fields still wanted at all", and leaving an edit is
+    // the moment they stop being.
+    const isCurrent = loadGate.current.begin();
+    if (!isEdit || !eventId) {
+      setLoadedEventId(null);
+      return;
+    }
+    // Synchronously, before the fetch: whatever is on screen belongs to the
+    // event we are navigating AWAY from, so it is not editable state for this
+    // one until the response lands and says otherwise.
+    setLoadedEventId(null);
     api.get<EventDetail>(`/events/${eventId}`).then((ev) => {
+      if (!isCurrent()) return;
+      setLoadedEventId(eventId);
       setTitle(ev.title);
       setDescription(ev.description ?? '');
       setGame(ev.game ?? '');
@@ -207,6 +270,7 @@ export default function EventFormPage() {
       setLoadedGuildId(ev.guildId);
       setLoadedRevision(ev.revision);
       setVoiceChannelId(ev.voiceChannelId ?? '');
+      setIsPrivate(!!ev.isPrivate);
       // The organizer's own row (idea 26) is not an invitee choice, so it is
       // not one of the picker's selections either. It is also not in the
       // picker at all -- `listFriends` excludes the caller -- so leaving it in
@@ -253,6 +317,31 @@ export default function EventFormPage() {
           endDate: ev.recurrence.endDate ?? '',
           endCount: ev.recurrence.endCount ?? 10,
         });
+
+        // Pass-11 review (R24). The date and time fields have to come from the
+        // recurrence *rule*, not from ev.startAt/ev.endAt, and this block runs
+        // after the one above precisely to override what it set.
+        //
+        // GET /events/:id resolves startAt/endAt to the NEXT OCCURRENCE, and
+        // per-occurrence time overrides apply to it. Every save then resends
+        // whatever is in these fields as the entire rule -- startDate,
+        // startTime and a duration derived from the end fields. So editing the
+        // title of a weekly series that began in August re-anchored the whole
+        // series to today: the earlier occurrences dropped out of expansion
+        // entirely, and `after_count` started again from the upcoming one,
+        // silently adding sessions at the far end. A one-occurrence time
+        // override could likewise become the time and duration of every
+        // occurrence. And a series whose occurrences are all in the past has
+        // no next occurrence at all, so the fields kept the form's own
+        // unrelated defaults -- today's date at 17:00.
+        //
+        // The rule is the series' own definition and is what a save is
+        // rewriting, so it is what the editor has to show.
+        const fields = scheduleFieldsFromRecurrence(ev.recurrence, ev.timezone);
+        setDate(fields.date);
+        setStartTime(fields.startTime);
+        setEndDate(fields.endDate);
+        setEndTime(fields.endTime);
       }
       if (ev.eventType === 'poll') {
         setPollStrategy(ev.pollStrategy ?? 'threshold');
@@ -279,24 +368,34 @@ export default function EventFormPage() {
           );
         }
       }
-    }, (e: unknown) => setLoadError(describeError(e)));
+    }, (e: unknown) => {
+      if (!isCurrent()) return;
+      setLoadError(describeError(e));
+    });
   }, [isEdit, eventId]);
+
+  // Save is not merely discouraged while a different event is loading; the
+  // fields on screen are another event's, so submitting them is the bug.
+  const targetReady = editTargetReady({ isEdit, loadedId: loadedEventId, targetId: eventId });
 
   const addPollSlot = () =>
     setPollSlots((prev) => [
       ...prev,
-      { key: crypto.randomUUID(), date: prefillDate, startTime: '13:00', endDate: prefillDate, endTime: '17:00' },
+      { key: crypto.randomUUID(), date: prefillDate, startTime: DEFAULT_START_TIME, endDate: prefillDate, endTime: DEFAULT_END_TIME },
     ]);
 
   const removePollSlot = (key: string) =>
     setPollSlots((prev) => prev.filter((s) => s.key !== key));
 
-  // Same nudge as handleStartDateChange below, applied per-slot: moving a
-  // candidate day's start date forward drags its own end date along if the
-  // end would otherwise fall before it.
-  const handleSlotStartDateChange = (key: string, next: string) =>
+  // Each poll option row follows the same rule as the event's own times
+  // (handleStartChange below): moving its start takes its end with it.
+  const handleSlotStartChange = (key: string, next: { date?: string; startTime?: string }) =>
     setPollSlots((prev) =>
-      prev.map((s) => (s.key === key ? { ...s, date: next, endDate: s.endDate < next ? next : s.endDate } : s)),
+      prev.map((s) => {
+        if (s.key !== key) return s;
+        const nextStart = { date: next.date ?? s.date, startTime: next.startTime ?? s.startTime };
+        return { ...s, ...nextStart, ...endFollowingStart(s, nextStart, timezone) };
+      }),
     );
 
   const toggleUser = (id: string) =>
@@ -368,6 +467,20 @@ export default function EventFormPage() {
     ]),
   );
 
+  // Found in 0.8.1 sandbox verification: nothing stopped "Confirm once N
+  // people say yes" from being set above the number of people actually
+  // invited, which asks for a threshold the poll can never reach. The +1 is
+  // the organizer -- resolveInviteeUserIds always folds them in server-side
+  // (they get a real invite row even without being added here explicitly),
+  // so the true ceiling is one more than inviteeIds ever shows.
+  //
+  // This is a UI hint, not the enforcement. It clamps the field so the common
+  // mistake can't be typed in the first place, but eventWrites.ts's own
+  // assertThresholdReachable is what actually rejects a request that still
+  // gets here too high -- through a race with a concurrent invite removal, or
+  // a client that skips this page entirely.
+  const maxPollThreshold = inviteeIds.length + 1;
+
   // Invitees no longer need clearing on a server change -- they're upstream
   // of it now, and the select only ever offers servers the current roster
   // actually has in common. Voice channels are still guild-scoped, so a
@@ -377,16 +490,22 @@ export default function EventFormPage() {
     setVoiceChannelId('');
   };
 
-  // Moving the start forward drags an earlier end along with it, so the form
-  // can't sit in a state that would submit a negative-length event.
-  const handleStartDateChange = (next: string) => {
-    setDate(next);
-    if (endDate < next) setEndDate(next);
+  // Moving the start takes the end with it, keeping the length
+  // (lib/timeRange.ts's endFollowingStart, shared by every start/end picker).
+  // It subsumes the old date-level nudge, which it keeps as its fallback for a
+  // range with no length yet, so the form still can't be dragged into a
+  // negative-length event.
+  const handleStartChange = (nextDate: string, nextStartTime: string) => {
+    const end = endFollowingStart({ date, startTime, endDate, endTime }, { date: nextDate, startTime: nextStartTime }, timezone);
+    setDate(nextDate);
+    setStartTime(nextStartTime);
+    setEndDate(end.endDate);
+    setEndTime(end.endTime);
   };
 
-  // Catches what handleStartDateChange doesn't: two same-day fields where the
-  // end *time* (not date) is before the start time, which the date-level
-  // nudge above has no way to see. Server-side, worker/src/lib/validate.ts
+  // Catches what handleStartChange can't prevent: an end typed before the
+  // start directly, or a range with no length yet, which endFollowingStart
+  // deliberately leaves alone rather than rewriting. Server-side, worker/src/lib/validate.ts
   // rejects this unconditionally -- this is the client-side warning that was
   // missing (idea 12), not a replacement for that check.
   const singleRangeValid =
@@ -450,6 +569,7 @@ export default function EventFormPage() {
         voiceChannelName: voiceChannelId
           ? (voiceChannels.find((vc) => vc.id === voiceChannelId)?.name ?? null)
           : null,
+        isPrivate,
       };
 
       if (eventType === 'single') {
@@ -514,6 +634,12 @@ export default function EventFormPage() {
       }
 
       if (isEdit) {
+        // Belt and braces with the disabled button below: the callback is
+        // reachable programmatically, and this is the guard that actually
+        // decides whether these fields may be written to this event.
+        if (!editTargetReady({ isEdit, loadedId: loadedEventId, targetId: eventId })) {
+          throw new Error('Still loading this event — give it a moment before saving.');
+        }
         if (loadedRevision != null) body.revision = loadedRevision;
         try {
           await api.patch(`/events/${eventId}`, body);
@@ -604,7 +730,7 @@ export default function EventFormPage() {
               <input
                 type="date"
                 value={date}
-                onChange={(e) => handleStartDateChange(e.target.value)}
+                onChange={(e) => handleStartChange(e.target.value, startTime)}
                 className={controlClass('lg', 'w-full')}
               />
             </div>
@@ -613,7 +739,7 @@ export default function EventFormPage() {
               <input
                 type="time"
                 value={startTime}
-                onChange={(e) => setStartTime(e.target.value)}
+                onChange={(e) => handleStartChange(date, e.target.value)}
                 className={controlClass('lg', 'w-full')}
               />
             </div>
@@ -738,17 +864,13 @@ export default function EventFormPage() {
                     <input
                       type="date"
                       value={slot.date}
-                      onChange={(e) => handleSlotStartDateChange(slot.key, e.target.value)}
+                      onChange={(e) => handleSlotStartChange(slot.key, { date: e.target.value })}
                       className={controlClass('sm')}
                     />
                     <input
                       type="time"
                       value={slot.startTime}
-                      onChange={(e) =>
-                        setPollSlots((prev) =>
-                          prev.map((s) => (s.key === slot.key ? { ...s, startTime: e.target.value } : s)),
-                        )
-                      }
+                      onChange={(e) => handleSlotStartChange(slot.key, { startTime: e.target.value })}
                       className={controlClass('sm')}
                     />
                     <span className="text-faint">to</span>
@@ -846,12 +968,15 @@ export default function EventFormPage() {
               <input
                 type="number"
                 min={1}
+                max={maxPollThreshold}
                 disabled={pollStrategy !== 'threshold'}
                 value={pollThreshold}
-                onChange={(e) => setPollThreshold(Math.max(1, Number(e.target.value)))}
+                onChange={(e) => setPollThreshold(Math.min(maxPollThreshold, Math.max(1, Number(e.target.value))))}
                 className={controlClass('xs', 'w-14')}
               />
-              {windowed ? 'people can make the same block' : 'people say yes'}
+              {windowed
+                ? pollThreshold === 1 ? 'person can make the same block' : 'people can make the same block'
+                : pollThreshold === 1 ? 'person says yes' : 'people say yes'}
             </label>
             <label className="flex items-center gap-1 text-sm">
               <input
@@ -865,6 +990,12 @@ export default function EventFormPage() {
               {windowed ? 'Pick the best overlap at the deadline' : 'Pick the most popular slot at the deadline'}
             </label>
           </div>
+
+          {pollStrategy === 'threshold' && (
+            <p className="text-xs text-faint">
+              Capped at {maxPollThreshold} — everyone invited, organizer included.
+            </p>
+          )}
 
           {pollStrategy === 'threshold' && (
             <label className="flex items-start gap-2 text-sm text-ink-dim">
@@ -939,6 +1070,30 @@ export default function EventFormPage() {
 
       {effectiveGuildId && (
         <div className={cardClass()}>
+          <h2 className="mb-1 font-semibold">Server noticeboard</h2>
+          <p className="mb-3 text-xs text-faint">
+            Everyone on this server can see what's on, so people know when there's a game to join.
+            Titles, times and who's going &mdash; never the description.
+          </p>
+          <label className="flex items-start gap-2 text-sm text-ink-dim">
+            <input
+              type="checkbox"
+              checked={isPrivate}
+              onChange={(e) => setIsPrivate(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              Keep this one off the noticeboard
+              <span className="block text-xs text-faint">
+                Only the people invited will be able to see it, the way every event worked before.
+              </span>
+            </span>
+          </label>
+        </div>
+      )}
+
+      {effectiveGuildId && (
+        <div className={cardClass()}>
           <h2 className="mb-1 font-semibold">Voice channel (optional)</h2>
           <p className="mb-3 text-xs text-faint">
             Shortly before start, confirmed attendees get a DM with a link to join this channel. Discord
@@ -991,11 +1146,11 @@ export default function EventFormPage() {
           Cancel
         </button>
         <button
-          disabled={saving || !rangeValid}
+          disabled={saving || !rangeValid || !targetReady}
           onClick={handleSubmit}
           className={buttonClass('primary', 'lg')}
         >
-          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create event'}
+          {saving ? 'Saving…' : !targetReady ? 'Loading…' : isEdit ? 'Save changes' : 'Create event'}
         </button>
       </div>
     </div>

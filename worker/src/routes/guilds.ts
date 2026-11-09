@@ -5,6 +5,8 @@ import { isGuildMember, listUserGuilds, MEMBERSHIP_GRACE_MS } from '../lib/db';
 import { createEventWithInvites, type EventWriteInput } from '../lib/eventWrites';
 import { buildCalendarOccurrences } from '../lib/calendar';
 import { computeBusyBlocksForUsers } from '../lib/freeBusy';
+import { buildNoticeboard } from '../lib/noticeboard';
+import { loadEventIfVisible } from './events';
 import { fetchGuildVoiceChannels } from '../lib/discord';
 import { assertStringArray, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
 
@@ -88,7 +90,20 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
   }
 
   const visibleIds = members.filter((m) => !!m.free_busy_visible || m.id === userId).map((m) => m.id);
-  const excludeEventId = c.req.query('exclude_event_id') || undefined;
+  // Pass-11 review (F-23): resolved through the visibility check rather than
+  // trusted as given. The parameter exists so the edit form stops showing an
+  // event's own invitees as busy during it (IDEAS item 63), but an arbitrary
+  // id was accepted -- and diffing the busy blocks with and without one tells
+  // you whether a given person holds a non-declined invite to that event.
+  // Low, since it needs the event's UUID (they do appear in DM links), but the
+  // fix is one lookup the caller is entitled to make anyway: an id they cannot
+  // see is ignored rather than refused, since the parameter is an optimisation
+  // and failing the whole free/busy read over it would be worse.
+  const requestedExcludeId = c.req.query('exclude_event_id') || undefined;
+  const excludeEventId =
+    requestedExcludeId && (await loadEventIfVisible(c.env, requestedExcludeId, userId))
+      ? requestedExcludeId
+      : undefined;
   const busyByUser = await computeBusyBlocksForUsers(c.env, visibleIds, from, to, excludeEventId);
 
   const out = [];
@@ -103,6 +118,35 @@ guildRoutes.get('/:guildId/free-busy', async (c) => {
     });
   }
   return c.json(out);
+});
+
+// IDEAS item 5 (second half) / docs/specs/0007: what is on in this server.
+//
+// The one endpoint in this app that returns event details the caller was not
+// invited to, which is why every word of its filter matters:
+//
+//   - isGuildMember gates it, so a non-member sees nothing at all. That check
+//     also revalidates a stale membership against Discord, so someone who left
+//     the server stops seeing its noticeboard rather than keeping a cached
+//     view of it.
+//   - is_private = 0 and migration 0038's backfill together mean nothing
+//     created under the previous Privacy Policy can appear here.
+//   - descriptions are never selected, per the spec's decision 3.
+//   - personal time blocks live in a different table entirely and cannot
+//     surface through this query at all (blocker 4).
+guildRoutes.get('/:guildId/noticeboard', async (c) => {
+  const userId = c.get('userId');
+  const guildId = c.req.param('guildId');
+  if (!(await isGuildMember(c.env, userId, guildId))) return c.text('Forbidden', 403);
+
+  const { from, to } = parseRangeQuery(c, LIMITS.MAX_NOTICEBOARD_RANGE_MS);
+  // `{ occurrences, complete }` rather than a bare array since IDEAS item 79.
+  // The board is assembled by a bounded scan that can stop with candidates
+  // unexamined, and the response has to be able to say so -- an empty array
+  // meaning "nothing scheduled" and an empty array meaning "we ran out of
+  // allowance before we could tell" are the same bytes otherwise, which is how
+  // three separate regressions here reached a user as a confidently blank page.
+  return c.json(await buildNoticeboard(c.env, guildId, from, to));
 });
 
 guildRoutes.get('/:guildId/voice-channels', async (c) => {

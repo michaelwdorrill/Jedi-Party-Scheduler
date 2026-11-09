@@ -5,6 +5,7 @@ import {
   checkWindowThresholdAndResolve,
   getOptionTallies,
   getWindowedCandidates,
+  pollAnswersClosed,
   recordPollVote,
   requireInvitedOrOrganizer,
   resolveWindowedCandidates,
@@ -165,6 +166,15 @@ pollRoutes.post('/:eventId/window', async (c) => {
   }
   const option = candidates.find((o) => o.id === optionId);
   if (!option) return c.text('Invalid option', 400);
+
+  // Pass-21 review (P21-05). This route had no deadline check at all -- only
+  // `status !== 'active'` above -- so a window poll accepted a decisive
+  // availability submission after its advertised cutoff, right up until the
+  // cron sweep resolved it. Same shared rule as the vote path, so an already
+  // confirmed window stays joinable and an unconfirmed one closes on time.
+  if (pollAnswersClosed(event, !option.confirmedAt)) {
+    return c.text('Submissions for this window have closed', 400);
+  }
 
   if (
     startAt < option.startAt ||

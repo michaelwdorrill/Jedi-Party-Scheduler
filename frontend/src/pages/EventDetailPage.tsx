@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
+import { cancelEventMessage, rsvpCallsOffEvent } from '../lib/callOff';
 import { formatDuration, formatTimeRange } from '../lib/datetime';
 import ChangeRequestSection from '../components/ChangeRequestSection';
+import MoveOccurrenceForm from '../components/MoveOccurrenceForm';
 import PollOptionRow from '../components/PollOptionRow';
 import RsvpButtons from '../components/RsvpButtons';
 import WindowAvailabilityPicker from '../components/WindowAvailabilityPicker';
@@ -18,6 +20,8 @@ import type {
 } from '../types';
 import { useAction, useAsync } from '../lib/async';
 import { ErrorState, InlineError, Loading, buttonClass, cardClass } from '../components/ui';
+import { pollRowVotingClosed } from '../lib/pollRow';
+import { autoCancelLine, people, peopleCan, peopleSay, unlessLeavesFewer } from '../lib/plural';
 
 type WindowDraft = { startAt: number; endAt: number };
 
@@ -54,6 +58,12 @@ export default function EventDetailPage() {
   const navigate = useNavigate();
   const [windowDrafts, setWindowDrafts] = useState<WindowDrafts>({});
   const [linkCopied, setLinkCopied] = useState(false);
+  // Which occurrence the Move form was opened FOR, rather than a bare open/closed
+  // flag. A flag would stay set while ?occurrence= changed under it -- the
+  // P19-04 shape, where this page kept one date's state and acted on another's.
+  // Keyed this way, opening one date's form can never show on another date.
+  const [movingFor, setMovingFor] = useState<string | null>(null);
+  const moveKey = `${eventId ?? ''}:${occurrenceDate ?? ''}`;
 
   const { data, error, loading, reload } = useAsync<EventBundle | null>(async () => {
     if (!eventId) return null;
@@ -71,7 +81,15 @@ export default function EventDetailPage() {
         ? await api.get<ChangeRequestView[]>(`/events/${eventId}/change-requests`)
         : [];
     return { event: ev, windowInfo, changeRequests };
-  }, [eventId]);
+    // Pass-19 review (P19-04). `occurrenceDate` is read INSIDE this loader and
+    // was missing from its identity, so keeping this page mounted while only
+    // `?occurrence=` changed left the previous occurrence's date and RSVP
+    // state on screen while handleRsvp below closed over the NEW one. Pressing
+    // "declined" then answered for a date the user was not looking at, and the
+    // reload afterwards was the first thing to show which. useAsync's
+    // generation guard was always here and always correct; it just was never
+    // being told that the selection had changed.
+  }, [eventId, occurrenceDate]);
 
   // Every mutation on this page was `await api.post(...); await load();` with
   // no catch, so a refused request became an unhandled rejection and the
@@ -110,8 +128,19 @@ export default function EventDetailPage() {
   // slots to vote on or windows to find a session inside (specs/0013).
   const isWindowed = event.windowBlockMinutes != null;
 
-  const handleRsvp = (status: RsvpStatus) =>
-    action.run(async () => {
+  const handleRsvp = (status: RsvpStatus) => {
+    // IDEAS 97: the decline that takes an auto-cancelling event below its
+    // minimum calls it off for everyone -- say so before, not after.
+    if (
+      rsvpCallsOffEvent(event, user?.id, status) &&
+      !confirm(
+        `This needs ${people(event.minimumAttendees ?? 0)} in, and saying you can't make it takes it below that. ` +
+          `It will be called off for everyone, and the people still coming will be told. It can't be put back on afterwards.`,
+      )
+    ) {
+      return;
+    }
+    return action.run(async () => {
       // specs/0014: attendance is per occurrence. The URL's ?occurrence= wins
       // when present (it's what the calendar linked to); otherwise fall back
       // to the occurrence the server already resolved this page to (decision
@@ -122,6 +151,7 @@ export default function EventDetailPage() {
       });
       reload();
     });
+  };
 
   const handleVote = (optionId: string, vote: PollVote) =>
     action.run(async () => {
@@ -139,7 +169,7 @@ export default function EventDetailPage() {
   };
 
   const handleCancelEvent = async () => {
-    if (!confirm('Cancel this event for everyone?')) return;
+    if (!confirm(cancelEventMessage(event, zone))) return;
     await action.run(async () => {
       await api.delete(`/events/${event.eventId}`);
       reload();
@@ -195,6 +225,17 @@ export default function EventDetailPage() {
     });
   };
 
+  // IDEAS 94. Stays on the page and reloads it, rather than leaving for the
+  // calendar as the cancel below does: a moved date still exists, and the page
+  // showing its new time is the confirmation.
+  const handleMoveOccurrence = async (range: { startAt: number; endAt: number }) => {
+    if (!occurrenceDate) return;
+    if (await action.run(() => api.post(`/events/${event.eventId}/occurrences/${occurrenceDate}/move`, range))) {
+      setMovingFor(null);
+      reload();
+    }
+  };
+
   const handleCancelOccurrence = async () => {
     if (!occurrenceDate) return;
     if (!confirm(`Cancel just the ${occurrenceDate} occurrence?`)) return;
@@ -228,9 +269,17 @@ export default function EventDetailPage() {
             Organized by {isOrganizer ? 'you' : event.organizerGlobalName ?? event.organizerUsername ?? 'someone no longer in this server'}
           </p>
           {event.guildName && <p className="text-sm text-faint">On {event.guildName}</p>}
+          {event.createdFromPoll && (
+            <p className="text-sm text-faint">
+              From the poll{' '}
+              <Link to={`/events/${event.createdFromPoll.id}`} className="text-accent-text hover:underline">
+                {event.createdFromPoll.title}
+              </Link>
+            </p>
+          )}
         </div>
         {isOrganizer && event.status !== 'cancelled' && (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
             <button
               onClick={handleCopyInviteLink}
               className={buttonClass('secondary')}
@@ -244,6 +293,15 @@ export default function EventDetailPage() {
               >
                 Edit
               </Link>
+            )}
+            {event.status === 'active' && event.isRecurring && occurrenceDate && event.startAt != null && (
+              <button
+                onClick={() => setMovingFor(movingFor === moveKey ? null : moveKey)}
+                aria-expanded={movingFor === moveKey}
+                className={buttonClass('secondary')}
+              >
+                Move this occurrence
+              </button>
             )}
             {event.status === 'active' && event.isRecurring && occurrenceDate && (
               <button
@@ -262,6 +320,19 @@ export default function EventDetailPage() {
           </div>
         )}
       </div>
+
+      {movingFor === moveKey && occurrenceDate && event.startAt != null && event.endAt != null && (
+        <MoveOccurrenceForm
+          key={moveKey}
+          startAt={event.startAt}
+          endAt={event.endAt}
+          occurrenceDate={occurrenceDate}
+          eventZone={event.timezone}
+          viewerZone={zone}
+          onSubmit={handleMoveOccurrence}
+          onClose={() => setMovingFor(null)}
+        />
+      )}
 
       {action.error && <InlineError message={action.error} onDismiss={action.clearError} />}
 
@@ -298,6 +369,15 @@ export default function EventDetailPage() {
       {event.eventType === 'single' && event.startAt && event.endAt && (
         <div className={cardClass()}>
           <p className="mb-3 font-medium">{formatTimeRange(event.startAt, event.endAt, zone)}</p>
+          {event.status === 'active' &&
+            event.minimumAttendees != null &&
+            event.autoCancelBelowMinimum &&
+            event.minimumAttendeesDeadlineAt == null &&
+            !event.isRecurring && (
+              <p className="mb-3 text-xs text-muted">
+                {autoCancelLine(event.minimumAttendees ?? 0)}
+              </p>
+            )}
           {event.status === 'active' && (
             <RsvpButtons current={event.myRsvpStatus} onChange={handleRsvp} />
           )}
@@ -308,7 +388,7 @@ export default function EventDetailPage() {
         <div className="space-y-2">
           <p className="text-sm text-muted">
             {event.pollStrategy === 'threshold'
-              ? `Confirms once ${event.pollThresholdCount} people say they're in, otherwise by the deadline.`
+              ? `Confirms once ${peopleSay(event.pollThresholdCount ?? 0)} they're in, otherwise by the deadline.`
               : "Whichever time slot has the most votes wins at the deadline."}
             {event.pollDeadlineAt && (
               <> Voting closes {formatTimeRange(event.pollDeadlineAt, event.pollDeadlineAt, zone).split(' –')[0]}.</>
@@ -328,8 +408,9 @@ export default function EventDetailPage() {
       {event.eventType === 'poll' && !isWindowed && isMultiWinner && event.pollOptions && (
         <div className="space-y-2">
           <p className="text-sm text-muted">
-            Each day is confirmed independently once {event.pollThresholdCount} people say they're in — any that
-            qualify all happen. You can still vote (or join a confirmed day) any time before it starts.
+            Each day is confirmed independently once {peopleSay(event.pollThresholdCount ?? 0)} they're in — any that
+            qualify all happen, each as its own event. You can change your answer on a confirmed day any time before
+            it starts, but {unlessLeavesFewer(event.pollThresholdCount ?? 0)}, the day is called off.
           </p>
           {event.pollOptions.map((opt) => (
             <PollOptionRow
@@ -337,7 +418,8 @@ export default function EventDetailPage() {
               option={opt}
               zone={zone}
               onVote={(vote) => handleVote(opt.id, vote)}
-              votingDisabled={!opt.confirmedAt && deadlinePassed}
+              votingDisabled={pollRowVotingClosed(opt, event.status, deadlinePassed)}
+              threshold={event.pollThresholdCount}
             />
           ))}
         </div>
@@ -347,7 +429,7 @@ export default function EventDetailPage() {
         <div className="space-y-3">
           <p className="text-sm text-muted">
             {event.pollStrategy === 'threshold'
-              ? `Each option confirms once ${event.pollThresholdCount} people can commit to the same block within it, otherwise the best one wins at the deadline.`
+              ? `Each option confirms once ${peopleCan(event.pollThresholdCount ?? 0)} commit to the same block within it, otherwise the best one wins at the deadline.`
               : 'The option with the best overlap wins at the deadline.'}{' '}
             Sessions are at least {formatDuration(windowInfo.blockMinutes)} long — if everyone can stay longer, they
             will be.
@@ -402,7 +484,13 @@ export default function EventDetailPage() {
           event={event}
           userId={user.id}
           isOrganizer={isOrganizer}
-          isInvitee={event.invites.some((inv) => inv.userId === user.id)}
+          // Not the organizer, even though they have an invite row. Idea 26 gave
+          // every organizer one (so their own RSVP has somewhere to land), which
+          // quietly made this check true for them too: the section offered the
+          // organizer "Ask to move this" and "Suggest someone" -- both refused by
+          // the server for the organizer -- and vote buttons the spec reserves
+          // for invitees. Found on the first browser walkthrough.
+          isInvitee={!isOrganizer && event.invites.some((inv) => inv.userId === user.id)}
           requests={changeRequests}
           occurrenceDate={occurrenceDate}
           loadFriends={loadFriends}

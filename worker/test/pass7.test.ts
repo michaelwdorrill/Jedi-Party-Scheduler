@@ -213,8 +213,11 @@ describe('combined direct/group invitee resolution fits the Free-plan budget (F-
     )
       .bind(Date.now())
       .run();
-    for (const id of group) {
-      await db.prepare(`INSERT INTO group_members (group_id, user_id, added_at) VALUES ('g1', ?, ?)`)
+    // The creator included, as migration 0017 makes true of every real group
+    // -- and as F-25 in the Pass-11 review now requires, since an organizer
+    // can only invite through groups they belong to.
+    for (const id of [...group, 'organizer']) {
+      await db.prepare(`INSERT OR IGNORE INTO group_members (group_id, user_id, added_at) VALUES ('g1', ?, ?)`)
         .bind(id, Date.now())
         .run();
     }

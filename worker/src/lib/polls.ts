@@ -1,6 +1,7 @@
 import type { Env } from '../env';
 import type { EventRow } from './events';
 import { requireActiveGuildMember } from './db';
+import { recordRsvp, type RsvpStatus } from './attendance';
 import { LIMITS } from './validate';
 
 interface OptionTally {
@@ -71,25 +72,92 @@ export async function getOptionTallies(env: Env, eventId: string): Promise<Optio
   return [...byId.values()];
 }
 
-// Compare-and-set: only transitions an event that's still 'active'. Two
-// concurrent requests (a synchronous threshold-crossing vote racing the cron
-// deadline sweep, or two votes crossing threshold in the same instant) must
-// produce exactly one resolution and one notification claim, not two -- the
-// WHERE clause makes the database the arbiter instead of a check-then-act
-// race in application code. Returns whether *this* call won the transition.
-async function markResolved(env: Env, eventId: string, option: { id: string; startAt: number; endAt: number }): Promise<boolean> {
+// The parent event's optimistic-concurrency token, as the caller read it.
+//
+// Pass-20 review (P20-02). `markResolved` gained a revision check in Pass 19
+// and the other four poll-decision writers did not, so the same class of stale
+// decision simply moved next door: an owner raising a threshold or extending a
+// deadline could have their successful, authorized edit ignored by a decision
+// computed before it. Every state-changing poll decision now carries this.
+//
+// `events.revision` is NOT NULL DEFAULT 0 (migration 0013) and every caller
+// reads its row with SELECT *, so the throw is an assertion rather than a
+// reachable branch. It is worth having because `revision` is optional on
+// EventRow -- narrower selects omit it -- and binding `undefined` would make
+// `revision = NULL`, which is never true, so every poll in the system would
+// silently stop settling. The deadline sweep catches this per poll and counts
+// it as a resolution failure, which is visible. Silence is not.
+function requireRevision(event: EventRow): number {
+  const revision = event.revision;
+  if (revision == null) {
+    throw new Error('poll decisions need an event row read with its revision');
+  }
+  return revision;
+}
+
+// Compare-and-set: only transitions an event that's still 'active', is still
+// at the revision the winner was computed from, and whose winning option is
+// still a candidate. Two concurrent requests (a synchronous threshold-crossing
+// vote racing the cron deadline sweep, or two votes crossing threshold in the
+// same instant) must produce exactly one resolution and one notification
+// claim, not two -- the WHERE clause makes the database the arbiter instead of
+// a check-then-act race in application code. Returns whether *this* call won.
+//
+// Pass-19 review (P19-02). `status = 'active'` alone was not enough, and the
+// gap was a real one rather than a theoretical interleaving: an organizer can
+// edit a poll's candidates while it is still active and still collecting
+// votes, through the ordinary authorized PATCH. Between the tally read and
+// this UPDATE, the winning option can therefore be DELETED -- and because
+// `resolved_option_id` is plain TEXT with no foreign key, the id was committed
+// anyway. The event ended up resolved to a time that was no longer a
+// candidate, pointing at an option that no longer existed, and the noticeboard
+// advertised that time to the whole server.
+//
+// `revision` is the token that closes it, not option existence, because it
+// catches every edit and not just the deletion: eventWrites applies a poll
+// edit as one guarded batch whose sibling statements all carry the revision,
+// so ANY change -- a moved candidate, a different threshold, a new deadline --
+// bumps it and invalidates a decision computed before it. The caller passes
+// the revision it read the event at, which is necessarily before it read the
+// tallies.
+//
+// The EXISTS is defence in depth rather than the mechanism. It costs nothing
+// inside a statement that already has to find the row, and it means a future
+// path that removes an option WITHOUT bumping the revision cannot resurrect
+// this bug silently.
+//
+// Losing this race is not an error. The vote that triggered it is already
+// recorded, the poll is still active, and the next vote or the deadline sweep
+// decides again from current state -- which is what the reviewer's correction
+// asks for, and is strictly better than committing a decision about a world
+// that no longer exists.
+async function markResolved(
+  env: Env,
+  event: EventRow,
+  option: { id: string; startAt: number; endAt: number },
+): Promise<boolean> {
+  const revision = requireRevision(event);
+  const eventId = event.id;
   const result = await env.DB.prepare(
     `UPDATE events SET status = 'resolved', resolved_option_id = ?, start_at = ?, end_at = ?, updated_at = ?
-     WHERE id = ? AND status = 'active'`,
+     WHERE id = ? AND status = 'active' AND revision = ?
+       AND EXISTS (SELECT 1 FROM event_poll_options o WHERE o.id = ? AND o.event_id = events.id)`,
   )
-    .bind(option.id, option.startAt, option.endAt, Date.now(), eventId)
+    .bind(option.id, option.startAt, option.endAt, Date.now(), eventId, revision, option.id)
     .run();
   return result.meta.changes > 0;
 }
 
-async function markCancelled(env: Env, eventId: string): Promise<boolean> {
-  const result = await env.DB.prepare(`UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'active'`)
-    .bind(Date.now(), eventId)
+async function markCancelled(env: Env, event: EventRow): Promise<boolean> {
+  // Revision-guarded for the same reason as markResolved (P20-02). Cancelling
+  // an unanswered poll is a decision like any other, and the specific schedule
+  // the review demonstrated is an owner EXTENDING the deadline into the future
+  // moments before an old close: the new deadline was saved and the poll was
+  // cancelled anyway.
+  const result = await env.DB.prepare(
+    `UPDATE events SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'active' AND revision = ?`,
+  )
+    .bind(Date.now(), event.id, requireRevision(event))
     .run();
   return result.meta.changes > 0;
 }
@@ -105,10 +173,40 @@ function pickMostVotes(tallies: OptionTally[]): OptionTally | null {
   })[0];
 }
 
-// Same compare-and-set principle as markResolved, scoped to one option.
-async function confirmOption(env: Env, optionId: string): Promise<boolean> {
-  const result = await env.DB.prepare(`UPDATE event_poll_options SET confirmed_at = ? WHERE id = ? AND confirmed_at IS NULL`)
-    .bind(Date.now(), optionId)
+// Same compare-and-set principle as markResolved, scoped to one option -- and
+// since P20-02, carrying the parent's revision the same way. The row being
+// written is the option, so the parent check is an EXISTS rather than a column
+// comparison; confirming a candidate is still a decision about the poll, and a
+// threshold raised from one to two between the tally and this write must
+// invalidate it. It did not, and a full reminder sweep then created the child
+// session for a day nobody had agreed to.
+async function confirmOption(env: Env, event: EventRow, optionId: string): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE event_poll_options SET confirmed_at = ?
+     WHERE id = ? AND confirmed_at IS NULL
+       AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_poll_options.event_id
+                     AND e.status = 'active' AND e.revision = ?)`,
+  )
+    .bind(Date.now(), optionId, requireRevision(event))
+    .run();
+  return result.meta.changes > 0;
+}
+
+// The reverse of confirmOption, for a day that drops back below the threshold
+// in the window before the reminder sweep turns it into its own event. Same
+// revision guard, for the same reason. The NOT EXISTS is what keeps the two
+// halves of IDEAS 97 apart: once the day has an event, attendance there is
+// what counts, and clearing the parent's confirmation under it would leave a
+// live session hanging off a candidate the poll no longer shows as decided.
+async function unconfirmOption(env: Env, event: EventRow, optionId: string): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE event_poll_options SET confirmed_at = NULL
+     WHERE id = ? AND confirmed_at IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM events c WHERE c.created_from_option_id = event_poll_options.id)
+       AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_poll_options.event_id
+                     AND e.status = 'active' AND e.revision = ?)`,
+  )
+    .bind(optionId, requireRevision(event))
     .run();
   return result.meta.changes > 0;
 }
@@ -136,7 +234,14 @@ export async function checkThresholdAndResolve(env: Env, event: EventRow): Promi
     const newlyConfirmed: string[] = [];
     for (const t of tallies) {
       if (!t.confirmedAt && t.yes >= event.poll_threshold_count) {
-        if (await confirmOption(env, t.id)) newlyConfirmed.push(t.id);
+        if (await confirmOption(env, event, t.id)) newlyConfirmed.push(t.id);
+      } else if (t.confirmedAt && t.yes < event.poll_threshold_count) {
+        // IDEAS 97. Only reaches a day that has not become its own event yet
+        // (unconfirmOption's NOT EXISTS) -- nobody has been told about it, so
+        // it simply goes back to being a candidate and can confirm again. A day
+        // that HAS its own event is called off there instead, by that event's
+        // inherited minimum (createFannedOutEvent).
+        await unconfirmOption(env, event, t.id);
       }
     }
     return newlyConfirmed;
@@ -147,7 +252,7 @@ export async function checkThresholdAndResolve(env: Env, event: EventRow): Promi
     .filter((t) => t.yes >= event.poll_threshold_count!)
     .sort((a, b) => a.displayOrder - b.displayOrder || a.id.localeCompare(b.id))[0];
 
-  if (winner && (await markResolved(env, event.id, winner))) {
+  if (winner && (await markResolved(env, event, winner))) {
     return [winner.id];
   }
   return [];
@@ -346,11 +451,20 @@ export function resolveWindowedCandidates(
 // the span that actually won. Both writes are in the one compare-and-set, so
 // a candidate cannot be confirmed twice or be left confirmed with its window
 // still in place.
-async function confirmWindowedOption(env: Env, optionId: string, span: WindowCandidate): Promise<boolean> {
+async function confirmWindowedOption(
+  env: Env,
+  event: EventRow,
+  optionId: string,
+  span: WindowCandidate,
+): Promise<boolean> {
+  // The windowed twin of confirmOption, guarded identically (P20-02).
   const result = await env.DB.prepare(
-    `UPDATE event_poll_options SET confirmed_at = ?, start_at = ?, end_at = ? WHERE id = ? AND confirmed_at IS NULL`,
+    `UPDATE event_poll_options SET confirmed_at = ?, start_at = ?, end_at = ?
+     WHERE id = ? AND confirmed_at IS NULL
+       AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_poll_options.event_id
+                     AND e.status = 'active' AND e.revision = ?)`,
   )
-    .bind(Date.now(), span.startAt, span.endAt, optionId)
+    .bind(Date.now(), span.startAt, span.endAt, optionId, requireRevision(event))
     .run();
   return result.meta.changes > 0;
 }
@@ -377,13 +491,13 @@ export async function checkWindowThresholdAndResolve(env: Env, event: EventRow):
     const newlyConfirmed: string[] = [];
     for (const { candidate, best } of resolved) {
       if (candidate.confirmedAt || !best || best.count < threshold) continue;
-      if (await confirmWindowedOption(env, candidate.id, best)) newlyConfirmed.push(candidate.id);
+      if (await confirmWindowedOption(env, event, candidate.id, best)) newlyConfirmed.push(candidate.id);
     }
     return newlyConfirmed;
   }
 
   const winner = resolved.find(({ best }) => best && best.count >= threshold);
-  if (winner && (await markResolved(env, event.id, { id: winner.candidate.id, ...winner.best! }))) {
+  if (winner && (await markResolved(env, event, { id: winner.candidate.id, ...winner.best! }))) {
     return [winner.candidate.id];
   }
   return [];
@@ -450,11 +564,19 @@ export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): P
         const tallies = await getOptionTallies(env, event.id);
         const anyConfirmed = tallies.some((t) => t.confirmedAt);
         if (anyConfirmed) {
-          await env.DB.prepare(`UPDATE events SET status = 'resolved', updated_at = ? WHERE id = ? AND status = 'active'`)
-            .bind(now, event.id)
+          // Revision-guarded like every other decision (P20-02): the review's
+          // schedule is an already-confirmed multi-winner day plus a deadline
+          // the owner has just extended, where the old close wrote 'resolved'
+          // over the new future deadline.
+          const closed = await env.DB.prepare(
+            `UPDATE events SET status = 'resolved', updated_at = ?
+             WHERE id = ? AND status = 'active' AND revision = ?`,
+          )
+            .bind(now, event.id, requireRevision(event))
             .run();
-        } else {
-          await markCancelled(env, event.id);
+          if (closed.meta.changes === 0) continue;
+        } else if (!(await markCancelled(env, event))) {
+          continue;
         }
         resolvedEventIds.push(event.id);
         continue;
@@ -475,10 +597,14 @@ export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): P
             if (lenB !== lenA) return lenB - lenA;
             return a.candidate.displayOrder - b.candidate.displayOrder || a.candidate.id.localeCompare(b.candidate.id);
           })[0];
+        // A refused CAS here means the poll was edited out from under this
+        // decision (P19-02). Neither resolving nor cancelling is right, and
+        // marking it handled would strand it -- leave it due so the next
+        // sweep decides from the edited state.
         if (winner) {
-          await markResolved(env, event.id, { id: winner.candidate.id, ...winner.best! });
-        } else {
-          await markCancelled(env, event.id);
+          if (!(await markResolved(env, event, { id: winner.candidate.id, ...winner.best! }))) continue;
+        } else if (!(await markCancelled(env, event))) {
+          continue;
         }
         resolvedEventIds.push(event.id);
         continue;
@@ -487,9 +613,9 @@ export async function resolvePastDeadlinePolls(env: Env, budget?: WorkBudget): P
       const tallies = await getOptionTallies(env, event.id);
       const winner = pickMostVotes(tallies);
       if (winner) {
-        await markResolved(env, event.id, winner);
-      } else {
-        await markCancelled(env, event.id);
+        if (!(await markResolved(env, event, winner))) continue;
+      } else if (!(await markCancelled(env, event))) {
+        continue;
       }
       resolvedEventIds.push(event.id);
     } catch (err) {
@@ -553,6 +679,25 @@ export type VoteOutcome =
 // refuse it, in the order the route used to ask them. Shared by the HTTP
 // route and the interactions endpoint so the two can never drift on what
 // "this poll is still open to you" means.
+// Whether the advertised cutoff has closed the answers being submitted.
+//
+// A CONFIRMED candidate stays joinable forever -- that is a deliberate feature
+// for late joiners, and joining a day everyone already agreed on is not a new
+// decision. An unconfirmed one is, so the deadline governs it.
+//
+// Exported because the same rule has to hold at every submission boundary.
+// Pass-21 review (P21-05) found it in one arm of one function: the other arm
+// checked only `status`, and the window route checked neither, so three ways of
+// answering a poll had three different answers to "is it too late".
+export function pollAnswersClosed(
+  event: { poll_deadline_at: number | null },
+  targetsAnyUnconfirmed: boolean,
+  now: number = Date.now(),
+): boolean {
+  if (!event.poll_deadline_at || now <= event.poll_deadline_at) return false;
+  return targetsAnyUnconfirmed;
+}
+
 async function loadVotablePoll(
   env: Env,
   userId: string,
@@ -587,14 +732,22 @@ async function loadVotablePoll(
     if (options.length !== optionIds.length) return { status: 'invalid_option' };
   }
 
-  if (event.poll_resolution_mode === 'multi_winner') {
-    // Confirmed days stay open forever for late joiners; unconfirmed days
-    // close once the deadline passes.
-    const deadlinePassed = !!event.poll_deadline_at && Date.now() > event.poll_deadline_at;
-    if (deadlinePassed && options.some((o) => !o.confirmed_at)) {
-      return { status: 'closed', reason: 'Voting for this day has closed' };
-    }
-  } else if (event.status !== 'active') {
+  // Pass-21 review (P21-05). The deadline check used to live only in the
+  // multi-winner arm, so a single-winner poll past its advertised cutoff still
+  // accepted a decisive answer for as long as it took the cron sweep to notice
+  // -- and whether a late answer counted therefore depended on when the sweep
+  // last ran, which is not a rule anyone can see or rely on. The UI states when
+  // voting closes.
+  //
+  // The two arms are now one shared rule plus a mode-specific status check,
+  // because having the rule in one arm and not the other is the whole finding.
+  // `pollAnswersClosed` is exported so the window submission route -- which had
+  // no deadline check at all -- applies the identical test rather than a third
+  // interpretation of it.
+  if (pollAnswersClosed(event, options.some((o) => !o.confirmed_at))) {
+    return { status: 'closed', reason: 'Voting for this poll has closed' };
+  }
+  if (event.poll_resolution_mode !== 'multi_winner' && event.status !== 'active') {
     return { status: 'closed', reason: 'Voting is closed for this event' };
   }
 
@@ -602,6 +755,14 @@ async function loadVotablePoll(
 
   return { status: 'recorded', event };
 }
+
+// Exported for the fan-out seed in cron/reminders.ts (Pass 24, P24-02): a vote
+// carried onto a confirmed day's event uses the same mapping a later vote does.
+export const VOTE_AS_RSVP: Record<'yes' | 'no' | 'maybe', RsvpStatus> = {
+  yes: 'accepted',
+  no: 'declined',
+  maybe: 'tentative',
+};
 
 // One vote on one candidate -- what the website's poll screen submits, where
 // yes/no/maybe are all expressible.
@@ -614,6 +775,32 @@ export async function recordPollVote(
 ): Promise<VoteOutcome> {
   const loaded = await loadVotablePoll(env, userId, eventId, [optionId]);
   if (loaded.status !== 'recorded') return loaded;
+
+  // IDEAS 97. Once a confirmed day has become its own event, that event's
+  // attendance is what counts (IDEAS 88), so an answer given on the poll's row
+  // for it is recorded there -- otherwise "Can't make it" here changes a
+  // display and nothing else, while the real session goes on counting you. The
+  // decline is what lets that event's inherited minimum call the day off.
+  const session = await env.DB.prepare(`SELECT id, status FROM events WHERE created_from_option_id = ?`)
+    .bind(optionId)
+    .first<{ id: string; status: string }>();
+  if (session) {
+    if (session.status === 'cancelled') {
+      return { status: 'closed', reason: 'This day was called off -- too few people were still in for it' };
+    }
+    const answered = await recordRsvp(env, userId, session.id, '', VOTE_AS_RSVP[vote]);
+    if (answered === 'event_not_active') {
+      return { status: 'closed', reason: 'This day was called off -- too few people were still in for it' };
+    }
+    if (answered !== 'recorded') return { status: 'forbidden' };
+  } else if (loaded.event.status !== 'active') {
+    // Pass 24, P24-04. loadVotablePoll lets a multi-winner poll past its own
+    // status check on purpose, so a day that became its own event stays
+    // answerable from here after the poll closes (item 99). A day that never
+    // did has nothing left to decide once the poll is cancelled: the vote was
+    // saved and shown as the person's answer while changing nothing.
+    return { status: 'closed', reason: 'Voting for this poll has closed' };
+  }
 
   await env.DB.prepare(
     `INSERT INTO event_poll_votes (option_id, user_id, vote, voted_at) VALUES (?, ?, ?, ?)
@@ -651,6 +838,63 @@ export async function recordPollSelection(
   const optionIds = [...new Set(submitted)];
   const loaded = await loadVotablePoll(env, userId, eventId, optionIds);
   if (loaded.status !== 'recorded') return loaded;
+  // P24-04, the Discord night picker's half. This path never routes to a
+  // day's own event, so on a poll that is no longer active it has nothing to
+  // record at all.
+  if (loaded.event.status !== 'active') return { status: 'closed', reason: 'Voting for this poll has closed' };
+
+  // Pass-22 acceptance review (RG-05). A complete-answer update is a mutation
+  // of every answer this person has on this poll, and the deadline check above
+  // only saw the ones being ADDED. The Discord select legitimately permits zero
+  // choices, and an empty selection loads no options at all -- so
+  // `options.some(unconfirmed)` was false, the cutoff passed, and the DELETE
+  // below still removed the votes the person had already cast on unconfirmed
+  // candidates. Withdrawing a vote after the deadline changed the eventual
+  // winner, which is the same harm as casting one.
+  //
+  // So the eligibility question is not "what is being added" but "what answers
+  // does this mutation touch". Only asked once the cutoff has actually passed,
+  // so the ordinary path costs nothing extra.
+  if (loaded.event.poll_deadline_at && Date.now() > loaded.event.poll_deadline_at) {
+    const removing = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM event_poll_votes v
+       JOIN event_poll_options o ON o.id = v.option_id
+       WHERE v.user_id = ? AND o.event_id = ? AND o.confirmed_at IS NULL
+         ${optionIds.length ? `AND o.id NOT IN (${optionIds.map(() => '?').join(', ')})` : ''}`,
+    )
+      .bind(userId, eventId, ...optionIds)
+      .first<{ n: number }>();
+    if ((removing?.n ?? 0) > 0) {
+      return { status: 'closed', reason: 'Voting for this poll has closed' };
+    }
+  }
+
+  // Walkthrough B4 (10 Nov 2026), for 1.0: a picked night that has become its
+  // own event is answered on that event, as recordPollVote does for the site
+  // (item 97) -- the picker used to save it against the poll row only, so
+  // "I'm in" from Discord counted for nothing. Picked only: the picker says
+  // "anything you don't pick is left blank, not refused", so leaving a day out
+  // says nothing about it. A called-off day refuses the whole answer before
+  // anything is written, the way the site refuses that one button.
+  const sessions: { id: string; status: string }[] = [];
+  if (optionIds.length > 0) {
+    const { results } = await env.DB.prepare(
+      `SELECT id, status FROM events WHERE created_from_option_id IN (${optionIds.map(() => '?').join(', ')})`,
+    )
+      .bind(...optionIds)
+      .all<{ id: string; status: string }>();
+    sessions.push(...results);
+  }
+  if (sessions.some((s) => s.status === 'cancelled')) {
+    return { status: 'closed', reason: 'One of those days was called off -- too few people were still in for it' };
+  }
+  for (const session of sessions) {
+    const answered = await recordRsvp(env, userId, session.id, '', 'accepted');
+    if (answered === 'event_not_active') {
+      return { status: 'closed', reason: 'One of those days was called off -- too few people were still in for it' };
+    }
+    if (answered !== 'recorded') return { status: 'forbidden' };
+  }
 
   const statements = [];
   const keep = optionIds.map(() => '?').join(', ');

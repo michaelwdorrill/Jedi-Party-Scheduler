@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import { requirePolicyAcceptance } from '../lib/authMiddleware';
 import { CURRENT_POLICY_VERSION } from '../lib/policy';
+import { activeLaunchAnnouncement } from '../lib/launchAnnouncement';
 import { buildCalendarOccurrences } from '../lib/calendar';
 import { chunkIds, placeholders } from '../lib/d1';
 import { deleteUserCompletely, isGuildMember, isOwner, listFriends, listFriendsAcrossGuilds, mapUser, type UserRow } from '../lib/db';
@@ -28,11 +29,16 @@ const PROFILE_COLUMNS = `id, username, global_name, avatar_hash, timezone, notif
 // missing argument rather than a silent hole.
 meRoutes.get('/', async (c) => {
   const userId = c.get('userId');
-  const row = await c.env.DB.prepare(`SELECT ${PROFILE_COLUMNS} FROM users WHERE id = ?`)
+  const row = await c.env.DB.prepare(`SELECT ${PROFILE_COLUMNS}, announcement_seen FROM users WHERE id = ?`)
     .bind(userId)
-    .first<UserRow>();
+    .first<UserRow & { announcement_seen: string | null }>();
   if (!row) return c.text('User not found', 404);
+  const announcement = activeLaunchAnnouncement(c.env);
   return c.json({
+    // The 1.0 launch pop-up (LAUNCH-ONLY, removed in 1.1): the id of the
+    // announcement this person has not been shown yet, or null. Just the id --
+    // the picture is the frontend's own asset.
+    unseenAnnouncement: announcement && row.announcement_seen !== announcement.id ? announcement.id : null,
     ...mapUser(row, isOwner(c.env, userId)),
     // The frontend reads the current version from here rather than holding a
     // copy of it -- two constants in two deployables that must agree is the
@@ -53,6 +59,21 @@ meRoutes.post('/accept-policy', async (c) => {
     .run();
   c.set('acceptedPolicyVersion', CURRENT_POLICY_VERSION);
   return c.json({ ok: true, policyVersion: CURRENT_POLICY_VERSION });
+});
+
+// The 1.0 launch pop-up has been shown (LAUNCH-ONLY, removed in 1.1).
+// Recorded when it appears, not when it is closed, so it shows once even if
+// the tab is closed with it open. Only the live announcement's id is
+// accepted; anything else is a no-op rather than an error, since a stale tab
+// naming an old one has nothing useful to be told.
+meRoutes.post('/announcement-seen', requirePolicyAcceptance, async (c) => {
+  const userId = c.get('userId');
+  const body = await readJsonBody<{ id?: unknown }>(c);
+  const announcement = activeLaunchAnnouncement(c.env);
+  if (announcement && body.id === announcement.id) {
+    await c.env.DB.prepare(`UPDATE users SET announcement_seen = ? WHERE id = ?`).bind(announcement.id, userId).run();
+  }
+  return c.json({ ok: true });
 });
 
 meRoutes.patch('/', requirePolicyAcceptance, async (c) => {
@@ -103,7 +124,26 @@ meRoutes.get('/export', async (c) => {
   c.header('Cache-Control', 'no-store, private');
   const userId = c.get('userId');
   const tables: Record<string, string> = {
-    profile: `SELECT ${PROFILE_COLUMNS}, created_at, updated_at, last_login_at FROM users WHERE id = ?`,
+    // last_login_attempt_at alongside last_login_at (Pass-12 review, P12-19).
+    // The Pass-11 commit claimed this returning-user bookkeeping was in the
+    // export and it was not: only the successful-login column was added. It is
+    // a timestamp the app records about the person, including for attempts
+    // that were refused, which makes it exactly the sort of thing an access
+    // request is for.
+    //
+    // Pass 24 review (D-07, Michael's call: "extend the export"). Both reviewers
+    // found the policy's "everything the service holds about you" still short
+    // of the schema: dm_channel_id here, three session columns, three Google
+    // connection columns, the ids that tie a Google link to the entry it made,
+    // the Google pending/orphan rows, and group_activity_nudges. All of them now
+    // come out, and test/exportCompleteness.test.ts compares every projection
+    // below against the live schema, so a column added later fails CI until it
+    // is exported or excluded on purpose. The only exclusions are credentials
+    // (*_ciphertext, *_iv) and the user_id that is the export's own key.
+    // dm_channel_id is the id of the Discord DM channel the bot uses to reach
+    // you: an address, not a credential -- nothing can be sent with it alone.
+    profile: `SELECT ${PROFILE_COLUMNS}, dm_channel_id, created_at, updated_at, last_login_at, last_login_attempt_at, announcement_seen
+              FROM users WHERE id = ?`,
     serverMemberships: `SELECT guild_id, nickname, is_member, verified_at FROM user_guild_membership WHERE user_id = ?`,
     personalEvents: `SELECT * FROM personal_events WHERE user_id = ?`,
     organisedEvents: `SELECT * FROM events WHERE organizer_id = ?`,
@@ -114,6 +154,113 @@ meRoutes.get('/export', async (c) => {
     groupsCreated: `SELECT * FROM groups WHERE created_by = ?`,
     groupMemberships: `SELECT * FROM group_members WHERE user_id = ?`,
     notificationsSent: `SELECT * FROM notification_log WHERE user_id = ?`,
+    // IDEAS item 2 / specs/0017. Columns are listed explicitly rather than
+    // `SELECT *`, and that is the whole point of the difference from every
+    // other line here: this table holds encrypted OAuth credentials, and a
+    // wildcard would put them in a file the user downloads and may well email
+    // to themselves. An export is a right of access to *your data*, not to the
+    // app's keys for acting on your behalf.
+    googleCalendar: `SELECT google_account_email, calendar_id, read_calendar_id, sync_enabled, status,
+                       last_synced_at, last_error, connected_at, updated_at, access_token_expires_at,
+                       disconnect_attempts, authorization_failed_at
+                     FROM google_calendar_connections WHERE user_id = ?`,
+    // google_event_id and calendar_id say which entry in which of your Google
+    // calendars this service wrote -- what you would need to find and remove it.
+    googleCalendarLinks: `SELECT id, event_id, occurrence_date, google_event_id, calendar_id, synced_title,
+                            synced_start_at, synced_end_at, synced_at
+                          FROM google_event_links WHERE user_id = ?`,
+    // A Google connection awaiting your choice of calendar (expires in minutes),
+    // credentials left out for the same reason as googleCalendar's.
+    googlePendingConnections: `SELECT id, google_account_email, access_token_expires_at, created_at, expires_at
+                               FROM google_pending_connections WHERE user_id = ?`,
+    // Entries written to your Google calendar whose link could not be recorded,
+    // kept so they can be found and removed. No credential in the table.
+    googleOrphanedEntries: `SELECT * FROM google_orphaned_inserts WHERE user_id = ?`,
+
+    // Pass-11 review (F-21 / R13), found by both reviewers. Everything below
+    // was held about the caller and left out of the download, against a policy
+    // that says it "returns everything the service holds about you" -- and
+    // which discloses several of these categories by name earlier in the same
+    // document, so this was more than loose wording.
+    //
+    // The same discipline as googleCalendar above applies throughout: columns
+    // are listed explicitly on any table that could grow a credential-shaped
+    // one, and `SELECT *` is used only where the whole row is the person's own
+    // content.
+    //
+    // Session *metadata*, not session credentials: a row here says when you
+    // signed in, when it was last used and when it expires. There is nothing
+    // to authenticate with -- the id is meaningless without a JWT signed by a
+    // key that is never exported -- but the policy discloses that these rows
+    // exist, so their subject can see them.
+    //
+    // Pass-14 review (F-41). Refresh rotates a session (F-20) and retains the
+    // predecessor until it expires, so that reuse of a replaced token can be
+    // detected (0041/0042). The projection predated rotation and carried
+    // nothing to tell a retired row from a live one -- so a single login that
+    // had been open a week came back as dozens of identical-looking rows, read
+    // against a policy sentence promising "your active login sessions". They
+    // ARE all held, so filtering them out would be the wrong correction; what
+    // was missing is the two columns that say which is which.
+    //
+    // superseded_at: null on the session you are actually using, set on every
+    // predecessor it rotated out of. family_id: the login that started the
+    // chain, so one login's rotations group together instead of reading as
+    // separate sign-ins. Both are as inert as the id -- no key, no
+    // credential -- and the privacy page now says the predecessors are kept.
+    //
+    // Pass 24 (D-07): id, successor_id and policy_version too. successor_id
+    // names the row a session was rotated into, which reads as nothing without
+    // the ids it points at; policy_version is which policy you had agreed to
+    // when it was issued.
+    sessions: `SELECT id, created_at, last_used_at, expires_at, revoked_at, superseded_at, family_id,
+                 successor_id, policy_version
+               FROM sessions WHERE user_id = ?`,
+
+    // The free-text `message` on a change request is the person's own writing,
+    // which is exactly the sort of thing an access request is for.
+    changeRequestsFiled: `SELECT * FROM event_change_requests WHERE requester_id = ?`,
+    changeRequestsAboutYou: `SELECT * FROM event_change_requests WHERE target_user_id = ?`,
+    changeRequestsDecided: `SELECT * FROM event_change_requests WHERE decided_by = ?`,
+    changeRequestVotes: `SELECT * FROM event_change_request_votes WHERE user_id = ?`,
+    changeRequestNotifications: `SELECT * FROM change_request_log WHERE user_id = ?`,
+
+    // Both directions: you are the subject of one and the audience of the
+    // other, and both are records about you.
+    rsvpNoticesYouTriggered: `SELECT * FROM organizer_rsvp_notice_log WHERE responder_id = ?`,
+    rsvpNoticesSentToYou: `SELECT * FROM organizer_rsvp_notice_log WHERE organizer_id = ?`,
+
+    groupNudges: `SELECT * FROM group_nudge_log WHERE user_id = ?`,
+    // When the service last checked a group you created for inactivity and
+    // reminded it. The group's state rather than yours, but you created the
+    // group, and it is deleted with your account for that reason (lib/db.ts).
+    groupIdleChecks: `SELECT n.* FROM group_activity_nudges n
+                      JOIN groups g ON g.id = n.group_id WHERE g.created_by = ?`,
+    inactivityWarnings: `SELECT * FROM account_purge_warnings WHERE user_id = ?`,
+    // The 1.0 launch announcement DM (LAUNCH-ONLY, removed in 1.1).
+    launchAnnouncements: `SELECT * FROM announcement_log WHERE user_id = ?`,
+    // Includes the server name the person typed, which is their own input.
+    serverRequests: `SELECT * FROM guild_add_requests WHERE requested_by = ?`,
+
+    // Without these an exported event cannot be reconstructed: a recurring
+    // event's rows say is_recurring = 1 and carry no start time, and its real
+    // schedule lives entirely in these two tables.
+    recurrenceRules: `SELECT r.* FROM event_recurrence_rules r
+                      JOIN events e ON e.id = r.event_id WHERE e.organizer_id = ?`,
+    occurrenceOverrides: `SELECT o.* FROM event_occurrence_overrides o
+                          JOIN events e ON e.id = o.event_id WHERE e.organizer_id = ?`,
+    personalEventOverrides: `SELECT o.* FROM personal_event_overrides o
+                             JOIN personal_events p ON p.id = o.personal_event_id WHERE p.user_id = ?`,
+
+    // Pass-12 review (P12-19). A poll exported without its candidates is the
+    // same gap recurrenceRules closes for a recurring event: organisedEvents
+    // returns a row saying event_type = 'poll' and the candidate nights people
+    // actually voted on -- the content of the poll -- were nowhere in the
+    // download. pollVotes above exports the caller's own votes and references
+    // option ids that appeared in no other table, which made those rows
+    // unreadable on their own terms too.
+    pollCandidates: `SELECT o.* FROM event_poll_options o
+                     JOIN events e ON e.id = o.event_id WHERE e.organizer_id = ?`,
   };
 
   const out: Record<string, unknown> = { exportedAt: new Date().toISOString() };

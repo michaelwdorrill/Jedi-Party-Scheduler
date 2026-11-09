@@ -1,5 +1,6 @@
 import type { Env } from '../env';
 import { sendBotDm } from './discord';
+import type { DmAttachment } from './launchAnnouncement';
 import { newId } from './ids';
 
 // A leased delivery outbox for bot DMs.
@@ -119,7 +120,11 @@ export type OutboxTable =
   | 'group_nudge_log'
   | 'change_request_log'
   | 'account_purge_warnings'
-  | 'organizer_rsvp_notice_log';
+  | 'organizer_rsvp_notice_log'
+  // The 1.0 launch announcement (migration 0049). LAUNCH-ONLY, removed in
+  // 1.1. Not reaped either, for the reason the two above give: its own sweep
+  // stops retrying a row at MAX_DELIVERY_ATTEMPTS, which is all reaping adds.
+  | 'announcement_log';
 
 // The outbox tables that carry a message's components and the id of the
 // message they were sent on (migrations 0022 and 0023). Deliberately one
@@ -260,6 +265,8 @@ export async function deliverThroughOutbox(
   // retry cannot re-derive them, and an options poll's select lists the
   // candidates *as they were* when the DM was written.
   components?: unknown[] | null,
+  // A file to send with it -- only the launch announcement's picture.
+  attachment?: DmAttachment | null,
 ): Promise<boolean> {
   if (!recipient.notifications_enabled) return false;
 
@@ -302,6 +309,7 @@ export async function deliverThroughOutbox(
     content,
     recipient.dm_channel_id,
     components,
+    attachment,
   );
   if (channelId && channelId !== recipient.dm_channel_id) {
     await env.DB.prepare(`UPDATE users SET dm_channel_id = ? WHERE id = ?`).bind(channelId, recipient.id).run();

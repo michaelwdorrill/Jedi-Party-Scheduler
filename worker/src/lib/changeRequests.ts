@@ -1,5 +1,5 @@
 import type { Env } from '../env';
-import type { EventRow } from './events';
+import { writeOccurrenceMove, type EventRow } from './events';
 import { requireActiveGuildMember } from './db';
 import { chunkIds, placeholders, queryInChunks } from './d1';
 import { addInvitesToEvent, updateEvent } from './eventWrites';
@@ -87,6 +87,9 @@ export interface ChangeRequestView {
   // Advisory only -- see "Staleness" in the spec. Never computed for a
   // recurring time_change, whose accept path doesn't consult events.revision.
   stale: boolean;
+  // A pending time change whose occurrence the organizer has cancelled since:
+  // it can only be declined (P24-01), so the page says so up front.
+  dateCancelled: boolean;
 }
 
 export async function loadChangeRequest(env: Env, eventId: string, requestId: string): Promise<ChangeRequestRow | null> {
@@ -181,11 +184,31 @@ export async function createChangeRequest(
 
   const id = newId();
   const now = Date.now();
+  // A sole invitee's time change waits for the organizer -- decided 22 Oct
+  // 2026, reversing the spec's original call.
+  //
+  // Spec 0003 said: if the requester is the only invitee, the threshold is 1,
+  // their own implicit yes meets it, and the request applies the instant it is
+  // filed -- "there's no one else to ask". There is: the organizer. Found on
+  // the first browser walkthrough, where the alt moved Michael's event before
+  // he saw a request at all. With one invitee, "the invitees agree" and "this
+  // one person wants it" are the same statement, so majority voting decides
+  // nothing and only removes the organizer's say.
+  //
+  // So no threshold and no deadline: the request waits for Accept or Decline,
+  // exactly as an add_invitee request already does. tryAutoResolve returns on
+  // a NULL threshold and the deadline sweep selects on vote_deadline_at <= now,
+  // which NULL never satisfies -- so neither can apply it behind the
+  // organizer's back. Frozen at filing like the threshold always was: inviting
+  // someone afterwards does not turn it back into a vote.
+  //
+  // Two or more invitees vote exactly as before.
+  const organizerDecides = isTimeChange && inviteeCount <= 1;
   // Simple majority of the invitee count read above, frozen on the row --
   // see "Who votes, and the threshold" in the spec for why this is
   // system-computed rather than something the requester supplies.
-  const voteThreshold = isTimeChange ? Math.max(1, Math.floor(inviteeCount / 2) + 1) : null;
-  const voteDeadline = isTimeChange ? now + LIMITS.CHANGE_REQUEST_VOTE_WINDOW_MS : null;
+  const voteThreshold = isTimeChange && !organizerDecides ? Math.max(1, Math.floor(inviteeCount / 2) + 1) : null;
+  const voteDeadline = isTimeChange && !organizerDecides ? now + LIMITS.CHANGE_REQUEST_VOTE_WINDOW_MS : null;
 
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
@@ -235,7 +258,9 @@ export async function createChangeRequest(
     throw new ConflictError('This event already has too many open change requests -- resolve or withdraw one first');
   }
 
-  if (isTimeChange) await tryAutoResolve(env, event, id);
+  // Skipped, not merely a no-op, for a request the organizer decides: there is
+  // no threshold for it to read, and it would spend a query to find that out.
+  if (isTimeChange && !organizerDecides) await tryAutoResolve(env, event, id);
 
   return id;
 }
@@ -262,6 +287,19 @@ export async function voteOnChangeRequest(
 ): Promise<void> {
   if (request.kind !== 'time_change') throw new ValidationError('Only a time_change request can be voted on');
   if (request.status !== 'pending') throw new ValidationError('Voting is closed for this request');
+  // The organizer decides a request; they do not vote on it -- the spec's "not
+  // the organizer, who has the override instead", which createChangeRequest
+  // above already enforces for filing. isCurrentInvitee alone stopped being
+  // enough when idea 26 gave every organizer an invite row: their vote then
+  // counted toward a threshold computed WITHOUT them, so with three invitees
+  // (threshold two) the requester's own yes plus the organizer's would carry a
+  // request only one invitee had backed. No privilege was gained -- they can
+  // accept outright -- but the tally invitees see counted someone the spec
+  // excludes. Found on the first browser walkthrough, via the page offering
+  // the organizer vote controls for the same reason.
+  if (event.organizer_id === userId) {
+    throw new ValidationError('The organizer accepts or declines a request rather than voting on it');
+  }
   if (!(await isCurrentInvitee(env, event.id, userId))) {
     throw new ValidationError('Only a current invitee can vote');
   }
@@ -312,20 +350,114 @@ async function applyAndAccept(
   request: ChangeRequestRow,
   decidedBy: string | null,
 ): Promise<void> {
+  // Pass-12 review (P12-18). The decision is claimed BEFORE the event is
+  // touched, not recorded after it.
+  //
+  // acceptChangeRequest's `request.status !== 'pending'` check reads a row the
+  // route loaded earlier, so it is a check against a snapshot. A decline
+  // landing in between passed it anyway: the accept went on to move the event,
+  // and only then ran its `WHERE status = 'pending'` update, which matched
+  // nothing. The stored request read 'declined', complete with the organizer's
+  // decline note, while the schedule had already moved -- and nothing in the
+  // app showed the two disagreeing.
+  //
+  // Claiming first makes 'pending' the thing being competed for, so exactly
+  // one of accept and decline can win it, and the winner is the only one that
+  // gets to act.
+  const claim = await env.DB.prepare(
+    `UPDATE event_change_requests SET status = 'accepted', decided_at = ?, decided_by = ?
+     WHERE id = ? AND status = 'pending'`,
+  )
+    .bind(Date.now(), decidedBy, request.id)
+    .run();
+  if (claim.meta.changes === 0) throw new ConflictError('This request has already been decided');
+
+  try {
+    await applyChangeRequest(env, event, request);
+  } catch (err) {
+    // The claim is released rather than left standing over a change that did
+    // not happen. Without this a stale revision -- which updateEvent below
+    // throws for by design -- would leave a request reading 'accepted' beside
+    // an event that never moved, which is the same class of disagreement this
+    // finding is about, just the other way round.
+    await env.DB.prepare(
+      `UPDATE event_change_requests SET status = 'pending', decided_at = NULL, decided_by = NULL
+       WHERE id = ? AND status = 'accepted'`,
+    )
+      .bind(request.id)
+      .run();
+    throw err;
+  }
+
+  // Pass-16 review (P16-02). OUTSIDE the try, and that placement is the whole
+  // finding. Pass 15 put this write inside it, so a failure to RECORD the
+  // application was handled as a failure OF the application: the compensating
+  // release ran, the request went back to pending over an event that had
+  // already moved, and the next deadline pass declined it on a stale revision
+  // while the schedule kept the new time. Record and effect disagreed, and the
+  // decline was announceable.
+  //
+  // Its own failure is contained instead. What that costs is a row that
+  // applied and does not say so, which the notice gate reads as "not applied
+  // yet" and stays quiet about -- a missing notification rather than a false
+  // one, and no replay. IDEAS item 70 carries what closing it properly needs.
+  try {
+    await env.DB.prepare(`UPDATE event_change_requests SET applied_at = ? WHERE id = ?`)
+      .bind(Date.now(), request.id)
+      .run();
+  } catch (err) {
+    console.warn(
+      `Change request ${request.id} applied but its completion record failed to write, so it will not be ` +
+        `announced until that is reconciled (P16-02): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+async function applyChangeRequest(env: Env, event: EventRow, request: ChangeRequestRow): Promise<void> {
   if (request.kind === 'time_change') {
     if (event.is_recurring) {
       // An occurrence override, not a change to the series -- and, following
       // the existing POST /:eventId/occurrences/:date/cancel endpoint's own
       // precedent, not guarded on events.revision: an occurrence override has
       // never been tracked by that column anywhere in the app.
-      await env.DB.prepare(
-        `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled, override_start_at, override_end_at)
-         VALUES (?, ?, ?, 0, ?, ?)
-         ON CONFLICT(event_id, occurrence_date) DO UPDATE SET
-           is_cancelled = 0, override_start_at = excluded.override_start_at, override_end_at = excluded.override_end_at`,
-      )
-        .bind(newId(), event.id, request.occurrence_date, request.proposed_start_at, request.proposed_end_at)
-        .run();
+      // Pass-15 review (P15-06). Admission travels inside the write rather
+      // than sitting in front of it, so it costs no extra query -- the accept
+      // path's price is measured against the Free-plan ceiling (P13-05) and
+      // must not move -- and so two concurrent acceptances cannot both pass a
+      // preflight that neither of them then honours (the P13-10 lesson).
+      //
+      // The statement itself now lives in lib/events.ts as writeOccurrenceMove,
+      // shared with the organizer's own move (IDEAS 94). Unlike the organizer's
+      // move it never un-cancels a date (Pass 24, P24-01): a request filed
+      // before the organizer cancelled the date is not a request to undo that.
+      const written = await writeOccurrenceMove(
+        env,
+        event.id,
+        request.occurrence_date,
+        request.proposed_start_at!,
+        request.proposed_end_at!,
+        { restoreCancelled: false },
+      );
+      // Keeping acceptance honest when the write changed nothing, the same way
+      // P14-11 made it honest when the invite could not be added: a request
+      // that changed nothing must not be reported as accepted. ConflictError
+      // releases the claim; the deadline sweep then declines, and a threshold
+      // vote leaves it for the organizer or the sweep. The read below is on
+      // this refusal path only, to say which of the two refusals it was -- the
+      // accept path's own price is unchanged.
+      if (!written) {
+        const cancelled = await env.DB.prepare(
+          `SELECT 1 FROM event_occurrence_overrides WHERE event_id = ? AND occurrence_date = ? AND is_cancelled = 1`,
+        )
+          .bind(event.id, request.occurrence_date)
+          .first();
+        if (cancelled) {
+          throw new ConflictError('That date has been cancelled, so this request can no longer be accepted');
+        }
+        throw new ConflictError(
+          `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`,
+        );
+      }
     } else {
       // The same call PATCH /events/:eventId makes. `revision` is the
       // request's captured event_revision, not a fresh read -- if the event
@@ -354,19 +486,32 @@ async function applyAndAccept(
     if ((countRow?.n ?? 0) >= LIMITS.MAX_INVITEES) {
       throw new ValidationError('This event has reached its limit of invitees');
     }
-    await addInvitesToEvent(env, event.id, event.guild_id, [request.target_user_id!], []);
+    // The organizer is the actor: accepting a request is their decision, and
+    // this path passes no group ids anyway.
+    //
+    // Pass-14 review (P14-11 / F-40). notAdded is read rather than discarded.
+    // P13-09 gave addInvitesToEvent an honest answer about who the capacity
+    // guard actually admitted and taught the additive route to surface it;
+    // this caller kept ignoring it. So two organizer accepts racing at the
+    // cap both returned 200 and both requests committed as accepted while
+    // only one person was invited -- a decision recorded for an effect that
+    // never happened.
+    //
+    // ConflictError rather than a silent partial: it travels the release path
+    // applyAndAccept already has, so the claim goes back to pending and the
+    // request stays actionable instead of being closed over nothing.
+    const { notAdded } = await addInvitesToEvent(
+      env,
+      event.id,
+      event.guild_id,
+      [request.target_user_id!],
+      [],
+      event.organizer_id,
+    );
+    if (notAdded.length > 0) {
+      throw new ConflictError('This event filled up before the request could be accepted');
+    }
   }
-
-  // Best-effort bookkeeping, not a joint transaction with the write above --
-  // the write's own guard (updateEvent's revision check, or the fact that
-  // only one accept path is ever reached per request) is what actually
-  // prevents a double-apply. This step only has to avoid double-recording
-  // it, via the ordinary status='pending' compare-and-set.
-  await env.DB.prepare(
-    `UPDATE event_change_requests SET status = 'accepted', decided_at = ?, decided_by = ? WHERE id = ? AND status = 'pending'`,
-  )
-    .bind(Date.now(), decidedBy, request.id)
-    .run();
 }
 
 export async function acceptChangeRequest(
@@ -494,6 +639,24 @@ export async function listChangeRequests(
     getMyVotesFor(env, timeChangeIds, viewerId),
   ]);
 
+  // Walkthrough 3.22 (10 Nov 2026): a pending request for a date the organizer
+  // has since cancelled offered a plain Accept, and the page gave no sign the
+  // date was gone until Accept was refused (P24-01). One read, and only for a
+  // series with open time changes.
+  const pendingDates = [
+    ...new Set(rows.filter((r) => r.kind === 'time_change' && r.status === 'pending').map((r) => r.occurrence_date)),
+  ].filter((d) => d !== '');
+  const cancelledDates = new Set<string>();
+  if (event.is_recurring && pendingDates.length > 0) {
+    const { results: cancelled } = await env.DB.prepare(
+      `SELECT occurrence_date FROM event_occurrence_overrides
+       WHERE event_id = ? AND is_cancelled = 1 AND occurrence_date IN (${pendingDates.map(() => '?').join(', ')})`,
+    )
+      .bind(event.id, ...pendingDates)
+      .all<{ occurrence_date: string }>();
+    for (const row of cancelled) cancelledDates.add(row.occurrence_date);
+  }
+
   return rows.map((r) => ({
     id: r.id,
     kind: r.kind,
@@ -518,6 +681,7 @@ export async function listChangeRequests(
     decidedAt: r.decided_at,
     decidedBy: r.decided_by,
     stale: r.kind === 'time_change' && !event.is_recurring && (event.revision ?? 0) !== r.event_revision,
+    dateCancelled: r.kind === 'time_change' && r.status === 'pending' && cancelledDates.has(r.occurrence_date),
   }));
 }
 
@@ -527,7 +691,41 @@ export interface WorkBudget {
   trySpend(queries: number): boolean;
 }
 
-const RESOLUTION_COST_PER_REQUEST = 3;
+// Pass-13 review (P13-05). Priced per branch rather than as one flat number,
+// because the branches differ by a factor of five and the flat number was the
+// cheap one.
+//
+// The old constant was 3. What an accepted, date-moving one-off actually
+// costs: the tally, the event lookup, the acceptance claim P12-18 added, and
+// updateEvent's own batch -- the event row, its attendance rows and its
+// recurrence rule, three statements. Six, charged as three. Six such requests
+// in one tick measured 65 real D1 statements against Cloudflare's documented
+// Free-plan ceiling of 50, with the ledger reporting itself comfortably
+// inside. P12-18's claim made an existing undercount worse by exactly one.
+//
+// Discovery is what every request pays before its branch is known.
+const DISCOVERY_COST_PER_REQUEST = 2;
+
+// Claim, updateEvent's three-statement batch, the compensating release, and
+// (Pass-15 review, P15-08) the applied_at stamp.
+// The release is reserved up front deliberately (P13-11): it is the statement
+// that undoes a claim whose apply failed, and a release that cannot be paid
+// for is how a request ends up permanently 'accepted' over an event that
+// never moved.
+//
+// The sixth query is the stamp, and it is priced rather than absorbed: this
+// pass's own P15-06 declined to add a query to this path for exactly this
+// reason, and the difference is that the stamp is what makes the failure this
+// number exists to prevent RECOVERABLE rather than merely less likely. Six
+// healthy decisions reserve 48 against the Free plan's 50, which is the
+// tightest this tick has ever been -- if it needs to grow again, the per-tick
+// cap comes down first.
+const ACCEPT_COST_PER_REQUEST = 6;
+
+
+
+// The decline path is a single compare-and-set.
+const DECLINE_COST_PER_REQUEST = 1;
 const MAX_CHANGE_REQUESTS_RESOLVED_PER_INVOCATION = 25;
 const CHANGE_REQUEST_RESOLUTION_DEAD_LETTER_AFTER = 3;
 
@@ -537,6 +735,21 @@ const CHANGE_REQUEST_RESOLUTION_DEAD_LETTER_AFTER = 3;
 // the page ahead of healthy ones, bounded per invocation, per-row try/catch.
 export async function resolvePastDeadlineChangeRequests(env: Env, budget?: WorkBudget): Promise<string[]> {
   const now = Date.now();
+  // Pass-16 review (P16-01): this selects pending rows and ONLY pending rows.
+  //
+  // Pass 15 added a second disjunct for accepted rows with no `applied_at` and
+  // re-ran their effects. That was wrong, and the way it was wrong belongs in
+  // front of whoever reads this next: replaying an effect is not idempotent
+  // against a world that has since changed its mind. An `add_invitee`
+  // acceptance replayed after the organizer removed that person re-admitted
+  // them -- to an event whose title and description had been edited in the
+  // meantime, so it handed back access the organizer had deliberately revoked.
+  // A recurring `time_change` replayed after the organizer cancelled that
+  // occurrence set `is_cancelled` back to 0.
+  //
+  // "Re-applying an identical change is a no-op" was true and beside the
+  // point. The test written for it proved idempotence against an UNCHANGED
+  // world, and that was read as safety.
   const { results: requests } = await env.DB.prepare(
     `SELECT * FROM event_change_requests
      WHERE status = 'pending' AND kind = 'time_change' AND vote_deadline_at <= ?
@@ -548,7 +761,7 @@ export async function resolvePastDeadlineChangeRequests(env: Env, budget?: WorkB
 
   const resolvedIds: string[] = [];
   for (const request of requests) {
-    if (budget && !budget.trySpend(RESOLUTION_COST_PER_REQUEST)) break;
+    if (budget && !budget.trySpend(DISCOVERY_COST_PER_REQUEST)) break;
     try {
       const tally = await getVoteTally(env, request.id);
       let accepted = tally.yes > tally.no;
@@ -556,6 +769,11 @@ export async function resolvePastDeadlineChangeRequests(env: Env, budget?: WorkB
       if (accepted) {
         const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(request.event_id).first<EventRow>();
         if (event) {
+          // Reserved in full before the claim, never part-way through it. A
+          // tick that cannot afford the whole acceptance leaves the request
+          // pending for the next one, which is a state the resolver already
+          // handles -- unlike a claim it could not finish (P13-11).
+          if (budget && !budget.trySpend(ACCEPT_COST_PER_REQUEST)) break;
           try {
             await applyAndAccept(env, event, request, null);
           } catch (err) {
@@ -570,6 +788,7 @@ export async function resolvePastDeadlineChangeRequests(env: Env, budget?: WorkB
       }
 
       if (!accepted) {
+        if (budget && !budget.trySpend(DECLINE_COST_PER_REQUEST)) break;
         await env.DB.prepare(
           `UPDATE event_change_requests SET status = 'declined', decided_at = ? WHERE id = ? AND status = 'pending'`,
         )

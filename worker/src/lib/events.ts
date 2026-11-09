@@ -1,5 +1,7 @@
 import type { Env } from '../env';
 import { chunkIds, placeholders } from './d1';
+import { newId } from './ids';
+import { LIMITS } from './validate';
 
 export interface EventRow {
   id: string;
@@ -29,6 +31,9 @@ export interface EventRow {
   window_end_at: number | null;
   window_block_minutes: number | null;
   is_recurring: number;
+  // specs/0007. Optional because narrower SELECTs and older test fixtures
+  // don't carry it; absent is read as visible, matching the column default.
+  is_private?: number;
   voice_channel_id: string | null;
   voice_channel_name: string | null;
   created_at: number;
@@ -215,8 +220,24 @@ export async function loadConfirmedOptionsForEvents(
   const map = new Map<string, ConfirmedPollOptionRow[]>();
   for (const chunk of chunkIds(eventIds)) {
     const { results } = await env.DB.prepare(
-      `SELECT id, event_id, start_at, end_at FROM event_poll_options
-       WHERE event_id IN (${placeholders(chunk.length)}) AND confirmed_at IS NOT NULL`,
+      // Pass-22 acceptance review (RG-06). A confirmed option is the
+      // commitment only until its child event exists; after fanout the child
+      // is, and reading both means one agreement shows up twice.
+      //
+      // The consequence was not cosmetic. Moving the materialized session left
+      // the OLD parent time still on the calendar beside the new one, and
+      // declining the child left the historical yes-vote making the old slot
+      // busy -- so the projection disagreed with the event the person had
+      // actually answered. `created_from_option_id` (migration 0027) is the
+      // handover, and the fanout itself already uses this exact NOT EXISTS to
+      // avoid materializing twice; this is the reading half of the same rule.
+      //
+      // A CANCELLED child still satisfies this, deliberately: the row exists,
+      // so the parent stays excluded and cancelling cannot resurrect the
+      // historical commitment.
+      `SELECT id, event_id, start_at, end_at FROM event_poll_options o
+       WHERE event_id IN (${placeholders(chunk.length)}) AND confirmed_at IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM events c WHERE c.created_from_option_id = o.id)`,
     )
       .bind(...chunk)
       .all<ConfirmedPollOptionRow>();
@@ -226,4 +247,96 @@ export async function loadConfirmedOptionsForEvents(
     }
   }
   return map;
+}
+
+// Pass-15 review (P15-06). The per-event override cap was enforced by exactly
+// one of its four writers -- the website's occurrence-cancel route -- while
+// accepted change requests, the Discord cancel button and the automatic
+// minimum-attendees cancellation all wrote the table unguarded. An accepted
+// request also stops counting against the open-request quota the moment it is
+// accepted, so that quota bounds nothing here: 501 sequential requests, each
+// moving a different real day of a series by an hour, produce 501 stored
+// overrides through ordinary authenticated routes with no race and no
+// injected failure. Every calendar expansion loads the whole override set, so
+// the cost is paid by every viewer, forever.
+//
+// Two things this clause gets right that a COUNT(*) preflight does not:
+//
+// 1. It is part of the write, not a check before it (the P13-10 lesson --
+//    a cap enforced only in a preflight is a cap two concurrent writers walk
+//    straight through).
+// 2. An existing key is an UPDATE, not an addition, so it is admitted at
+//    capacity. Cancelling an occurrence you had already moved consumes no new
+//    storage, and refusing it would strand people at the cap with no way to
+//    change what is already there.
+//
+// Expressed as SQL rather than a helper because it has to travel inside each
+// writer's own statement -- and because adding a query to the accept path
+// would move the pricing P13-05 measured against the Free-plan ceiling.
+// Callers bind, in this order: event_id, occurrence_date, event_id.
+//
+// That order is written down twice because it was written down WRONG the first
+// time (Pass-16 review): this comment said occurrence_date first while the
+// predicate below reads event_id first. No caller was affected -- all three
+// bind correctly -- but the Pass-15 brief called this fragment the most
+// dangerous thing in the pass and then documented its contract incorrectly,
+// which is the kind of error that makes the fourth caller wrong.
+export const OVERRIDE_ADMISSION_SQL = `(
+  EXISTS (SELECT 1 FROM event_occurrence_overrides WHERE event_id = ? AND occurrence_date = ?)
+  OR (SELECT COUNT(*) FROM event_occurrence_overrides WHERE event_id = ?) < ${LIMITS.MAX_OVERRIDES_PER_EVENT}
+)`;
+
+// The one write that moves a single occurrence of a recurring series to a new
+// time. Shared by an accepted invitee change request and, since IDEAS 94, the
+// organizer's own POST /:eventId/occurrences/:date/move -- so there is one way
+// an occurrence moves rather than two that can drift apart. It is the accept
+// path's statement moved here unchanged, so that path's behaviour is exactly
+// what it was.
+//
+// Three consequences, each checked against the code rather than assumed:
+//
+// - For the ORGANIZER, moving an occurrence that was cancelled RESTORES it at
+//   the new time (is_cancelled = 0) -- they are asking for it back. This is the
+//   only write in the app that un-cancels an occurrence.
+// - For an ACCEPTED CHANGE REQUEST it does not (`restoreCancelled: false`), and
+//   the write changes nothing. Pass 24 review, P24-01: an invitee asks to move a
+//   date, the organizer then cancels it, and the request is accepted anyway --
+//   by the organizer pressing Accept on a page that gave no sign the date was
+//   off, by votes crossing the threshold, or by the 72-hour deadline sweep with
+//   nobody deciding at all. Each put the date back on, and the organizer who
+//   cancelled it was not told. This comment used to call the restore "the same
+//   reading an accepted request has always had"; a request filed before the
+//   cancellation is not a request to undo it. The refusal is a WHERE on the
+//   conflict update, so it costs no extra query on the accept path (P13-05).
+// - Answers already given carry over. event_attendance is keyed on the
+//   occurrence's nominal date (recurrence.ts: ExpandedOccurrence.date is
+//   pre-override), and a move never changes that key.
+// - Nothing is sent. Per-occurrence changes to a series are deliberately
+//   silent -- see the cancellation notice's comment in cron/reminders.ts and
+//   IDEAS 54 -- and every reminder reads the moved time, because the cron
+//   expands occurrences with their overrides applied.
+//
+// Admission travels inside the statement (OVERRIDE_ADMISSION_SQL above), so a
+// move of an already-changed date is admitted at the cap. Resolves false when
+// admission refused it, or (restoreCancelled false) the date is cancelled; each
+// caller turns that into its own error.
+export async function writeOccurrenceMove(
+  env: Env,
+  eventId: string,
+  occurrenceDate: string,
+  startAt: number,
+  endAt: number,
+  { restoreCancelled }: { restoreCancelled: boolean },
+): Promise<boolean> {
+  const written = await env.DB.prepare(
+    `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled, override_start_at, override_end_at)
+     SELECT ?, ?, ?, 0, ?, ?
+     WHERE ${OVERRIDE_ADMISSION_SQL}
+     ON CONFLICT(event_id, occurrence_date) DO UPDATE SET
+       is_cancelled = 0, override_start_at = excluded.override_start_at, override_end_at = excluded.override_end_at
+     ${restoreCancelled ? '' : 'WHERE event_occurrence_overrides.is_cancelled = 0'}`,
+  )
+    .bind(newId(), eventId, occurrenceDate, startAt, endAt, eventId, occurrenceDate, eventId)
+    .run();
+  return written.meta.changes > 0;
 }

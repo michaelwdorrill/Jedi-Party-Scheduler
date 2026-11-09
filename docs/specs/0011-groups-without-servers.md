@@ -1,8 +1,17 @@
 # 0011 — Groups without servers
 
-**Status:** Draft
+**Status:** Built — v0.7.2
 **Covers:** `IDEAS.md` item 36, and item 34 (which it subsumes)
-**Phase:** TBD — after v0.5
+**Phase:** — (unphased; built in the v0.7.2 pass)
+
+> Status corrected Sept 2026. This said "Draft / Phase TBD" for two releases
+> after it shipped. Worth noting what the drift cost: "are we ready for 1.0"
+> could not be answered from `specs/` alone, which is the same failure item 29
+> closed for `IDEAS.md` and nobody thought to check for here. The build also
+> answered a fifth question this document never asked — what replaces the
+> guild-membership half of a group route's access check once groups have no
+> guild — and the answer (group membership alone is enough) lives in item 36's
+> `IDEAS.md` entry rather than below.
 
 ## The change in one sentence
 

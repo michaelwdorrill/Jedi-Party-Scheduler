@@ -31,14 +31,51 @@ DISCORD_PUBLIC_KEY = "ce60fa5ba939ad3e1b22e6386752725ce94da9adacebf9b223c220165b
 # one var this project's sandbox/production parity guardrail
 # (scripts/check-env-parity.mjs) is EXPECTED to report differently between
 # the two environments once flipped -- see env.sandbox.vars' copy for why.
-EMAIL_MODE = "stub"
+#
+# Live in production from 1.0 (Michael, 9 Nov 2026, policy decision F4):
+# Resend account in us-east-1, uncleowen.space verified with DKIM/SPF on its
+# own subdomains (send, rsend, resend._domainkey) -- the root domain's
+# Namecheap email forwarding is untouched. RESEND_API_KEY is a secret.
+EMAIL_MODE = "live"
 # Where the one email this app sends (a pending guild-add request) goes, and
 # which Resend-verified address it comes from. Neither is a secret -- see
 # docs/SETUP.md for the one-time Resend/DNS setup both depend on. Left blank
 # until that setup happens; lib/email.ts refuses to send (loudly, not
 # silently) if EMAIL_MODE is "live" but either is still empty.
-OWNER_EMAIL_ADDRESS = ""
-EMAIL_FROM_ADDRESS = ""
+OWNER_EMAIL_ADDRESS = "JediParty@proton.me"
+# Display-name form, which Resend accepts: the inbox shows "Uncle Owen".
+# bot@ needs no mailbox, only to be on the verified domain.
+EMAIL_FROM_ADDRESS = "Uncle Owen <bot@uncleowen.space>"
+# specs/0017 / IDEAS item 2: "live" turns Google Calendar sync on; anything
+# else leaves the /google routes answering 503 and the sweep returning
+# immediately. Ships "off" here for the same reason EMAIL_MODE ships "stub" --
+# the code is complete but the Google Cloud project, OAuth client and
+# GOOGLE_TOKEN_ENCRYPTION_KEY secret are a one-time manual provisioning step
+# (docs/SETUP.md section 7).
+#
+# Like EMAIL_MODE, this is a var check:env-parity is EXPECTED to eventually
+# report differently between the two environments: the sandbox should be
+# switched to "live" first, verified, and only then production -- which is the
+# sandbox-first rule applied to a config flag rather than to code.
+#
+# Live in production from 1.0 (Michael, 9 Nov 2026), after running live on the
+# sandbox since 0.8.1. Production has its own Google Cloud project ("Uncle
+# Owen"), separate from the sandbox's so the 100-user lifetime cap and the
+# publishing status are its own. It is published "In production" -- unverified,
+# warning screen accepted (IDEAS 64) -- and NOT Testing, which would expire
+# every connection after 7 days. Its client secret and token key are secrets.
+GOOGLE_SYNC_MODE = "live"
+# The Google OAuth client id. Not a secret (it appears in the authorize URL
+# every user's browser sees), same as DISCORD_CLIENT_ID above. The matching
+# GOOGLE_CLIENT_SECRET and GOOGLE_TOKEN_ENCRYPTION_KEY are set with
+# `wrangler secret put` and never committed. Blank until provisioned;
+# isGoogleConfigured() treats blank as "off" rather than erroring.
+#
+# Production needs its OWN client, not the sandbox's: a redirect URI is
+# registered per client, so the sandbox's would refuse to send anyone back to
+# the production Worker. This is production's own client, "Uncle Owen
+# Production", whose one redirect URI is this Worker's /google/callback.
+GOOGLE_CLIENT_ID = "767835704577-51fbld55v5oh4vsl2kpgqbmabeohk4f6.apps.googleusercontent.com"
 # Which Cloudflare plan this Worker runs on: "free" or "paid". Free and Paid
 # differ by more than an order of magnitude in D1 queries and outbound
 # subrequests allowed per invocation, and the 15-minute cron sizes its own
@@ -46,6 +83,29 @@ EMAIL_FROM_ADDRESS = ""
 # the account is actually on Workers Paid -- overstating it means the sweep
 # gets killed by the platform mid-send instead of deferring cleanly.
 WORKERS_PLAN = "free"
+# The 1.0 launch announcement (lib/launchAnnouncement.ts): one DM with the
+# "We've hit 1.0!" picture to everyone, and a one-time pop-up. LAUNCH-ONLY --
+# 1.1 removes this var and the code behind it (docs/IDEAS.md item 105).
+LAUNCH_ANNOUNCEMENT = "1.0"
+
+# Workers Logs (policy decision F8, 9 Nov 2026): kept, disclosed in the Privacy
+# Policy, and stated here so the code decides it rather than a dashboard toggle
+# that could change without anyone noticing -- the policy says how long
+# Cloudflare keeps these lines (3 days on Free; IDEAS 106), and that has to
+# stay true. What production logs: Discord user and server IDs and error
+# details, including fragments of Google's or Resend's error text; never
+# event titles, descriptions or DM text. Usernames and server names reach a
+# log only through the email stub (lib/email.ts), which production doesn't run.
+[observability]
+enabled = true
+
+# Only the app's own log lines are kept, not the per-invocation entry Workers
+# Logs would otherwise add (URL, network details and so on): the policy describes
+# what the stored logs contain, and the app's own lines are the part this
+# codebase controls and can state truthfully. `wrangler tail` still shows
+# everything live.
+[observability.logs]
+invocation_logs = false
 
 [[d1_databases]]
 binding = "DB"
@@ -61,6 +121,11 @@ migrations_dir = "migrations"
 # Runs the reminder/poll-resolution sweep every 15 minutes.
 [triggers]
 crons = ["*/15 * * * *"]
+
+# Item 92's bound on the three OAuth callbacks is counted in D1 (migration
+# 0048, src/lib/rateLimit.ts), not by a Cloudflare rate-limiting binding: the
+# binding that used to be declared here never refused a request in the
+# sandbox, so it was removed rather than left looking like protection.
 
 # A second, isolated deployment to build and test against instead of building
 # directly in prod (docs/specs/0002-sandbox-and-promotion.md). Same Cloudflare
@@ -99,6 +164,10 @@ DISCORD_PUBLIC_KEY = "581ea9d6fbb92b712da44102493097cb80113f52297d3eb77a0d24fbbc
 # sandbox is to exercise the cron's budget logic (src/cron/budget.ts) under
 # the same ceiling prod runs under, not a more generous one.
 WORKERS_PLAN = "free"
+# The 1.0 launch announcement (lib/launchAnnouncement.ts): one DM with the
+# "We've hit 1.0!" picture to everyone, and a one-time pop-up. LAUNCH-ONLY --
+# 1.1 removes this var and the code behind it (docs/IDEAS.md item 105).
+LAUNCH_ANNOUNCEMENT = "1.0"
 # specs/0015: deliberately "stub" here, not just for now like production's
 # but *permanently* -- this flow's only real recipient is Michael's own
 # inbox, and live-sending it from the sandbox during routine iteration would
@@ -107,6 +176,19 @@ WORKERS_PLAN = "free"
 EMAIL_MODE = "stub"
 OWNER_EMAIL_ADDRESS = ""
 EMAIL_FROM_ADDRESS = ""
+# specs/0017. Unlike EMAIL_MODE -- which is permanently "stub" here because its
+# only real recipient is Michael's own inbox -- this one is expected to go
+# "live" on the sandbox *first*, and stay ahead of production for as long as it
+# takes to verify a real Google round trip. That is the sandbox-first rule
+# doing its job: a second Google Cloud OAuth client, pointed at the sandbox
+# Worker's own /google/callback, with a throwaway Google account behind it.
+GOOGLE_SYNC_MODE = "live"
+# The *sandbox* Google OAuth client id -- deliberately not production's, for
+# the same reason DISCORD_PUBLIC_KEY above is per-application: the redirect URI
+# is registered per client, and production's would refuse to redirect back to
+# the sandbox Worker. check:env-parity only proves the key exists in both
+# blocks; that they hold different values is on whoever fills them in.
+GOOGLE_CLIENT_ID = "975267822402-hunqti72352i6u1e7hn2cpp88lv9n25a.apps.googleusercontent.com"
 
 [[env.sandbox.d1_databases]]
 binding = "DB"
@@ -125,3 +207,11 @@ migrations_dir = "migrations"
 # wrong half of the app.
 [env.sandbox.triggers]
 crons = ["*/15 * * * *"]
+
+# Same as production's [observability] above (F8), stated per environment so
+# neither depends on whether wrangler inherits it.
+[env.sandbox.observability]
+enabled = true
+
+[env.sandbox.observability.logs]
+invocation_logs = false

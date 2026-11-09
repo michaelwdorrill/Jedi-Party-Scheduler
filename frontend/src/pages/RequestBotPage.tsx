@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { API_BASE_URL } from '../api/client';
-import { Button, Card, PageHeader } from '../components/ui';
+import { Button, Card, PageHeader, buttonClass } from '../components/ui';
 
 // IDEAS item 9 / docs/specs/0015: self-service "add this bot to your server"
 // requests, gated by owner approval. Deliberately outside AuthGuard (see
@@ -16,6 +16,10 @@ interface Candidate {
   guildName: string;
   token?: string;
   alreadyAdded?: boolean;
+  // Allow-listed, but the bot isn't actually in it (IDEAS 102): already
+  // approved, so this is a direct invite rather than a new request.
+  botMissing?: boolean;
+  botInviteUrl?: string;
 }
 
 // The Worker's /guild-requests/callback hands this page a base64'd JSON
@@ -123,6 +127,13 @@ export default function RequestBotPage() {
                 <span className={c.alreadyAdded ? 'text-faint' : undefined}>{c.guildName}</span>
                 {c.alreadyAdded ? (
                   <span className="text-sm text-faint">Already added</span>
+                ) : c.botMissing && c.botInviteUrl ? (
+                  <span className="flex items-center gap-2">
+                    <span className="text-sm text-muted">The bot isn't in this server</span>
+                    <a href={c.botInviteUrl} className={buttonClass('primary', 'sm')}>
+                      Add it back
+                    </a>
+                  </span>
                 ) : (
                   <Button size="sm" disabled={submitting === c.guildId} onClick={() => void submitRequest(c)}>
                     {submitting === c.guildId ? 'Requesting…' : 'Request'}

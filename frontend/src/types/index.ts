@@ -13,11 +13,43 @@ export interface User {
   // exactly the drift this avoids having at all.
   policyVersion: number;
   acceptedPolicyVersion: number;
+  // The 1.0 launch pop-up (LAUNCH-ONLY, removed in 1.1): the id of the
+  // announcement this account hasn't been shown yet, or null.
+  unseenAnnouncement: string | null;
 }
 
 export interface Guild {
   id: string;
   name: string;
+}
+
+// IDEAS item 2 / docs/specs/0017. `configured` is about the deployment, not
+// the person: it is false when the operator hasn't provisioned Google yet, and
+// the Settings card hides itself entirely rather than offering a button that
+// can only 503.
+export interface GoogleCalendarStatus {
+  configured: boolean;
+  connected: boolean;
+  accountEmail?: string | null;
+  calendarId?: string;
+  // The single calendar we may READ, distinct from calendarId (where we
+  // write). null means reading is off, which is the default for everyone —
+  // connecting to push never starts a pull.
+  readCalendarId?: string | null;
+  syncEnabled?: boolean;
+  // 'disconnecting' while the cron removes the entries already written, before
+  // the credential is revoked and the connection dropped.
+  status?: 'active' | 'disconnecting';
+  lastSyncedAt?: number | null;
+  // Why sync stopped, shown to the user because "it silently stopped working"
+  // is this feature's most likely failure.
+  lastError?: string | null;
+}
+
+export interface GoogleCalendarOption {
+  id: string;
+  summary: string;
+  primary: boolean;
 }
 
 export interface CommonServer {
@@ -103,6 +135,11 @@ export interface PollOption {
   voters: PollVoter[];
   tally: { yes: number; no: number; maybe: number };
   myVote: PollVote | null;
+  // IDEAS 97: a confirmed multi-winner day becomes its own event, which is
+  // where it is answered and counted from then on. sessionStatus 'cancelled'
+  // means it was called off for dropping below the poll's threshold.
+  sessionEventId: string | null;
+  sessionStatus: EventStatus | null;
 }
 
 export interface WindowSubmission {
@@ -146,6 +183,38 @@ export interface EventInvite {
 }
 
 // A single occurrence as returned by GET /guilds/:guildId/events?from=&to=
+// specs/0007: whether this event is kept off its server's noticeboard.
+// Absent/false means visible to the server, which is the default for events
+// created after v0.8.1 — every event that predates it was backfilled private.
+export interface NoticeboardAttendee {
+  userId: string;
+  username: string;
+  globalName: string | null;
+  avatarHash: string | null;
+  rsvpStatus: RsvpStatus | null;
+}
+
+// The board plus whether it is the whole answer. `complete: false` means the
+// server's bounded scan stopped with candidates unexamined, so an empty
+// `occurrences` must NOT be rendered as "nothing scheduled" -- that conflation
+// is what hid three separate backend regressions from three reviews.
+export interface NoticeboardResult {
+  occurrences: NoticeboardOccurrence[];
+  complete: boolean;
+}
+
+export interface NoticeboardOccurrence {
+  occurrenceId: string;
+  eventId: string;
+  title: string;
+  game: string | null;
+  startAt: number;
+  endAt: number;
+  isRecurring: boolean;
+  organizerId: string;
+  attendees: NoticeboardAttendee[];
+}
+
 export interface EventOccurrence {
   occurrenceId: string; // `${eventId}::${date}` for recurring, eventId otherwise
   eventId: string;
@@ -187,6 +256,11 @@ export interface PersonalEvent {
   endAt: number | null;
   status: 'active' | 'cancelled';
   availability: PersonalAvailability;
+  // 0.8.1 v2: true for a row cron/googleSync.ts imported from a connected
+  // Google calendar. The worker refuses to PATCH or DELETE one of these
+  // (Google is the source of truth for it) -- this is what lets the UI show
+  // that up front, as a disabled form, rather than as a 409 after the fact.
+  importedFromGoogle: boolean;
   isRecurring: boolean;
   recurrence: RecurrenceRule | null;
 }
@@ -229,6 +303,10 @@ export interface EventDetail extends EventOccurrence {
   windowBlockMinutes: number | null;
   voiceChannelId: string | null;
   voiceChannelName: string | null;
+  // specs/0007: kept off the server's noticeboard. False means visible to the
+  // whole server, which is the default for events created from v0.8.1 onward;
+  // every event predating it was backfilled private by migration 0038.
+  isPrivate: boolean;
   // specs/0014 stage 3, decision 4 / IDEAS item 54. Available on both
   // recurring and non-recurring single events now -- which of the two
   // deadline fields below applies is decided by isRecurring.
@@ -239,6 +317,9 @@ export interface EventDetail extends EventOccurrence {
   recurrence: RecurrenceRule | null;
   invites: EventInvite[];
   pollOptions: PollOption[] | null;
+  // A poll day's own event: the poll it came from, when the viewer can open
+  // it (10 Nov 2026 walkthrough). Null for everything else.
+  createdFromPoll: { id: string; title: string } | null;
 }
 
 // Invitee change requests (docs/specs/0003-event-change-requests.md).
@@ -275,4 +356,7 @@ export interface ChangeRequestView {
   // Advisory: the event has moved since this request was filed. Never true
   // for a recurring time_change, whose accept path doesn't consult it.
   stale: boolean;
+  // A pending time change whose date the organizer has cancelled since; it can
+  // only be declined (P24-01, walkthrough 3.22).
+  dateCancelled: boolean;
 }

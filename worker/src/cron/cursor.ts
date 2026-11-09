@@ -34,7 +34,29 @@ export type CursorName =
   // scanned by next_attempt_at directly, not reached through whatever
   // event/poll/group source query originally created them.
   | 'due_notification_retries'
-  | 'due_nudge_retries';
+  | 'due_nudge_retries'
+  // Pass-11 review (R06). Both arms of sweepMinimumAttendeesDeadlines were
+  // bounded by a LIMIT with no cursor and no ORDER BY -- the same shape
+  // migration 0012 records fixing for the global poll scans, and with the
+  // same consequence: one tick can only afford a dozen or so events, so the
+  // identical prefix was re-examined every tick and everything behind it
+  // never had its deadline resolved at all. Measured before the fix: ten
+  // consecutive ticks reached nine of thirty events, and would never have
+  // reached the other twenty-one.
+  | 'minimum_attendees_single'
+  | 'minimum_attendees_recurring'
+  // Pass-12 review (P12-08). R06 gave the deadline sweep above its cursors and
+  // left its sibling -- the T-24h warning for the same events, same shape --
+  // selecting both its pages with a bare LIMIT and no ORDER BY, so it had the
+  // identical fairness bug forty lines further down the same file. Measured
+  // before this: nineteen of thirty events warned across twelve ticks, with
+  // the other eleven unreachable.
+  | 'minimum_attendees_warning_single'
+  | 'minimum_attendees_warning_recurring'
+  // The 1.0 launch announcement (LAUNCH-ONLY, removed in 1.1): holds the id of
+  // an announcement once everyone it was owed to has been handled, so a
+  // finished announcement costs a tick nothing at all.
+  | 'launch_announcement';
 
 // The single-event scan orders by (start_at, id), so its key is both.
 export interface EventKey {

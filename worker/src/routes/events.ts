@@ -3,15 +3,36 @@ import { DateTime } from 'luxon';
 import type { AppEnv } from '../lib/authMiddleware';
 import type { Env } from '../env';
 import type { EventRow } from '../lib/events';
-import { loadOverridesForEvents } from '../lib/events';
-import { expandOccurrencesForEvent } from '../lib/recurrence';
+import { OVERRIDE_ADMISSION_SQL, loadOverridesForEvents, writeOccurrenceMove } from '../lib/events';
+import { expandOccurrencesForEvent, isSeriesOccurrence, loadRecurrenceRulesForEvents } from '../lib/recurrence';
 import { requireActiveGuildMember } from '../lib/db';
 import { recordRsvp, type RsvpStatus } from '../lib/attendance';
 import { newId } from '../lib/ids';
 import { addInvitesToEvent, updateEvent, type EventWriteInput } from '../lib/eventWrites';
-import { assertIsoDate, assertOneOf, assertStringArray, LIMITS, readJsonBody, ValidationError } from '../lib/validate';
+import {
+  assertIsoDate,
+  assertOneOf,
+  assertSafeInt,
+  assertStringArray,
+  assertTimeRange,
+  LIMITS,
+  readJsonBody,
+  ValidationError,
+} from '../lib/validate';
 
 export const eventRoutes = new Hono<AppEnv>();
+
+// IDEAS 97: the viewer's answer for a poll day that has its own event, read
+// from that event in the poll's own terms -- an RSVP there is what counts now,
+// and the organizer with no answer is implicitly in, as everywhere else.
+const RSVP_AS_VOTE: Record<string, 'yes' | 'no' | 'maybe'> = { accepted: 'yes', declined: 'no', tentative: 'maybe' };
+function sessionAnswer(
+  opt: { my_session_rsvp: string | null; session_organizer_id: string | null },
+  userId: string,
+): 'yes' | 'no' | 'maybe' | null {
+  if (opt.my_session_rsvp) return RSVP_AS_VOTE[opt.my_session_rsvp] ?? null;
+  return opt.session_organizer_id === userId ? 'yes' : null;
+}
 
 export async function loadEventIfVisible(env: Env, eventId: string, userId: string): Promise<EventRow | null> {
   const event = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(eventId).first<EventRow>();
@@ -72,7 +93,26 @@ async function resolveOccurrence(
     const zone = event.timezone;
     const dayStart = DateTime.fromISO(requestedDate, { zone }).startOf('day').toMillis();
     const dayEnd = DateTime.fromISO(requestedDate, { zone }).endOf('day').toMillis();
-    const occurrences = await expandOccurrencesForEvent(env, event, dayStart, dayEnd, overrides);
+
+    // Pass-14 review (P14-14). Widened to cover where the occurrence actually
+    // is, not only where its rule would have put it.
+    //
+    // An occurrence keeps its ORIGINAL date as its key and carries the
+    // override's times, so a session moved to another day has a key inside
+    // this window and a time outside it -- and the overlap filter therefore
+    // never returned it. The calendar links here by that key, so following a
+    // moved occurrence's own link answered 200 with startAt and endAt null,
+    // and the frontend gates its time and RSVP block on exactly those two
+    // fields. The page rendered with no time on it.
+    //
+    // Series membership is still decided by the expander (an override for a
+    // date the rule does not produce is not emitted at all), so widening the
+    // window cannot conjure an occurrence that should not exist.
+    const moved = overrides.find((o) => o.occurrence_date === requestedDate && !o.is_cancelled);
+    const from = Math.min(dayStart, moved?.override_start_at ?? dayStart);
+    const to = Math.max(dayEnd, moved?.override_end_at ?? dayEnd);
+
+    const occurrences = await expandOccurrencesForEvent(env, event, from, to, overrides);
     const occ = occurrences.find((o) => o.date === requestedDate);
     // No match means either a cancelled occurrence (expandOccurrences omits
     // those entirely) or a date the rule never produces -- either way,
@@ -158,12 +198,31 @@ eventRoutes.get('/:eventId', async (c) => {
   // longer branches on poll_mode -- a migrated window poll has exactly one.
   let pollOptions = null;
   if (event.event_type === 'poll') {
+    // IDEAS 97: a confirmed day that has become its own event is answered and
+    // counted there, so the row reports that event's state rather than the
+    // poll's frozen record of it. The viewer's own answer there rides along on
+    // the same read rather than costing a fifth query below.
     const { results: options } = await c.env.DB.prepare(
-      `SELECT id, start_at, end_at, display_order, confirmed_at FROM event_poll_options
-       WHERE event_id = ? ORDER BY display_order`,
+      `SELECT o.id, o.start_at, o.end_at, o.display_order, o.confirmed_at,
+              c.id AS session_event_id, c.status AS session_status, c.organizer_id AS session_organizer_id,
+              mine.rsvp_status AS my_session_rsvp
+       FROM event_poll_options o
+       LEFT JOIN events c ON c.created_from_option_id = o.id
+       LEFT JOIN event_attendance mine ON mine.event_id = c.id AND mine.occurrence_date = '' AND mine.user_id = ?
+       WHERE o.event_id = ? ORDER BY o.display_order`,
     )
-      .bind(eventId)
-      .all<{ id: string; start_at: number; end_at: number; display_order: number; confirmed_at: number | null }>();
+      .bind(userId, eventId)
+      .all<{
+        id: string;
+        start_at: number;
+        end_at: number;
+        display_order: number;
+        confirmed_at: number | null;
+        session_event_id: string | null;
+        session_status: string | null;
+        session_organizer_id: string | null;
+        my_session_rsvp: string | null;
+      }>();
 
     // Three fixed queries for the whole option set, not one per option.
     //
@@ -200,14 +259,32 @@ eventRoutes.get('/:eventId', async (c) => {
       // Only confirmed options display their attendee list, so the join
       // filters on confirmed_at rather than loading every yes-voter and
       // discarding most of them.
+      //
+      // IDEAS 97: for a day that has its own event, "going" is that event's
+      // answer -- accepted, plus the organizer unless they declined, the same
+      // rule as ORGANIZER_UNLESS_DECLINED -- not the votes it started from.
       c.env.DB.prepare(
         `SELECT ev.option_id, ev.user_id, u.username, u.global_name FROM event_poll_votes ev
          JOIN event_poll_options o ON o.id = ev.option_id
          JOIN users u ON u.id = ev.user_id
          WHERE o.event_id = ? AND o.confirmed_at IS NOT NULL AND ev.vote = 'yes'
-         ORDER BY u.username`,
+           AND NOT EXISTS (SELECT 1 FROM events c WHERE c.created_from_option_id = o.id)
+         UNION
+         SELECT o.id, a.user_id, u.username, u.global_name FROM event_poll_options o
+         JOIN events c ON c.created_from_option_id = o.id
+         JOIN event_attendance a ON a.event_id = c.id AND a.occurrence_date = '' AND a.rsvp_status = 'accepted'
+         JOIN users u ON u.id = a.user_id
+         WHERE o.event_id = ?
+         UNION
+         SELECT o.id, c.organizer_id, u.username, u.global_name FROM event_poll_options o
+         JOIN events c ON c.created_from_option_id = o.id
+         JOIN users u ON u.id = c.organizer_id
+         WHERE o.event_id = ?
+           AND NOT EXISTS (SELECT 1 FROM event_attendance a WHERE a.event_id = c.id AND a.occurrence_date = ''
+                             AND a.user_id = c.organizer_id AND a.rsvp_status = 'declined')
+         ORDER BY username`,
       )
-        .bind(eventId)
+        .bind(eventId, eventId, eventId)
         .all<{ option_id: string; user_id: string; username: string; global_name: string | null }>(),
       // IDEAS item 49: every voter on every option, not just the confirmed
       // yes-voters above -- "who voted for what" while the poll is still
@@ -225,7 +302,9 @@ eventRoutes.get('/:eventId', async (c) => {
          FROM event_poll_votes ev
          JOIN event_poll_options o ON o.id = ev.option_id
          JOIN users u ON u.id = ev.user_id
-         LEFT JOIN event_attendance att ON att.event_id = o.event_id AND att.occurrence_date = '' AND att.user_id = ev.user_id
+         LEFT JOIN events c ON c.created_from_option_id = o.id
+         LEFT JOIN event_attendance att ON att.event_id = COALESCE(c.id, o.event_id) AND att.occurrence_date = ''
+           AND att.user_id = ev.user_id
          WHERE o.event_id = ?
          ORDER BY u.username`,
       )
@@ -291,13 +370,33 @@ eventRoutes.get('/:eventId', async (c) => {
       // which is the normal case before resolution).
       voters: votersByOption.get(opt.id) ?? [],
       tally: talliesByOption.get(opt.id) ?? { yes: 0, no: 0, maybe: 0 },
-      myVote: myVoteByOption.get(opt.id) ?? null,
+      myVote: opt.session_event_id ? sessionAnswer(opt, userId) ?? myVoteByOption.get(opt.id) ?? null : myVoteByOption.get(opt.id) ?? null,
+      // IDEAS 97: the day's own event, once it has one, and whether it was
+      // called off for dropping below the threshold.
+      sessionEventId: opt.session_event_id,
+      sessionStatus: opt.session_status,
     }));
   }
+
+  // Michael, 10 Nov walkthrough: a poll day's own event had no way back to
+  // the poll it came from. Only offered to someone who can open that poll --
+  // the day copies the poll's invite list at fan-out, but someone invited to
+  // the day afterwards was never invited to the poll -- and a poll purged
+  // after 90 days simply yields no link rather than a 404.
+  const parentPoll = event.created_from_poll_id
+    ? await c.env.DB.prepare(
+        `SELECT p.id, p.title FROM events p
+         WHERE p.id = ? AND (p.organizer_id = ? OR EXISTS (
+           SELECT 1 FROM event_invites i WHERE i.event_id = p.id AND i.user_id = ?))`,
+      )
+        .bind(event.created_from_poll_id, userId, userId)
+        .first<{ id: string; title: string }>()
+    : null;
 
   return c.json({
     occurrenceId: event.id,
     eventId: event.id,
+    createdFromPoll: parentPoll ? { id: parentPoll.id, title: parentPoll.title } : null,
     id: event.id,
     guildId: event.guild_id,
     guildName: guild?.name ?? null,
@@ -342,6 +441,9 @@ eventRoutes.get('/:eventId', async (c) => {
     windowBlockMinutes: event.window_block_minutes,
     voiceChannelId: event.voice_channel_id,
     voiceChannelName: event.voice_channel_name,
+    // specs/0007, so the edit form can round-trip the setting rather than
+    // silently resetting it to the default on every save.
+    isPrivate: !!event.is_private,
     // specs/0014 stage 3, decision 4.
     minimumAttendees: event.minimum_attendees ?? null,
     autoCancelBelowMinimum: !!event.auto_cancel_below_minimum,
@@ -404,14 +506,14 @@ eventRoutes.delete('/:eventId', async (c) => {
 // Overrides are loaded and applied for every recurring event on every
 // calendar request, so an unbounded pile of them on one series is a cost
 // every viewer pays. Nothing about the feature needs hundreds.
-async function assertOverrideQuota(env: Env, eventId: string): Promise<void> {
-  const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM event_occurrence_overrides WHERE event_id = ?`)
-    .bind(eventId)
-    .first<{ n: number }>();
-  if ((row?.n ?? 0) >= LIMITS.MAX_OVERRIDES_PER_EVENT) {
-    throw new ValidationError(`This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`);
-  }
-}
+//
+// Pass-15 review (P15-06). This was the only writer that checked at all, and
+// it checked in the wrong place twice over: a preflight two concurrent
+// requests can both pass, and a count that refuses an UPDATE of a key that
+// already exists -- so someone at the cap could not re-cancel an occurrence
+// they had already moved, which adds no row. Both are now handled by
+// OVERRIDE_ADMISSION_SQL travelling inside the write, shared with the two
+// writers that had no check at all.
 
 eventRoutes.post('/:eventId/occurrences/:date/cancel', async (c) => {
   const userId = c.get('userId');
@@ -425,15 +527,74 @@ eventRoutes.post('/:eventId/occurrences/:date/cancel', async (c) => {
   const event = await loadOwnedActiveEvent(c.env, eventId, userId);
   if (!event) return c.text('Not found', 404);
 
-  await assertOverrideQuota(c.env, eventId);
-
-  await c.env.DB.prepare(
+  const written = await c.env.DB.prepare(
     `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled)
-     VALUES (?, ?, ?, 1)
+     SELECT ?, ?, ?, 1
+     WHERE ${OVERRIDE_ADMISSION_SQL}
      ON CONFLICT(event_id, occurrence_date) DO UPDATE SET is_cancelled = 1`,
   )
-    .bind(newId(), eventId, date)
+    .bind(newId(), eventId, date, eventId, date, eventId)
     .run();
+  if (written.meta.changes === 0) {
+    throw new ValidationError(
+      `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`,
+    );
+  }
+  return c.json({ ok: true });
+});
+
+// IDEAS 94. Move one occurrence of a series to a new time.
+//
+// Until this existed the organizer could cancel one date but not move it,
+// while an invitee could get one moved by filing a change request the
+// organizer accepted -- and createChangeRequest refuses the organizer on their
+// own event. Spec 0003 justified that refusal with "they can edit it", which
+// holds for a one-off event and not for one date of a series, because Edit is
+// series-wide. Nobody decided the organizer should be unable to do this.
+//
+// The write is writeOccurrenceMove, the same statement an accepted change
+// request uses, so the two cannot disagree about what a move means: answers
+// carry over, a cancelled date comes back at the new time, and nothing is
+// sent. See its comment in lib/events.ts for each of those, checked.
+//
+// Not guarded on events.revision, following the cancel route above and the
+// accept path: an occurrence override has never been tracked by that column.
+eventRoutes.post('/:eventId/occurrences/:date/move', async (c) => {
+  const userId = c.get('userId');
+  const eventId = c.req.param('eventId');
+  const date = assertIsoDate(c.req.param('date'), 'date');
+  const body = await readJsonBody<{ startAt?: unknown; endAt?: unknown }>(c);
+  const startAt = assertSafeInt(body.startAt, 'startAt');
+  const endAt = assertSafeInt(body.endAt, 'endAt');
+  // The same bound an invitee's proposed time is held to.
+  assertTimeRange(startAt, endAt, 'new', LIMITS.MAX_EVENT_DURATION_MS);
+
+  const event = await loadOwnedActiveEvent(c.env, eventId, userId);
+  if (!event) return c.text('Not found', 404);
+  if (!event.is_recurring) {
+    throw new ValidationError('Only one date of a repeating event can be moved -- edit the event to change its time');
+  }
+  // loadOwnedActiveEvent's "active" is about the organizer's membership, not
+  // the event. Moving a date of a cancelled series would write an override
+  // nothing ever reads.
+  if (event.status !== 'active') return c.text('This event is no longer active', 409);
+
+  // A date the rule does not produce is refused here rather than written. The
+  // expander already ignores such an override (P14-13), so this is not about
+  // correctness on read -- it is that the row would count against the
+  // per-event cap while doing nothing, and that "moved" would be reported for
+  // a date that was never a session. isSeriesOccurrence is the walk itself,
+  // the one definition of membership.
+  const rule = (await loadRecurrenceRulesForEvents(c.env, [event.id])).get(event.id);
+  if (!rule || !isSeriesOccurrence(rule, event.timezone, date)) {
+    throw new ValidationError(`${date} is not one of this event's dates`);
+  }
+
+  if (!(await writeOccurrenceMove(c.env, event.id, date, startAt, endAt, { restoreCancelled: true }))) {
+    throw new ValidationError(
+      `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`,
+    );
+  }
   return c.json({ ok: true });
 });
 
@@ -449,8 +610,14 @@ eventRoutes.post('/:eventId/invites', async (c) => {
   // Additive only -- unlike PATCH /:eventId (the full edit form, which
   // replaces the invite list to match whatever it submits), this endpoint's
   // whole purpose is inviting more people without touching anyone already invited.
-  await addInvitesToEvent(c.env, eventId, event.guild_id, userIds, groupIds);
-  return c.json({ ok: true });
+  // loadOwnedActiveEvent above already established this caller is the
+  // organizer, which is what makes them the actor for the group-scoping check
+  // inside (F-25 / R08).
+  // notAdded is surfaced rather than swallowed (Pass-13 review, P13-09): the
+  // capacity guard can admit fewer people than were named, and answering a
+  // bare { ok: true } told the organizer everyone got in when some had not.
+  const { notAdded } = await addInvitesToEvent(c.env, eventId, event.guild_id, userIds, groupIds, userId);
+  return c.json({ ok: true, notAdded });
 });
 
 eventRoutes.delete('/:eventId/invites/:userId', async (c) => {

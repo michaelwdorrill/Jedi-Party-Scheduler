@@ -40,10 +40,71 @@
 // came along and then sat on `main` for four releases telling every reader
 // not to merge a commit that had already been merged.
 //
+// Bumped to 3 for specs/0017 (v0.8), and this one discloses the most of the
+// three so far: a new third-party processor (Google), event titles and times
+// leaving this service for an external calendar, and -- the part that actually
+// changes the app's posture rather than its vendor list -- the first long-lived
+// third-party credential it has ever stored. The previous policy's "Discord
+// access or refresh tokens ... are not written to the database" was offered as
+// a statement about how this service works, not merely about Discord, and a
+// stored Google refresh token makes it incomplete. That is exactly the class of
+// change this mechanism exists for.
+//
+// Bumped even though the feature ships dormant (GOOGLE_SYNC_MODE = "off"),
+// which is the precedent version 2 set: it shipped for Resend while EMAIL_MODE
+// was still "stub". The capability is in the deployed code, and the policy
+// should describe the code rather than the config.
+//
+// Bumped to 4 for v0.8.1, and this one changes what other people can see
+// about you rather than which vendors are involved — which makes it the most
+// substantive of the four.
+//
+// Two changes, both needing consent that the previous version cannot stand in
+// for. The server noticeboard (specs/0007) makes a limited view of an event —
+// title, time, who is invited and their answer — visible to members of its
+// server who were not invited, where the old policy said in as many words that
+// "sharing a Discord server with someone does not let you see their events".
+// And the Google pull half (specs/0017) reads busy/free times from one
+// nominated calendar, which is a new direction of data flow entirely.
+//
+// What makes the noticeboard defensible rather than a retroactive change of
+// terms is migration 0038: every event that already existed was backfilled
+// private, so nothing created under version 3 changed visibility under it.
+// People consent to the new rule for new events, which is the only honest way
+// to ship this.
+//
 // It is guarded now: `../../policy-version.txt` has to carry the same number,
 // and `npm run check:policy-version` (wired into CI) fails the build if they
 // disagree, the same shape check-env-parity.mjs already used for
 // wrangler.toml. Bumping this for real means updating both files in the same
 // commit, on purpose -- an accidental edit surviving a `git checkout` or a
 // stray `git add -A` now fails the build instead of shipping silently.
-export const CURRENT_POLICY_VERSION = 2;
+//
+// Bumped to 5, within the same v0.8.1 that introduced 4 and before it left
+// the branch (specs/0017, "The pull half, twice over"). Version 4 already
+// covered a Google connection reading busy/free times from a nominated
+// calendar; what it did not cover, and could not stand in for, is that this
+// service now *stores* real content from that calendar -- event titles and
+// descriptions, imported as personal time entries -- rather than the opaque
+// time ranges version 4 described. That content is disclosed to nobody but
+// the connection's own owner, same as any personal time block made by hand,
+// but retention is a different fact from disclosure, and version 4's text
+// was accurate about the second and silent about the first.
+//
+// A bump this close to the one before it looks unusual, and the honest
+// reading is the boring one: this is still one unreleased branch, corrected
+// twice in the same sandbox-verification pass, not two separate releases
+// each asking for consent. Recorded as its own bump anyway rather than
+// folded backward into 4's, because folding it in would mean this comment
+// -- and the spec section it points at -- describing a decision that was
+// never actually made at the time 4 was written.
+//
+// Bumped to 6 for 1.0 (9 Nov 2026). Both documents were rewritten from an
+// audit of what the code actually does (docs/POLICY-DRAFT-1.0.md, reviewed by
+// Astra and a Fable model), and the rewrite changes facts people agree to:
+// the operator is named; message text is kept, not just a delivery record;
+// the export covers everything but the Google credential; deleted data stays
+// restorable for 7 days (D1 Time Travel); Cloudflare keeps the Worker's own
+// log lines for 3 days; Resend and Google are live processors; Virginia law
+// governs the Terms; and the 1.0 launch announcement and its record exist.
+export const CURRENT_POLICY_VERSION = 6;

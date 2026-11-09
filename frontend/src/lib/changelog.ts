@@ -20,6 +20,43 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  // 1.0 is the first release to reach production since 0.7.2. The 0.8 and
+  // 0.8.1 work (Google Calendar, the noticeboard) only ever ran on the
+  // sandbox, so it is described here rather than as releases nobody got.
+  {
+    version: '1.0.0',
+    date: '9 November 2026',
+    summary: 'Feature complete: Google Calendar, a noticeboard for each server, and polls that turn into real plans.',
+    added: [
+      'Google Calendar. Connect a Google account in Settings and the sessions you organize or are invited to — unless you’ve declined — are written onto a calendar you choose: title, time, server and a link back, never the description, never a poll’s proposed dates. You can also choose one calendar to be read back as private personal time, so people scheduling with you see when you’re busy (they only ever see blank blocks). Google will warn you that it hasn’t verified Uncle Owen; that’s expected for a project this small.',
+      'A “What’s on” noticeboard for each server: the sessions happening there, whether or not you were invited, with who’s going. Descriptions are never shown on it, and any event can be kept off it. Everything made before this release stays private.',
+      'On a poll where each day is confirmed on its own, a confirmed day becomes a real event that carries everyone’s answer — “I’m in”, “can’t make it” or “maybe” — and links back to its poll. If people drop out and it falls below what the poll needed, the day is called off and everyone still coming is told; you’re warned before your answer is the one that does it.',
+      'Cancelling a poll like that now leaves days that are already happening in place, and says so before you confirm.',
+      'An organizer can move a single date of a repeating event without touching the rest of the series.',
+      'The night picker in a poll’s Discord message now works for a day that has become its own event.',
+      'Moving an event’s start now takes its end with it, everywhere you pick a start and end.',
+      'If someone asks the bot to be added to a server it was removed from, the request page offers to add it back.',
+    ],
+    changed: [
+      'The Privacy Policy and Terms have been rewritten from a check of what the app actually does, so you’ll be asked to agree once more. The short version: they now name who runs Uncle Owen, say plainly that message text is kept, that deleted data can be restored by the host for 7 days, that the app’s own error logs are kept for 3 days, and that Google Calendar and one operator email service are in use. Nothing is sold, tracked or used for advertising.',
+      'When you’re the only person invited, a request to change the time now waits for the organizer instead of applying itself.',
+      'A cancelled event’s Discord invite loses its answer buttons and says it was cancelled.',
+      'A change request for a date that has since been cancelled says so, and can only be declined.',
+      'A new event defaults to 7pm–11pm instead of 1pm–5pm, and a poll can’t ask for more yeses than people invited.',
+      '“Download my data” now includes everything held about you, apart from the encrypted Google credentials.',
+      'Signing in is limited to a sensible number of attempts per minute, and sign-in sessions renew themselves more safely.',
+    ],
+    fixed: [
+      'An accepted change request could bring back a date the organizer had cancelled.',
+      'An event ending at exactly midnight was also drawn on the following day.',
+      'Editing a poll could delete the votes already cast on it, and editing a repeating event could rewrite its schedule.',
+      'Someone removed from an event could keep getting its messages.',
+      'Deleting your account could fail if you had answered someone else’s event.',
+      'A server the bot had been removed from made everyone in it look as if they had left.',
+      'Wording: “1 person”, not “1 people”.',
+      'Many smaller fixes from several rounds of review, mostly to make sure messages go to the right people, at the right time, and only once.',
+    ],
+  },
   {
     version: '0.7.2',
     date: '5 September 2026',

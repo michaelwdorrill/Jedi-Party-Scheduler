@@ -18,10 +18,14 @@ export interface OwnerEmail {
 }
 
 // specs/0015's stubbing decision: EMAIL_MODE is per-environment
-// (wrangler.toml), 'live' in production only. Everything else -- unset local
-// dev, the sandbox's deliberate 'stub' -- logs instead of calling Resend, so
-// iterating on this flow never pages Michael's own inbox and never needs a
-// throwaway address.
+// (wrangler.toml): 'live' in production from 1.0, 'stub' in the sandbox and
+// in local dev. (This comment has been wrong twice as the config moved under
+// it -- Pass 24 A1, then the v6 second pass, V6-07 -- so check wrangler.toml
+// before trusting it.) Anything but 'live' logs instead of calling Resend, and
+// that log line carries the whole message: the requester's name, username and
+// id and the server's. That only happens where the stub runs, i.e. never in
+// production, which is why the Privacy Policy's log description can leave
+// names out.
 function isLive(env: Env): boolean {
   return env.EMAIL_MODE === 'live';
 }

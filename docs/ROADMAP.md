@@ -128,7 +128,9 @@ think about servers":
   attendee lists, not anonymous busy blocks); the four design calls are
   locked and written down in `specs/0007-server-noticeboard.md`, but it is
   unscheduled and blocked on a Privacy Policy rewrite. Still open in
-  `IDEAS.md`, so it still counts against 1.0.
+  `IDEAS.md`, so it still counts against 1.0. *(Superseded 13 Sept 2026: the
+  1.0 test is the release bar, not an empty list — see "Versions". Being open
+  no longer counts against 1.0 by itself.)*
 - **16, group creator membership.** Auto-seed the creator, backfill existing
   groups, ownership transfer on self-removal, and the owner/member split
   (owner adds-removes-renames-deletes; any member can create events for the
@@ -240,7 +242,11 @@ runs entirely through the sandbox.
   rejected: it would redeploy the sandbox out from under whatever feature is
   parked on it.
 - **29, a backlog that never emptied.** `IDEAS.md` is now two sections, and
-  the 1.0 test reads against **Still open** alone.
+  the 1.0 test reads against **Still open** alone. *(Superseded 13 Sept 2026:
+  the test is the release bar rather than an empty section. Item 29's actual
+  complaint — a list that stops saying where things stand — is now answered by
+  every open item carrying a version assignment, which is a stronger answer
+  than emptiness was.)*
 
 **The deployed app stays at 0.4.1, deliberately.** `APP_VERSION`,
 `PUBLISHED_AT` and the changelog page are not bumped for this release,
@@ -599,7 +605,9 @@ relative to v0.5 itself: specced completely, held back by exactly one call
 that "wants someone looking at" something outside the code, then built once
 that call was made.
 
-### Phase 5 — Google Calendar sync (idea 2) → **v0.8**
+### Phase 5 — Google Calendar sync (idea 2) → **v0.8** ✅ push half shipped
+
+**Spec:** `specs/0017-google-calendar-sync.md` (Built — push half).
 
 The biggest lift, and deliberately last. It wants a second OAuth provider,
 a second set of refreshable tokens to store securely (note that we currently
@@ -618,19 +626,317 @@ second**, pull via `freebusy.query` rather than full event read, event titles
 explicitly out of scope for the first build, and the 100-user unverified-app
 ceiling accepted rather than designed around.
 
+**Shipped 5 Sept 2026 as the push half, and the split is a real release
+boundary rather than a convenient stopping point.** `specs/0017` records why:
+the pull half's cost is not `freebusy.query` — that is one POST — but that its
+answer belongs inside `computeBusyBlocksForUsers`, which runs *synchronously in
+a request* for up to 25 users. One Google call each is up to 25 subrequests in
+one invocation against a Free-plan ceiling of 50, in the one function whose own
+design note is that its cost is a product and every factor has to be small. So
+pulling needs a cron-refreshed busy cache, a staleness rule, and an answer for
+the cold-cache case. That is **v0.8.1**, and this is the v0.4.6 lesson
+(`specs/0013` held back from v0.4.5) applied before the fact rather than after.
+
+Four things this release turned up that the phase entry above did not plan for:
+
+- **Rule 1 reappeared as a scope rule, not a sequencing one.** The scopes
+  requested are the ones *v0.8.1* needs, not the ones v0.8 needs, because
+  narrowing now would mean sending everyone who connected back through a Google
+  consent screen later. The cheaper ask today buys a worse moment later.
+- **`ARCHITECTURE.md` held a claim that was broader than its evidence.** "Discord's
+  access and refresh tokens are used once and then discarded — nothing in the
+  app acts on Discord's behalf later" reads as a statement about the app's
+  posture, and every summary of this project has treated it as one. It was
+  always a statement about *Discord*. A cron sweep writing to a calendar with
+  nobody logged in is the case it never covered, and the fix was to scope the
+  sentence rather than to weaken it.
+- **The FK trap that items 38 and 56 each cost a session, a third time.**
+  `google_event_links.event_id` is a real foreign key with no `ON DELETE`
+  action, and its rows can belong to someone *other* than the organiser — an
+  invitee syncing an event they did not create. Both delete paths (account
+  erasure and the ninety-day terminal purge) needed it cleared first. The purge
+  one is the nastier of the two: `runIsolated` catches the error, so the only
+  symptom would have been a table that quietly stopped shrinking. Caught by
+  writing the test and then deleting the fix to check the test could fail —
+  which is item 31's lesson (a guardrail that cannot fail usefully is worse
+  than none) applied to a test rather than to a CI step.
+- **Policy version 3.** The first bump whose trigger is a change in what the
+  app *is* rather than which vendors it uses: the previous policy's "Discord
+  access or refresh tokens are not written to the database" was offered as a
+  general statement, and a stored Google refresh token makes it incomplete.
+
+### Phase 6 — What twenty review passes left standing (66–73, 76, 77, 82, 85) → **v1.0.1**
+
+Nineteen passes of independent AI security review across 0.8.x. Everything
+demonstrably a disclosure, authorization or privacy defect is closed, including
+the cycle's only P1 -- private event content replayed to a guest who had been
+explicitly removed -- now independently verified closed four times over.
+
+**What changed in Pass 19, and why this phase is shorter than it was.** The
+reviewer declined to sign off on "everything else waits for 1.0.1" and named
+three things to correct before general release: a poll that could resolve to a
+candidate an organizer had just removed, an edit form that could overwrite a
+different event from a delayed response, and a Google entry that survived a
+completed disconnect against an unqualified promise in the Privacy Policy. All
+three were correct, all three are fixed, and that judgement was worth more than
+the schedule it overturned. **The remaining items are the ones the reviewer
+described as design work with regression controls, plus maintenance.**
+
+**Identity and third-party lifecycle (73, 71, 72).** No disclosure, no attacker.
+
+- **73** is an in-flight Google revoke outrunning a same-account reconnect.
+  Unfixable by local checks by construction: Google revokes at grant level and
+  a dispatched request cannot be recalled, the same semantics that forced the
+  F-44 revoke to be reverted in Pass 16. Costs a reconnect, not data.
+- **71** is the neighbouring reconnect race, narrowed twice already.
+- **72** is cross-tab login identity: same browser, same person, two accounts
+  they both hold, a refresh in flight. A confused deputy between one human's
+  own two sessions, and Web Storage supplies no transaction to close it with.
+
+**Design work (70 with 78, 83).**
+
+- **70/78**: a stranded acceptance reads as a plain success with no uncertainty
+  and no reconciliation path. This is the one item where the wrong fix is known
+  to be worse than the bug -- the removed recovery arm is what caused the P1 --
+  so it needs approval and verified application represented separately, not a
+  replay.
+- **85** is idempotent Google creation. Pass 20 made a lost mapping write
+  recoverable across a failed statement; it cannot be made recoverable across a
+  lost process by any amount of bookkeeping, because the bookkeeping is what is
+  lost. That needs a client-supplied event id, which is a design with its own
+  failure modes.
+
+Item **83** closed in Pass 20 rather than waiting: the audit it asked for found
+that four other poll writers had the same gap `markResolved` had, and the
+Pass-20 review independently demonstrated two of them. Predicting a class and
+then leaving it for later turned out to cost a whole review round.
+
+**Feature gaps predating the review cycle (66, 67, 68, 69).** The import's
+forty-event horizon, a retried voice DM that does not re-check attendance,
+login rate limiting, and a removed invitee's poll vote still counting. **68 is
+the one to look at first if this list is reordered:** it is the only remaining
+item anywhere on the backlog that is straightforwardly a security control
+rather than a correctness or lifecycle issue, and it was never part of the
+review findings because no reviewer was asked to attack the login endpoint.
+
+**Maintenance (76, 77, 82).** The dependency audit `npm audit fix` cannot clear
+without breaking the test typecheck; the demo seed that DMs a real operator on
+some days of the week; and migration 0044's index, whose documented purpose was
+deleted with the recovery arm.
+
+**The v1.0 test was settled on 13 September 2026: it is restated, not
+excepted.** For two releases this section recorded an open decision -- the test
+was "`IDEAS.md`'s Still open section is empty", it was not empty and would not
+be, and the honest options were a named written exception listing exactly these
+items or a restatement. Michael chose the restatement.
+
+An exception listing twenty-nine items would not have been an exception. It
+would have been a new definition wearing a disguise, and the disguise is the
+part that does damage: the next person to read the test would find a rule plus
+a footnote quietly cancelling it, which is item 29's failure mode reached by a
+different route.
+
+The new test is in "Versions" below -- the release bar's five clauses hold, and
+nothing still open is a category-1 or category-2 finding -- along with why the
+old one stopped fitting and why emptiness was never the property worth
+measuring. What did NOT change is the anti-gaming guardrail: version-assigning
+an item is ordinary planning under a bar-based test and would have been
+sweeping under an emptiness-based one, but neither test lets a finding that
+writes wrong data or discloses data leave by being described differently.
+
+### What "release ready" means, decided 12 September 2026
+
+Written down because it was not, and that absence is most of why 0.8.x took
+twenty review passes to not finish.
+
+The bar in force until then was implicit and unreachable: **ship when the next
+independent review comes back empty.** Against an adversarial reviewer with
+unlimited scope that never happens, and the evidence says so plainly. Findings
+per pass: 14, 15, 8, 9, 7, 8, 9, 8. It flatlined at eight, six passes ago.
+
+What did NOT flatline is severity. Five P1s in Pass 13, one in Pass 14, one in
+Pass 16 -- and none at all in Passes 17 through 20. The last P1 in this project
+was caused by a fix nobody asked for.
+
+The reason the count stopped falling is visible in Pass 20's own
+classifications. Of its eight findings, three were acknowledged design
+residuals, three were in code written during the two immediately preceding
+passes, two were pre-existing but adjacent to those same fixes -- and one of
+those two had been predicted and recorded by this project a pass earlier.
+**Zero were newly discovered defects in original application code that nobody
+had already flagged.** The review had stopped finding bugs in the app and
+started finding bugs in the repairs.
+
+So the bar is now a property of the software, not of a report:
+
+**Release when all five hold.** Clause 2 was sharpened and clauses 3 and 4
+added after the Pass-21 whole-application review, which endorsed the bar for
+data and then demonstrated two things it could not see. Both amendments make
+the bar stricter, which is worth noting: the reviewer's proposals moved two of
+their own findings from "does not block" to "blocks".
+
+1. **No P1.** No unauthenticated access, no cross-user disclosure, no
+   authorization bypass, no private content reaching someone whose access was
+   removed.
+2. **No P2 that writes wrong data, discloses data, or makes a published
+   statement false.** The third clause is not decoration: P19-08 was the one
+   finding in the cycle where the Privacy Policy asserted something the code
+   did not do, and text the user is asked to rely on is a promise, not a
+   comment.
+
+   **The line, stated so it is not re-argued each time:** a wrong write
+   reachable on the ordinary path, or under a race no faster than a person,
+   blocks. A wrong write that needs a concurrent actor inside a
+   request-length window is scheduled. That is what actually separated P19-08
+   (blocked) from P20-06/07/08 (scheduled), and writing it down means a finding
+   of the same class gets the same disposition whichever way it falls.
+3. **Abuse resistance.** Every unauthenticated endpoint that consumes a metered
+   third-party resource, sends mail, or writes durable state is bounded, in
+   code or at the edge.
+
+   Added because F-59 was invisible to clauses 1 and 2 by construction: one
+   unauthenticated request spending a Discord token exchange writes nothing,
+   discloses nothing and falsifies nothing. Without this clause, IDEAS item 68
+   would have stayed outside the release test forever.
+4. **No silence about consequences.** Every destructive action's confirmation
+   states what it does **not** undo.
+
+   Clause 2 catches a false statement; it does not catch an omitted one. Both
+   findings a whole-application read turned up were this shape — a dialog
+   listing what it removes and not what it leaves. It is checkable surface by
+   surface.
+5. **Everything else recorded in `IDEAS.md` with the design it needs.**
+
+Findings in categories 1 and 2 block. Everything else is scheduled. A reviewer
+disagreeing with the schedule is a result worth hearing and is not a veto --
+which is the counterpart of the standing request that reviewers say plainly
+when something should be left alone.
+
+**Two guardrails, because this bar could obviously be gamed.**
+
+- It is not a licence to reclassify. A finding moves out of category 2 only by
+  being fixed or by being demonstrated not to write wrong data -- never by
+  being described differently. The same discipline that keeps
+  "Parked until after 1.0" honest applies here.
+- **Prefer removal to mechanism.** Three consecutive regressions in
+  `lib/noticeboard.ts` (P18-01, P19-01, P20-03) were each introduced by a fix
+  for the previous one, and each fix added machinery: a widened predicate, then
+  an override arm, then a mutable-cursor pager. The two changes in this cycle
+  that closed findings and introduced nothing were both DELETIONS -- the change
+  request recovery arm, and migration 0044's backfill. When a fix requires new
+  state, new lifecycle, or a new table, that is a signal to look for the
+  smaller answer first.
+
+**Who clears a release, decided 12 September 2026.** Two independent reviewers
+ran the first whole-application pass. One read the surfaces statically and
+found two defects, declaring four others clean and the package releasable. The
+other executed 254 checks and found eight, including defects in **all four**
+surfaces the first had called clean -- a group roster write that strands a
+group, a Discord control that cancels a series it was never issued for, polls
+that accept answers past their advertised deadline, and two availability
+projection faults.
+
+Spot-checking settled it in minutes: the one-off cancel handler selects
+`organizer_id, status, guild_id` and not `is_recurring`, and the personal
+editor's loader sets `isRecurring` true with no else branch. Both were real,
+both were in code the static reviewer had read and passed.
+
+The static reviewer said so themselves -- *"I have never executed this code"* --
+and that is the whole difference. **Release clearance follows the executing
+reviewer from here.** A static read is useful for finding candidates and worse
+than useless for clearing them, because a clean list from one reads exactly like
+a clean list from the other.
+
+The corollary matters as much: **a reviewer declaring a surface clean is not
+evidence it is.** Only a reproduction is evidence, in either direction.
+
+**That final whole-application review happened, and it answered the question.**
+Pass 21 read the never-covered surfaces end to end and found two defects in
+original code, neither in any recent diff, both of a kind diff review could not
+have found: F-59 and F-60. Everything else on that list read clean and is
+enumerated in the report. Zero disclosures, zero authorization defects — after
+a whole-application pass, that is evidence rather than an absence of it.
+
+The reasoning for scoping it that way, kept because it is the transferable
+part:
+
+**The final review is scoped to the whole application, not to the diff.** Every
+pass so far reviewed the change since the last one, which guarantees the
+findings concentrate wherever the most recent work happened. One whole-app pass
+is the only way to test whether the original surface is genuinely exhausted or
+whether that is an artifact of always reviewing the same author's newest code.
+
 ## Versions
 
 The app entered **Beta at v0.2**, the moment there was a written backlog
 being worked through rather than a pile of unsorted intentions.
 
-**v1.0 is defined by the backlog, not by a feature set: when `IDEAS.md`'s
-"Still open" section is empty, we leave Beta.** (Until v0.4.2 that read
-"when `IDEAS.md` is empty", and since nothing ever cleared the file, the one
-test 1.0 is defined by could not pass — item 29.) That deliberately makes 1.0 a moving target — new
-ideas get captured all the time, and each one pushes 1.0 out. That's the
-intended behaviour, not a flaw in the definition: shipping 1.0 should mean
-"there is nothing captured that we still intend to build", and the honest way
-to reach it is to keep clearing the list rather than to freeze it.
+**v1.0 is defined by the release bar, not by the size of the backlog: we
+leave Beta when all five clauses of "What release ready means" hold, and
+nothing in `IDEAS.md`'s "Still open" section is a category-1 or category-2
+finding.** Every item that remains open carries a version assignment.
+
+**Restated 13 September 2026, replacing "when `IDEAS.md`'s Still open section
+is empty".** That test was right for the thing it was written about. The
+backlog then was features being worked through, and "nothing captured that we
+still intend to build" was a real description of leaving Beta. What broke it
+was not drift — it was twenty-three review passes putting design work,
+accepted residuals and maintenance into the same list. Twenty-nine items are
+open as this is written, none of them a defect, and the test could not
+distinguish that from twenty-nine unbuilt features.
+
+Kept as it was, the test had one more property nobody chose: **it made every
+captured idea a release blocker, which taxes capture.** `IDEAS.md` exists to
+be a low-friction place to write down anything noticed in passing. A rule that
+turns each of those notes into something standing between us and shipping is a
+rule that argues, quietly and constantly, for not writing them down. That is a
+worse failure than a stale list, and it is the one this project was closest to.
+
+The two earlier readings of the test are the same mistake at different scales:
+until v0.4.2 it read "when `IDEAS.md` is empty", and nothing ever cleared the
+file, so the single test 1.0 was defined by could not pass at all (item 29).
+Emptiness was never the property worth testing. **What we actually mean by
+leaving Beta is that the software has no known defect of a severity we would
+refuse to ship — which is exactly what the release bar already says, clause by
+clause, and says better.**
+
+**This is not a licence to reclassify, and the guardrail transfers verbatim.**
+A finding leaves category 1 or 2 by being fixed or by being demonstrated not to
+belong there — never by being given a version number. Assigning an item to
+1.0.1 is ordinary release planning under this test *because the test no longer
+keys on the list being empty*; the moment it is used on something that writes
+wrong data or discloses data, it is the same gaming the old guardrail names,
+and it is refused for the same reason.
+
+**"Parked until after 1.0" survives the restatement, but stops being
+load-bearing — and that is the point.** It was added in Sept 2026 as an
+exception to the emptiness test: work explicitly decided to come after 1.0
+would otherwise hold 1.0 hostage forever, or, worse, not get written down at
+all so that it stops holding it hostage. Under a bar-based test there is no
+hostage to take, so the section no longer *exempts* anything; it now only
+records a genuine distinction worth keeping — decided-for-after versus
+scheduled-for-next. **Which retires the risk it was carrying.** The drawer
+problem below existed because parking an item changed whether we could ship.
+It cannot any more, so the incentive to sweep is gone, and what is left of the
+warning is ordinary hygiene rather than a guardrail holding something up.
+
+Its entry bar is unchanged and still worth meeting, because it is what keeps
+the distinction meaningful — written out in `IDEAS.md`'s own "How this file is
+kept": a recorded decision that it belongs after 1.0, nothing scheduled
+depending on it, and written up to the same standard as everything else. Its
+first entry is 64 (Google OAuth verification), parked because every user of
+this app personally knows its author, which is precisely the condition the
+warning it removes asks about.
+
+The risk the old framing named — that parking becomes the drawer inconvenient
+items are swept into so a number goes green, recreating item 29's failure of a
+list that has stopped saying where things stand — is now mostly historical,
+since no number goes green by sweeping. The residual version is worth keeping
+an eye on anyway: a parked item is one nobody is planning around, so parking
+something that other work quietly depends on still produces a list that
+misleads. That is a hygiene failure rather than a release-integrity one, and
+the old tell still finds it — if parked grows faster than *Still open* shrinks,
+look at why.
 
 The version numbers below are therefore a *plan*, not a promise. If a new
 idea lands in the middle, it gets a phase like everything else and the tail
@@ -656,8 +962,10 @@ shifts.
 | **0.7** | Phase 4 — stale-account purge (10), per `specs/0016` | **Shipped** |
 | **0.7.1** | Phase 4 — self-service bot add + email (9), per `specs/0015` | **Shipped** |
 | **0.7.2** | What v0.7.1 and the standing backlog turned up — already-allow-listed servers shown, not hidden, on `/add-bot` (57); the bot can leave a server on deactivation (58); the calendar chip shows your own declined/tentative answer (52); a guarded `CURRENT_POLICY_VERSION` (43); the terminal-history purge's budget under-count and FK error fixed together (53, 56); a plain organizer cancel now notifies invitees (55); idea 49 found already shipped in v0.6.2 and documented as such. A second pass, after Michael settled the open design questions directly, shipped both items originally assessed and left open: groups without servers, per `specs/0011` plus the resolved access-control gap it didn't cover (36), and the minimum-attendees cascade extended to recurring events with configurable per-event/per-occurrence deadlines (54) — plus two new ideas captured and built in the same motion: the organizer notified on every invitee RSVP for every event (59), an owner-only tool for checking whether a hypothetical group of people has a common server before committing to one, found useful while manually verifying 36 on the sandbox (60), the New Event form's field order inverted to match: invite first, then let the server narrow from who's invited (61), the event detail page now names which server an event actually landed on, also found while testing 36 (62), and editing an event no longer shows its own invitees as busy during the very slot being edited (63) | **Shipped** |
-| 0.8 | Phase 5 — Google Calendar sync (2) | Planned |
-| 1.0 | `IDEAS.md`'s **Still open** section empty — leave Beta | When the list clears |
+| **0.8** | Phase 5 — Google Calendar sync (2), push half: connect one Google account, pick a calendar, and have the sessions you're committed to written to it. Policy version 3, and the first long-lived third-party credential this app stores | **Shipped 5 September 2026** |
+| **0.8.1** | Phase 5's pull half (2) — one nominated calendar read back via `freebusy.query`, cached by the cron rather than called live inside a request; the server noticeboard (5, per `specs/0007`); the sandbox frontend gap closed as decided-against (23); and policy version 4 covering both disclosures at once. **`IDEAS.md`'s Still open is empty** | **Built — held for the security review** |
+| 1.0 | Leave Beta: the release bar's five clauses hold, and nothing in `IDEAS.md`'s **Still open** is a category-1 or category-2 finding | **Test restated 13 Sept 2026** (see "Versions"); the old "Still open is empty" test is retired rather than excepted. Twenty-three review passes closed every demonstrable disclosure, authorization, privacy and data-integrity defect, each re-verified; Pass 23 passed on all six release gates. What remains open is design work, pre-cycle feature gaps and maintenance, all version-assigned. **Item 92 closed 13 Sept 2026, reopened and reworked 9 Nov 2026** — the OAuth callbacks are bounded by an exact per-address count in D1 (20 a minute), so bar clause 3 is met by being fixed rather than by a written exception. The first fix, Cloudflare's Workers rate-limiting binding, passed its tests against a fake and refused nothing when the walkthrough drove it live; the D1 counter was seen refusing live on 10 Nov 2026 (walkthrough 0.0b: 20 allowed, 21–25 refused with 429). **Item 94 built 22 Oct 2026** — the organizer can move one occurrence of a series, which the first browser walkthrough found missing; Michael chose 1.0 over the recommended 1.0.1. **Items 95 and 96 built 22 Oct 2026**, from the same walkthrough's Phase 3 — a sole invitee's time change now waits for the organizer, and moving a start takes the end with it. **Item 97 built 22 Oct 2026** from the same walkthrough — a confirmed multi-winner day that drops below its threshold is called off (Michael's call over the recommended alternative). **Remaining before release:** the Privacy Policy and Terms rewrite (drafted 9 Nov 2026 in `docs/POLICY-DRAFT-1.0.md`, with Michael's decisions F1–F9 open and review by Astra and possibly a Fable model to come), one reviewer pass over it (package: `docs/REVIEW-PASS-24.md`), items 92, 94, 95, 96, 97 and 99 together (99 built 9 Nov: cancelling a multi-winner poll leaves its already-scheduled days on and says so), the walkthrough in `RELEASE-TESTING.md`, then the changelog and version bump. **Pass 24 reviews received 9 Nov** (Astra on the policy; a Fable model on the policy and the code, both static): P24-01 (category 2, a cancelled date brought back by an accepted request) and P24-02 fixed, the policy-truth findings D-01/D-07/D-09/D-11 fixed in code, and policy draft 2 written with Michael's calls (export extended, last-used made true, legal bases kept). Open: F1, F2, F3, F4, F6, F7, F8; the residuals are IDEAS 101, all 1.0.1 |
+| **1.0.1** | Phase 6 — accept-and-apply as one transaction (70a, first), the custom domain, which would let an edge rule replace the D1 rate-limit counter (92, optional), Google grant lifecycle (73, 71), cross-tab identity (72), the concurrency-token audit's remainder, idempotent Google creation (85), the pre-cycle feature gaps (66–69), plus maintenance (76, 77, 82) and the plan question (93) | Planned |
 
 ## Summary
 
@@ -682,13 +990,14 @@ shifts.
 | 19 | Interactive bot (RSVP, slash, sync) | L | 3.75 | 0.5 | 8 | TBD |
 | 9 | Self-service bot add + email | L | 4 | 0.7.1 | — | 0015 |
 | 10 | Stale-account auto-delete | M | 4 | 0.7 | — | 0016 |
-| 2 | Google Calendar sync | XL | 5 | 0.7 | 1, 5, 10 | TBD |
+| 2 | Google Calendar sync (push) | XL | 5 | 0.8 | 1, 5, 10 | 0017 |
+| 2 | Google Calendar sync (pull, `freebusy`) | M | 5 | 0.8.1 | 2's push half | 0017 |
 | 21 | Calendar chip click opens New Event | S | 3.5 | 0.4 | — | 0009 — done |
 | 22 | Calendar can only show 2 months | M | 3.75 | 0.5 | — | rode along in 19 |
 | 24 | A failed API call renders as "nothing scheduled" | M | 3.6 | 0.4.1 | — | none needed |
 | 26 | Organizer gets a 403 from their own RSVP buttons | M | 3.6 | 0.4.1 | 24 | none needed |
 | 25 | CI actions on a deprecated Node runtime | XS | 3.6 | 0.4.1 | — | none needed |
-| 23 | No sandbox frontend (rule written down only) | S | 3.6 | 0.4.1 | — | still open |
+| 23 | No sandbox frontend (closed as decided-against, plus the production-bundle step) | S | 3.6 / 5 | 0.4.1 + 0.8.1 | — | none needed |
 | 27 | Fade events that have already happened | XS | 3.6 | 0.4.1 | — | none needed |
 | 28 | Warn on an event created in the past | XS | 3.6 | 0.4.1 | — | none needed |
 | 29 | `IDEAS.md` never marked shipped items | S | 3.7 | 0.4.2 | — | none needed |

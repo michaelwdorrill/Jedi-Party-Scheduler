@@ -37,9 +37,70 @@ export interface ExpandedOccurrence {
 // pathological rule (e.g. "never"-ending daily event created years ago).
 const MAX_ITERATIONS = 3000;
 
+const MINUTES_PER_DAY = 24 * 60;
+
+// How many whole periods the fast-forward has to step back before the window
+// so that every occurrence still overlapping it is actually generated.
+//
+// Pass-12 review (P12-14). This used to be the literal 1 in each arm, with the
+// comment "step back one period to be safe against partial-day rounding at the
+// boundary" -- slack measured in intervals, with no reference to how long an
+// occurrence lasts. An occurrence longer than one interval therefore begins
+// before the step-back point, is never generated at all, and so is never
+// tested for overlap: a seven-day daily occurrence starting 1 September was
+// returned by a 1-8 September query and vanished from a 5-6 September one.
+//
+// That is worse than a missing row. The narrower window is a subset of one
+// that returned it, so the calendar and the free/busy assistant report a
+// genuinely occupied interval as free, and the more precise the question the
+// likelier they are to. MAX_EVENT_DURATION_MS allows a year, so this is well
+// inside what the app accepts rather than a pathological input.
+//
+// One period of the original rounding slack, plus however many periods the
+// duration itself spans. MAX_ITERATIONS still bounds the walk.
+//
+// What this does not cover -- and what Pass 12 wrongly described as a narrower
+// separate problem -- is an override that MOVES an occurrence away from its
+// nominal date. No lookback can, in either direction: the move is unbounded
+// and unrelated to the rule. That is handled after the walk instead, by the
+// override pass at the end of expandOccurrences (P13-14 / F-34).
+function lookbackPeriods(rule: RecurrenceRule, periodMinutes: number): number {
+  return 1 + Math.ceil(Math.max(0, rule.durationMinutes) / Math.max(1, periodMinutes));
+}
+
+// Is `dateKey` a date this rule actually produces?
+//
+// Pass-14 review (P14-13 / F-39). The override pass below used to accept any
+// override whose date sat between seriesStart and endDate, which is not the
+// same question: it says nothing about interval, weekday, month-day or
+// end_count. A stored override outside the pattern was therefore emitted as a
+// real occurrence -- reachable by ordinary use, because a rule edit rewrites
+// event_recurrence_rules and never touches event_occurrence_overrides, so
+// changing a Monday series to Tuesdays or shortening its count orphans every
+// override keyed to a date the new rule does not produce.
+//
+// Answered by running the walk itself over a one-day window with NO overrides
+// rather than by re-deriving the pattern arithmetically. That is deliberate:
+// the walk is the one definition of series membership in this codebase, it
+// already handles end_count through its occurrence index -- which arithmetic
+// on the date alone cannot -- and a second implementation would be a second
+// thing to keep in agreement. It is also what routes/events.ts's RSVP path
+// already does to validate an occurrence date.
+//
+// No recursion hazard: the inner call passes an empty override list, so its
+// own override pass iterates nothing.
+export function isSeriesOccurrence(rule: RecurrenceRule, zone: string, dateKey: string): boolean {
+  const day = DateTime.fromISO(dateKey, { zone });
+  if (!day.isValid) return false;
+  const nominal = expandOccurrences(rule, zone, day.startOf('day').toMillis(), day.endOf('day').toMillis(), []);
+  return nominal.some((o) => o.date === dateKey);
+}
+
 // Pure: expands a recurrence rule into concrete occurrences overlapping
 // [windowFromMs, windowToMs]. No DB access, so it's equally usable for guild
 // events, personal events, and unit-style checks.
+//
+// Output is ordered by effective start time (Pass-14 review, P14-15 / F-38).
 export function expandOccurrences(
   rule: RecurrenceRule,
   zone: string,
@@ -87,8 +148,7 @@ export function expandOccurrences(
 
   if (rule.freq === 'DAILY') {
     const daysSinceStart = Math.max(0, Math.floor(windowStart.diff(seriesStart, 'days').days));
-    // Step back one period to be safe against partial-day rounding at the boundary.
-    let k = Math.max(0, Math.floor(daysSinceStart / interval) - 1);
+    let k = Math.max(0, Math.floor(daysSinceStart / interval) - lookbackPeriods(rule, interval * MINUTES_PER_DAY));
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
       const candidate = seriesStart.plus({ days: k * interval });
@@ -112,11 +172,28 @@ export function expandOccurrences(
 
     const seriesStartWeek = seriesStart.startOf('week'); // Luxon weeks start Monday
     const weeksSinceStart = Math.max(0, Math.floor(windowStart.diff(seriesStartWeek, 'weeks').weeks));
-    let weekIndex = Math.max(0, Math.floor(weeksSinceStart / interval) - 1);
+    let weekIndex = Math.max(
+      0,
+      Math.floor(weeksSinceStart / interval) - lookbackPeriods(rule, interval * 7 * MINUTES_PER_DAY),
+    );
 
     // Occurrences elapsed before the week we fast-forwarded to, so `end_count`
     // is measured against the true series position rather than the window.
-    let seriesIndex = weekIndex * weekdays.length;
+    //
+    // Pass-11 review (R22): the first week is partial whenever the series
+    // starts on anything but its earliest selected weekday, and those earlier
+    // slots are not occurrences -- the loop below skips them with `continue`
+    // without counting them. The fast-forward has to skip them too, or every
+    // occurrence after the first week is numbered one too high per missed
+    // slot, and an `after_count` series ends early. Worse, it ended early by a
+    // different amount depending on how far the fast-forward jumped, so the
+    // same series expanded over two overlapping windows disagreed about which
+    // dates exist -- a whole-month view showing an occurrence that vanished
+    // when the range was narrowed.
+    const slotsBeforeSeriesStart = weekdays.filter(
+      (wd) => seriesStartWeek.plus({ days: wd }) < seriesStart,
+    ).length;
+    let seriesIndex = weekIndex === 0 ? 0 : weekIndex * weekdays.length - slotsBeforeSeriesStart;
 
     outer: for (let i = 0; i < MAX_ITERATIONS; i++) {
       const weekStart = seriesStartWeek.plus({ weeks: weekIndex * interval });
@@ -136,20 +213,126 @@ export function expandOccurrences(
     const day = rule.byMonthDay ?? seriesStart.day;
     const seriesStartMonth = seriesStart.startOf('month');
     const monthsSinceStart = Math.max(0, Math.floor(windowStart.diff(seriesStartMonth, 'months').months));
-    let monthIndex = Math.max(0, Math.floor(monthsSinceStart / interval) - 1);
+    // 28 days is the shortest month, so pricing a period at 28 days can only
+    // ever step back further than needed, never less far.
+    let monthIndex = Math.max(
+      0,
+      Math.floor(monthsSinceStart / interval) - lookbackPeriods(rule, interval * 28 * MINUTES_PER_DAY),
+    );
+
+    // Pass-11 review (R22): months are not occurrences. A rule on day 31 has
+    // no occurrence in February, April, June, September or November, but the
+    // old code passed `monthIndex` straight to the end_count check -- so those
+    // empty months were counted as though they had produced something and an
+    // `after_count` series stopped early. "The 31st of every month, three
+    // times" starting 31 January yielded 31 January and 31 March and then
+    // gave up, because by May the month counter already read 4.
+    //
+    // Counted here rather than derived, for the months the fast-forward
+    // skipped over: only day 29-31 rules can miss a month at all, so for
+    // everything else this is exactly monthIndex, and the loop runs at most
+    // once per month the series has existed.
+    // Pass-12 review (P12-13): `candidate >= seriesStart` here and in the loop
+    // below. R22 taught this arm that an empty month is not an occurrence; the
+    // remaining case is a month whose day falls *before the series' own start
+    // date*, which only the start month can produce and only when byMonthDay
+    // precedes the day the series begins on.
+    //
+    // pushIfInWindow already refuses to emit such a candidate -- it returns
+    // early for anything before seriesStart -- but the loop counted it anyway,
+    // so it consumed one of the occurrences an after_count series is allowed.
+    // "The 1st of the month, three times" starting 15 January produced
+    // 1 February and 1 March and then stopped, because 1 January had already
+    // spent the third. The WEEKLY arm has always skipped these with a
+    // `continue` that does not count; this is the same rule.
+    //
+    // Only reachable through the API directly: the form sets byMonthDay from
+    // the start date, so the two always agree there.
+    let occurrenceIndex = 0;
+    for (let m = 0; m < monthIndex; m++) {
+      const monthStart = seriesStartMonth.plus({ months: m * interval });
+      if (day > (monthStart.daysInMonth ?? 0)) continue;
+      if (monthStart.set({ day }) < seriesStart) continue;
+      occurrenceIndex++;
+    }
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
       const monthStart = seriesStartMonth.plus({ months: monthIndex * interval });
       if (day <= (monthStart.daysInMonth ?? 0)) {
         const candidate = monthStart.set({ day });
-        if (!pushIfInWindow(candidate, monthIndex)) break;
-        if (candidate > windowEnd) break;
+        if (candidate >= seriesStart) {
+          if (!pushIfInWindow(candidate, occurrenceIndex)) break;
+          occurrenceIndex++;
+          if (candidate > windowEnd) break;
+        }
       } else if (monthStart > windowEnd) {
         break;
       }
       monthIndex++;
     }
   }
+
+  // Pass-13 review (P13-14 / F-34). A second, window-driven pass over the
+  // overrides, because the walk above is driven by NOMINAL dates and an
+  // override can move an occurrence arbitrarily far from its own.
+  //
+  // P12-14 widened the fast-forward so a LONG occurrence starting before the
+  // window is still generated. That was the smaller half. The general problem
+  // is that a moved occurrence is only ever considered if the walk happens to
+  // reach its original date -- and pushIfInWindow returns `false` (stop) for a
+  // candidate past windowEnd *before* it looks the override up, so the forward
+  // walk cannot reach a rule date beyond the window whose override pulls the
+  // occurrence back into it. Both directions, any distance: an accepted
+  // time_change validates only that the proposed time is a sane future range,
+  // so moving next Monday's game three weeks out is an ordinary use of the
+  // feature and three weeks is far outside any lookback.
+  //
+  // Everything downstream reads this function -- the reminder sweeps,
+  // free/busy, the calendar, the noticeboard, the Google push -- so a moved
+  // night got no reminder, showed its people as free, and was missing from the
+  // calendar for any window that did not span its original date.
+  //
+  // Cheap, because loadOverridesForEvents already hands over every override
+  // for the event: no query, no dependence on the window, and the walk above
+  // stays as the fast path for the ordinary case. Emitted only for overrides
+  // the walk did not already produce, so a moved occurrence appears once.
+  const emitted = new Set(results.map((r) => r.date));
+  for (const override of overrides) {
+    if (override.is_cancelled) continue;
+    if (override.override_start_at == null || override.override_end_at == null) continue;
+    if (emitted.has(override.occurrence_date)) continue;
+    if (override.override_end_at < windowFromMs || override.override_start_at > windowToMs) continue;
+
+    // Still has to be an occurrence of this series. The first version of this
+    // checked only seriesStart and endDate, which let an override orphaned by
+    // a rule edit -- a changed weekday, a shortened count -- come back as a
+    // live occurrence (P14-13 / F-39). isSeriesOccurrence asks the walk.
+    if (!isSeriesOccurrence(rule, zone, override.occurrence_date)) continue;
+
+    results.push({
+      date: override.occurrence_date,
+      startAt: override.override_start_at,
+      endAt: override.override_end_at,
+    });
+  }
+
+  // Pass-14 review (P14-15 / F-38). Sorted by effective start, because
+  // nothing else in this function is.
+  //
+  // pushIfInWindow emits at the RULE's position carrying the OVERRIDE's
+  // times, so a moved occurrence was already out of order before the override
+  // pass existed; that pass then appends the far-moved ones at the very end.
+  // Three callers take results[0] as "the next occurrence" -- the date the
+  // new-invite DM announces, the ladder's activeOccurrence (whose comment
+  // asserts that checking [0] is sufficient, true only if sorted), and event
+  // detail's next occurrence. So pulling an occurrence earlier, the case the
+  // override pass was written to make visible, left the reminder ladder
+  // firing for the wrong slot and the detail page naming the wrong night.
+  //
+  // Safe after the dedupe rather than before it: the dedupe is keyed by date,
+  // and nothing downstream consumes rule order -- freeBusy and noticeboard
+  // sort their own output already.
+  results.sort((a, b) => a.startAt - b.startAt || a.date.localeCompare(b.date));
 
   return results;
 }

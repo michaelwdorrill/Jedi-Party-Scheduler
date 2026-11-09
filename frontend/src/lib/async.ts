@@ -71,6 +71,58 @@ export interface AsyncState<T> {
 }
 
 /**
+ * A generation gate: `begin()` starts an attempt and hands back a predicate
+ * that is true only while that attempt is still the newest one.
+ *
+ * Extracted in the Pass-19 review (P19-03). This logic lived inline in
+ * `useAsync` and nowhere else, so `EventFormPage` -- which hand rolls its own
+ * fetch because it predates this hook -- simply did not have it. A late
+ * response for the event you were editing a moment ago repopulated the form's
+ * fields AND its loaded revision, and the next Save wrote them over whichever
+ * event the route had moved on to. Two different events are legitimately both
+ * at revision 0, so the server's optimistic-concurrency check could not catch
+ * a mix-up the client had already made.
+ *
+ * A plain closure rather than a hook so it can be tested directly, and so the
+ * two callers cannot drift apart again.
+ */
+export function latestOnly(): { begin: () => () => boolean } {
+  let generation = 0;
+  return {
+    begin: () => {
+      const mine = ++generation;
+      return () => mine === generation;
+    },
+  };
+}
+
+/**
+ * Whether a form's loaded state belongs to the thing it is about to write to.
+ *
+ * Pass-20 review (P20-01), the residual half of P19-03. `latestOnly` stopped an
+ * obsolete response from OVERWRITING newer state, which was the reported bug.
+ * It does not stop the opposite order: while a newly selected event is still
+ * loading, the fields and the loaded revision still belong to the PREVIOUS
+ * event, and Save was enabled and submitted them to the current route's id.
+ * Two events are legitimately both at revision 0, so the server's concurrency
+ * check saw a well-formed request and accepted it -- one event's contents
+ * written over another's, at the client's invitation.
+ *
+ * Clearing the revision instead would be worse, not better: it would send the
+ * wrong event's fields with no concurrency protection at all.
+ *
+ * A creation form has nothing loaded and is always ready.
+ */
+export function editTargetReady(opts: {
+  isEdit: boolean;
+  loadedId: string | null;
+  targetId: string | undefined;
+}): boolean {
+  if (!opts.isEdit) return true;
+  return opts.targetId != null && opts.loadedId === opts.targetId;
+}
+
+/**
  * Runs `load` on mount and whenever `deps` change, tracking loading and error
  * alongside the data so a page can tell "nothing came back" apart from
  * "nothing is scheduled".
@@ -83,20 +135,20 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[]): AsyncState
 
   // Guards against a slow earlier request landing after a newer one -- the
   // calendar re-fetches on a timezone change, and the two are not ordered.
-  const generation = useRef(0);
+  const gate = useRef(latestOnly());
 
   useEffect(() => {
-    const mine = ++generation.current;
+    const isCurrent = gate.current.begin();
     setLoading(true);
     setError(null);
     load().then(
       (result) => {
-        if (mine !== generation.current) return;
+        if (!isCurrent()) return;
         setData(result);
         setLoading(false);
       },
       (e: unknown) => {
-        if (mine !== generation.current) return;
+        if (!isCurrent()) return;
         // `data` is deliberately left alone: on a failed reload the previous
         // page contents are still the truest thing available, and the error
         // is shown over them rather than blanking the screen first.

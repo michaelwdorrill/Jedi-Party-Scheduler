@@ -1,6 +1,7 @@
+import { useState } from 'react';
 import { Link, Navigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
-import { API_BASE_URL } from '../api/client';
+import { beginLogin } from '../auth/loginTransaction';
 import { buttonClass } from '../components/ui';
 
 // The one surface in the app with no task to interrupt, and the one you see at
@@ -13,6 +14,20 @@ import { buttonClass } from '../components/ui';
 // reduced motion the composed scene is simply there.
 export default function LoginPage() {
   const { isAuthenticated, loading } = useAuth();
+  const [startError, setStartError] = useState<string | null>(null);
+
+  // A button rather than a plain link now (R02 in the Pass-11 review): the
+  // login transaction's verifier has to be minted and parked in this browser
+  // *before* the navigation, so that the code coming back can be proved to
+  // belong to the browser that asked for it. beginLogin is async because
+  // hashing the verifier is, hence the click handler.
+  const startLogin = async () => {
+    try {
+      window.location.href = await beginLogin();
+    } catch {
+      setStartError('Could not start login. Please reload the page and try again.');
+    }
+  };
 
   if (loading) return null;
   if (isAuthenticated) return <Navigate to="/" replace />;
@@ -77,9 +92,10 @@ export default function LoginPage() {
           your friends.
         </p>
 
-        <a href={`${API_BASE_URL}/auth/login`} className={buttonClass('primary', 'hero')}>
+        <button type="button" onClick={startLogin} className={buttonClass('primary', 'hero')}>
           Log in with Discord
-        </a>
+        </button>
+        {startError && <p className="text-sm text-danger-text">{startError}</p>}
 
         <p className="text-xs text-[#9A8067]">
           By logging in you agree to the{' '}

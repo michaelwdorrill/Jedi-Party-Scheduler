@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createEventWithInvites, type EventWriteInput } from '../src/lib/eventWrites';
+import { createEventWithInvites, updateEvent, type EventWriteInput } from '../src/lib/eventWrites';
 import { assertRecurrenceInput, LIMITS, ValidationError } from '../src/lib/validate';
 import { expandOccurrences } from '../src/lib/recurrence';
 import {
@@ -144,6 +144,79 @@ describe('poll shape validation', () => {
       ).rejects.toBeInstanceOf(ValidationError);
     },
   );
+
+  // Found in 0.8.1 sandbox verification: a threshold below MAX_RESOLVED_INVITEES
+  // still passed the range check above even when it was higher than anyone this
+  // event could actually invite, so the UI let it be typed in and the poll
+  // could only ever hit its deadline -- never its threshold.
+  it('rejects a threshold higher than the people actually invited', async () => {
+    const { env, db } = await seedOrganizer();
+    await seedUser(db, 'friend-1');
+    await seedMembership(db, 'friend-1', 'guild-1');
+    // organizer + friend-1 = 2 invited; asking for 3 can never be reached.
+    await expect(
+      create(env, {
+        ...poll,
+        pollStrategy: 'threshold',
+        pollThresholdCount: 3,
+        invites: { userIds: ['friend-1'], groupIds: [] },
+      }),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('accepts a threshold equal to the full invited list, organizer included', async () => {
+    const { env, db } = await seedOrganizer();
+    await seedUser(db, 'friend-1');
+    await seedMembership(db, 'friend-1', 'guild-1');
+    await expect(
+      create(env, {
+        ...poll,
+        pollStrategy: 'threshold',
+        pollThresholdCount: 2,
+        invites: { userIds: ['friend-1'], groupIds: [] },
+      }),
+    ).resolves.toBeTypeOf('string');
+  });
+
+  it('rejects raising the threshold past the invite list on a later edit, even when the edit does not touch invites', async () => {
+    const { env, db } = await seedOrganizer();
+    await seedUser(db, 'friend-1');
+    await seedMembership(db, 'friend-1', 'guild-1');
+    const eventId = await create(env, {
+      ...poll,
+      pollStrategy: 'threshold',
+      pollThresholdCount: 2,
+      invites: { userIds: ['friend-1'], groupIds: [] },
+    });
+    const stored = await db.prepare('SELECT * FROM events WHERE id = ?').bind(eventId).first();
+    // Only pollThresholdCount changes; the invite list is not part of this
+    // PATCH at all, which is exactly the case that needs the stored-count
+    // fallback rather than a fresh resolveInviteeUserIds call.
+    await expect(
+      updateEvent(env, eventId, 'guild-1', { pollThresholdCount: 5 }, stored as never),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('rejects shrinking the invite list below an already-set threshold', async () => {
+    const { env, db } = await seedOrganizer();
+    await seedUser(db, 'friend-1');
+    await seedMembership(db, 'friend-1', 'guild-1');
+    await seedUser(db, 'friend-2');
+    await seedMembership(db, 'friend-2', 'guild-1');
+    const eventId = await create(env, {
+      ...poll,
+      pollStrategy: 'threshold',
+      pollThresholdCount: 3,
+      invites: { userIds: ['friend-1', 'friend-2'], groupIds: [] },
+    });
+    const stored = await db.prepare('SELECT * FROM events WHERE id = ?').bind(eventId).first();
+    // The threshold itself is untouched -- only the roster shrinks, from
+    // (organizer, friend-1, friend-2) to (organizer, friend-1). 3 was reachable
+    // before; it no longer is.
+    await expect(
+      updateEvent(env, eventId, 'guild-1', { invites: { userIds: ['friend-1'], groupIds: [] } }, stored as never),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
 
   it('rejects a window poll missing its window bounds', async () => {
     const { env } = await seedOrganizer();

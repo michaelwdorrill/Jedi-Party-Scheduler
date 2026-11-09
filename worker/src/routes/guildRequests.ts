@@ -15,7 +15,8 @@
 import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { AppEnv } from '../lib/authMiddleware';
-import { canAdministerGuild, exchangeCodeForToken, fetchDiscordUser, fetchDiscordUserGuilds } from '../lib/discord';
+import { botGuildPresence, canAdministerGuild, exchangeCodeForToken, fetchDiscordUser, fetchDiscordUserGuilds } from '../lib/discord';
+import { oauthCallbackAllowed } from '../lib/rateLimit';
 import {
   createGuildAddRequest,
   decideGuildAddRequest,
@@ -25,12 +26,20 @@ import {
   type GuildVerifyTokenPayload,
   signGuildVerifyToken,
 } from '../lib/guildRequests';
-import { verifyToken } from '../lib/signedToken';
+import { signToken, verifyToken } from '../lib/signedToken';
 import { assertString, readJsonBody } from '../lib/validate';
 
 export const guildRequestRoutes = new Hono<AppEnv>();
 
 const STATE_COOKIE = 'guild_verify_state';
+
+// Pass-21 review (F-59). The same unauthenticated token-exchange trigger as
+// routes/auth.ts's login callback, one route over and with the same fix: the
+// state is signed and verified before `exchangeCodeForToken` is reached, so a
+// fabricated one costs an HMAC instead of a call to Discord's token endpoint.
+// The cookie stays and still does the CSRF binding.
+const OAUTH_STATE_PURPOSE = 'discord_oauth_state';
+const OAUTH_STATE_TTL_SECONDS = 300;
 const NO_STORE = 'no-store, private';
 
 function redirectUri(c: { req: { url: string } }): string {
@@ -50,15 +59,21 @@ function frontendRequestPageUrl(c: { env: { FRONTEND_URL: string } }): string {
   return `${c.env.FRONTEND_URL}/#/add-bot`;
 }
 
-guildRequestRoutes.get('/connect', (c) => {
-  const state = randomState();
-  setCookie(c, STATE_COOKIE, state, {
+guildRequestRoutes.get('/connect', async (c) => {
+  const nonce = randomState();
+  setCookie(c, STATE_COOKIE, nonce, {
     httpOnly: true,
     secure: true,
     sameSite: 'Lax',
     path: '/guild-requests',
     maxAge: 600,
   });
+  const state = await signToken(
+    OAUTH_STATE_PURPOSE,
+    { nonce },
+    c.env.JWT_SIGNING_KEY,
+    OAUTH_STATE_TTL_SECONDS,
+  );
   const params = new URLSearchParams({
     client_id: c.env.DISCORD_CLIENT_ID,
     redirect_uri: redirectUri(c),
@@ -75,9 +90,19 @@ guildRequestRoutes.get('/callback', async (c) => {
   const cookieState = getCookie(c, STATE_COOKIE);
   deleteCookie(c, STATE_COOKIE, { path: '/guild-requests' });
 
-  if (!code || !state || !cookieState || state !== cookieState) {
+  // Signature before spend (F-59), as in routes/auth.ts.
+  const stateToken = state
+    ? await verifyToken<{ nonce: string }>(state, OAUTH_STATE_PURPOSE, c.env.JWT_SIGNING_KEY)
+    : null;
+  if (!code || !stateToken || !cookieState || stateToken.nonce !== cookieState) {
     c.header('Cache-Control', NO_STORE);
     return c.text('This request could not be verified. Please try again.', 400);
+  }
+
+  // Bound before the spend, same rule and same ordering as routes/auth.ts.
+  if (!(await oauthCallbackAllowed(c.env, c.req.raw.headers))) {
+    c.header('Cache-Control', NO_STORE);
+    return c.text('Too many attempts from this address. Please wait a minute and try again.', 429);
   }
 
   try {
@@ -114,7 +139,14 @@ guildRequestRoutes.get('/callback', async (c) => {
     const eligible = await Promise.all(
       administered.map(async (g) => {
         const active = await c.env.DB.prepare(`SELECT 1 FROM guilds WHERE id = ? AND is_active = 1`).bind(g.id).first();
-        if (active) return { guildId: g.id, guildName: g.name, alreadyAdded: true as const };
+        if (active) {
+          // IDEAS 102 follow-up: allow-listed is not the same as the bot being
+          // there. Already approved, so no new request -- just the invite.
+          if ((await botGuildPresence(c.env.DISCORD_BOT_TOKEN, g.id)) === 'absent') {
+            return { guildId: g.id, guildName: g.name, botMissing: true as const, botInviteUrl: botInviteUrl(c.env, g.id) };
+          }
+          return { guildId: g.id, guildName: g.name, alreadyAdded: true as const };
+        }
         const payload: GuildVerifyTokenPayload = { guildId: g.id, guildName: g.name, requestedBy: discordUser.id };
         return { guildId: g.id, guildName: g.name, token: await signGuildVerifyToken(c.env, payload) };
       }),
@@ -171,30 +203,117 @@ guildRequestRoutes.post('/', async (c) => {
     // Discord was handed), so this was never an access hole -- but it leaves
     // an approved server with no bot in it and a bot sitting in a server
     // nobody approved, which is its own kind of wrong.
-    botInviteUrl:
-      `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(c.env.DISCORD_CLIENT_ID)}` +
-      `&scope=bot&permissions=0&guild_id=${encodeURIComponent(payload.guildId)}&disable_guild_select=true`,
+    botInviteUrl: botInviteUrl(c.env, payload.guildId),
   }, 201);
 });
 
 // Consumed from an email, not a browser session -- see this file's header
-// comment. A GET rather than POST because that's what a mail client's own
-// link-click gives us, and the token itself (single-purpose, short-lived,
-// one-shot via decided_at) is what makes a GET safe to act on here.
+// comment.
+//
+// Pass-11 review (F-19): the GET used to *make* the decision, and the comment
+// here argued that the token being single-purpose, short-lived and one-shot
+// was what made that safe. It is not. Outlook Safe Links, Gmail's image and
+// link proxies and corporate mail gateways fetch the URLs in inbound mail
+// before any human sees them, and this app's email lists Approve first. So a
+// request could be approved with nothing but the mail arriving -- and since
+// the decision is one-shot, the owner's own later click would tell them it
+// had "already been decided", with no indication by what.
+//
+// What is being approved makes that worse than an ordinary prefetch bug:
+// `guilds` is this app's entire admission control. Everyone in an allow-listed
+// server can log in, so an auto-approval hands a whole Discord server accounts
+// here without anybody agreeing to it.
+//
+// The fix is a confirmation step. Prefetchers follow links; they do not submit
+// forms. The GET now verifies the token and renders one button, and the POST
+// below is what actually decides -- which is also just the correct HTTP for a
+// state change.
+function decisionPage(title: string, body: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
+button{font:inherit;padding:.6rem 1.1rem;border-radius:.4rem;border:1px solid #888;background:#f4f4f5;cursor:pointer}</style>
+</head><body>${body}</body></html>`;
+}
+
+// The guild name is operator-facing but originates from Discord, so it is
+// escaped rather than trusted -- this is the one place in the app that builds
+// an HTML document by hand.
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 guildRequestRoutes.get('/:token/decide', async (c) => {
   c.header('Cache-Control', NO_STORE);
+  const token = c.req.param('token');
+  const payload = await verifyToken<DecisionTokenPayload>(token, DECISION_TOKEN_PURPOSE, c.env.JWT_SIGNING_KEY);
+  if (!payload) return c.html(decisionPage('Link expired', '<p>This link has expired or is invalid.</p>'), 400);
+
+  const request = await c.env.DB.prepare(`SELECT guild_name, decided_at FROM guild_add_requests WHERE id = ?`)
+    .bind(payload.requestId)
+    .first<{ guild_name: string; decided_at: number | null }>();
+  if (!request) return c.html(decisionPage('Not found', '<p>This request no longer exists.</p>'), 404);
+  if (request.decided_at !== null) {
+    return c.html(
+      decisionPage(
+        'Already decided',
+        '<p>This request was already decided (by this link or the admin page). No changes were made.</p>',
+      ),
+    );
+  }
+
+  const verb = payload.action === 'approve' ? 'Approve' : 'Reject';
+  const name = escapeHtml(request.guild_name);
+  return c.html(
+    decisionPage(
+      `${verb} ${name}?`,
+      `<h1>${verb} “${name}”?</h1>
+       <p>${
+         payload.action === 'approve'
+           ? 'Approving adds this server to the allow-list. Everyone in it will be able to log in.'
+           : 'Rejecting leaves the allow-list unchanged.'
+       }</p>
+       <form method="post"><button type="submit">Confirm: ${verb.toLowerCase()} “${name}”</button></form>`,
+    ),
+  );
+});
+
+// The decision itself. Same token, same one-shot semantics as before -- the
+// only change is that reaching here takes a deliberate submission.
+guildRequestRoutes.post('/:token/decide', async (c) => {
+  c.header('Cache-Control', NO_STORE);
   const payload = await verifyToken<DecisionTokenPayload>(c.req.param('token'), DECISION_TOKEN_PURPOSE, c.env.JWT_SIGNING_KEY);
-  if (!payload) return c.text('This link has expired or is invalid.', 400);
+  if (!payload) return c.html(decisionPage('Link expired', '<p>This link has expired or is invalid.</p>'), 400);
 
   const result = await decideGuildAddRequest(c.env, payload.requestId, payload.action);
   switch (result) {
     case 'approved':
-      return c.text('Approved -- the server has been added to the allow-list.');
+      return c.html(decisionPage('Approved', '<p>Approved -- the server has been added to the allow-list.</p>'));
     case 'rejected':
-      return c.text('Rejected -- no changes were made.');
+      return c.html(decisionPage('Rejected', '<p>Rejected -- no changes were made.</p>'));
     case 'already_decided':
-      return c.text('This request was already decided (by this link or the admin page). No changes were made.');
+      return c.html(
+        decisionPage(
+          'Already decided',
+          '<p>This request was already decided (by this link or the admin page). No changes were made.</p>',
+        ),
+      );
     case 'not_found':
-      return c.text('This request no longer exists.', 404);
+      return c.html(decisionPage('Not found', '<p>This request no longer exists.</p>'), 404);
   }
 });
+
+// One place for the bot's invite link: the request flow and the add-bot list's
+// "add it back" both use it. See the POST handler's comment for why
+// permissions=0 and disable_guild_select=true.
+function botInviteUrl(env: { DISCORD_CLIENT_ID: string }, guildId: string): string {
+  return (
+    `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(env.DISCORD_CLIENT_ID)}` +
+    `&scope=bot&permissions=0&guild_id=${encodeURIComponent(guildId)}&disable_guild_select=true`
+  );
+}

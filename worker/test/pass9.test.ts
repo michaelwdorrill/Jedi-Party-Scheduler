@@ -146,8 +146,14 @@ describe('a whole cron tick stays inside the Free-plan D1 ceiling (F-04-G1)', ()
     // 32, not 31, for the organizer-RSVP-notice idea captured alongside item
     // 54: one more new fixed discovery read (sweepOrganizerRsvpNotices),
     // uncharged for the same reason as the rest.
-    expect(firstTick).toBeLessThanOrEqual(32);
-    expect(secondTick).toBeLessThanOrEqual(32);
+    //
+    // 33, not 32, for IDEAS item 92's D1 counter: pruneOAuthCallbackCounts
+    // deletes earlier minutes' rows every tick, so the privacy policy's "kept
+    // for at most about fifteen minutes" is true on a day nobody logs in. One
+    // uncharged statement, beside pruneStaleSessions; the full-tick ceiling
+    // test above and pass6's purge budget fit were re-run against it.
+    expect(firstTick).toBeLessThanOrEqual(33);
+    expect(secondTick).toBeLessThanOrEqual(33);
     // One flush statement, not ten: the ten fresh cursors cost the first tick
     // barely more than the second, which has none to write.
     expect(firstTick - secondTick).toBeLessThanOrEqual(2);

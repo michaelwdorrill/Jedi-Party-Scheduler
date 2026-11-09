@@ -106,7 +106,18 @@ export default function HomePage() {
   } = useAsync<EventOccurrence[]>(() => {
     const { from, to } = gridWindow(monthStart);
     return api.get<EventOccurrence[]>(`/me/events?from=${from.toMillis()}&to=${to.toMillis()}`);
-  }, [zone, monthStart.toMillis()]);
+    // `monthStart` rather than `monthStart.toMillis()`: it is a useMemo keyed
+    // on [monthOffset, zone], so its identity already changes exactly when its
+    // value does, and the two are behaviourally identical. The difference is
+    // that exhaustive-deps can check this one -- a `.toMillis()` call in a
+    // dependency array is opaque to it, which is the same blind spot that let
+    // P19-04 ship on EventDetailPage.
+    //
+    // `zone` is gone from this list because the closure never reads it and
+    // `monthStart` is already keyed on it, so it could only ever fire a
+    // duplicate fetch. It was invisible while the array held an expression
+    // the rule could not check.
+  }, [monthStart]);
 
   // The rail's own data, anchored to now and unaffected by paging.
   const horizon = useAsync<EventOccurrence[]>(() => {
