@@ -1423,6 +1423,39 @@ answer stops counting -- but the false error message is text a person is asked
 to rely on. **Recommendation: 1.0.1**, unless Michael wants it in the same
 reviewer pass as 94-97.
 
+### 99. Cancelling a multi-winner poll leaves its confirmed days on, and tells invitees the wrong reason
+
+Found 8 November 2026, by accident: walkthrough setup that landed on production
+was cleaned up by cancelling two multi-winner polls, and the DMs that followed
+were wrong. Confirmed in the candidate's code, not only production's:
+
+- `DELETE /events/:eventId` sets the poll's own status and nothing else. A day
+  that already became its own event (spec 0014's fan-out) stays **active**,
+  with its invitees, reminders and cascade, and the organizer's confirmation
+  ("Cancel this event for everyone?") says nothing about it.
+- `sweepMultiWinnerPollClosedNotifications` fires for `status IN
+  ('resolved','cancelled')` and words its notice for a deadline: with no
+  confirmed days, *"didn't get enough interest on any day and was
+  cancelled"* -- false when the organizer cancelled it; with confirmed days,
+  *"Voting has closed. N day(s) got confirmed -- check the event"*, which
+  reads as if those days are still on (they are) without the organizer ever
+  having chosen that.
+
+**Under the release bar this is clause 4** (a destructive action's
+confirmation must say what it does not undo) and arguably clause 2 for the
+false reason. IDEAS 55 already drew the same line for single events: an
+organizer cancel gets its own wording, distinct from "dropped below the
+minimum".
+
+**Design needed, not just wording:** when an organizer cancels a multi-winner
+poll, should its confirmed days go too? Either answer is defensible; the bug
+is that nobody chose. Options: (a) cancel the confirmed days with it and say
+so in the dialog; (b) leave them on and say so in the dialog, and word the
+notice as "the organizer closed the poll; these days are still happening".
+Either way the notice for an organizer cancel needs its own wording.
+
+**Not yet decided; needs Michael's call before 1.0.**
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
