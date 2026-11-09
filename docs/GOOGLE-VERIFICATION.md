@@ -72,19 +72,94 @@ be needed after that edit; it was quick the first time.)
 everything in one place, and phone notifications that already work, with
 the choice left to the user.*
 
-## Demo video shot list (unlisted YouTube, 3–5 minutes, English, no narration required but captions help)
+## Demo video: the script
 
-Google wants to see the consent screen showing the app name **and the OAuth
-client ID in the browser's address bar**, then each scope actually being used.
+**Record after 1.0.1 ships** (home page description, plain `/privacy`), so
+Scene 1 shows the final versions.
 
-1. Open **https://uncleowen.space** (the home page with its description and Privacy link). Click the Privacy link and scroll to the Google section.
-2. Log in with Discord. Go to **Settings → Connected calendars → Connect Google**.
-3. On Google's consent screen, **pause and zoom on the address bar** so `client_id=767835704577-…` is readable, then on the app name "Uncle Owen" and the two permissions listed. Grant them.
-4. Back in Settings: open the **"Calendar to write to"** list (that's `calendar.readonly` listing calendars). Pick one; tick **Sync my sessions**.
-5. In Uncle Owen, show an event you're going to. Then show **Google Calendar** with that session written there: title, time, server name, link. *(Sync runs about hourly, so record this part after it has run.)*
-6. **Move the session's time** in Uncle Owen, wait for the sync, and show the Google entry updated. Then **cancel** it and show it removed.
-7. In Settings choose a calendar under **"Read my busy times from"**. Show its events appearing in **your** Uncle Owen calendar as read-only personal time. Then, as a second account (SchedulerTest), show the scheduling view where you appear only as **blank busy blocks**.
-8. **Disconnect** in Settings and show the upcoming Uncle Owen entries gone from Google Calendar.
+### Tools
+- **Snipping Tool** (Windows 11): Win+Shift+R, or the video-camera icon, drag
+  a box around the browser window, then Start. One MP4 per clip.
+- **Clipchamp** (built into Windows 11, free): join the four clips, add the
+  caption text below as on-screen titles, export **1080p MP4**.
+- Then YouTube, **Unlisted**, title "Uncle Owen — Google Calendar
+  integration (OAuth verification demo)".
+
+### Before recording (once)
+1. **Chrome profile:** the new profile signed in to the **Demo Google
+   account**, with **Discord's website signed in as DM MD** (so login is one
+   click). Close every tab except Uncle Owen. Hide the bookmarks bar
+   (Ctrl+Shift+B). Normal window, not full-screen, so the **address bar
+   shows**. Zoom **125%**.
+2. **Windows:** turn on **Do Not Disturb** (Win+N, the bell) so no
+   notification pops up mid-shot.
+3. **Demo Google account:** in Google Calendar, create a **second calendar**
+   called "Personal" and add two made-up events in the next week (e.g.
+   "Dentist", "Dinner with Sam"). The **primary** calendar stays empty; that's
+   where Uncle Owen will write.
+4. **Uncle Owen (production, as DM MD), in your DM MD server:** create two
+   events in the next week, e.g. **"Demo game night"** and **"Demo board
+   games"**, unticking the noticeboard so they stay private. Leave the rest of
+   your calendar as it is, but **check that no friend's event or name shows**
+   on the calendar month you'll be filming.
+5. **Settings (as DM MD):** "Let people I share a server with see when I'm
+   busy" **on**. **Disconnect** your real Gmail.
+6. **SchedulerTest:** invite it to your **DM MD** server, then log in to
+   production Uncle Owen once as SchedulerTest in an **Incognito window** (or
+   another profile), agree to the policy, and close the pop-up. You'll film it
+   in Clip C.
+7. Log **out** of Uncle Owen in the recording profile.
+
+### Clip A: discovery, consent, setup (about 2 minutes)
+
+| # | Do | Caption | Hold |
+|---|---|---|---|
+| A1 | Open **https://uncleowen.space**. Let the home page sit; point at the description with the mouse | "Uncle Owen: a free scheduler for private Discord friend groups" | 4 s |
+| A2 | Click **Privacy Policy**; scroll to **"If you connect a Google calendar"** and the **Limited Use** sentence | "How Google data is used, and the Limited Use statement" | 5 s |
+| A3 | Back to the home page, **Log in with Discord** → Discord's authorize page → **Authorize** | "Sign-in is with Discord" | 3 s |
+| A4 | **Settings → Connected calendars → Connect Google** | "Connecting Google Calendar is optional" | 2 s |
+| A5 | Google: choose the **Demo** account. On **"Google hasn't verified this app"**: **Advanced → Go to Uncle Owen** | "(This warning is what verification removes)" | 3 s |
+| A6 | **Consent screen. Click into the address bar, press End, and scroll until `client_id=767835704577-…` is visible. Hold.** Then show the app name "Uncle Owen" and the two permissions listed | "OAuth client ID 767835704577-…; the two permissions requested" | **5 s each** |
+| A7 | **Allow**. Back in Settings: open **"Calendar to write to"** to show the list, pick the **primary** calendar, tick **Sync my sessions** | "calendar.readonly: listing calendars so you can choose" | 4 s |
+| A8 | Open **"Read my busy times from"**, choose **Personal** | "Optional: one calendar read, so others see when you're busy" | 3 s |
+
+Stop recording. **Wait about 15 minutes** (the first sync of a new connection
+is on the next 15-minute run).
+
+### Clip B: writing and reading (about 1 minute)
+
+| # | Do | Caption | Hold |
+|---|---|---|---|
+| B1 | Open **Google Calendar** (Demo account, primary): both **Demo** sessions are there. Open one: title, time, server name, link back | "calendar.events: your sessions, written to the calendar you chose" | 5 s |
+| B2 | Back in **Uncle Owen**'s calendar: the two **"Personal"** events appear as your own read-only personal time | "calendar.readonly: your chosen calendar, shown only to you" | 4 s |
+| B3 | In Uncle Owen: **move "Demo game night"** to a different time, then **cancel "Demo board games"** | "Changes and cancellations are kept in sync" | 3 s |
+
+Stop. **Wait about an hour** (the next sync for this connection).
+
+### Clip C: updates, and what others see (about 1 minute)
+
+| # | Do | Caption | Hold |
+|---|---|---|---|
+| C1 | Google Calendar: **"Demo game night"** is at its **new time**, and **"Demo board games" is gone** | "Updated and removed automatically" | 5 s |
+| C2 | Switch to the **Incognito window, logged in as SchedulerTest**: start a **New Event** in the DM MD server, invite **DM MD**, and show the scheduling view's **blank busy blocks** for DM MD's "Personal" times, with no titles | "Other people see only that you're busy, never details" | 5 s |
+
+### Clip D: disconnecting (about 30 seconds plus a wait)
+
+| # | Do | Caption | Hold |
+|---|---|---|---|
+| D1 | Back as DM MD: **Settings → Disconnect** | "Disconnect at any time" | 3 s |
+| D2 | *(Wait for the next 15-minute run.)* Google Calendar: the upcoming Uncle Owen entries are **gone** | "Disconnecting removes what Uncle Owen wrote and revokes access" | 5 s |
+
+Afterwards: reconnect your **real Gmail** in Settings, and remove
+SchedulerTest from the DM MD server if you don't want it there.
+
+### What not to show
+- The **Discord app or discord.com** (servers, DMs, friends). Discord's
+  authorize page during login is fine.
+- Your **real Gmail** or real calendar. Everything Google-side is the Demo
+  account.
+- Any **friend's** events or names in Uncle Owen. Only the two Demo events
+  and SchedulerTest.
 
 ## Submitting
 
