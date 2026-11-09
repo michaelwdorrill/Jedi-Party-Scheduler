@@ -55,8 +55,8 @@ export default function TermsPage() {
       <Section heading="Messages from the bot">
         <p>
           {SERVICE_NAME} sends Discord messages about invitations, upcoming sessions, polls, change
-          requests, cancellations and inactive groups, and sent one announcement when version 1.0
-          launched. You can turn them off in Settings, or block the bot in Discord. The warnings before
+          requests, cancellations, answers to events you organize and inactive groups, and sent one
+          announcement when version 1.0 launched. You can turn them off in Settings, or block the bot in Discord. The warnings before
           an inactive account is deleted are sent regardless, because they exist to stop that
           deletion.
         </p>

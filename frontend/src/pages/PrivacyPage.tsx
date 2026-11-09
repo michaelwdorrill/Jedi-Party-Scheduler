@@ -90,7 +90,8 @@ export default function PrivacyPage() {
           can't hammer them. To count attempts, {SERVICE_NAME} turns your IP address into a scrambled
           code that can't be turned back into the address without a secret key only the service
           holds, and keeps that code with a count for the current minute. It is not linked to your
-          account, and it is deleted within about fifteen minutes. Your IP address itself is never
+          account, and it is deleted from the live database within about fifteen minutes (recovery
+          copies, below, keep it no longer than anything else). Your IP address itself is never
           written to {SERVICE_NAME}'s database, and is never used for anything else.
         </p>
         <p>
@@ -110,25 +111,30 @@ export default function PrivacyPage() {
           that it hasn't verified {SERVICE_NAME}; that is expected for a project this small.
         </p>
         <p>
-          <strong>What is written to your Google calendar</strong> is limited on purpose: only
-          sessions you are committed to, with their title, times, the name of the Discord server and
-          a link back here. <strong>Never descriptions</strong>, never a poll's proposed dates, never
-          an event you've declined, and never your personal time.
+          <strong>What is written to your Google calendar</strong> is limited on purpose: sessions
+          in the next two months that you organize or have been invited to and haven't declined —
+          including ones you haven't answered yet and ones you've said "maybe" to — with their title,
+          times, the name of the Discord server and a link back here.{' '}
+          <strong>Never descriptions</strong>, never a poll's proposed dates, never an event you've
+          declined, and never your personal time.
         </p>
         <p>
           <strong>Reading a calendar is a separate choice, off by default.</strong> You can choose{' '}
           <em>one</em> of your Google calendars to be read, so people scheduling with you can see when
-          you're busy. Every event on it is then copied into your own {SERVICE_NAME} calendar as
-          read-only personal time, <strong>with its title, time and description</strong>, visible only
-          to you; anyone else still sees only plain blocks of busy time. Events are read about two
-          months ahead, at most forty at a time. Switching reading off, or choosing a different
-          calendar, deletes every entry it created. Google's permission covers all your calendars,
+          you're busy. Its upcoming events — about two months ahead, up to forty at a time — are then
+          copied into your own {SERVICE_NAME} calendar as read-only personal time,{' '}
+          <strong>with their titles, times and descriptions</strong>, visible only to you; anyone else
+          still sees only plain blocks of busy time. Cancelled events, and the sessions{' '}
+          {SERVICE_NAME} itself wrote to that calendar, are left out. If there are more than forty,
+          Settings tells you. Switching reading off, or choosing a different calendar, deletes every
+          entry it created. Google's permission covers all your calendars,
           not just the one you choose — that only one is read is enforced by {SERVICE_NAME}'s own
           code, not by Google — so if that matters to you, leave reading off.
         </p>
         <p>
-          <strong>Disconnecting</strong> removes the upcoming entries {SERVICE_NAME} wrote and asks
-          Google to revoke its access. If Google can't confirm that at the time, the credential is
+          <strong>Disconnecting</strong> removes the upcoming entries {SERVICE_NAME} wrote (if Google
+          refuses, it keeps trying for about an hour, then stops) and asks Google to revoke its
+          access. If Google can't confirm that at the time, the credential is
           still deleted here, but the permission may stay on your Google account until you remove it
           in your Google account's third-party access settings.{' '}
           <strong>
@@ -138,7 +144,8 @@ export default function PrivacyPage() {
           — disconnect first if you want them gone.
         </p>
         <p>
-          {SERVICE_NAME}'s use and transfer of information received from Google APIs adheres to the{' '}
+          {SERVICE_NAME}'s use and transfer to any other app of information received from Google APIs
+          will adhere to the{' '}
           <a
             href="https://developers.google.com/terms/api-services-user-data-policy"
             className="underline"
@@ -153,8 +160,9 @@ export default function PrivacyPage() {
 
       <Section heading="What is deliberately not collected">
         <p>
-          Your email address, your Discord messages, your Discord password or login tokens (used once
-          during sign-in, in memory, then discarded), payment details, location, device fingerprints,
+          Your email address (other than the address of a Google account you choose to connect — see
+          above), your Discord messages, your Discord password or login tokens (used once during
+          sign-in, in memory, then discarded), payment details, location, device fingerprints,
           advertising identifiers, or analytics of any kind. There are no third-party trackers, ad
           networks or tracking cookies.
         </p>
@@ -261,8 +269,10 @@ export default function PrivacyPage() {
               <strong>Cloudflare</strong> runs the application and its database. Like any host, it
               receives your IP address with each request. It also keeps the application's own log
               lines for {LOG_RETENTION_DAYS} days, for finding faults. They can include Discord user and
-              server IDs and error details; they don't include event titles, descriptions or message
-              text, and Cloudflare's automatic record of every request is switched off.
+              server IDs and error details, including parts of error messages from Google or Resend.{' '}
+              {SERVICE_NAME} is written not to log event titles, descriptions or the text of
+              messages, and the automatic per-request entry Cloudflare would otherwise add to those
+              logs is switched off.
             </>,
             <>
               <strong>GitHub</strong> serves the website's files. Like any web host, it receives your
@@ -275,9 +285,11 @@ export default function PrivacyPage() {
               when it does.
             </>,
             <>
-              <strong>Resend</strong> delivers one kind of email, to the operator, when someone asks to
-              add the bot to a server. It contains that person's Discord display name, username and
-              ID, and the server's name and ID. Nothing else ever triggers an email.
+              <strong>Resend</strong> delivers one kind of email, to the operator's inbox at{' '}
+              <strong>Proton Mail</strong>, when someone asks to add the bot to a server. It contains
+              that person's Discord display name, username and ID, the server's name and ID, and two
+              links to approve or reject the request, which expire after 7 days. Proton keeps it as the
+              operator's email provider. Nothing else ever triggers an email.
             </>,
             <>
               <strong>Google</strong>, for people who connect a calendar, as described above. Google
@@ -300,8 +312,15 @@ export default function PrivacyPage() {
         <Bullets
           items={[
             <>
-              <strong>Your account, settings, groups and personal time:</strong> until you delete
-              your account, or after 365 days without logging in.
+              <strong>Your account, settings, groups, personal time and any requests you made to add
+              the bot:</strong> until you delete your account, or after 365 days without logging in.
+            </>,
+            <>
+              <strong>Google Calendar:</strong> the connection, its credential and the record of
+              entries written, until you disconnect or delete your account. Personal time imported
+              from a calendar you chose to read, until you switch reading off, choose a different
+              calendar or disconnect; while reading is on it is refreshed against the next two
+              months.
             </>,
             <>
               <strong>Events you organize, and everyone's answers on them:</strong> until you delete
@@ -345,8 +364,8 @@ export default function PrivacyPage() {
           items={[
             <>
               <strong>See and take your data:</strong> "Download my data" gives you a file with
-              everything {SERVICE_NAME} holds about you, apart from the encrypted Google credential (if
-              you connected Google), which is never given out to anyone.
+              everything {SERVICE_NAME} holds about you, apart from the encrypted Google credentials (if
+              you connected Google), which are never given out to anyone.
             </>,
             <>
               <strong>Delete your account:</strong> "Delete my account" removes your profile,
@@ -429,10 +448,11 @@ export default function PrivacyPage() {
       <Section heading="Where it is processed">
         <p>
           Cloudflare, GitHub, Discord, Resend and Google process information in the United States and
-          elsewhere, so it may be handled outside your country and, while there, be accessible to
-          authorities under local law. Where information leaves the UK, the EU or Canada, these
-          companies rely on their own published safeguards, such as the EU–US Data Privacy Framework
-          or standard contractual clauses.
+          elsewhere, and Proton, the operator's email provider, is based in Switzerland. So it may be
+          handled outside your country and, while there, be accessible to authorities under local
+          law. Where information leaves the UK, the EU or Canada, these companies rely on their own
+          published safeguards — such as the EU–US Data Privacy Framework or standard contractual
+          clauses for the EU and UK, and contractual protections for Canada.
         </p>
       </Section>
 

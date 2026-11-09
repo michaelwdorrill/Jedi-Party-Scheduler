@@ -28,7 +28,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     date: '9 November 2026',
     summary: 'Feature complete: Google Calendar, a noticeboard for each server, and polls that turn into real plans.',
     added: [
-      'Google Calendar. Connect a Google account in Settings and the sessions you’re committed to are written onto a calendar you choose — title, time, server and a link back, never the description, never a poll’s proposed dates, never anything you’ve declined. You can also choose one calendar to be read back as private personal time, so people scheduling with you see when you’re busy (they only ever see blank blocks). Google will warn you that it hasn’t verified Uncle Owen; that’s expected for a project this small.',
+      'Google Calendar. Connect a Google account in Settings and the sessions you organize or are invited to — unless you’ve declined — are written onto a calendar you choose: title, time, server and a link back, never the description, never a poll’s proposed dates. You can also choose one calendar to be read back as private personal time, so people scheduling with you see when you’re busy (they only ever see blank blocks). Google will warn you that it hasn’t verified Uncle Owen; that’s expected for a project this small.',
       'A “What’s on” noticeboard for each server: the sessions happening there, whether or not you were invited, with who’s going. Descriptions are never shown on it, and any event can be kept off it. Everything made before this release stays private.',
       'On a poll where each day is confirmed on its own, a confirmed day becomes a real event that carries everyone’s answer — “I’m in”, “can’t make it” or “maybe” — and links back to its poll. If people drop out and it falls below what the poll needed, the day is called off and everyone still coming is told; you’re warned before your answer is the one that does it.',
       'Cancelling a poll like that now leaves days that are already happening in place, and says so before you confirm.',
@@ -43,7 +43,7 @@ export const CHANGELOG: ChangelogEntry[] = [
       'A cancelled event’s Discord invite loses its answer buttons and says it was cancelled.',
       'A change request for a date that has since been cancelled says so, and can only be declined.',
       'A new event defaults to 7pm–11pm instead of 1pm–5pm, and a poll can’t ask for more yeses than people invited.',
-      '“Download my data” now includes everything held about you, apart from the encrypted Google credential.',
+      '“Download my data” now includes everything held about you, apart from the encrypted Google credentials.',
       'Signing in is limited to a sensible number of attempts per minute, and sign-in sessions renew themselves more safely.',
     ],
     fixed: [

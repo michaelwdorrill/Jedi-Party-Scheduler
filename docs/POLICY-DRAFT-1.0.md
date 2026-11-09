@@ -68,7 +68,7 @@ the code as it stands for 1.0, these statements are **untrue or out of date**:
 
 | # | Version 5 says | What is actually true | Draft |
 |---|---|---|---|
-| A1 | Resend "sends the one email this service generates" to the operator | Production runs with `EMAIL_MODE = "stub"` (`worker/wrangler.toml`): no email is sent and Resend receives nothing. (The `worker/src/lib/email.ts` comment that said production is `live` is corrected in draft 2.) | Resend described as used **only if** owner email is switched on — see F4 |
+| A1 | Resend "sends the one email this service generates" to the operator | Production runs with `EMAIL_MODE = "stub"` (`worker/wrangler.toml`): no email is sent and Resend receives nothing. (The `worker/src/lib/email.ts` comment that said production is `live` is corrected in draft 2.) | Resend described as used **only if** owner email is switched on — see F4 **Superseded at 1.0: production `EMAIL_MODE = "live"` (F4); the policy names Resend and Proton.** |
 | A2 | The Google Calendar connection is described as available | Production runs with `GOOGLE_SYNC_MODE = "off"`; every Google route answers 503 and the sync never runs (`isGoogleConfigured`, `worker/src/lib/googleCalendar.ts:102`) | Kept, but marked **not currently offered** — see F3 |
 | A3 | "There is no administrative screen in the app for reading other people's data" | The operator has an admin page listing every account: username, display name, notifications on/off, last login, last refused login, and server memberships (`worker/src/routes/admin.ts:28`, `:62`). It shows no event content | States exactly what the operator's screens show |
 | A4 | "No soft-delete or grace period" on account deletion | True of the app. But Cloudflare D1 keeps point-in-time recovery ("Time Travel") for a fixed window, so the operator could technically restore a deleted account's data during it | States the window — see F6 to confirm its length |
@@ -505,7 +505,7 @@ Every factual statement in Parts B and C, and where it is made true.
 | IP never stored; a keyed code of it kept with a per-minute count, not linked to an account, deleted within ~15 min | `worker/src/lib/rateLimit.ts:63` (`callbackBucket`: HMAC under `JWT_SIGNING_KEY`), `:91` (deletes earlier minutes on each callback), `:136` + `cron/reminders.ts:3635` (deleted every 15-minute tick); migration 0048 has no IP or user column | `rateLimit.test.ts` "never stores the address", "removes earlier minutes", "the cron tick removes a finished minute"; grep for `CF-Connecting-IP` |
 | The three limited routes | `auth.ts:176`, `google.ts:208`, `guildRequests.ts:103` | read; timetable R92 |
 | Bot-add request stores server id/name, requester, times | `guild_add_requests` | schema |
-| Google is switched off in production | `wrangler.toml` `GOOGLE_SYNC_MODE = "off"`; `googleCalendar.ts:102` | read |
+| Google Calendar is live in production (F3); writes every non-declined, non-cancelled session you organize or are invited to in the next 60 days, pending and maybe included (V6-01); reads one chosen calendar 62 days ahead, ≤40 events, skipping cancelled ones and its own writes | `wrangler.toml` `GOOGLE_SYNC_MODE = "live"`; `googleSync.ts:200-203` (`desiredOccurrencesFor`), `SYNC_WINDOW_MS` `:46`, `MAX_IMPORTED_EVENTS_PER_SYNC` `:117`; `googleCalendar.ts:869` | read; P1 after merge |
 | No trackers/analytics/ad networks | no third-party scripts in `frontend/`; fonts self-hosted (`frontend/src/fonts.css`, `noRemoteAssets.test.ts`) | read; network tab on the site |
 | Browser storage keys | `jps_token`, `jps_identity`, `jps_login_verifier`, `jps_pending_revocation:<token>` (one key per pending sign-out, holding the retired token so it can be revoked later; `frontend/src/auth/pendingRevocation.ts:32`) plus the legacy `jps_pending_revocations` array migrated away on read (`:39`), `jps_selected_guild`, `uo.view`, `uo.scenery` | grep `frontend/src` |
 | Three short-lived cookies | `oauth_state` (`auth.ts:14`), `guild_verify_state` (`guildRequests.ts:34`), `google_connect_nonce` (`google.ts:46`) — all HttpOnly, 600 s, scoped to their own path | read `setCookie` options |
@@ -531,7 +531,7 @@ Every factual statement in Parts B and C, and where it is made true.
 | Profile pictures load from Discord's CDN | `frontend/src/lib/avatar.ts:7` (`cdn.discordapp.com/avatars/…`); `noRemoteAssets.test.ts` checks only `index.html` and `fonts.css` — **draft 2, D-03** | network tab on the noticeboard |
 | Bot-add requests need an existing account | `routes/guildRequests.ts:122`–`:130` (403 without one) — **draft 2, D-05** | read |
 | The bot lists voice channels and re-checks membership | `routes/guilds.ts:152`–`:163`; `lib/db.ts:719`–`:779` — **draft 2, D-19** | read |
-| Operational logs: Discord IDs and usernames possible; no event titles, descriptions or messages; a refused stranger is not named | `grep console. worker/src`; the email stub logs the whole owner email (`lib/email.ts:40`); `auth.ts` refused-login line carries no id since draft 2 (D-11, `pass11.test.ts` "keeps no profile") | grep |
+| Operational logs (production): Discord user and server IDs, error details incl. fragments of Google/Resend error text; no event titles, descriptions or DM text; no usernames or server names (those reach a log only via the email stub, sandbox-only); a refused stranger is not named; per-invocation entries off; 3 days | every `console.*` in `worker/src` (78, read in the v6 second pass); `email.ts:40` (stub only); `wrangler.toml` `[observability]`, `invocation_logs = false`; Cloudflare Workers Logs docs (Free: 3 days) | read; Fable second pass |
 | Delivery is attempted, not guaranteed | outbox retries; Discord can refuse (blocked bot, closed DMs); notifications can be off | read `lib/outbox.ts` |
 
 ---
@@ -542,7 +542,7 @@ Every factual statement in Parts B and C, and where it is made true.
 
 | Table | Holds | About whom | Export | Deleted with account | Other deletion |
 |---|---|---|---|---|---|
-| `users` | id, username, display name, avatar ref, timezone, notifications on/off, **DM channel id** (written the first time the bot messages you), created/updated, last login, last refused login, free/busy visible, policy version + time | you | yes, all columns | yes | 365-day inactivity |
+| `users` | id, username, display name, avatar ref, timezone, notifications on/off, **DM channel id** (written the first time the bot messages you), created/updated, last login, last refused login, free/busy visible, policy version + time, **`announcement_seen`** (the 1.0 pop-up, migration 0049) | you | yes, all columns | yes | 365-day inactivity |
 | `user_guild_membership` | which allow-listed servers you're in, verified time (`nickname` column exists but nothing writes it) | you | yes | yes | — |
 | `sessions` | id, created, last used (to within 5 min), expires, revoked, replaced, family, successor, policy version | you | yes, all but `user_id` | yes | at expiry/revocation/policy change |
 | `personal_events` (+ `_overrides`) | your personal time, **including entries imported from a Google calendar with their title and description** (only if Google is on and you chose a calendar to read) | you | yes | yes | imported ones when reading is switched off |
@@ -556,6 +556,7 @@ Every factual statement in Parts B and C, and where it is made true.
 | `guilds` | allow-listed servers | — (servers) | n/a | n/a | operator |
 | `notification_log` | **DM text**, sent/delivered, Discord message id, buttons | recipient | yes (all columns) | yes (yours, and those on your events) | with the event |
 | `change_request_log`, `organizer_rsvp_notice_log`, `group_nudge_log`, `account_purge_warnings` | **DM text** + delivery state for those kinds | recipient (+ responder for RSVP notices) | yes | yes | with the event/group |
+| `announcement_log` (migration 0049, LAUNCH-ONLY) | **DM text** of the 1.0 launch announcement + delivery state | recipient | yes | yes | until the account is deleted (nothing purges it) |
 | `google_calendar_connections` | encrypted Google credentials, Google email, chosen calendars, status, failure/disconnect bookkeeping | you | yes, **never the credential** | yes (and revoked with Google) | — |
 | `google_event_links` | which sessions were written to which Google calendar, with Google's event id | you | yes | yes (the Google entries themselves stay) | — |
 | `google_pending_connections` | encrypted credential + Google email, during connect only | you | yes, **never the credential** | yes | expires |
@@ -570,18 +571,20 @@ Every factual statement in Parts B and C, and where it is made true.
 | Cloudflare | everything above (hosting, D1 database), request metadata incl. IP | always |
 | GitHub (Pages) | site file requests, incl. IP | when the site loads |
 | Discord | OAuth (login); DM text; button presses back; server-membership and voice-channel lookups by the bot; **your browser's requests for profile pictures** (`cdn.discordapp.com`), with your IP | always |
-| Resend | owner email about a bot-add request | **only if `EMAIL_MODE = "live"`** (production: stub) |
-| Google | session titles/times/server name/link; calendar reads | **only if `GOOGLE_SYNC_MODE = "live"`** (production: off) |
+| Resend | owner email about a bot-add request (requester name/username/ID, server name/ID, two 7-day decision links) | production: **live** (F4); sandbox: stub |
+| Proton Mail | holds that email, as the operator's inbox provider (Switzerland) | production (Astra second pass) |
+| Google | session titles/times/server name/link written; one chosen calendar read | production: **live** (F3); sandbox: live |
 
-**Logs — corrected in draft 2.** The first draft said no logs are kept because
-`worker/wrangler.toml` enables no `[observability]`. Astra points out that
-Cloudflare can have Workers Logs on for a Worker regardless, so that inference
-is not evidence: only the dashboard (Workers → the Worker → Logs) says. The
-log lines themselves can carry Discord IDs and usernames, and the email stub
-writes the whole owner email (requester and server) on every bot-add request;
-none writes event titles, descriptions or DM text. The refused-login warning no
-longer names the person refused. *[F8: check the setting; Part B's Cloudflare
-bullet and retention row carry the disclosure if it is on.]*
+**Logs — settled at 1.0 (F8, confirmed in the v6 second pass).** Workers
+Logs is on in both environments (`[observability] enabled = true`) with the
+per-invocation entry off (`invocation_logs = false`), so Cloudflare stores only
+the app's own `console.*` lines, for 3 days on Workers Free (Cloudflare docs,
+read 9 Nov; re-check after 1 Dec, IDEAS 106). In production those lines carry
+Discord user and server IDs and error details, including fragments of Google's
+or Resend's error text; they never carry event titles, descriptions or DM text.
+The email stub's line, which prints the whole owner email, runs only on the
+sandbox now that production's email is live. The refused-login warning names
+nobody.
 
 ### Automatic actions
 
@@ -613,6 +616,31 @@ this file stays as the audit and the ledger behind it.
 
 The original options table follows, for the record.
 
+### Second pass on the final text (16859c5): Fable and Astra, 9 Nov 2026
+
+Both conditionally approved. Every first-pass disposition was judged correct.
+What changed:
+
+| Finding | Severity | Done |
+|---|---|---|
+| V6-01 Google writes more than "committed to" (pending and maybe too) | blocking | Text matches the code (a deliberate product choice, `googleSync.ts:200-203`); changelog too |
+| V6-02 / Astra 1: "not collected: your email address" vs the Google address | blocking | Parenthesis added |
+| Astra 2: "every event" imported | blocking | Now: upcoming, two months, up to 40, cancelled events and its own writes left out, Settings says if truncated |
+| Astra 3: Proton Mail receives the owner email | blocking | Named in the Resend bullet and in "Where it is processed"; the 7-day decision links stated |
+| V6-03 no Google retention row; bot-add requests | should fix | Both added |
+| V6-04 / Astra: logs wording | should fix | "Written not to log…", error-text fragments named, the per-invocation entry described precisely |
+| V6-05 disconnect retries | should fix | "keeps trying for about an hour, then stops" |
+| V6-06 Limited Use wording | should fix | Google's form: "use and transfer to any other app … will adhere to" |
+| V6-07 three stale comments | should fix | `email.ts`, `routes/google.ts`, `wrangler.toml` |
+| V6-08 this ledger | should fix | A1, the Google and logs rows, Part E (`announcement_log`, `announcement_seen`, Resend, Proton, Google), the logs paragraph |
+| V6-09 Canada, V6-10 IP code in recovery copies, V6-11 push horizon, V6-12 Terms message list | optional | All four taken |
+| V6-13 "current" badge in the extraction | optional | Extraction artifact, not the app |
+| Astra: controller identified by first name only | recommendation | For Michael (F1) |
+| Article 27 representative | question | Both: don't assume the "occasional" exemption; Fable thinks the stronger ground is not targeting the EU (Art. 3(2), Recital 23). Michael's call; no text change |
+
+Policy stays **version 6**: it hasn't been released, so nobody has agreed to
+the earlier wording.
+
 | # | Decision | Why it matters | Author's suggestion |
 |---|---|---|---|
 | F1 | **Who is named as the controller** | Data-protection law expects the controller to be identifiable; "the operator of Uncle Owen" isn't | Your name, or a name you publish under, plus the existing email |
@@ -624,4 +652,4 @@ The original options table follows, for the record.
 | F7 | **International transfer safeguards** | Law-dependent; the author can't confirm which mechanisms each provider uses | State plainly that processing happens in the US, and either cite each provider's own published safeguards or leave the general statement |
 | F8 | **Cloudflare log settings** | Whether Cloudflare keeps the app's log lines, and for how long (see Part E, Logs) | Check Workers → Logs in the dashboard. If on, keep Part B's two bracketed sentences with the retention filled in; if off, delete them |
 | F9 | **Which privacy laws to name, and legal bases** | Both reviewers flagged that the first draft dropped version 5's legal-bases paragraph | **Decided 9 Nov: keep a short version** — now in Part B, updated to match what the service actually does. Still offer the rights to everyone rather than claim one law applies |
-| F10 | **The 1.0 launch announcement** (IDEAS 105) | A one-off DM to everyone with notifications on, kept in a new `announcement_log` table (text + delivery state, like the other DM logs), and `users.announcement_seen` for the one-time pop-up. Both are exported and deleted with the account. Neither the policy nor the inventory mentions them yet | Add one line to "Messages it has sent you" (a one-off service announcement, 1.0 only, respecting the notifications setting) and the two items to Part E. Removed from the text when 1.1 removes the feature |
+| F10 | **The 1.0 launch announcement** (IDEAS 105) | A one-off DM to everyone with notifications on, kept in a new `announcement_log` table (text + delivery state, like the other DM logs), and `users.announcement_seen` for the one-time pop-up. Both are exported and deleted with the account. **Done** (Part B text, Part E rows) | Add one line to "Messages it has sent you" (a one-off service announcement, 1.0 only, respecting the notifications setting) and the two items to Part E. Removed from the text when 1.1 removes the feature |

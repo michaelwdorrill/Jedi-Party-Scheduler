@@ -200,9 +200,9 @@ googleRoutes.get('/callback', async (c) => {
   }
 
   // Bound before the spend, same rule and ordering as the two Discord
-  // callbacks. Included even though production ships GOOGLE_SYNC_MODE = "off"
-  // -- isGoogleConfigured() already refuses above, so this endpoint spends
-  // nothing there today, but the sandbox runs it live and 1.0.1 turns it on.
+  // callbacks. Both environments run GOOGLE_SYNC_MODE = "live" from 1.0 (the
+  // sandbox since 0.8.1), so this bound is active everywhere the endpoint
+  // can be reached.
   // Two of three unauthenticated spends bounded and the third left out is
   // exactly the shape P21-05 was: one rule, three implementations.
   if (!(await oauthCallbackAllowed(c.env, c.req.raw.headers))) {

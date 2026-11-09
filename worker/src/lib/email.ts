@@ -18,14 +18,14 @@ export interface OwnerEmail {
 }
 
 // specs/0015's stubbing decision: EMAIL_MODE is per-environment
-// (wrangler.toml). Anything but 'live' -- unset local dev, and today BOTH
-// deployed environments, which set 'stub' (Pass 24 review, A1: this comment
-// used to say production was 'live'; wrangler.toml says otherwise) -- logs
-// instead of calling Resend, so the flow never pages Michael's inbox. The log
-// line carries the whole message: the requester's name, username and id and
-// the server's, all of which guild_add_requests already stores and the admin
-// page shows. The privacy policy discloses that operational logs can hold
-// Discord ids and usernames.
+// (wrangler.toml): 'live' in production from 1.0, 'stub' in the sandbox and
+// in local dev. (This comment has been wrong twice as the config moved under
+// it -- Pass 24 A1, then the v6 second pass, V6-07 -- so check wrangler.toml
+// before trusting it.) Anything but 'live' logs instead of calling Resend, and
+// that log line carries the whole message: the requester's name, username and
+// id and the server's. That only happens where the stub runs, i.e. never in
+// production, which is why the Privacy Policy's log description can leave
+// names out.
 function isLive(env: Env): boolean {
   return env.EMAIL_MODE === 'live';
 }
