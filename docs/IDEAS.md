@@ -1618,8 +1618,15 @@ routes and sweeps -- not only the reviewer's copied SQL -- and revert-verified.
   leaving a day event under an unconfirmed option until the next yes. Fix: add
   `AND EXISTS (... confirmed_at IS NOT NULL)` to the fan-out INSERT's WHERE.
 - **P24-04.** A cancelled multi-winner poll still accepts (meaningless) votes
-  on unconfirmed candidates through the API; the site hides the buttons.
-  Answer `closed` instead.
+  on unconfirmed candidates. Answer `closed` instead. **Correction, 10 Nov
+  (walkthrough 5.15):** the review rated this API-only because "the site hides
+  the buttons" -- it doesn't. The multi-winner rows close only when a day is
+  unconfirmed *and* the deadline has passed (`EventDetailPage.tsx`,
+  `votingDisabled`), never on the poll's status, so a cancelled poll's
+  unconfirmed days still offer I'm in / Maybe / Can't make it, and a press is
+  saved and shown as your vote while doing nothing. Fix both sides: close the
+  rows once the poll isn't active (a day that is its own event keeps its
+  buttons, since they answer that event), and answer `closed` on the server.
 - **D-16's predicate.** The inactivity stake treats `start_at IS NULL` as
   upcoming, and every series has it, so organizing or holding an invite to a
   finished-but-uncancelled series pauses account deletion forever. Over-
