@@ -91,20 +91,43 @@ export async function leaveGuild(botToken: string, guildId: string): Promise<voi
 }
 
 // Deliberately more granular than "yes / no / dunno". Only `member` and
-// `not_member` are answers about the *user*; the other two are answers about
+// `not_member` are answers about the *user*; the other three are answers about
 // our own ability to ask the question, and they have very different
 // operational meanings:
 //
-//   bot_unauthorized  the bot token is wrong/revoked (401), or the bot isn't
-//                     in this guild any more (403). Persistent, and nothing
-//                     resolves it except an operator fixing the Discord app.
-//   temporarily_unavailable  rate limit (429), Discord 5xx, or a network
-//                     failure. Expected to clear on its own.
+//   bot_unauthorized  the bot token is wrong/revoked (401). Persistent, the
+//                     same for every server, and nothing resolves it except an
+//                     operator fixing the Discord app.
+//   bot_not_in_guild  the bot cannot see THIS server: Discord's 404 "Unknown
+//                     Guild" (10004), which is what it sends when the bot is
+//                     not in the server, or a 403. Persistent, but only for
+//                     that server -- every other server is unaffected.
+//   temporarily_unavailable  rate limit (429), Discord 5xx, a network failure,
+//                     or a 404 Discord doesn't explain. Expected to clear.
+//
+// IDEAS 102 (found on the 10 November walkthrough): "not found" used to mean
+// "not a member" whatever was not found. SandboxBot was never added to one
+// allow-listed server, Discord answered 404 Unknown Guild for every member
+// check there, and both test accounts -- members of that server -- were
+// marked as having left it, so everything on it vanished from their
+// calendars, silently: a 404 logged nothing. Only Discord's own "Unknown
+// Member" (10007) now says the person left; anything unexplained is "could
+// not check", which the 24-hour grace already handles, rather than a guess
+// that removes someone.
 //
 // Collapsing these into one bucket is what made the previous version
 // indistinguishable in logs: a permanently broken bot looked exactly like a
 // thirty-second Discord blip. See docs/SETUP.md's operations note.
-export type GuildMembershipStatus = 'member' | 'not_member' | 'bot_unauthorized' | 'temporarily_unavailable';
+export type GuildMembershipStatus =
+  | 'member'
+  | 'not_member'
+  | 'bot_not_in_guild'
+  | 'bot_unauthorized'
+  | 'temporarily_unavailable';
+
+// Discord JSON error codes (https://discord.com/developers/docs/topics/opcodes-and-status-codes).
+const UNKNOWN_GUILD = 10004;
+const UNKNOWN_MEMBER = 10007;
 
 // Live check against Discord's own membership record, used to revalidate a
 // stale cache entry (see isGuildMember in db.ts). This single REST lookup
@@ -120,12 +143,33 @@ export async function checkGuildMembership(
       headers: { Authorization: `Bot ${botToken}` },
     });
     if (res.status === 200) return 'member';
-    if (res.status === 404) return 'not_member';
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 404) {
+      const code = await res.json().then(
+        (body) => (body as { code?: unknown } | null)?.code,
+        () => undefined,
+      );
+      if (code === UNKNOWN_MEMBER) return 'not_member';
+      if (code === UNKNOWN_GUILD) {
+        console.error(
+          `Discord membership check: the bot is not in guild ${guildId} (404 Unknown Guild). ` +
+            `Nobody there can be verified until the bot is added back; members keep access for the grace window.`,
+        );
+        return 'bot_not_in_guild';
+      }
+      console.warn(`Discord membership check: unexplained 404 (code ${String(code)}) for guild ${guildId}`);
+      return 'temporarily_unavailable';
+    }
+    if (res.status === 403) {
       console.error(
-        `Discord membership check rejected (${res.status}) for guild ${guildId}: ` +
-          `the bot token is invalid or the bot is no longer in this server. ` +
-          `Membership can no longer be verified until this is fixed.`,
+        `Discord membership check rejected (403) for guild ${guildId}: the bot cannot see this server. ` +
+          `Nobody there can be verified until that is fixed; members keep access for the grace window.`,
+      );
+      return 'bot_not_in_guild';
+    }
+    if (res.status === 401) {
+      console.error(
+        `Discord membership check rejected (401): the bot token is invalid. ` +
+          `Membership can no longer be verified anywhere until this is fixed.`,
       );
       return 'bot_unauthorized';
     }

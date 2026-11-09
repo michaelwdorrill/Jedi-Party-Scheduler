@@ -930,12 +930,19 @@ different responses:
 | Log line | What it means | What to do |
 |---|---|---|
 | `Discord membership check rejected (401)` | The bot token is wrong or was regenerated | `npx wrangler secret put DISCORD_BOT_TOKEN` with the current token |
-| `Discord membership check rejected (403)` | The bot is no longer in that server | Re-invite the bot (step 1.6) |
+| `Discord membership check: the bot is not in guild … (404 Unknown Guild)` | The bot was never added to, or was removed from, an allow-listed server | Invite the bot to that server (step 1.6), or deactivate the server if it shouldn't be allow-listed |
+| `Discord membership check rejected (403) for guild …` | The bot is in the server but can't see it | Check the bot's role in that server |
+| `Discord membership check: unexplained 404` | Discord answered "not found" without saying what | Nothing at once — it is treated like an outage; look again if it repeats |
 | `Discord membership check unavailable (429/5xx)` | Rate limit or a Discord outage | Nothing — it clears on its own |
 | `Membership for user … is Nh stale … denying access` | Someone has actually been locked out by the above | Fix whichever of the first two rows applies |
 
-A 401 or 403 will not fix itself, and after 24 hours it locks everyone out.
-Those two are the ones worth alerting on.
+A 401, a 403 or an Unknown Guild will not fix itself, and after 24 hours it
+locks that server's members out. Those are the ones worth alerting on.
+
+**Until 10 November 2026 the Unknown Guild case logged nothing at all** (IDEAS
+102): the check read any 404 as "this person left", so a server the bot wasn't
+in quietly marked every member as gone and emptied their calendars of it. Only
+Discord's "Unknown Member" (10007) is read that way now.
 
 ### Rate limiting the OAuth callbacks
 

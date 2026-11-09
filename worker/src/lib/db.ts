@@ -722,11 +722,20 @@ export async function revalidateStaleMemberships(
   budget?: MembershipCheckBudget,
 ): Promise<number> {
   const cutoff = Date.now() - MEMBERSHIP_FRESHNESS_MS;
+  // Servers take turns: each server's stalest row, then each server's second,
+  // and so on (IDEAS 102). Plain oldest-first let one server whose rows can
+  // never be refreshed -- the bot is not in it -- fill every tick's batch, so
+  // every other server's memberships aged past the grace window and locked
+  // their members out. ROW_NUMBER is one statement, so the price is unchanged.
   const { results } = await env.DB.prepare(
-    `SELECT m.user_id, m.guild_id, m.verified_at FROM user_guild_membership m
-     JOIN guilds g ON g.id = m.guild_id
-     WHERE m.is_member = 1 AND g.is_active = 1 AND m.verified_at < ?
-     ORDER BY m.verified_at ASC
+    `SELECT user_id, guild_id, verified_at FROM (
+       SELECT m.user_id, m.guild_id, m.verified_at,
+              ROW_NUMBER() OVER (PARTITION BY m.guild_id ORDER BY m.verified_at) AS turn
+       FROM user_guild_membership m
+       JOIN guilds g ON g.id = m.guild_id
+       WHERE m.is_member = 1 AND g.is_active = 1 AND m.verified_at < ?
+     )
+     ORDER BY turn, verified_at
      LIMIT ?`,
   )
     .bind(cutoff, limit)
@@ -734,9 +743,13 @@ export async function revalidateStaleMemberships(
 
   const confirmed: [string, string][] = [];
   const departed: [string, string][] = [];
+  // Servers the bot cannot see this tick: one refusal says the same about
+  // every other row there, so the rest are skipped rather than re-asked.
+  const unreachable = new Set<string>();
   let checked = 0;
 
   for (const row of results) {
+    if (unreachable.has(row.guild_id)) continue;
     // Each check is an outbound Discord call, and the tick has a finite
     // allowance shared with the DM sends that follow. Refreshing the cache
     // matters, but not more than actually delivering the notifications that
@@ -750,9 +763,11 @@ export async function revalidateStaleMemberships(
       confirmed.push([row.user_id, row.guild_id]);
     } else if (status === 'not_member') {
       departed.push([row.user_id, row.guild_id]);
+    } else if (status === 'bot_not_in_guild') {
+      unreachable.add(row.guild_id);
     } else if (status === 'bot_unauthorized') {
-      // Every subsequent check this tick would fail the same way, and each
-      // one costs a round trip. Stop and let the next tick retry.
+      // A bad token fails the same way for every server, and each check
+      // costs a round trip. Stop and let the next tick retry.
       break;
     }
     checked++;

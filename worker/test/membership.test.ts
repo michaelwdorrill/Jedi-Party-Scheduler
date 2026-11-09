@@ -88,7 +88,13 @@ describe('checkGuildAccess', () => {
   // rather than resetting on each failed attempt.
   describe.each([
     ['invalid bot token (401)', membershipRule(401)],
-    ['bot removed from guild (403)', membershipRule(403)],
+    ['bot denied access to the server (403)', membershipRule(403)],
+    // IDEAS 102, found on the walkthrough: this is what Discord actually sends
+    // for a server the bot is not in, and it used to be read as "this person
+    // left" -- both sandbox test accounts were marked gone from a server they
+    // are in, and everything on it vanished from their calendars.
+    ['bot not in the server (404 Unknown Guild)', membershipRule(404, { message: 'Unknown Guild', code: 10004 })],
+    ['a 404 Discord does not explain', membershipRule(404, { message: '404: Not Found', code: 0 })],
     ['rate limited (429)', membershipRule(429)],
     ['Discord outage (500)', membershipRule(500)],
     ['network failure', { match: '/members/', status: 0, networkError: true }],
@@ -101,6 +107,17 @@ describe('checkGuildAccess', () => {
       fetchStub = stubFetch([rule]);
 
       expect(await checkGuildAccess(env, 'u1', 'guild-1')).toBe('member');
+    });
+
+    it('does not mark the member as gone', async () => {
+      const { db, env } = setup();
+      await seedGuild(db);
+      await seedUser(db, 'u1');
+      await seedMembership(db, 'u1', 'guild-1', { verifiedAgoMs: 2 * HOUR_MS });
+      fetchStub = stubFetch([rule]);
+
+      await checkGuildAccess(env, 'u1', 'guild-1');
+      expect((await membershipRow(db, 'u1', 'guild-1'))?.is_member).toBe(1);
     });
 
     it('does not refresh verified_at, so the grace window keeps counting down', async () => {
@@ -319,6 +336,50 @@ describe('revalidateStaleMemberships', () => {
 
     await revalidateStaleMemberships(env, 10);
     expect((await membershipRow(db, 'gone', 'guild-1'))?.is_member).toBe(0);
+  });
+
+  // IDEAS 102. The sweep that marked both walkthrough accounts gone.
+  it('does not mark anyone gone from a server the bot is not in', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'still-here');
+    await seedMembership(db, 'still-here', 'guild-1', { verifiedAgoMs: 3 * HOUR_MS });
+    fetchStub = stubFetch([membershipRule(404, { message: 'Unknown Guild', code: 10004 })]);
+
+    await revalidateStaleMemberships(env, 10);
+    expect((await membershipRow(db, 'still-here', 'guild-1'))?.is_member).toBe(1);
+  });
+
+  // The same fix's trap. Rows in a server the bot cannot see are never
+  // refreshed, so they stay the oldest; read oldest-first and stopped on the
+  // first refusal, they would take every check of every tick, and every OTHER
+  // server's memberships would go stale and lock their members out after the
+  // grace window. Servers take turns, and a server the bot is not in is
+  // skipped for the rest of the tick after one check.
+  it('does not let a server the bot is not in starve the others', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'no-bot');
+    await seedGuild(db, 'has-bot');
+    for (const id of ids('stuck', 12)) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'no-bot', { verifiedAgoMs: 20 * HOUR_MS });
+    }
+    await seedUser(db, 'fine');
+    await seedMembership(db, 'fine', 'has-bot', { verifiedAgoMs: 3 * HOUR_MS });
+    fetchStub = stubFetch([
+      membershipRule(404, { message: 'Unknown Guild', code: 10004 }, '/guilds/no-bot/members/'),
+      membershipRule(200, {}, '/guilds/has-bot/members/'),
+    ]);
+
+    await revalidateStaleMemberships(env, 10);
+
+    const fine = await membershipRow(db, 'fine', 'has-bot');
+    expect(Date.now() - fine!.verified_at, 'the other server was re-checked').toBeLessThan(HOUR_MS);
+    expect(fetchStub.calls.filter((u) => u.includes('/guilds/no-bot/')), 'one check, then skipped').toHaveLength(1);
+    const { results } = await db
+      .prepare(`SELECT is_member FROM user_guild_membership WHERE guild_id = 'no-bot'`)
+      .all<{ is_member: number }>();
+    expect(results.every((r) => r.is_member === 1)).toBe(true);
   });
 
   // A broken bot token fails identically for every row, so continuing would

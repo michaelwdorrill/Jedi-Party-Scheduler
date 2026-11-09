@@ -1643,6 +1643,46 @@ SQL against the migrations -- and both said so. Release clearance follows the
 executing reviewer; the walkthrough steps named above are where these become
 evidence.
 
+### 102. A server the bot isn't in made everyone in it "leave"
+
+**Found on the 10 November walkthrough, fixed for 1.0.** The 4.12 test series
+vanished from both accounts' calendars, though it was active and nothing had
+touched it. Read-only queries against the sandbox found both accounts marked
+`is_member = 0` on its server ("DM MD") within an hour of creating it. Michael
+confirmed SandboxBot is not in that server and both accounts are.
+
+**Cause.** `checkGuildMembership` read every 404 from Discord's member lookup as
+"not a member". Discord also answers 404 -- "Unknown Guild", code 10004 -- when
+the *bot* is not in the server, so the membership sweep marked everyone there
+as departed. A 404 logged nothing (only 401/403 did), so in production a server
+that removed the bot would have emptied its members' calendars of it with no
+trace; the operations table in SETUP.md never fired. The test suite encoded the
+same assumption: its "bot removed from guild" case was a 403.
+
+**Fix.**
+- Only 404 with Discord's "Unknown Member" (10007) means the person left.
+  Unknown Guild, and any 403, is a new `bot_not_in_guild`: logged as an error,
+  nobody marked gone, members keep access for the 24-hour grace. A 404 Discord
+  doesn't explain counts as "could not check", not as a departure.
+- The cron's revalidation stopped at the first "bot can't check" answer, which
+  is right for a bad token (every server fails) and wrong for one server: those
+  rows are never refreshed, so they stay oldest, and read oldest-first they
+  would take all ten checks every tick and starve every other server into
+  lockout. Servers now take turns (`ROW_NUMBER() OVER (PARTITION BY guild_id)`,
+  still one statement) and a server the bot can't see is skipped for the rest
+  of the tick after one check.
+- Tests: the two unexplained-404 shapes join the existing "Discord cannot
+  confirm" table (grace, no refresh, lockout after grace, and a new "not marked
+  gone"), plus the sweep cases. Revert-checked separately: the old 404 reading
+  fails 10, dropping the turns fails the starvation test, dropping the skip
+  fails it too. The test helper's default 404 is now an explicit Unknown Member.
+
+**Nothing was lost:** departure only ever set `is_member = 0`, and a login
+re-syncs it. **The sandbox still needs setting right** -- add SandboxBot to that
+server, or deactivate it there -- or after 24 hours its members are refused as
+unverifiable, which is now the intended (and logged) behaviour. The voice-channel
+502 in item 100 is very likely the same missing bot.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.

@@ -108,8 +108,17 @@ export const DM_CHANNEL_RULE: FetchRule = {
   body: { id: 'dm-channel-1' },
 };
 
-export function membershipRule(status: number, body: unknown = {}): FetchRule {
-  return { match: '/members/', status, body };
+// A 404 defaults to Discord's "Unknown Member" body -- the one 404 that means
+// the person is not in the server. Before the walkthrough found otherwise
+// (IDEAS 102), any bare 404 was read as that, and so was Discord's 404
+// "Unknown Guild" for a server the bot is not in; a test wanting that case
+// now has to say so.
+export function membershipRule(
+  status: number,
+  body: unknown = status === 404 ? { message: 'Unknown Member', code: 10007 } : {},
+  match = '/members/',
+): FetchRule {
+  return { match, status, body };
 }
 
 export function dmSendRule(status: number, headers?: Record<string, string>): FetchRule {
