@@ -295,10 +295,19 @@ export const OVERRIDE_ADMISSION_SQL = `(
 //
 // Three consequences, each checked against the code rather than assumed:
 //
-// - Moving an occurrence that was cancelled RESTORES it at the new time
-//   (is_cancelled = 0). This is the only write in the app that un-cancels an
-//   occurrence, and an organizer moving a date they cancelled is asking for it
-//   back -- the same reading an accepted request has always had.
+// - For the ORGANIZER, moving an occurrence that was cancelled RESTORES it at
+//   the new time (is_cancelled = 0) -- they are asking for it back. This is the
+//   only write in the app that un-cancels an occurrence.
+// - For an ACCEPTED CHANGE REQUEST it does not (`restoreCancelled: false`), and
+//   the write changes nothing. Pass 24 review, P24-01: an invitee asks to move a
+//   date, the organizer then cancels it, and the request is accepted anyway --
+//   by the organizer pressing Accept on a page that gave no sign the date was
+//   off, by votes crossing the threshold, or by the 72-hour deadline sweep with
+//   nobody deciding at all. Each put the date back on, and the organizer who
+//   cancelled it was not told. This comment used to call the restore "the same
+//   reading an accepted request has always had"; a request filed before the
+//   cancellation is not a request to undo it. The refusal is a WHERE on the
+//   conflict update, so it costs no extra query on the accept path (P13-05).
 // - Answers already given carry over. event_attendance is keyed on the
 //   occurrence's nominal date (recurrence.ts: ExpandedOccurrence.date is
 //   pre-override), and a move never changes that key.
@@ -309,20 +318,23 @@ export const OVERRIDE_ADMISSION_SQL = `(
 //
 // Admission travels inside the statement (OVERRIDE_ADMISSION_SQL above), so a
 // move of an already-changed date is admitted at the cap. Resolves false when
-// admission refused it; each caller turns that into its own error.
+// admission refused it, or (restoreCancelled false) the date is cancelled; each
+// caller turns that into its own error.
 export async function writeOccurrenceMove(
   env: Env,
   eventId: string,
   occurrenceDate: string,
   startAt: number,
   endAt: number,
+  { restoreCancelled }: { restoreCancelled: boolean },
 ): Promise<boolean> {
   const written = await env.DB.prepare(
     `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled, override_start_at, override_end_at)
      SELECT ?, ?, ?, 0, ?, ?
      WHERE ${OVERRIDE_ADMISSION_SQL}
      ON CONFLICT(event_id, occurrence_date) DO UPDATE SET
-       is_cancelled = 0, override_start_at = excluded.override_start_at, override_end_at = excluded.override_end_at`,
+       is_cancelled = 0, override_start_at = excluded.override_start_at, override_end_at = excluded.override_end_at
+     ${restoreCancelled ? '' : 'WHERE event_occurrence_overrides.is_cancelled = 0'}`,
   )
     .bind(newId(), eventId, occurrenceDate, startAt, endAt, eventId, occurrenceDate, eventId)
     .run();

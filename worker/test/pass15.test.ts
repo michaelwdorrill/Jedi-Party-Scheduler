@@ -753,6 +753,14 @@ describe('the override cap binds every writer a person can drive (P15-06)', () =
     const existingDate = await db
       .prepare(`SELECT occurrence_date FROM event_occurrence_overrides WHERE event_id = 'ev-1' LIMIT 1`)
       .first<{ occurrence_date: string }>();
+    // The fixture's overrides are cancellations. Since Pass 24 (P24-01) an
+    // accepted request refuses to bring back a cancelled date, which is a
+    // different refusal from the cap's -- so the date this changes is made a
+    // live, already-moved one, keeping the test about the cap.
+    await db
+      .prepare(`UPDATE event_occurrence_overrides SET is_cancelled = 0 WHERE event_id = 'ev-1' AND occurrence_date = ?`)
+      .bind(existingDate!.occurrence_date)
+      .run();
 
     const event = await db.prepare(`SELECT * FROM events WHERE id = 'ev-1'`).first<Record<string, unknown>>();
     const request = {

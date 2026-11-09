@@ -559,6 +559,96 @@ describe('past-deadline vote resolution', () => {
   });
 });
 
+// Pass 24 review, P24-01 (category 2). An invitee asks to move one date of a
+// series; the organizer then cancels that date; the request is accepted
+// anyway -- by the organizer, by votes crossing the threshold, or by the
+// 72-hour deadline sweep with nobody deciding -- and writeOccurrenceMove's
+// ON CONFLICT ... SET is_cancelled = 0 put the date back on at the new time.
+// The organizer was not told. The organizer's OWN move still restores a date
+// they cancelled (occurrenceMove.test.ts); only the accept path refuses.
+describe('an accepted request never brings back a date the organizer cancelled (P24-01)', () => {
+  const DATE = '2026-09-01';
+
+  async function seedCancelledDateWithRequest(db: ShimDatabase, env: Env, invitees: string[]) {
+    await seedBasicEvent(db, { isRecurring: 1, startAt: null, endAt: null });
+    for (const invId of invitees) {
+      await seedUser(db, invId);
+      await seedMembership(db, invId, 'guild-1');
+      await seedInvite(db, 'ev1', invId);
+    }
+    const event = await loadEventRow(db, 'ev1');
+    const id = await createChangeRequest(env, event, invitees[0], {
+      kind: 'time_change',
+      proposedStartAt: Date.now() + 30 * HOUR_MS,
+      proposedEndAt: Date.now() + 31 * HOUR_MS,
+      occurrenceDate: DATE,
+    });
+    // What POST /events/:id/occurrences/:date/cancel writes.
+    await db
+      .prepare(
+        `INSERT INTO event_occurrence_overrides (id, event_id, occurrence_date, is_cancelled) VALUES ('ov-c', 'ev1', ?, 1)
+         ON CONFLICT(event_id, occurrence_date) DO UPDATE SET is_cancelled = 1`,
+      )
+      .bind(DATE)
+      .run();
+    return { event, id };
+  }
+
+  async function overrideFor(db: ShimDatabase) {
+    return db
+      .prepare(`SELECT is_cancelled, override_start_at FROM event_occurrence_overrides WHERE event_id = 'ev1' AND occurrence_date = ?`)
+      .bind(DATE)
+      .first<{ is_cancelled: number; override_start_at: number | null }>();
+  }
+
+  it("refuses the organizer's accept, saying the date is no longer on, and leaves the request open", async () => {
+    const { db, env } = setup();
+    const { event, id } = await seedCancelledDateWithRequest(db, env, ['inv-a', 'inv-b', 'inv-c']);
+    const request = await loadChangeRequest(env, 'ev1', id);
+
+    await expect(acceptChangeRequest(env, event, request!, 'organizer')).rejects.toThrow(/cancelled/);
+
+    expect(await overrideFor(db)).toEqual({ is_cancelled: 1, override_start_at: null });
+    expect((await loadChangeRequest(env, 'ev1', id))!.status).toBe('pending');
+  });
+
+  it('is declined by the deadline sweep, not accepted, when only the requester voted', async () => {
+    const { db, env } = setup();
+    const { id } = await seedCancelledDateWithRequest(db, env, ['inv-a', 'inv-b', 'inv-c']);
+    await db.prepare(`UPDATE event_change_requests SET vote_deadline_at = ? WHERE id = ?`).bind(Date.now() - 1000, id).run();
+
+    await resolvePastDeadlineChangeRequests(env);
+
+    expect((await loadChangeRequest(env, 'ev1', id))!.status).toBe('declined');
+    expect(await overrideFor(db)).toEqual({ is_cancelled: 1, override_start_at: null });
+  });
+
+  it('is not applied when the votes cross the threshold', async () => {
+    const { db, env } = setup();
+    const { event, id } = await seedCancelledDateWithRequest(db, env, ['inv-a', 'inv-b', 'inv-c']);
+    const request = await loadChangeRequest(env, 'ev1', id);
+    expect(request!.vote_threshold_count).toBe(2);
+
+    await voteOnChangeRequest(env, event, request!, 'inv-b', 'yes');
+
+    expect(await overrideFor(db)).toEqual({ is_cancelled: 1, override_start_at: null });
+    expect((await loadChangeRequest(env, 'ev1', id))!.status).toBe('pending');
+  });
+
+  // INVARIANT GUARD: the accept path still moves a date that is on.
+  it('still moves a date that has an override but is not cancelled', async () => {
+    const { db, env } = setup();
+    const { event, id } = await seedCancelledDateWithRequest(db, env, ['inv-a', 'inv-b', 'inv-c']);
+    await db.prepare(`UPDATE event_occurrence_overrides SET is_cancelled = 0 WHERE event_id = 'ev1'`).run();
+    const request = await loadChangeRequest(env, 'ev1', id);
+
+    await acceptChangeRequest(env, event, request!, 'organizer');
+
+    expect((await overrideFor(db))!.is_cancelled).toBe(0);
+    expect((await overrideFor(db))!.override_start_at).toBe(request!.proposed_start_at);
+  });
+});
+
 describe('GET asymmetry and notification dedupe', () => {
   it('an invitee sees only their own requests; the organizer sees all, with aggregate tallies only', async () => {
     const { db, env } = setup();

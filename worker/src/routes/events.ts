@@ -574,7 +574,7 @@ eventRoutes.post('/:eventId/occurrences/:date/move', async (c) => {
     throw new ValidationError(`${date} is not one of this event's dates`);
   }
 
-  if (!(await writeOccurrenceMove(c.env, event.id, date, startAt, endAt))) {
+  if (!(await writeOccurrenceMove(c.env, event.id, date, startAt, endAt, { restoreCancelled: true }))) {
     throw new ValidationError(
       `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`,
     );

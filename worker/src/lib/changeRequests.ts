@@ -424,19 +424,33 @@ async function applyChangeRequest(env: Env, event: EventRow, request: ChangeRequ
       // preflight that neither of them then honours (the P13-10 lesson).
       //
       // The statement itself now lives in lib/events.ts as writeOccurrenceMove,
-      // shared with the organizer's own move (IDEAS 94), unchanged.
+      // shared with the organizer's own move (IDEAS 94). Unlike the organizer's
+      // move it never un-cancels a date (Pass 24, P24-01): a request filed
+      // before the organizer cancelled the date is not a request to undo that.
       const written = await writeOccurrenceMove(
         env,
         event.id,
         request.occurrence_date,
         request.proposed_start_at!,
         request.proposed_end_at!,
+        { restoreCancelled: false },
       );
-      // Keeping acceptance honest when admission fails, the same way P14-11
-      // made it honest when the invite could not be added: a request that
-      // changed nothing must not be reported as accepted. ConflictError
-      // releases the claim.
+      // Keeping acceptance honest when the write changed nothing, the same way
+      // P14-11 made it honest when the invite could not be added: a request
+      // that changed nothing must not be reported as accepted. ConflictError
+      // releases the claim; the deadline sweep then declines, and a threshold
+      // vote leaves it for the organizer or the sweep. The read below is on
+      // this refusal path only, to say which of the two refusals it was -- the
+      // accept path's own price is unchanged.
       if (!written) {
+        const cancelled = await env.DB.prepare(
+          `SELECT 1 FROM event_occurrence_overrides WHERE event_id = ? AND occurrence_date = ? AND is_cancelled = 1`,
+        )
+          .bind(event.id, request.occurrence_date)
+          .first();
+        if (cancelled) {
+          throw new ConflictError('That date has been cancelled, so this request can no longer be accepted');
+        }
         throw new ConflictError(
           `This event has reached its limit of ${LIMITS.MAX_OVERRIDES_PER_EVENT} changed occurrences`,
         );
