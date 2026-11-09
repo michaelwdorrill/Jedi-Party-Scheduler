@@ -1578,7 +1578,7 @@ routes and sweeps -- not only the reviewer's copied SQL -- and revert-verified.
   now takes `restoreCancelled`; only the organizer's own move restores. Item
   94 had moved the statement into a shared helper and written the restore
   down as intended for both callers, which is the moment it stopped being an
-  accident. Walkthrough 3.22-3.23.
+  accident. Walkthrough 3.22.
 - **P24-02.** Fan-out carried only yes-votes, so an organizer who voted no
   counted as going by default, was shown "yes", and kept a day alive below
   its threshold. Every answer is carried now (Michael's call). 5.17-5.18;

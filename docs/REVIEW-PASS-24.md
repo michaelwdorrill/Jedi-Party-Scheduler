@@ -60,7 +60,7 @@ and counted) are fixed and revert-verified; **P24-03** and **P24-04** are
 1.0.1 (IDEAS 101). Items 92, 94, 95, 96 and 99 cleared on a static read; 92
 was then reworked (the binding never refused live) and its live check is
 walkthrough 0.0b. The reviewers' own limit stands: neither executed the code,
-so the walkthrough steps (0.0b, 2.28–2.31, 3.22–3.23, 5.15–5.18, 6.3/6.3b,
+so the walkthrough steps (0.0b, 2.28–2.31, 3.22, 5.15–5.18, 6.3/6.3b,
 6.5b, 6.6) are where "clears" becomes evidence.
 
 ## Scope at a glance

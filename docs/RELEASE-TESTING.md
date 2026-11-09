@@ -462,17 +462,19 @@ opened, not when it was queued or linked.**
 
 ### A cancelled date stays cancelled (Pass 24, P24-01)
 
-- [ ] **3.22** On a series with **three** invitees, the alt asks to move one
-      date (a time change, leave it pending). Main then **cancels that date**
-      (the occurrence's own Cancel). Main opens the request and presses
-      **Accept**. → Refused: *"That date has been cancelled, so this request
+- [ ] **3.22** On a series the alt is invited to, the alt asks to move one
+      date (**Ask to move this**; as the only invitee, it waits for main). Main
+      then **cancels that date** (the occurrence's own Cancel). Main opens the
+      series, finds the request, and presses **Accept**. → Refused: *"That date has been cancelled, so this request
       can no longer be accepted."* The date is still cancelled on everyone's
       calendar, and the request is still pending (main can Decline it).
       *(Before the fix the accept put the date back on at the requested time —
       and so did the 72-hour deadline sweep, with nobody deciding.)*
-- [ ] **3.23** Control: main **moves** a date they cancelled themselves (2.22's
-      form). → It comes back at the new time. The organizer's own move still
-      restores; only an invitee's request doesn't.
+- *3.23 is not a browser step.* The control — the organizer's own move still
+  brings back a date they cancelled — is reachable only through the API: the
+  page offers **Move this occurrence** only for a date that is on. It is
+  pinned by `worker/test/occurrenceMove.test.ts` ("brings back a date the
+  organizer had cancelled") and was revert-checked against the fix.
 
 ### The organizer decides; they do not vote
 
@@ -615,14 +617,15 @@ when the organizer cancels the poll, and both the dialog and the DM say so.
 
 ### An organizer's "Can't make it" is carried too (Pass 24, P24-02)
 
-- [ ] **5.17** Multi-winner poll, threshold **2**, main + two alts invited.
-      **Main votes Can't make it** on a day, then both alts say **I'm in**. →
-      Confirmed; after a tick it is its own event. As main, the poll row shows
-      **Can't make it** (not I'm in), and main is not among the confirmed.
-- [ ] **5.18** One alt switches to **Can't make it**. → The day is **called off**
-      (1 yes against 2) and the other alt gets the cancellation DM. *(Before the
-      fix only yes-votes were carried, so main counted as going by default and
-      the day stayed on.)*
+- [ ] **5.17** Multi-winner poll, **Confirm once 1 people say yes**, confirm
+      each day independently, the alt invited. **Main votes Can't make it** on a
+      day; the alt says **I'm in**. → Confirmed; after a tick it is its own
+      event. As main, the poll row shows **Can't make it** (not I'm in), and
+      main is not among the confirmed.
+- [ ] **5.18** The alt switches to **Can't make it**. → The day is **called
+      off** (no yes against a threshold of 1) and leaves the calendar. *(Before
+      the fix only yes-votes were carried, so main counted as going by default,
+      the count stayed at 1, and the day stayed on.)*
 
 ---
 
@@ -758,7 +761,7 @@ table, and therefore how hard to look here.
 | **Account** | Deletion no longer fails for anyone who took part in someone else's event | **6.6, 6.7** | Good — and destructive, so it is last |
 | **Account** | The export returns everything held about you | **2.10** | Good |
 | **Account** | **New (9 Nov, Pass 24):** the export gains the columns the review found missing; sessions' last-used is real; the deletion dialog names the effect on invitees | **6.5b, 6.6** | Revert-verified; a schema-coverage test now guards the export |
-| **Change requests** | **New (9 Nov, Pass 24 P24-01, category 2):** an accepted request no longer brings back a date the organizer cancelled | **3.22, 3.23** | Revert-verified both ways |
+| **Change requests** | **New (9 Nov, Pass 24 P24-01, category 2):** an accepted request no longer brings back a date the organizer cancelled | **3.22** (3.23 is test-only) | Revert-verified both ways |
 | **Polls** | **New (9 Nov, Pass 24 P24-02):** every answer is carried onto a confirmed day, so an organizer's no is not shown as yes or counted | **5.17, 5.18** | Revert-verified |
 | **Policy** | The Privacy Policy made true; policy version bump and reacceptance | **6.3, 6.3b** | **Text is being rewritten before this runs** |
 | **Assets** | Webfonts self-hosted | **0.4** | Visible immediately if broken |
