@@ -1798,6 +1798,17 @@ left to do" flag in its discovery query (a notice already sent to everyone
 costs nothing), or to move it after new invites. Measure with the test shape in
 `cancelledInviteEdit.test.ts`.
 
+**Related, fixed for 1.0 (B9 re-check, 9 Nov 2026):** the invite-message edit
+for a cancelled one-off (5.16) was still charged ahead of new invites when an
+edit *was* due, so the pile of unedited cancellations that existed when it
+first deployed held the sandbox's invites back for about an hour (B9's poll
+invite went at 19:30 instead of 18:30). The edits now run as their own step
+after new invites, fed from the cancellation sweep's existing discovery query,
+so they add no fixed query to a tick (pass9's empty-tick ceiling). Test:
+`cancelledInviteEdit.test.ts`, "cancelled invite edits wait behind new
+invites". What this item still describes -- notices themselves ranking ahead
+of invites -- is unchanged and still 1.0.1.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.

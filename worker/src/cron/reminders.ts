@@ -1956,7 +1956,11 @@ async function sweepConfirmedMultiWinnerOptions(
 // own comment on item 47) and bumping the reserve "to match" didn't save
 // it then either -- the fix was leaving the reserve alone and not adding a
 // new charged call site, which is what this does too.
-async function sweepCancellationCascade(env: Env, budget: TickBudget): Promise<void> {
+async function sweepCancellationCascade(
+  env: Env,
+  budget: TickBudget,
+  inviteEditsDue: CancelledEvent[],
+): Promise<void> {
   // SELECT * on both halves, not a narrower column list -- UNION ALL
   // requires matching column sets, and the alternative (a narrow projection,
   // cast to EventRow at the call sites below) would be typechecked but not
@@ -1986,13 +1990,13 @@ async function sweepCancellationCascade(env: Env, budget: TickBudget): Promise<v
 
      SELECT * FROM (
        -- invite_edit_due (10 Nov batch re-check, B9): whether this event still
-       -- has an invite DM waiting for its cancellation edit. Worked out here, in
-       -- the one discovery statement, so an event whose invites are all edited
-       -- costs the tick nothing more. Charging the edit pass on every tick for
-       -- every cancellation in the window starved the new-invites sweep after
-       -- it: with sixteen recent cancellations the sandbox sent nothing at all.
-       -- Mirrors editSettledInviteDms' own conditions closely enough that a
-       -- row it would skip for good doesn't keep an event flagged.
+       -- has an invite DM waiting for its cancellation edit. Worked out here,
+       -- in the discovery statement every tick already pays for, so the edit
+       -- pass after new invites costs no fixed query of its own (pass9's
+       -- empty-tick ceiling) and an event whose invites are all edited costs
+       -- nothing more. Mirrors editSettledInviteDms' own conditions closely
+       -- enough that a row it would skip for good doesn't keep an event
+       -- flagged.
        SELECT *, 'notice' AS kind,
               CASE WHEN events.event_type = 'single' AND EXISTS (
                 SELECT 1 FROM notification_log nl
@@ -2018,7 +2022,11 @@ async function sweepCancellationCascade(env: Env, budget: TickBudget): Promise<v
         // the notice arm's rows (a plain cancel has no minimum at all).
         await maybeSendOrganizerCancelPrompt(env, budget, row as EventRow & { minimum_attendees: number });
       } else {
-        await sendCancelledEventNotice(env, budget, row, !!row.invite_edit_due);
+        // Only once the notice has gone to everyone it is owed to, and handed
+        // on rather than done here: sweepCancelledInviteEdits runs after new
+        // invites.
+        const noticesDone = await sendCancelledEventNotice(env, budget, row);
+        if (noticesDone && row.invite_edit_due && row.event_type === 'single') inviteEditsDue.push(row);
       }
     } catch (err) {
       console.error(`sweepCancellationCascade failed for event ${row.id} (${row.kind}):`, err);
@@ -2067,20 +2075,29 @@ async function maybeSendOrganizerCancelPrompt(
   );
 }
 
+function cancelledEventMessage(env: Env, event: EventRow & { minimum_attendees: number | null }): string {
+  return event.minimum_attendees != null
+    ? `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`
+    : `"${event.title}" has been cancelled by the organizer.\n${eventLink(env, event.id)}`;
+}
+
+// IDEAS item 55: a plain organizer cancel (DELETE /:eventId) gets its own
+// type and wording rather than reusing 'event_cancelled_below_minimum' --
+// that message states a reason ("attendance dropped below the minimum")
+// that isn't true for it, and the two need separate notification_log rows
+// anyway since dedupe is keyed on notification_type.
+function cancelledNoticeType(event: { minimum_attendees: number | null }): NotificationType {
+  return event.minimum_attendees != null ? 'event_cancelled_below_minimum' : 'event_cancelled';
+}
+
 async function sendCancelledEventNotice(
   env: Env,
   budget: TickBudget,
   event: EventRow & { minimum_attendees: number | null },
-  inviteEditDue: boolean,
-): Promise<void> {
+): Promise<boolean> {
   const limit = budget.deliveriesAffordable;
-  if (limit <= 0) return;
-  // IDEAS item 55: a plain organizer cancel (DELETE /:eventId) gets its own
-  // type and wording rather than reusing 'event_cancelled_below_minimum' --
-  // that message states a reason ("attendance dropped below the minimum")
-  // that isn't true for it, and the two need separate notification_log rows
-  // anyway since dedupe is keyed on notification_type.
-  const notificationType = event.minimum_attendees != null ? 'event_cancelled_below_minimum' : 'event_cancelled';
+  if (limit <= 0) return false;
+  const notificationType = cancelledNoticeType(event);
   // Deliberately not getConfirmedAttendeeIds' `PendingFor` shape -- that
   // dedupes against a *different* notification's history, which is exactly
   // wrong for "did we already tell you this one is cancelled."
@@ -2089,26 +2106,48 @@ async function sendCancelledEventNotice(
     occurrenceDate: '',
     limit,
   });
-  const message =
-    event.minimum_attendees != null
-      ? `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`
-      : `"${event.title}" has been cancelled by the organizer.\n${eventLink(env, event.id)}`;
+  const message = cancelledEventMessage(env, event);
   await notifyPending(env, budget, pending, event.id, notificationType, '', () => message);
+  // Everyone owed it was found and the tick could afford them all. Not proof
+  // every DM landed -- one can fail and retry -- but the same test the edit
+  // used when it lived here, and a failed notice is retried by its own sweep.
+  return pending.length < limit && !budget.exhausted;
+}
 
-  // Walkthrough 5.16 (10 Nov 2026), for 1.0: the invite DMs then went on
-  // offering I'm in / Maybe / Can't make it for an event that no longer
-  // existed. Only poll DMs were ever edited when they settled. The same edit,
-  // after the notices and ranked below them for the same reason it is there:
-  // a stale button is survivable (a press is refused), a missing notice is not.
-  // Everyone invited, not only those still coming -- the called-off day that
-  // found this had nobody left to notify, so nothing ever reached its invite.
-  // One-off events only. This arm also sees cancelled polls, whose invite DMs
-  // their own sweeps edit with the poll's own wording (item 99's "N days are
-  // still happening"); an edit happens once, so this generic text must never
-  // be the one that lands there, even on a tick where the poll's sweep was
-  // deferred.
-  if (!inviteEditDue || pending.length >= limit || budget.exhausted || event.event_type !== 'single') return;
-  await editSettledInviteDms(env, budget, event, () => message, []);
+type CancelledEvent = EventRow & { minimum_attendees: number | null };
+
+// Walkthrough 5.16 (10 Nov 2026), for 1.0: a cancelled one-off's invite DMs
+// went on offering I'm in / Maybe / Can't make it for an event that no longer
+// existed. Only poll DMs were ever edited when they settled; this gives
+// one-off events the same edit.
+//
+// Its own sweep, run after new invites, rather than a tail on the
+// cancellation notice above, where it started. The B9 re-check found why:
+// there it was charged ahead of new invites, and the pile of unedited
+// cancellations that existed when it first deployed held every new invite
+// back for an hour. A stale button is survivable (a press is refused, 4.12);
+// a missing invite is not. So the edit takes what invites leave.
+//
+// Everyone invited, not only those still coming -- the called-off day that
+// found this had nobody left to notify, so nothing ever reached its invite.
+// One-off events only: a cancelled poll's invite DMs are edited by the poll's
+// own sweeps in the poll's own wording (item 99's "N days are still
+// happening"), and an edit happens once, so this generic text must never be
+// the one that lands there.
+//
+// The cancellation sweep hands over the events still due an edit, from its
+// own discovery query and only once their notices are out, so this costs no
+// fixed query of its own and an event already done costs nothing on later
+// ticks (bd0d957).
+async function sweepCancelledInviteEdits(env: Env, budget: TickBudget, due: readonly CancelledEvent[]): Promise<void> {
+  for (const event of due) {
+    if (budget.exhausted) return;
+    try {
+      await editSettledInviteDms(env, budget, event, () => cancelledEventMessage(env, event), []);
+    } catch (err) {
+      console.error(`sweepCancelledInviteEdits failed for event ${event.id}:`, err);
+    }
+  }
 }
 
 // IDEAS item 54: the deadline-based half of the minimum-attendees cascade,
@@ -3657,12 +3696,16 @@ export async function runReminderSweep(env: Env): Promise<void> {
     sweepMultiWinnerPollClosedNotifications(env, budget, cursors),
   );
   await runIsolated('confirmedMultiWinnerOptions', () => sweepConfirmedMultiWinnerOptions(env, budget, cursors));
-  await runIsolated('cancellationCascade', () => sweepCancellationCascade(env, budget));
+  // Filled by the cancellation sweep, drained after new invites -- see
+  // sweepCancelledInviteEdits.
+  const cancelledInviteEditsDue: CancelledEvent[] = [];
+  await runIsolated('cancellationCascade', () => sweepCancellationCascade(env, budget, cancelledInviteEditsDue));
   await runIsolated('minimumAttendeesDeadlines', () => sweepMinimumAttendeesDeadlines(env, budget, cursors));
   await runIsolated('minimumAttendeesDeadlineWarnings', () =>
     sweepMinimumAttendeesDeadlineWarnings(env, budget, cursors),
   );
   await runIsolated('newInvites', () => sweepNewInvites(env, budget));
+  await runIsolated('cancelledInviteEdits', () => sweepCancelledInviteEdits(env, budget, cancelledInviteEditsDue));
   await runIsolated('changeRequestNotifications', () => sweepChangeRequestNotifications(env, budget));
   await runIsolated('reminders', () => sweepReminders(env, budget, cursors));
   await runIsolated('pollDeadlineReminders', () => sweepPollDeadlineReminders(env, budget, cursors));

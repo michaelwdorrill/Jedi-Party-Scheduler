@@ -151,3 +151,57 @@ describe('editing cancelled invites does not starve the rest of the tick', () =>
     expect(sent!.n, 'the new invite went out within three ticks').toBe(1);
   });
 });
+
+// The same re-check, the half bd0d957 left: an event whose edit IS still due
+// was charged ahead of new invites, so a pile of unedited cancellations (the
+// one that built up before that fix deployed) held invites back for an hour on
+// the sandbox. A stale button is survivable; a missing invite is not -- so the
+// edits now run after new invites, and a fresh invite goes out on the first
+// tick whatever is waiting to be edited.
+describe('cancelled invite edits wait behind new invites', () => {
+  it('sends a new invite on the first tick with 25 cancelled one-offs still to edit, and edits them all later', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    for (const id of ['organizer', 'guest']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    await db.prepare(`UPDATE users SET dm_channel_id = 'dm-guest' WHERE id = 'guest'`).run();
+    for (let i = 0; i < 25; i++) {
+      await seedEvent(db, { id: `c${i}`, organizerId: 'organizer', title: `cancelled ${i}`, status: 'cancelled' });
+      await seedInvite(db, `c${i}`, 'guest');
+      await db
+        .prepare(
+          `INSERT INTO notification_log (id, user_id, event_id, notification_type, occurrence_date, sent_at, delivered_at,
+             attempt_count, content, message_id)
+           VALUES (?, 'guest', ?, 'invite', '', ?, ?, 1, 'x', ?)`,
+        )
+        .bind(`nl-${i}`, `c${i}`, Date.now() - HOUR_MS, Date.now() - HOUR_MS, `msg-${i}`)
+        .run();
+      // The organizer's own cancellation notice is already out: notices are
+      // meant to go before invites, and this measures the edits alone.
+      await db
+        .prepare(
+          `INSERT INTO notification_log (id, user_id, event_id, notification_type, occurrence_date, sent_at, delivered_at, attempt_count, content)
+           VALUES (?, 'organizer', ?, 'event_cancelled', '', ?, ?, 1, 'x')`,
+        )
+        .bind(`nc-${i}`, `c${i}`, Date.now() - HOUR_MS, Date.now() - HOUR_MS)
+        .run();
+    }
+    await seedEvent(db, { id: 'fresh', organizerId: 'organizer', title: 'fresh', startAt: Date.now() + 48 * HOUR_MS, endAt: Date.now() + 50 * HOUR_MS });
+    await seedInvite(db, 'fresh', 'guest');
+    fetchStub = stubFetch([DM_CHANNEL_RULE, { match: '/messages/msg-', status: 200, body: {} }, dmSendRule(200), membershipRule(200)]);
+
+    await runReminderSweep(env);
+    const sent = await db
+      .prepare(`SELECT COUNT(*) AS n FROM notification_log WHERE event_id = 'fresh' AND notification_type = 'invite' AND delivered_at IS NOT NULL`)
+      .first<{ n: number }>();
+    expect(sent!.n, 'the new invite went out on the first tick').toBe(1);
+
+    for (let tick = 0; tick < 10; tick++) await runReminderSweep(env);
+    const left = await db
+      .prepare(`SELECT COUNT(*) AS n FROM notification_log WHERE notification_type = 'invite' AND event_id LIKE 'c%' AND message_edited_at IS NULL`)
+      .first<{ n: number }>();
+    expect(left!.n, 'every cancelled invite was edited eventually').toBe(0);
+  });
+});
