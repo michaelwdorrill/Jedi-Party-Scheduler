@@ -127,6 +127,11 @@ minimum-attendees cascade (decision 4 below). Before fan-out it simply
 un-confirms. A vote on the poll's row for a fanned-out day is recorded as an
 RSVP on the day's event. Windowed days are unchanged.
 
+**Amended 9 November 2026 (IDEAS 99).** Cancelling the poll does not cancel
+the days that already became events: they stay on, and the organizer's
+dialog and the invitees' notice both say so. A confirmed day not yet fanned
+out goes with the poll.
+
 ## Recurring events: accept one at a time
 
 Michael's second call, and it is what makes per-occurrence attendance

@@ -1454,7 +1454,16 @@ so in the dialog; (b) leave them on and say so in the dialog, and word the
 notice as "the organizer closed the poll; these days are still happening".
 Either way the notice for an organizer cancel needs its own wording.
 
-**Not yet decided; needs Michael's call before 1.0.**
+**Decided and built 9 November 2026: the days stay on** (Michael's call). The
+cancel dialog on a multi-winner poll now names the days that are already
+their own events and says they will still happen and how to cancel them too;
+the poll-closed notice for an organizer cancel says "The organizer closed the
+poll ... N day(s) already confirmed are still happening", or "was cancelled by
+the organizer" when none are. Telling an organizer cancel from a deadline one
+needed no new state -- see `pollClosedMessage` in `cron/reminders.ts`. A day
+confirmed but not yet its own event goes with the poll (the fan-out skips
+cancelled polls), and neither the dialog nor the notice counts it. Stays here
+until the reviewer pass and walkthrough 5.15-5.16.
 
 ### 100. Small things from the 8 November re-run
 

@@ -1625,6 +1625,44 @@ async function pendingOutsideHoursRecipients(
 // sweep (never synchronously -- individual options confirm independently
 // while the event stays active), so this one is safe to drive off "closed
 // this tick" the same way sweepPollDeadlines is a one-shot state change.
+// IDEAS 99. A multi-winner poll ends 'cancelled' two ways: the deadline
+// passed with no day confirmed, or the organizer cancelled it -- and the
+// notice used to describe both as the first ("didn't get enough interest"),
+// and an organizer cancel with confirmed days as a normal close. Telling them
+// apart needs no new state: the deadline sweep never leaves a poll cancelled
+// with a confirmed day (it marks those 'resolved'), and the organizer can only
+// cancel an active poll. So cancelled-with-confirmed-days is always the
+// organizer, and cancelled-with-none is the organizer when it happened before
+// the deadline. The one case still read as the deadline -- an organizer cancel
+// in the minutes between the deadline passing and the sweep running, with no
+// day confirmed -- gets a message that is true either way.
+//
+// Michael's call on what an organizer cancel does to days that already became
+// their own events: they stay on. So the notice counts those live day events,
+// not confirmed options -- a day confirmed moments before the cancel, not yet
+// fanned out, never will be (sweepConfirmedMultiWinnerOptions skips cancelled
+// polls) and goes with the poll.
+async function pollClosedMessage(env: Env, budget: TickBudget, event: EventRow, confirmed: number): Promise<string | null> {
+  const byOrganizer =
+    event.status === 'cancelled' &&
+    (confirmed > 0 || event.poll_deadline_at == null || event.updated_at < event.poll_deadline_at);
+  if (!byOrganizer) {
+    return confirmed > 0
+      ? `Voting for "${event.title}" has closed. ${confirmed} day(s) got confirmed -- check the event for details.\n${eventLink(env, event.id)}`
+      : `"${event.title}" didn't get enough interest on any day and was cancelled.`;
+  }
+  if (!budget.trySpend(1)) return null;
+  const live = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM events WHERE created_from_poll_id = ? AND status = 'active'`,
+  )
+    .bind(event.id)
+    .first<{ n: number }>();
+  const stillOn = live?.n ?? 0;
+  return stillOn > 0
+    ? `The organizer closed the poll "${event.title}". ${stillOn} day(s) already confirmed are still happening -- check the event for details.\n${eventLink(env, event.id)}`
+    : `"${event.title}" was cancelled by the organizer.`;
+}
+
 async function sweepMultiWinnerPollClosedNotifications(
   env: Env,
   budget: TickBudget,
@@ -1652,10 +1690,8 @@ async function sweepMultiWinnerPollClosedNotifications(
       const n = confirmedCount[0]?.n ?? 0;
       const limit = budget.deliveriesAffordable;
       const pending = await pendingRecipients(env, event, 'poll_resolved', '', limit);
-      const message =
-        n > 0
-          ? `Voting for "${event.title}" has closed. ${n} day(s) got confirmed -- check the event for details.\n${eventLink(env, event.id)}`
-          : `"${event.title}" didn't get enough interest on any day and was cancelled.`;
+      const message = await pollClosedMessage(env, budget, event, n);
+      if (message === null) return 'incomplete';
       await notifyPending(env, budget, pending, event.id, 'poll_resolved', '', () => message);
       // A full page of recipients means there may be more behind it, and an
       // exhausted budget means we stopped part-way through the ones we had.

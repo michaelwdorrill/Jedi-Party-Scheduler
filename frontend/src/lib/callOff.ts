@@ -1,3 +1,4 @@
+import { DateTime } from 'luxon';
 import type { EventDetail, PollOption, PollVote, RsvpStatus } from '../types';
 
 // IDEAS 97: an answer that calls a day off for everyone is a destructive
@@ -31,4 +32,25 @@ export function rsvpCallsOffEvent(event: EventDetail, myUserId: string | undefin
   if (organizerAnswer !== 'declined') going.add(event.organizerId);
   if (!going.has(myUserId)) return false;
   return going.size - 1 < event.minimumAttendees;
+}
+
+// IDEAS 99: cancelling a multi-winner poll leaves the days that already became
+// their own events on -- Michael's call -- so the confirmation says which, and
+// how to call them off too. Before this it asked only "Cancel this event for
+// everyone?", which reads as taking those days with it (release-bar clause 4).
+// A day confirmed but not yet its own event is not listed: it never will be one
+// once the poll is cancelled, so it does go with it.
+export function cancelEventMessage(event: EventDetail, zone: string): string {
+  const stillOn =
+    event.eventType === 'poll' && event.pollResolutionMode === 'multi_winner'
+      ? (event.pollOptions ?? []).filter((o) => o.sessionEventId && o.sessionStatus === 'active')
+      : [];
+  if (stillOn.length === 0) return 'Cancel this event for everyone?';
+  const days = stillOn.map((o) => DateTime.fromMillis(o.startAt).setZone(zone).toFormat('ccc d LLL')).join(', ');
+  const one = stillOn.length === 1;
+  return (
+    `Cancel this poll for everyone? ${one ? 'The day' : `The ${stillOn.length} days`} already confirmed as ` +
+    `${one ? 'its own event' : 'their own events'} (${days}) will still happen. To call ${one ? 'it' : 'them'} off ` +
+    `as well, cancel ${one ? 'it' : 'each one'} from its own page.`
+  );
 }

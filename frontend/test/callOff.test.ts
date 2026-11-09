@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rsvpCallsOffEvent, voteCallsOffDay } from '../src/lib/callOff';
+import { cancelEventMessage, rsvpCallsOffEvent, voteCallsOffDay } from '../src/lib/callOff';
 import type { EventDetail, EventInvite, PollOption } from '../src/types';
 
 // IDEAS 97: which presses call a day off for everyone, so the page can say so
@@ -86,5 +86,31 @@ describe('rsvpCallsOffEvent', () => {
     const invites = [invite('org', null), invite('alt', 'accepted')];
     expect(rsvpCallsOffEvent(dayEvent(invites, { autoCancelBelowMinimum: false }), 'alt', 'declined')).toBe(false);
     expect(rsvpCallsOffEvent(dayEvent(invites, { minimumAttendeesDeadlineAt: 5 }), 'alt', 'declined')).toBe(false);
+  });
+});
+
+describe('cancelEventMessage (IDEAS 99)', () => {
+  const NY = 'America/New_York';
+  const poll = (options: PollOption[]) =>
+    ({ eventType: 'poll', pollResolutionMode: 'multi_winner', pollOptions: options }) as unknown as EventDetail;
+  // Tue 10 Nov 2026, 7pm New York.
+  const tue = Date.UTC(2026, 10, 11, 0, 0);
+
+  it('names the days that stay on when a multi-winner poll is cancelled', () => {
+    const msg = cancelEventMessage(poll([day({ startAt: tue })]), NY);
+    expect(msg).toContain('The day already confirmed as its own event (Tue 10 Nov) will still happen');
+    expect(msg).toContain('cancel it from its own page');
+  });
+
+  it('leaves out a day that is confirmed but not yet its own event, and one already called off', () => {
+    const notYet = day({ startAt: tue, sessionEventId: null, sessionStatus: null });
+    const calledOff = day({ startAt: tue, sessionStatus: 'cancelled' });
+    expect(cancelEventMessage(poll([notYet, calledOff]), NY)).toBe('Cancel this event for everyone?');
+  });
+
+  it('keeps the plain question for every other kind of event', () => {
+    expect(cancelEventMessage({ eventType: 'single', pollOptions: null } as unknown as EventDetail, NY)).toBe(
+      'Cancel this event for everyone?',
+    );
   });
 });

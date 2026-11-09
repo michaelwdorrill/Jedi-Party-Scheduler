@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
-import { rsvpCallsOffEvent } from '../lib/callOff';
+import { cancelEventMessage, rsvpCallsOffEvent } from '../lib/callOff';
 import { formatDuration, formatTimeRange } from '../lib/datetime';
 import ChangeRequestSection from '../components/ChangeRequestSection';
 import MoveOccurrenceForm from '../components/MoveOccurrenceForm';
@@ -167,7 +167,7 @@ export default function EventDetailPage() {
   };
 
   const handleCancelEvent = async () => {
-    if (!confirm('Cancel this event for everyone?')) return;
+    if (!confirm(cancelEventMessage(event, zone))) return;
     await action.run(async () => {
       await api.delete(`/events/${event.eventId}`);
       reload();

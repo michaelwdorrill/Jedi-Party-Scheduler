@@ -564,6 +564,21 @@ invited.
 - [ ] **5.14** With a threshold of 2 and **three** people in, one drops out.
       → No warning, and the day stays on.
 
+### Cancelling a poll whose days are already events (IDEAS 99)
+
+Decided 9 November: days that already became their own events **stay on**
+when the organizer cancels the poll, and both the dialog and the DM say so.
+
+- [ ] **5.15** Multi-winner poll, one day confirmed and (after a tick) its own
+      event. As the organizer, **Cancel event** on the poll. → The dialog
+      names that day, says it will still happen, and says to cancel it from
+      its own page. Confirm. → The poll is cancelled; the day's event is
+      still on the calendar.
+- [ ] **5.16** After a tick: the alt's DM says *"The organizer closed the poll
+      … 1 day(s) already confirmed are still happening"*, not "didn't get
+      enough interest". Cancel a second poll with **no** confirmed day →
+      *"… was cancelled by the organizer."*
+
 ---
 
 ## Phase 6 — settings, policy, and the destructive ones last
