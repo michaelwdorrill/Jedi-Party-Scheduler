@@ -3722,8 +3722,6 @@ export async function runReminderSweep(env: Env): Promise<void> {
   // common pool and stop when it runs dry, instead of each being separately
   // "reasonable" and collectively over the line.
   const budget = new TickBudget(planFrom(env.WORKERS_PLAN));
-  // TEMPORARY (B10 diagnosis, 9 Nov 2026): what each step leaves. Revert before the 1.0 merge.
-  const trace: string[] = [];
 
   // Every sweep's scan position, read in one query here and written back in
   // one batch below. Ten cursored sweeps doing their own read/write would be
@@ -3756,57 +3754,35 @@ export async function runReminderSweep(env: Env): Promise<void> {
   }
 
   await runIsolated('membershipRevalidation', () => sweepMembershipRevalidation(env, budget));
-  trace.push(`membershipRevalidation=${budget.deliveriesAffordable}`);
   await runIsolated('pollDeadlines', () => sweepPollDeadlines(env, budget));
-  trace.push(`pollDeadlines=${budget.deliveriesAffordable}`);
   await runIsolated('changeRequestDeadlines', () => sweepChangeRequestDeadlines(env, budget));
-  trace.push(`changeRequestDeadlines=${budget.deliveriesAffordable}`);
   await runIsolated('singleWinnerPollNotifications', () => sweepSingleWinnerPollNotifications(env, budget, cursors));
-  trace.push(`singleWinnerPollNotifications=${budget.deliveriesAffordable}`);
   await runIsolated('multiWinnerPollClosedNotifications', () =>
     sweepMultiWinnerPollClosedNotifications(env, budget, cursors),
   );
-  trace.push(`multiWinnerPollClosedNotifications=${budget.deliveriesAffordable}`);
   await runIsolated('confirmedMultiWinnerOptions', () => sweepConfirmedMultiWinnerOptions(env, budget, cursors));
-  trace.push(`confirmedMultiWinnerOptions=${budget.deliveriesAffordable}`);
   // Filled by the cancellation sweep, drained after new invites -- see
   // sweepCancelledInviteEdits.
   const cancelledInviteEditsDue: CancelledEvent[] = [];
   await runIsolated('cancellationCascade', () => sweepCancellationCascade(env, budget, cancelledInviteEditsDue));
-  trace.push(`cancellationCascade=${budget.deliveriesAffordable}`);
   await runIsolated('minimumAttendeesDeadlines', () => sweepMinimumAttendeesDeadlines(env, budget, cursors));
-  trace.push(`minimumAttendeesDeadlines=${budget.deliveriesAffordable}`);
   await runIsolated('minimumAttendeesDeadlineWarnings', () =>
     sweepMinimumAttendeesDeadlineWarnings(env, budget, cursors),
   );
-  trace.push(`minimumAttendeesDeadlineWarnings=${budget.deliveriesAffordable}`);
   await runIsolated('newInvites', () => sweepNewInvites(env, budget));
-  trace.push(`newInvites=${budget.deliveriesAffordable}`);
   await runIsolated('cancelledInviteEdits', () => sweepCancelledInviteEdits(env, budget, cancelledInviteEditsDue));
-  trace.push(`cancelledInviteEdits=${budget.deliveriesAffordable}`);
   await runIsolated('changeRequestNotifications', () => sweepChangeRequestNotifications(env, budget));
-  trace.push(`changeRequestNotifications=${budget.deliveriesAffordable}`);
   await runIsolated('reminders', () => sweepReminders(env, budget, cursors));
-  trace.push(`reminders=${budget.deliveriesAffordable}`);
   await runIsolated('pollDeadlineReminders', () => sweepPollDeadlineReminders(env, budget, cursors));
-  trace.push(`pollDeadlineReminders=${budget.deliveriesAffordable}`);
   await runIsolated('voiceChannelInvites', () => sweepVoiceChannelInvites(env, budget, cursors));
-  trace.push(`voiceChannelInvites=${budget.deliveriesAffordable}`);
   await runIsolated('idleGroups', () => sweepIdleGroups(env, budget, cursors));
-  trace.push(`idleGroups=${budget.deliveriesAffordable}`);
   await runIsolated('groupDrift', () => sweepGroupDrift(env, budget));
-  trace.push(`groupDrift=${budget.deliveriesAffordable}`);
   await runIsolated('organizerRsvpNotices', () => sweepOrganizerRsvpNotices(env, budget));
-  trace.push(`organizerRsvpNotices=${budget.deliveriesAffordable}`);
   // LAUNCH-ONLY (1.0); removed in 1.1.
   await runIsolated('launchAnnouncement', () => sweepLaunchAnnouncement(env, budget, cursors));
-  trace.push(`launchAnnouncement=${budget.deliveriesAffordable}`);
   await runIsolated('pruneStaleSessions', () => pruneStaleSessions(env));
-  trace.push(`pruneStaleSessions=${budget.deliveriesAffordable}`);
   await runIsolated('pruneOAuthCallbackCounts', () => pruneOAuthCallbackCounts(env));
-  trace.push(`pruneOAuthCallbackCounts=${budget.deliveriesAffordable}`);
   await runIsolated('purgeTerminalHistory', () => sweepPurgeTerminalHistory(env, budget));
-  trace.push(`purgeTerminalHistory=${budget.deliveriesAffordable}`);
   // Source-independent retry consumers (F-04-H2): a row whose source
   // event/poll/group has already left every other sweep's scan window can
   // still be due for retry, so these scan the outbox tables directly by
@@ -3814,9 +3790,7 @@ export async function runReminderSweep(env: Env): Promise<void> {
   // chance at delivery in the same tick it's picked up in, rather than
   // possibly being reaped on a tick it was never actually retried.
   await runIsolated('dueNotificationRetries', () => sweepDueNotificationRetries(env, budget, cursors));
-  trace.push(`dueNotificationRetries=${budget.deliveriesAffordable}`);
   await runIsolated('dueNudgeRetries', () => sweepDueNudgeRetries(env, budget, cursors));
-  trace.push(`dueNudgeRetries=${budget.deliveriesAffordable}`);
   // Last of the budget-charged sweeps, deliberately: its own threshold is a
   // year of inactivity, so it has nothing to lose by going last and being the
   // one starved on a busy tick, and everything above it (same-day reminders,
@@ -3824,17 +3798,14 @@ export async function runReminderSweep(env: Env): Promise<void> {
   // test/pass6.test.ts) is more time-sensitive than a warning DM or a purge
   // that would fire again next tick regardless.
   await runIsolated('staleAccounts', () => sweepStaleAccounts(env, budget));
-  trace.push(`staleAccounts=${budget.deliveriesAffordable}`);
   // Last, so it settles anything that used up its final attempt during this
   // tick rather than leaving it for the next one.
   await runIsolated('reapExhaustedDeliveries', () => reapExhaustedDeliveries(env));
-  trace.push(`reapExhaustedDeliveries=${budget.deliveriesAffordable}`);
 
   // Persisted once, after every sweep has had its turn. Isolated like the
   // sweeps themselves: losing the cursor write costs a tick of re-scanning,
   // which the outbox dedupes, and must not mask a tick that otherwise worked.
   await runIsolated('flushCursors', () => cursors.flush());
-  trace.push(`flushCursors=${budget.deliveriesAffordable}`);
 
   // Routinely hitting zero means work is being deferred every tick, which is
   // survivable (the next tick resumes it) but worth knowing about -- it means
@@ -3842,5 +3813,4 @@ export async function runReminderSweep(env: Env): Promise<void> {
   if (budget.exhausted) {
     console.warn('Cron tick exhausted its work budget; remaining notifications deferred to the next tick.');
   }
-  console.log(`TEMP budget trace: ${trace.join(' ')}`);
 }
