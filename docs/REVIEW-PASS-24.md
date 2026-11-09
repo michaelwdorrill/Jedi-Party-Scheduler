@@ -44,7 +44,7 @@ the happy paths render, not that the edges are right.
 | Code diff | `git diff 2133fb5 HEAD -- worker/src frontend/src worker/wrangler.toml worker/scripts worker/migrations` |
 | Sandbox Worker | `https://jedi-party-scheduler-worker-sandbox.uncleowen.workers.dev` (deployed from the `sandbox` branch, same `worker/` tree as head) |
 | Frontend | local only: `VITE_API_BASE_URL=<sandbox worker> npm run build && npx vite preview --port 5173 --strictPort` in `frontend/` |
-| Tests | `cd worker && npx vitest run` (873), `cd frontend && npx vitest run` (153) |
+| Tests | `cd worker && npx vitest run` (878), `cd frontend && npx vitest run` (153) |
 
 `--port 5173` matters: it is the sandbox Worker's `FRONTEND_URL`, which drives
 both CORS and the OAuth redirect. `CLAUDE.md` has the rest of the sandbox
