@@ -869,6 +869,33 @@ export async function recordPollSelection(
     }
   }
 
+  // Walkthrough B4 (10 Nov 2026), for 1.0: a picked night that has become its
+  // own event is answered on that event, as recordPollVote does for the site
+  // (item 97) -- the picker used to save it against the poll row only, so
+  // "I'm in" from Discord counted for nothing. Picked only: the picker says
+  // "anything you don't pick is left blank, not refused", so leaving a day out
+  // says nothing about it. A called-off day refuses the whole answer before
+  // anything is written, the way the site refuses that one button.
+  const sessions: { id: string; status: string }[] = [];
+  if (optionIds.length > 0) {
+    const { results } = await env.DB.prepare(
+      `SELECT id, status FROM events WHERE created_from_option_id IN (${optionIds.map(() => '?').join(', ')})`,
+    )
+      .bind(...optionIds)
+      .all<{ id: string; status: string }>();
+    sessions.push(...results);
+  }
+  if (sessions.some((s) => s.status === 'cancelled')) {
+    return { status: 'closed', reason: 'One of those days was called off -- too few people were still in for it' };
+  }
+  for (const session of sessions) {
+    const answered = await recordRsvp(env, userId, session.id, '', 'accepted');
+    if (answered === 'event_not_active') {
+      return { status: 'closed', reason: 'One of those days was called off -- too few people were still in for it' };
+    }
+    if (answered !== 'recorded') return { status: 'forbidden' };
+  }
+
   const statements = [];
   const keep = optionIds.map(() => '?').join(', ');
   statements.push(

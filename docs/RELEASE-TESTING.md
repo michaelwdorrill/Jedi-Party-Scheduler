@@ -664,6 +664,16 @@ in the sandbox.
       the bot has left.
 - [ ] **B8** Dependencies (Hono, Vite): the app loads, login works, and nothing
       in the console that wasn't there before.
+- [ ] **B9** The Discord night picker reaches a day that is its own event
+      (Worker only, no rebuild). **a)** In SchedulerTest's Discord, on the
+      **P24 organizer no** invite, pick **Fri 20 Nov** (called off). → *"One of
+      those days was called off -- too few people were still in for it"*, and
+      nothing changes. **b)** Main: a multi-winner poll **B9 picker**, one day,
+      **Confirm once 1 person says yes**, each day independently, SchedulerTest
+      invited; main says **I'm in** (Confirmed). After the next tick: SchedulerTest
+      gets the invite with the picker, and the day is its own event. SchedulerTest
+      picks that day in Discord. → On the day's own event, SchedulerTest shows
+      **accepted**. *(Before: the pick was saved on the poll row only.)*
 
 ---
 

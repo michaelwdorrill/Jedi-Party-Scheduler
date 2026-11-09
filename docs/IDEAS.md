@@ -1591,7 +1591,7 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
   press is refused with "not active" (4.12). Safe, untidy: edit the invite to
   the cancellation text and drop its controls, the way poll DMs already are.
   *Built:* `sendCancelledEventNotice` now edits every invitee's invite DM to the cancellation text with no controls, after the notices (`editSettledPollDms` renamed `editSettledInviteDms`). One budgeted query per recently cancelled event per tick (3-day window). `worker/test/cancelledInviteEdit.test.ts`, revert-checked. Series cancellations are unchanged.
-- **The Discord night picker doesn't reach a day that is its own event.** Seen
+- **[Built for 1.0, 10 Nov] The Discord night picker doesn't reach a day that is its own event.** Seen
   on the 10 Nov batch re-check (B4): SchedulerTest's invite to the still-open
   poll "P24 organizer no" offers "Pick every night that works", and its only
   day had already become its own event and been called off. On the site, an
@@ -1603,6 +1603,12 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
   the Discord half item 97 didn't wire. Fix: route picked options that have a
   day event through the same `recordRsvp` path (refusing a called-off one, as
   the site does), or leave fanned-out days out of the picker's options.
+  *Built:* `recordPollSelection` answers each picked day that is its own event
+  with `recordRsvp(accepted)` before saving the poll row, as the site does;
+  unpicked days are left alone ("left blank, not refused"); a called-off day in
+  the pick refuses the whole answer before anything is written. Two
+  reproductions plus a labelled guard in `confirmedDayThreshold.test.ts`,
+  revert-checked. Walkthrough B9.
 - **An empty "Change Requests" box on a cancelled event.** Seen on the 10 Nov
   batch re-check (SchedulerTest on the called-off P24 day): the heading renders
   with nothing under it. `ChangeRequestSection` returns null only for someone

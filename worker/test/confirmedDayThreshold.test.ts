@@ -380,3 +380,59 @@ describe("a poll day's own event links back to its poll", () => {
     expect((await eventAs(env, day!.id, 'late')).createdFromPoll).toBeNull();
   });
 });
+
+// Walkthrough B4 (10 Nov 2026), taken into 1.0 by Michael: the Discord night
+// picker never reached a day that had become its own event. On the site an
+// answer on such a day is recorded on the day's event (item 97); a pick in
+// Discord was saved against the poll row only, so "I'm in" from Discord counted
+// for nothing.
+describe('the Discord night picker answers a day that is its own event', () => {
+  async function fannedOutWithMaybe(db: ShimDatabase, env: Env) {
+    const { pollId, optionId } = await seedPoll(db, env, { threshold: 2, invitees: ['a', 'b'] });
+    await vote(env, pollId, optionId, 'organizer', 'yes');
+    await vote(env, pollId, optionId, 'a', 'yes');
+    await vote(env, pollId, optionId, 'b', 'maybe');
+    await sweep(env);
+    const day = await session(db, optionId);
+    return { pollId, optionId, dayId: day!.id };
+  }
+  const answerOf = (db: ShimDatabase, dayId: string, userId: string) =>
+    db
+      .prepare(`SELECT rsvp_status FROM event_attendance WHERE event_id = ? AND occurrence_date = '' AND user_id = ?`)
+      .bind(dayId, userId)
+      .first<{ rsvp_status: string }>();
+
+  it("records a pick as going on the day's own event", async () => {
+    const { db, env } = setup();
+    const { pollId, optionId, dayId } = await fannedOutWithMaybe(db, env);
+    expect((await answerOf(db, dayId, 'b'))!.rsvp_status).toBe('tentative');
+
+    expect((await recordPollSelection(env, 'b', pollId, [optionId])).status).toBe('recorded');
+
+    expect((await answerOf(db, dayId, 'b'))!.rsvp_status).toBe('accepted');
+  });
+
+  // INVARIANT GUARD, not a reproduction (passes before the fix too): "anything
+  // you don't pick is left blank, not refused" -- the picker's own words.
+  // Leaving a day out says nothing about it, so the day's answer stays.
+  it('leaves the day alone when it is not picked', async () => {
+    const { db, env } = setup();
+    const { pollId, dayId } = await fannedOutWithMaybe(db, env);
+
+    expect((await recordPollSelection(env, 'a', pollId, [])).status).toBe('recorded');
+
+    expect((await answerOf(db, dayId, 'a'))!.rsvp_status).toBe('accepted');
+  });
+
+  it('refuses a pick on a day that was called off, and changes nothing', async () => {
+    const { db, env } = setup();
+    const { pollId, optionId, dayId } = await fannedOutWithMaybe(db, env);
+    await vote(env, pollId, optionId, 'a', 'no'); // organizer + b(maybe) -> below 2
+    expect((await session(db, optionId))!.status).toBe('cancelled');
+
+    const outcome = await recordPollSelection(env, 'b', pollId, [optionId]);
+
+    expect(outcome.status).toBe('closed');
+    expect((await answerOf(db, dayId, 'b'))!.rsvp_status).toBe('tentative');
+  });
+});
