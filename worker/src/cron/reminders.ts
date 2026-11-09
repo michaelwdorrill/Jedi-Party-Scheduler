@@ -3653,12 +3653,22 @@ async function runIsolated(name: string, fn: () => Promise<void>): Promise<void>
 // Costs nothing when no announcement is live (no query at all, which is what
 // keeps pass9's empty-tick ceiling), and nothing once it is finished: the
 // first tick that finds nobody left to send to records that in the cursor
-// store, which every tick already reads in one statement. Ranked near the end
-// of the tick, behind everything about actual plans: a launch note can wait
-// fifteen minutes; an invite or a reminder should not.
+// store, which every tick already reads in one statement.
+//
+// Where it runs, and how much it takes. It first went last in the tick, on the
+// reasoning that a launch note can wait fifteen minutes. On the sandbox
+// (B10, 9 Nov) a temporary per-step trace showed every tick reaching it with
+// nothing left, five ticks running: "last" meant "never" on a busy install,
+// and production's load can't be measured before the launch. So it runs near
+// the front, right after membership revalidation, and takes at most
+// LAUNCH_ANNOUNCEMENT_PER_TICK deliveries: always some progress, and most of
+// the tick still left for invites and reminders. Thirty people take eight
+// ticks, about two hours, and then it costs nothing at all.
 //
 // Never-attempted rows sort first, so people still waiting on a first try are
 // not stuck behind a retry backing off.
+const LAUNCH_ANNOUNCEMENT_PER_TICK = 4;
+
 async function sweepLaunchAnnouncement(env: Env, budget: TickBudget, cursors: CursorStore): Promise<void> {
   const announcement = activeLaunchAnnouncement(env);
   if (!announcement || cursors.get('launch_announcement') === announcement.id) return;
@@ -3678,7 +3688,7 @@ async function sweepLaunchAnnouncement(env: Env, budget: TickBudget, cursors: Cu
      ORDER BY (al.id IS NOT NULL), u.id
      LIMIT ?`,
   )
-    .bind(announcement.id, membershipCutoff(), MAX_DELIVERY_ATTEMPTS, Math.max(1, budget.deliveriesAffordable))
+    .bind(announcement.id, membershipCutoff(), MAX_DELIVERY_ATTEMPTS, Math.max(1, Math.min(LAUNCH_ANNOUNCEMENT_PER_TICK, budget.deliveriesAffordable)))
     .all<ParticipantRow>();
 
   if (results.length === 0) {
@@ -3754,6 +3764,9 @@ export async function runReminderSweep(env: Env): Promise<void> {
   }
 
   await runIsolated('membershipRevalidation', () => sweepMembershipRevalidation(env, budget));
+  // LAUNCH-ONLY (1.0); removed in 1.1. Near the front, capped per tick -- see
+  // sweepLaunchAnnouncement for why it isn't last.
+  await runIsolated('launchAnnouncement', () => sweepLaunchAnnouncement(env, budget, cursors));
   await runIsolated('pollDeadlines', () => sweepPollDeadlines(env, budget));
   await runIsolated('changeRequestDeadlines', () => sweepChangeRequestDeadlines(env, budget));
   await runIsolated('singleWinnerPollNotifications', () => sweepSingleWinnerPollNotifications(env, budget, cursors));
@@ -3778,8 +3791,6 @@ export async function runReminderSweep(env: Env): Promise<void> {
   await runIsolated('idleGroups', () => sweepIdleGroups(env, budget, cursors));
   await runIsolated('groupDrift', () => sweepGroupDrift(env, budget));
   await runIsolated('organizerRsvpNotices', () => sweepOrganizerRsvpNotices(env, budget));
-  // LAUNCH-ONLY (1.0); removed in 1.1.
-  await runIsolated('launchAnnouncement', () => sweepLaunchAnnouncement(env, budget, cursors));
   await runIsolated('pruneStaleSessions', () => pruneStaleSessions(env));
   await runIsolated('pruneOAuthCallbackCounts', () => pruneOAuthCallbackCounts(env));
   await runIsolated('purgeTerminalHistory', () => sweepPurgeTerminalHistory(env, budget));

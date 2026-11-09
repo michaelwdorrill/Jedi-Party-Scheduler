@@ -5,7 +5,7 @@ import { signJwt } from '../src/lib/jwt';
 import { buildApp } from '../src/router';
 import type { Env } from '../src/env';
 import type { ShimDatabase } from './d1shim';
-import { DM_CHANNEL_RULE, dmSendRule, membershipRule, seedGuild, seedMembership, seedUser, setup, stubFetch, type FetchStub } from './helpers';
+import { DM_CHANNEL_RULE, dmSendRule, HOUR_MS, membershipRule, seedEvent, seedGuild, seedInvite, seedMembership, seedUser, setup, stubFetch, type FetchStub } from './helpers';
 
 // The 1.0 launch announcement (Michael, 9 Nov 2026). LAUNCH-ONLY: this file
 // goes with the feature in 1.1 (docs/IDEAS.md item 105).
@@ -106,6 +106,40 @@ describe('the 1.0 launch DM', () => {
     await runReminderSweep(env);
     expect(announcementSends(fetchStub)).toHaveLength(0);
     expect(await db.prepare(`SELECT COUNT(*) AS n FROM announcement_log`).first<{ n: number }>()).toEqual({ n: 0 });
+  });
+});
+
+// B10 on the sandbox (9 Nov 2026): the announcement ran near the end of the
+// tick, and a temporary per-step trace showed every tick reaching it with
+// nothing left -- five ticks, no DM. "Last in line" can mean "never" on a busy
+// install. It now goes near the front, capped per tick, so it always makes
+// progress without crowding everything else out.
+describe('the 1.0 launch DM on a busy tick', () => {
+  it('goes out on the first tick even when a backlog would use the whole budget, a few at a time, and leaves room for the rest', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedEvent(db, { id: 'busy', organizerId: 'organizer', title: 'busy', startAt: Date.now() + 48 * HOUR_MS, endAt: Date.now() + 50 * HOUR_MS });
+    for (let i = 0; i < 30; i++) {
+      const id = `u${String(i).padStart(2, '0')}`;
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+      await db.prepare(`UPDATE users SET dm_channel_id = ? WHERE id = ?`).bind(`dm-${id}`, id).run();
+      await seedInvite(db, 'busy', id);
+    }
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+
+    await runReminderSweep(launchEnv(env));
+    const first = announcementSends(fetchStub).length;
+    expect(first, 'some announcements went out on the first tick').toBeGreaterThan(0);
+    expect(first, 'capped, so the rest of the tick keeps flowing').toBeLessThanOrEqual(4);
+    const invites = await db.prepare(`SELECT COUNT(*) AS n FROM notification_log WHERE notification_type = 'invite' AND delivered_at IS NOT NULL`).first<{ n: number }>();
+    expect(invites!.n, 'invites still went out on the same tick').toBeGreaterThan(0);
+
+    for (let tick = 0; tick < 12; tick++) await runReminderSweep(launchEnv(env));
+    const delivered = await db.prepare(`SELECT COUNT(*) AS n FROM announcement_log WHERE delivered_at IS NOT NULL`).first<{ n: number }>();
+    expect(delivered!.n, 'everyone, the organizer included, within 13 ticks').toBe(31);
   });
 });
 

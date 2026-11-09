@@ -1850,6 +1850,15 @@ out with 1.1's policy text, whenever that next changes.
 Built and tested 9 Nov 2026 (6 worker tests, revert-checked; pop-up driven
 in the built bundle).
 
+**Moved to the front of the tick, capped at 4 a tick (B10, 9 Nov).** It first
+ran last. On the sandbox, a temporary per-step budget trace showed every tick
+reaching it with nothing left, five ticks running, so no DM was sent. It now
+runs right after membership revalidation and takes at most
+`LAUNCH_ANNOUNCEMENT_PER_TICK` deliveries, so it always makes progress and
+leaves most of the tick for invites and reminders. Test: "the 1.0 launch DM on
+a busy tick" (30 pending invites; revert-checked for both the position and the
+cap).
+
 ### 106. Re-check Workers Logs retention after 1 December 2026 (keeps the Privacy Policy true)
 
 The 1.0 Privacy Policy says Cloudflare keeps the Worker's own log lines for
@@ -1866,6 +1875,24 @@ retention, and if it is no longer 3 days change `LOG_RETENTION_DAYS`. The
 number appears in the policy's "Who it is shared with" and "How long it is
 kept". A different number is a factual correction, not a material change,
 so no version bump. Note it in `docs/POLICY-DRAFT-1.0.md` Part F, F8.
+
+### 107. The sandbox's fake seed accounts spend a third of every cron tick
+
+Seen in the B10 budget trace (9 Nov 2026). `membershipRevalidation` re-checks
+the stale memberships of the seed and Google-demo accounts (`seed-user-*`,
+`gdemo-user-dm`) on every tick. Their IDs aren't real Discord snowflakes, so
+Discord answers **400**, `checkGuildMembership` treats that as "temporarily
+unavailable", and the rows stay stale and are retried forever: eight checks,
+about 4 of the tick's 13 deliveries' worth of budget, every 15 minutes. It is
+sandbox-only, because production has no fake accounts, but it makes the
+sandbox a harsher budget test than production and hid the announcement's
+starvation behind more noise.
+
+Two fixes, not exclusive: delete the seed and demo accounts from the sandbox
+(the clean-sandbox script exists for this; it writes to the sandbox, so it's
+Michael's call), and/or have a 400 for a malformed ID count as "not a member"
+rather than "try again". The second needs care, because a 400 for any other
+reason must not remove a real person. Not 1.0.
 
 ## Parked until after 1.0
 
