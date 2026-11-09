@@ -28,6 +28,15 @@ const ANNOUNCEMENTS: Record<string, LaunchAnnouncement> = {
   },
 };
 
+// The DM's text: Michael's words, a blank line, then a link to the site
+// (his addition after the sandbox run, 9 Nov). The link is in angle brackets,
+// which Discord shows as an ordinary clickable link but without its preview
+// card, so the picture stays the only thing under the text. FRONTEND_URL is
+// https://uncleowen.space in production.
+export function launchAnnouncementText(env: Env, announcement: LaunchAnnouncement): string {
+  return `${announcement.dm}\n\n<${env.FRONTEND_URL.replace(/\/+$/, '')}>`;
+}
+
 export function activeLaunchAnnouncement(env: Env): LaunchAnnouncement | null {
   const id = env.LAUNCH_ANNOUNCEMENT?.trim();
   return (id && ANNOUNCEMENTS[id]) || null;

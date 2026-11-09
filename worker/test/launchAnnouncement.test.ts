@@ -52,7 +52,8 @@ describe('the 1.0 launch DM', () => {
 
     const sends = announcementSends(fetchStub);
     expect(sends, 'exactly one announcement DM, across two ticks').toHaveLength(1);
-    expect(sends[0].payload.content).toBe(TEXT);
+    // makeEnv's FRONTEND_URL is https://example.test/app; production's is https://uncleowen.space.
+    expect(sends[0].payload.content).toBe(`${TEXT}\n\n<https://example.test/app>`);
     expect(sends[0].payload.allowed_mentions).toEqual({ parse: [] });
     expect(sends[0].payload.attachments).toEqual([{ id: 0, filename: 'uncle-owen-1.0.webp' }]);
     const file = sends[0].form.get('files[0]') as File;

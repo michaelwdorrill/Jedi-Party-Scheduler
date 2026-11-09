@@ -678,8 +678,9 @@ in the sandbox.
       frontend both, so a rebuild. **a)** Within a tick or two of the sandbox
       deploy, both accounts with notifications on get one Discord DM: *"Uncle
       Owen and Aunt Beru are proud to announce that we are feature complete!
-      Feel free to use Uncle Owen for all your scheduling needs!"* with the
-      "We've hit 1.0!" picture attached. Only once -- nothing more on later
+      Feel free to use Uncle Owen for all your scheduling needs!"*, a blank
+      line, the site's link (no preview card), and the "We've hit 1.0!"
+      picture attached. Only once -- nothing more on later
       ticks. **b)** Open the app (the rebuilt bundle): the picture pops up
       once. Clicking the picture leaves it; the X, a click outside it, or
       Escape closes it. Reload → it does not come back. Log in as the other

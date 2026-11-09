@@ -29,7 +29,7 @@ import {
   type DmRecipient,
 } from '../lib/outbox';
 import { editBotDm } from '../lib/discord';
-import { activeLaunchAnnouncement, launchAnnouncementImage } from '../lib/launchAnnouncement';
+import { activeLaunchAnnouncement, launchAnnouncementImage, launchAnnouncementText } from '../lib/launchAnnouncement';
 import { cancelButton, cancelOccurrenceButton, linkButton, pollSelect, rsvpButtons } from '../lib/dmComponents';
 import { LIMITS } from '../lib/validate';
 import { chunkIds, chunkRows, conditionalRowsSql, placeholders } from '../lib/d1';
@@ -3705,7 +3705,7 @@ async function sweepLaunchAnnouncement(env: Env, budget: TickBudget, cursors: Cu
         'announcement_log',
         { user_id: user.id, announcement_id: announcement.id },
         user,
-        announcement.dm,
+        launchAnnouncementText(env, announcement),
         budget,
         null,
         image,
