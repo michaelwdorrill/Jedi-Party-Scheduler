@@ -607,7 +607,7 @@ this file stays as the audit and the ledger behind it.
 | F5 | Export extended (done earlier) |
 | F6 | Workers Free → **7 days** (`RECOVERY_DAYS`) |
 | F7 | Option 1, widened to UK, EU **and Canada** (Michael has users in the EU and Canada), with "accessible to authorities under local law" |
-| F8 | Workers Logs **on**, stated in `wrangler.toml` (`[observability]`), Cloudflare's per-request invocation logs **off** so the stored logs are only the app's own lines; **3 days** (`LOG_RETENTION_DAYS`) — confirm against the dashboard |
+| F8 | Workers Logs **on**, stated in `wrangler.toml` (`[observability]`), Cloudflare's per-request invocation logs **off** so the stored logs are only the app's own lines; **3 days** (`LOG_RETENTION_DAYS`) — **confirmed 9 Nov 2026** from Cloudflare's Workers Logs docs, Pricing table: Workers Free 3 days (200,000 events/day), Paid 7 days. That page also says Workers Logs moves to "Cloudflare Observability pricing" on **1 December 2026**: re-check then (IDEAS 106) |
 | F9 | Short legal-bases section kept (done earlier) |
 | F10 | Launch announcement disclosed: messages, the "seen" record, retention, legal bases, Terms' message list |
 

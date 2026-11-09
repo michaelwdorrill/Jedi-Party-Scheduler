@@ -1850,6 +1850,23 @@ out with 1.1's policy text, whenever that next changes.
 Built and tested 9 Nov 2026 (6 worker tests, revert-checked; pop-up driven
 in the built bundle).
 
+### 106. Re-check Workers Logs retention after 1 December 2026 (keeps the Privacy Policy true)
+
+The 1.0 Privacy Policy says Cloudflare keeps the Worker's own log lines for
+**3 days** (`LOG_RETENTION_DAYS` in `frontend/src/lib/legal.ts`). That was
+confirmed on 9 Nov 2026 from Cloudflare's Workers Logs documentation (Pricing:
+Workers Free 3 days, Paid 7). The same page says that **from 1 December
+2026 Workers Logs moves to "Cloudflare Observability pricing"**, which may
+change the retention on Free without any change here.
+
+On or after 1 Dec: open
+https://developers.cloudflare.com/workers/observability/logs/workers-logs/
+(Pricing) or the new Observability pricing page, read the Free plan's
+retention, and if it is no longer 3 days change `LOG_RETENTION_DAYS`. The
+number appears in the policy's "Who it is shared with" and "How long it is
+kept". A different number is a factual correction, not a material change,
+so no version bump. Note it in `docs/POLICY-DRAFT-1.0.md` Part F, F8.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
