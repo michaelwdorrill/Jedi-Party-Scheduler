@@ -1456,6 +1456,45 @@ Either way the notice for an organizer cancel needs its own wording.
 
 **Not yet decided; needs Michael's call before 1.0.**
 
+### 100. Small things from the 8 November re-run
+
+All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
+5.10-5.14, all of which passed). None is a release-bar finding; all are
+1.0.1 unless noted.
+
+- **The sandbox frontend looks exactly like production.** The first attempt
+  at the timetable's setup was done on uncleowen.space by mistake, because the
+  guide said "your normal browser" and that browser had production open. Real
+  DMs went out from the production bot (only to DM MD and SchedulerTest) and
+  four test items had to be cancelled there. A visible **SANDBOX** banner
+  whenever `VITE_API_BASE_URL` points at the sandbox Worker would make that
+  impossible to miss. Cheap, and the cost of not having it was real tonight
+  -- worth doing early in 1.0.1.
+- **"1 people".** "Called off automatically if fewer than 1 people are in"
+  on the event page, and "Confirm once 1 people say yes" on the poll form.
+- **Button refusals link to the front page.** The 4.12 refusal ends "Open it
+  on the site: http://localhost:5173/" -- `siteLink` everywhere in
+  `interactions.ts`. Linking the event itself would save the person a search.
+- **A new event's default start can already be past.** After 7pm the form
+  defaults to tonight 7-11pm and says "This starts in the past". Defaulting to
+  tomorrow evening once tonight's 7pm has gone would be friendlier.
+- **The sandbox can't list voice channels.** `GET /guilds/:id/voice-channels`
+  returns 502 on every event form in the sandbox -- Discord refuses
+  SandboxBot's channel listing (a role permission or the bot's presence in
+  that server; check the response's status code). The form degrades as
+  designed. A sandbox setup gap, not a code one: worth fixing so the voice
+  channel picker can be exercised before release.
+- **A cancel prompt arrived one tick late.** 4.12's organizer prompt came at
+  10:00, not 9:45, with its setup confirmed identical to 4.13's by query --
+  the per-tick delivery cap deferring it while the same tick fanned out two
+  poll days. By design (cron/budget.ts); recorded so the next person who sees
+  it doesn't chase it.
+- **The organizer is told about their own cancel.** Pressing "Cancel this
+  session" on 4.13 was followed by a DM to the same organizer saying it "has
+  been cancelled -- attendance dropped below the minimum". The organizer
+  counts as coming unless they decline, so the notice reaches them. Same
+  family as IDEAS 99: cancellation notices don't know who cancelled.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.

@@ -177,22 +177,38 @@ where there is no evidence at all beyond my reasoning.
 
 The bug: two form pages were reached by two routes rendering the same
 component, so React reused the instance and the previous record's draft
-survived. Fixed by keying on record identity. **Unverified in a browser.**
+survived. Fixed by keying on record identity. **Verified in a browser on 8
+November 2026** -- but only because the steps below were rewritten first.
 
-- [ ] **1.1** Open an existing event → **Edit**. Let it fully load. Now
-      navigate to **New event**. → The form is **blank**: no title, no notes,
+**How to reach the bug, or the steps pass vacuously.** It only appears when
+the browser goes from one form *straight* to another within the same page
+load. The app has no control that does that: every in-app route between two
+forms passes through Calendar, which unmounts the form, and typing a URL or
+refreshing reloads the whole app. Both pass with the bug present. The first
+version of these steps said "navigate to New event", which is exactly such a
+route. What does reach it is a history jump, which stays in the same page
+load: open DevTools (F12) → Console and run `history.go(-N)`, where N counts
+back to the earlier form. Earlier console lines surviving the jump is the
+evidence there was no reload. Use the built preview, not `npm run dev`.
+
+- [ ] **1.1** Calendar → **+ New Event** (leave it empty) → header
+      **Calendar** → open event A → **Edit**, and let it fully load. Console:
+      `history.go(-3)`. → The New Event form, **blank**: no title, no notes,
       default times. Not the event you were just editing.
 - [ ] **1.2** From that blank create form, make an event with a title and
       *no* description. Open it. → Description is empty. It has not inherited
       the notes from 1.1's event.
-- [ ] **1.3** Edit event A, let it load, then navigate straight to editing
-      event B. → B's own title, notes and time. Save. → **B** changes; A is
-      untouched.
-- [ ] **1.4** Same three checks for a **personal time block**: edit one →
-      "new" → blank; edit one → edit another → correct one saves.
-- [ ] **1.5** Edit a **recurring** personal block, then go to create a new
-      one. → "Repeats" is **unticked** and the recurrence fields are back to
-      defaults.
+- [ ] **1.3** Open B → **Edit**, let it load → **Calendar** → open A →
+      **Edit**, let it load. Console: `history.go(-3)`. → B's own title, notes
+      and time. Save. → **B** changes; A is untouched.
+- [ ] **1.4** The same for **personal time**, where a block opens its editor
+      straight from the calendar so the jump is 2: **+ Personal time** →
+      **Calendar** → click P1, wait → `history.go(-2)` → blank. Then click P2,
+      wait → **Calendar** → click P1, wait → `history.go(-2)` → P2's own
+      details; save; P1 untouched.
+- [ ] **1.5** **+ Personal time** → **Calendar** → click a **repeating**
+      block, wait until Repeats shows ticked → `history.go(-2)`. → "Repeats"
+      is **unticked** and the recurrence fields are back to defaults.
 
 > 1.5 is the one that bit a real user: a fixed block inherited the previous
 > block's recurrence and a one-off silently became three daily occurrences.
@@ -267,8 +283,11 @@ The access token lasts **30 minutes** and the frontend refreshes it silently,
 so the refresh path only runs if you *wait*. Start 2.16 early and come back to
 it — it pairs naturally with the Phase 4 cron wait.
 
-- [ ] **2.16** Leave a tab open and idle for **over 30 minutes**, then click
-      something that loads data. → It works, with no flicker to a login screen
+- [ ] **2.16** In a **separate browser profile** (or another browser) logged
+      in as the same account, leave a tab open and idle for **over 30
+      minutes**, then click something that loads data. *(Separate because tabs
+      in one profile share one login: using any of them keeps the token fresh
+      and the test proves nothing.)* → It works, with no flicker to a login screen
       and no error. *(This is the refresh path. It is the single most likely
       thing to be broken and the least likely to be noticed.)*
 - [ ] **2.17** Two tabs, same account, both logged in. Use both, alternating,
