@@ -1576,6 +1576,12 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
   move feature, but item 96 makes it more common: shifting a 7-11 PM session an
   hour now carries its end to midnight. Fix: treat the end as exclusive (bucket
   on `endAt - 1` when `endAt > startAt`). Display only; the event itself is right.
+- **A cancelled event's invite DM keeps its RSVP buttons.** Seen in 5.16:
+  the called-off P24 day's invite still offered I'm in / Maybe / Can't make it.
+  Only poll DMs are edited when they settle (`editSettledPollDms`); a one-off
+  event's invite is never edited on cancellation, so its buttons stay, and a
+  press is refused with "not active" (4.12). Safe, untidy: edit the invite to
+  the cancellation text and drop its controls, the way poll DMs already are.
 - **A poll day's own event has no way back to its poll.** Michael, 10 Nov,
   during 5.15: from a day that became its own event you can't get to the poll
   -- the other candidate days and everyone's votes. `events.created_from_poll_id`
