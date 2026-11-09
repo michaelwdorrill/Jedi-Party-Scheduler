@@ -40,8 +40,8 @@ export default function ChangelogPage() {
   return (
     <LegalLayout title="Changelog" showLastUpdated={false}>
       <p>
-        What's changed in each release, newest first. Uncle Owen is in beta — the version number
-        stays below 1.0 until the planned work is done.
+        What's changed in each release, newest first. Version 1.0 is where Uncle Owen became
+        feature complete; everything before it was the beta.
       </p>
       {CHANGELOG.map((entry) => (
         <Entry key={entry.version} entry={entry} />

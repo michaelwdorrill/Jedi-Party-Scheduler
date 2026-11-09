@@ -90,6 +90,14 @@ LAUNCH_ANNOUNCEMENT = "1.0"
 [observability]
 enabled = true
 
+# Only the app's own log lines are kept, not Cloudflare's automatic record of
+# every request (URL, network details and so on): the Privacy Policy describes
+# what the stored logs contain, and the app's own lines are the part this
+# codebase controls and can state truthfully. `wrangler tail` still shows
+# everything live.
+[observability.logs]
+invocation_logs = false
+
 [[d1_databases]]
 binding = "DB"
 database_name = "jedi-party-scheduler-db"
@@ -195,3 +203,6 @@ crons = ["*/15 * * * *"]
 # neither depends on whether wrangler inherits it.
 [env.sandbox.observability]
 enabled = true
+
+[env.sandbox.observability.logs]
+invocation_logs = false

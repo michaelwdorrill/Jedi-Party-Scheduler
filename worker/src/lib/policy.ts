@@ -98,4 +98,13 @@
 // folded backward into 4's, because folding it in would mean this comment
 // -- and the spec section it points at -- describing a decision that was
 // never actually made at the time 4 was written.
-export const CURRENT_POLICY_VERSION = 5;
+//
+// Bumped to 6 for 1.0 (9 Nov 2026). Both documents were rewritten from an
+// audit of what the code actually does (docs/POLICY-DRAFT-1.0.md, reviewed by
+// Astra and a Fable model), and the rewrite changes facts people agree to:
+// the operator is named; message text is kept, not just a delivery record;
+// the export covers everything but the Google credential; deleted data stays
+// restorable for 7 days (D1 Time Travel); Cloudflare keeps the Worker's own
+// log lines for 3 days; Resend and Google are live processors; Virginia law
+// governs the Terms; and the 1.0 launch announcement and its record exist.
+export const CURRENT_POLICY_VERSION = 6;

@@ -9,7 +9,7 @@
 export const CONTACT_EMAIL = 'JediParty@proton.me';
 
 export const SERVICE_NAME = 'Uncle Owen';
-export const LAST_UPDATED = '10 September 2026';
+export const LAST_UPDATED = '9 November 2026';
 
 // The released version of the app, and when that version was published.
 //
@@ -18,9 +18,20 @@ export const LAST_UPDATED = '10 September 2026';
 // rebuild, including rebuilds that ship no user-visible change at all, which
 // would make "published" mean "last redeployed" instead of "last released".
 // Bump both together when cutting a release.
-export const APP_VERSION = '0.8.1';
-export const PUBLISHED_AT = '10 September 2026, 04:14 UTC';
+export const APP_VERSION = '1.0.0';
+export const PUBLISHED_AT = '9 November 2026';
 
 // The person or entity legally responsible for the data ("data controller"
-// under GDPR). For a personally-run project this is just your name.
-export const OPERATOR = 'the operator of Uncle Owen';
+// under GDPR). For a personally-run project this is just your name -- Michael's
+// own wording (policy decision F1, 9 Nov 2026): first name, with CONTACT_EMAIL.
+export const OPERATOR = 'Michael';
+
+// How long Cloudflare can still restore deleted data from D1's Time Travel:
+// 7 days on Workers Free, 30 on Paid (policy decision F6; the account is on
+// Free). Change it if the plan changes -- the Privacy Policy states it twice.
+export const RECOVERY_DAYS = 7;
+
+// How long Cloudflare keeps the Worker's own log lines (Workers Logs, switched
+// on in worker/wrangler.toml's [observability]; policy decision F8). 3 days on
+// Workers Free. Check the dashboard if the plan changes.
+export const LOG_RETENTION_DAYS = 3;

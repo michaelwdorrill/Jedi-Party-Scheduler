@@ -594,6 +594,25 @@ tick sends a limited number).
 
 ## Part F — decisions only Michael can make
 
+**All decided, 9 Nov 2026, and applied.** The final text is in
+`frontend/src/pages/PrivacyPage.tsx` and `TermsPage.tsx` (policy version 6);
+this file stays as the audit and the ledger behind it.
+
+| # | Decision |
+|---|---|
+| F1 | "Michael, contactable at JediParty@proton.me" (`OPERATOR` in `frontend/src/lib/legal.ts`) |
+| F2 | Commonwealth of Virginia, with "except where the law where you live gives you protections that can't be set aside" |
+| F3 | Google Calendar switched **on** for 1.0 (own Google Cloud project, published In production, unverified); section written as live, with the Limited Use statement |
+| F4 | Resend switched **on** for 1.0 (owner email); bullet written as live |
+| F5 | Export extended (done earlier) |
+| F6 | Workers Free → **7 days** (`RECOVERY_DAYS`) |
+| F7 | Option 1, widened to UK, EU **and Canada** (Michael has users in the EU and Canada), with "accessible to authorities under local law" |
+| F8 | Workers Logs **on**, stated in `wrangler.toml` (`[observability]`), Cloudflare's per-request invocation logs **off** so the stored logs are only the app's own lines; **3 days** (`LOG_RETENTION_DAYS`) — confirm against the dashboard |
+| F9 | Short legal-bases section kept (done earlier) |
+| F10 | Launch announcement disclosed: messages, the "seen" record, retention, legal bases, Terms' message list |
+
+The original options table follows, for the record.
+
 | # | Decision | Why it matters | Author's suggestion |
 |---|---|---|---|
 | F1 | **Who is named as the controller** | Data-protection law expects the controller to be identifiable; "the operator of Uncle Owen" isn't | Your name, or a name you publish under, plus the existing email |

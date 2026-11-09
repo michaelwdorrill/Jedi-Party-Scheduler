@@ -20,35 +20,41 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  // 1.0 is the first release to reach production since 0.7.2. The 0.8 and
+  // 0.8.1 work (Google Calendar, the noticeboard) only ever ran on the
+  // sandbox, so it is described here rather than as releases nobody got.
   {
-    version: '0.8.1',
-    date: '10 September 2026',
-    summary: 'A noticeboard for each server, and Google availability read back in.',
+    version: '1.0.0',
+    date: '9 November 2026',
+    summary: 'Feature complete: Google Calendar, a noticeboard for each server, and polls that turn into real plans.',
     added: [
-      'Each server now has a “What’s on” board: the sessions happening there, whether or not you were invited, with who’s going and what they’ve answered. Descriptions are never shown on it. When you create or edit an event you can keep it off the board entirely.',
-      'Every event that existed before this update stays private permanently. Nothing you made under the old rules became visible to anyone.',
-      'If you’ve connected Google Calendar, you can now also nominate one calendar to be read back: every event on it shows up as a read-only personal time entry on your own calendar, with its real title, time and description, exactly as it appears in Google — edit or remove it there and it updates here. It’s off unless you turn it on and separate from the calendar sessions are written to. Nobody but you ever sees the title or description; people scheduling with you still only ever see blank blocks of time.',
+      'Google Calendar. Connect a Google account in Settings and the sessions you’re committed to are written onto a calendar you choose — title, time, server and a link back, never the description, never a poll’s proposed dates, never anything you’ve declined. You can also choose one calendar to be read back as private personal time, so people scheduling with you see when you’re busy (they only ever see blank blocks). Google will warn you that it hasn’t verified Uncle Owen; that’s expected for a project this small.',
+      'A “What’s on” noticeboard for each server: the sessions happening there, whether or not you were invited, with who’s going. Descriptions are never shown on it, and any event can be kept off it. Everything made before this release stays private.',
+      'On a poll where each day is confirmed on its own, a confirmed day becomes a real event that carries everyone’s answer — “I’m in”, “can’t make it” or “maybe” — and links back to its poll. If people drop out and it falls below what the poll needed, the day is called off and everyone still coming is told; you’re warned before your answer is the one that does it.',
+      'Cancelling a poll like that now leaves days that are already happening in place, and says so before you confirm.',
+      'An organizer can move a single date of a repeating event without touching the rest of the series.',
+      'The night picker in a poll’s Discord message now works for a day that has become its own event.',
+      'Moving an event’s start now takes its end with it, everywhere you pick a start and end.',
+      'If someone asks the bot to be added to a server it was removed from, the request page offers to add it back.',
     ],
     changed: [
-      'The Privacy Policy and Terms have been updated twice for this release, so you’ll be asked to agree again if it’s been a moment since you last opened the app. The short version: a server can see a limited view of what’s on unless the organiser hides it, and reading a Google calendar now brings its real events in — not just blank busy times — though still visible to nobody but you.',
+      'The Privacy Policy and Terms have been rewritten from a check of what the app actually does, so you’ll be asked to agree once more. The short version: they now name who runs Uncle Owen, say plainly that message text is kept, that deleted data can be restored by the host for 7 days, that the app’s own error logs are kept for 3 days, and that Google Calendar and one operator email service are in use. Nothing is sold, tracked or used for advertising.',
+      'When you’re the only person invited, a request to change the time now waits for the organizer instead of applying itself.',
+      'A cancelled event’s Discord invite loses its answer buttons and says it was cancelled.',
+      'A change request for a date that has since been cancelled says so, and can only be declined.',
+      'A new event defaults to 7pm–11pm instead of 1pm–5pm, and a poll can’t ask for more yeses than people invited.',
+      '“Download my data” now includes everything held about you, apart from the encrypted Google credential.',
+      'Signing in is limited to a sensible number of attempts per minute, and sign-in sessions renew themselves more safely.',
     ],
     fixed: [
-      'Google Calendar sync could stop working without saying anything: a session that had already happened, a connection whose access expired, or simply a busy moment could leave it silently doing nothing. It now runs on a reliable schedule and reports what it did.',
-      'A poll’s “Confirm once N people say yes” could be set higher than the number of people actually invited, which meant it could never be reached.',
-      'A new event now defaults to 7pm–11pm instead of 1pm–5pm.',
-    ],
-  },
-  {
-    version: '0.8',
-    date: '5 September 2026',
-    summary: 'Your sessions can now appear on your own Google calendar.',
-    added: [
-      'You can connect a Google account in Settings and have the sessions you’re committed to written onto a calendar of your choosing. Pick which calendar, turn it on and off, or disconnect whenever you like.',
-      'Only things you’re actually committed to get written: never a poll’s proposed dates, never a session you’ve declined, and never your personal time blocks. What Google is sent is the title, the time, which server it’s on, and a link back here — an event’s description is never sent.',
-      'Disconnecting removes the upcoming entries this app added to that calendar and revokes its access to your Google account. Sessions that already happened are left alone — they’re your record of them.',
-    ],
-    changed: [
-      'The Privacy Policy and Terms have been updated to cover the Google connection, so you’ll be asked to agree to them again the next time you visit. The short version: Google is a new processor, but only if you choose to connect it, and the credential that lets this app write to your calendar is encrypted before it’s stored.',
+      'An accepted change request could bring back a date the organizer had cancelled.',
+      'An event ending at exactly midnight was also drawn on the following day.',
+      'Editing a poll could delete the votes already cast on it, and editing a repeating event could rewrite its schedule.',
+      'Someone removed from an event could keep getting its messages.',
+      'Deleting your account could fail if you had answered someone else’s event.',
+      'A server the bot had been removed from made everyone in it look as if they had left.',
+      'Wording: “1 person”, not “1 people”.',
+      'Many smaller fixes from several rounds of review, mostly to make sure messages go to the right people, at the right time, and only once.',
     ],
   },
   {
