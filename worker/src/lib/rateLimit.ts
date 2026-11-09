@@ -68,7 +68,31 @@ export async function oauthCallbackAllowed(env: Env, headers: Headers): Promise<
   // login -- and scripts/check-env-parity.mjs fails CI if the binding stops
   // being declared for either environment, which is what keeps "fail open"
   // from quietly meaning "no limit in production".
-  if (!limiter) return true;
-  const { success } = await limiter.limit({ key: headers.get(CONNECTING_IP) ?? NO_IP_BUCKET });
+  if (!limiter) {
+    console.log(JSON.stringify({ evt: 'oauth-limiter', binding: 'absent' }));
+    return true;
+  }
+  const ip = headers.get(CONNECTING_IP);
+  const key = ip ?? NO_IP_BUCKET;
+  const { success } = await limiter.limit({ key });
+  // TEMPORARY DIAGNOSTIC (9 Nov 2026) -- remove before 1.0. The walkthrough's
+  // R92 drove 60 callbacks from one machine at ~1/s and the binding allowed
+  // every one. This shows, in `wrangler tail` only (no [observability] is
+  // configured, so nothing is kept), whether those calls even shared a key:
+  // IPv4 or IPv6, and an 8-character one-way fingerprint of the key -- never
+  // the address itself.
+  console.log(
+    JSON.stringify({
+      evt: 'oauth-limiter',
+      keyKind: ip ? (ip.includes(':') ? 'ipv6' : 'ipv4') : 'none',
+      keyTag: await fingerprint(key),
+      success,
+    }),
+  );
   return success;
+}
+
+async function fingerprint(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`uo-limiter:${value}`));
+  return [...new Uint8Array(digest).slice(0, 4)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
