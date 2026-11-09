@@ -1683,6 +1683,12 @@ server, or deactivate it there -- or after 24 hours its members are refused as
 unverifiable, which is now the intended (and logged) behaviour. The voice-channel
 502 in item 100 is very likely the same missing bot.
 
+**Related, 1.0.1:** the add-bot page marks a server **"Already added"** from the
+allow-list alone, so a server the bot was removed from (or, in the sandbox,
+never joined) can't be re-requested there -- Michael hit this setting the
+sandbox right and needed a direct invite link. Now that the membership check
+can tell "bot not in this server" apart, the page could use the same signal.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
