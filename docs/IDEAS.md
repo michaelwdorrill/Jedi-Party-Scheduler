@@ -1550,6 +1550,12 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
 - **Button refusals link to the front page.** The 4.12 refusal ends "Open it
   on the site: http://localhost:5173/" -- `siteLink` everywhere in
   `interactions.ts`. Linking the event itself would save the person a search.
+- **A new poll's voting deadline defaults to yesterday.** Seen on the 10 Nov
+  batch re-check: a fresh poll showed candidate days on the 10th and 11th and a
+  deadline of 11/08. `EventFormPage.tsx` sets it to `prefillDate` minus one day,
+  and opened without a clicked date `prefillDate` is today. Default it to the
+  day before the earliest candidate instead, and never before today. Same
+  family as the next item.
 - **A new event's default start can already be past.** After 7pm the form
   defaults to tonight 7-11pm and says "This starts in the past". Defaulting to
   tomorrow evening once tonight's 7pm has gone would be friendlier.
