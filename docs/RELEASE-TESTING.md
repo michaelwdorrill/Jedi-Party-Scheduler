@@ -460,6 +460,20 @@ opened, not when it was queued or linked.**
       time and **still shows Accepted**. No DM about the move arrives — that is
       by design, and the form told main so.
 
+### A cancelled date stays cancelled (Pass 24, P24-01)
+
+- [ ] **3.22** On a series with **three** invitees, the alt asks to move one
+      date (a time change, leave it pending). Main then **cancels that date**
+      (the occurrence's own Cancel). Main opens the request and presses
+      **Accept**. → Refused: *"That date has been cancelled, so this request
+      can no longer be accepted."* The date is still cancelled on everyone's
+      calendar, and the request is still pending (main can Decline it).
+      *(Before the fix the accept put the date back on at the requested time —
+      and so did the 72-hour deadline sweep, with nobody deciding.)*
+- [ ] **3.23** Control: main **moves** a date they cancelled themselves (2.22's
+      form). → It comes back at the new time. The organizer's own move still
+      restores; only an invitee's request doesn't.
+
 ### The organizer decides; they do not vote
 
 - [ ] **3.21** With the alt's time-change request pending, main sees **Accept**
@@ -599,6 +613,17 @@ when the organizer cancels the poll, and both the dialog and the DM say so.
       enough interest". Cancel a second poll with **no** confirmed day →
       *"… was cancelled by the organizer."*
 
+### An organizer's "Can't make it" is carried too (Pass 24, P24-02)
+
+- [ ] **5.17** Multi-winner poll, threshold **2**, main + two alts invited.
+      **Main votes Can't make it** on a day, then both alts say **I'm in**. →
+      Confirmed; after a tick it is its own event. As main, the poll row shows
+      **Can't make it** (not I'm in), and main is not among the confirmed.
+- [ ] **5.18** One alt switches to **Can't make it**. → The day is **called off**
+      (1 yes against 2) and the other alt gets the cancellation DM. *(Before the
+      fix only yes-votes were carried, so main counted as going by default and
+      the day stayed on.)*
+
 ---
 
 ## Phase 6 — settings, policy, and the destructive ones last
@@ -616,11 +641,22 @@ when the organizer cancels the poll, and both the dialog and the DM say so.
       and is not asked twice afterwards.
 - [ ] **6.4** Read the Terms and the changelog page.
 - [ ] **6.5** `/add-bot` — the self-service flow lists servers you administer.
+- [ ] **6.5b** **Download my data** as main and open the file. → It has a
+      `dm_channel_id` on the profile, `id`/`successor_id`/`policy_version` on
+      sessions, and the sections `googlePendingConnections`,
+      `googleOrphanedEntries` and `groupIdleChecks` (empty is fine). No field
+      ends in `_ciphertext` or `_iv`. Use the site for six minutes or so first:
+      at least one session then has `last_used_at` later than its
+      `created_at`. *(Pass 24: D-07 and D-01.)*
 
 **Last, and in this order:**
 
 - [ ] **6.6** Delete the **alt** account. Read the confirmation dialog first —
-      does it tell the truth about what it leaves behind?
+      does it tell the truth about what it leaves behind? It should now say
+      that events the alt organised **disappear for everyone invited, with
+      their answers, and nobody is told** (Pass 24, D-09). Also open the same
+      dialog from the policy-agreement screen (6.3b) — it must be word for word
+      the same.
 - [ ] **6.7** After deletion: main's events survive, the alt's own events are
       gone, and nothing in the app 500s where the alt used to be.
 
@@ -721,6 +757,9 @@ table, and therefore how hard to look here.
 | **Cron** | The deadline sweeps stay inside the Free-plan D1 ceiling and keep moving | **4.9, 4.11** | Good logic, **never run on real timing** |
 | **Account** | Deletion no longer fails for anyone who took part in someone else's event | **6.6, 6.7** | Good — and destructive, so it is last |
 | **Account** | The export returns everything held about you | **2.10** | Good |
+| **Account** | **New (9 Nov, Pass 24):** the export gains the columns the review found missing; sessions' last-used is real; the deletion dialog names the effect on invitees | **6.5b, 6.6** | Revert-verified; a schema-coverage test now guards the export |
+| **Change requests** | **New (9 Nov, Pass 24 P24-01, category 2):** an accepted request no longer brings back a date the organizer cancelled | **3.22, 3.23** | Revert-verified both ways |
+| **Polls** | **New (9 Nov, Pass 24 P24-02):** every answer is carried onto a confirmed day, so an organizer's no is not shown as yes or counted | **5.17, 5.18** | Revert-verified |
 | **Policy** | The Privacy Policy made true; policy version bump and reacceptance | **6.3, 6.3b** | **Text is being rewritten before this runs** |
 | **Assets** | Webfonts self-hosted | **0.4** | Visible immediately if broken |
 | *(excluded)* | ~20 Google Calendar commits | — | Out of scope: `GOOGLE_SYNC_MODE = "off"` in production |

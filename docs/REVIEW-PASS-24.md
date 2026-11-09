@@ -50,6 +50,19 @@ the happy paths render, not that the edges are right.
 both CORS and the OAuth redirect. `CLAUDE.md` has the rest of the sandbox
 mechanics.
 
+## Outcome (9 November 2026)
+
+Both reviews are in (Astra on the policy; a Fable model on the policy and this
+package). On this package's code: **P24-01** (category 2: an accepted change
+request brought back a date the organizer had cancelled, including through the
+72-hour sweep) and **P24-02** (an organizer's pre-fan-out "no" shown as "yes"
+and counted) are fixed and revert-verified; **P24-03** and **P24-04** are
+1.0.1 (IDEAS 101). Items 92, 94, 95, 96 and 99 cleared on a static read; 92
+was then reworked (the binding never refused live) and its live check is
+walkthrough 0.0b. The reviewers' own limit stands: neither executed the code,
+so the walkthrough steps (0.0b, 2.28–2.31, 3.22–3.23, 5.15–5.18, 6.3/6.3b,
+6.5b, 6.6) are where "clears" becomes evidence.
+
 ## Scope at a glance
 
 | Item | What | Main code | Tests | Walkthrough |

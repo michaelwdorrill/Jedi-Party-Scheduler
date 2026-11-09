@@ -132,6 +132,13 @@ the days that already became events: they stay on, and the organizer's
 dialog and the invitees' notice both say so. A confirmed day not yet fanned
 out goes with the poll.
 
+**Amended 9 November 2026 (Pass 24 review, P24-02; Michael's call).** Every
+answer on the day is carried onto its event, not only yes: yes, no and maybe
+become accepted, declined and tentative. Carrying only yes left an organizer
+who voted no with no attendance row, and an organizer without one counts as
+going -- so they were shown "yes" and the day survived a dropout that took it
+below the threshold.
+
 ## Recurring events: accept one at a time
 
 Michael's second call, and it is what makes per-occurrence attendance

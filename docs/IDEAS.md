@@ -1562,6 +1562,72 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
   counts as coming unless they decline, so the notice reaches them. Same
   family as IDEAS 99: cancellation notices don't know who cancelled.
 
+### 101. What the Pass 24 reviews found, and what was done with it
+
+Two static reviews of the 1.0 candidate at `d945a36` (9 November 2026): Astra
+on the policy and terms draft, and a Fable model on both the draft and the
+Pass 24 code changes (its report, `REVIEW-1.0-POLICY-AND-PASS-24.md`, came with
+two SQL reproductions). Every finding below was re-checked at the current head
+before anything changed, and the code fixes were reproduced through the real
+routes and sweeps -- not only the reviewer's copied SQL -- and revert-verified.
+
+**Fixed for 1.0:**
+- **P24-01 (category 2).** An accepted change request un-cancelled a date the
+  organizer had cancelled after it was filed -- by the organizer's Accept, by
+  votes, or by the 72-hour sweep with nobody deciding. `writeOccurrenceMove`
+  now takes `restoreCancelled`; only the organizer's own move restores. Item
+  94 had moved the statement into a shared helper and written the restore
+  down as intended for both callers, which is the moment it stopped being an
+  accident. Walkthrough 3.22-3.23.
+- **P24-02.** Fan-out carried only yes-votes, so an organizer who voted no
+  counted as going by default, was shown "yes", and kept a day alive below
+  its threshold. Every answer is carried now (Michael's call). 5.17-5.18;
+  spec 0014 amended.
+- **D-01** sessions' `last_used_at` was never updated (Michael: make it true,
+  touched at most every five minutes); **D-07** the export was not
+  "everything" (Michael: extend it; a schema-coverage test now guards it);
+  **D-09** the deletion dialog didn't say what it does to invitees (one shared
+  string for both dialogs now); **D-11** a refused stranger's Discord id was
+  logged. The policy draft's text findings are applied as draft 2.
+
+**Left for 1.0.1, each a known shape:**
+- **P24-03 (request-length race).** A no landing between the fan-out sweep's
+  SELECT and its INSERT un-confirms the option and the INSERT still lands,
+  leaving a day event under an unconfirmed option until the next yes. Fix: add
+  `AND EXISTS (... confirmed_at IS NOT NULL)` to the fan-out INSERT's WHERE.
+- **P24-04.** A cancelled multi-winner poll still accepts (meaningless) votes
+  on unconfirmed candidates through the API; the site hides the buttons.
+  Answer `closed` instead.
+- **D-16's predicate.** The inactivity stake treats `start_at IS NULL` as
+  upcoming, and every series has it, so organizing or holding an invite to a
+  finished-but-uncancelled series pauses account deletion forever. Over-
+  retention, now stated in the policy; the fix is to read the rule's end.
+- **95 residual.** `inviteeCount` counts invitees who have declined, so a
+  three-invitee event with two declines still votes rather than waiting for
+  the organizer.
+- **97 residual.** A no on a confirmed-but-not-fanned-out day of a poll the
+  deadline sweep has just resolved does not un-confirm it, so the day is born
+  below threshold. Window: two sweeps in one tick.
+- **P24-01's page.** A recurring request's page gives no sign its date was
+  cancelled (`stale` is computed for one-off events only); the accept is now
+  refused with a reason, but the organizer finds out by pressing it. And a
+  sweep-declined request tells the requester only "declined", not why --
+  telling them would mean reading state the decline path doesn't have, not
+  matching an error message (item 91).
+- **The 429 page** on a rate-limited callback is bare text in the middle of an
+  OAuth redirect (cosmetic; item 100's family).
+
+**Declined, with the reason:** trimming the email stub's log line. Both
+deployed environments run `EMAIL_MODE = "stub"`, so production cannot be told
+apart from the sandbox, the sandbox workflow reads that log, and everything in
+it is already stored and shown on the admin page. The policy discloses
+operational logs instead (F8).
+
+**On the reviews themselves.** Both were static -- no code executed apart from
+SQL against the migrations -- and both said so. Release clearance follows the
+executing reviewer; the walkthrough steps named above are where these become
+evidence.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
