@@ -1568,6 +1568,14 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
   been cancelled -- attendance dropped below the minimum". The organizer
   counts as coming unless they decline, so the notice reaches them. Same
   family as IDEAS 99: cancellation notices don't know who cancelled.
+- **An event ending at exactly midnight is also drawn on the next day.**
+  Found in R94 (10 Nov): a session moved to 8 PM-12 AM showed on Sunday *and*
+  Monday in the month grid. `MonthCalendarGrid.tsx` buckets an occurrence on
+  every day from `startOf('day')` of its start to `startOf('day')` of its end,
+  so an end at 00:00 lands on the following day. Old (July 2026), not from the
+  move feature, but item 96 makes it more common: shifting a 7-11 PM session an
+  hour now carries its end to midnight. Fix: treat the end as exclusive (bucket
+  on `endAt - 1` when `endAt > startAt`). Display only; the event itself is right.
 
 ### 101. What the Pass 24 reviews found, and what was done with it
 
