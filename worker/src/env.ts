@@ -21,6 +21,9 @@ export interface Env {
   // pastes it in, and the endpoint has to answer that case with a 401 like
   // any other unverifiable request rather than a 500.
   DISCORD_PUBLIC_KEY?: string;
+  // The 1.0 launch announcement (lib/launchAnnouncement.ts): names which
+  // announcement is live, or unset for none. LAUNCH-ONLY -- removed in 1.1.
+  LAUNCH_ANNOUNCEMENT?: string;
   // 'live' sends real mail through Resend; anything else (including unset --
   // local dev has no reason to set this) stubs the send, logging what would
   // have gone out instead of calling the provider. specs/0015: the sandbox

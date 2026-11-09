@@ -68,6 +68,10 @@ GOOGLE_CLIENT_ID = ""
 # the account is actually on Workers Paid -- overstating it means the sweep
 # gets killed by the platform mid-send instead of deferring cleanly.
 WORKERS_PLAN = "free"
+# The 1.0 launch announcement (lib/launchAnnouncement.ts): one DM with the
+# "We've hit 1.0!" picture to everyone, and a one-time pop-up. LAUNCH-ONLY --
+# 1.1 removes this var and the code behind it (docs/IDEAS.md item 105).
+LAUNCH_ANNOUNCEMENT = "1.0"
 
 [[d1_databases]]
 binding = "DB"
@@ -126,6 +130,10 @@ DISCORD_PUBLIC_KEY = "581ea9d6fbb92b712da44102493097cb80113f52297d3eb77a0d24fbbc
 # sandbox is to exercise the cron's budget logic (src/cron/budget.ts) under
 # the same ceiling prod runs under, not a more generous one.
 WORKERS_PLAN = "free"
+# The 1.0 launch announcement (lib/launchAnnouncement.ts): one DM with the
+# "We've hit 1.0!" picture to everyone, and a one-time pop-up. LAUNCH-ONLY --
+# 1.1 removes this var and the code behind it (docs/IDEAS.md item 105).
+LAUNCH_ANNOUNCEMENT = "1.0"
 # specs/0015: deliberately "stub" here, not just for now like production's
 # but *permanently* -- this flow's only real recipient is Michael's own
 # inbox, and live-sending it from the sandbox during routine iteration would

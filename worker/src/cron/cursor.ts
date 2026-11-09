@@ -52,7 +52,11 @@ export type CursorName =
   // before this: nineteen of thirty events warned across twelve ticks, with
   // the other eleven unreachable.
   | 'minimum_attendees_warning_single'
-  | 'minimum_attendees_warning_recurring';
+  | 'minimum_attendees_warning_recurring'
+  // The 1.0 launch announcement (LAUNCH-ONLY, removed in 1.1): holds the id of
+  // an announcement once everyone it was owed to has been handled, so a
+  // finished announcement costs a tick nothing at all.
+  | 'launch_announcement';
 
 // The single-event scan orders by (start_at, id), so its key is both.
 export interface EventKey {

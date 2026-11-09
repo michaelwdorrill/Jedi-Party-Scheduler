@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../lib/authMiddleware';
 import { requirePolicyAcceptance } from '../lib/authMiddleware';
 import { CURRENT_POLICY_VERSION } from '../lib/policy';
+import { activeLaunchAnnouncement } from '../lib/launchAnnouncement';
 import { buildCalendarOccurrences } from '../lib/calendar';
 import { chunkIds, placeholders } from '../lib/d1';
 import { deleteUserCompletely, isGuildMember, isOwner, listFriends, listFriendsAcrossGuilds, mapUser, type UserRow } from '../lib/db';
@@ -28,11 +29,16 @@ const PROFILE_COLUMNS = `id, username, global_name, avatar_hash, timezone, notif
 // missing argument rather than a silent hole.
 meRoutes.get('/', async (c) => {
   const userId = c.get('userId');
-  const row = await c.env.DB.prepare(`SELECT ${PROFILE_COLUMNS} FROM users WHERE id = ?`)
+  const row = await c.env.DB.prepare(`SELECT ${PROFILE_COLUMNS}, announcement_seen FROM users WHERE id = ?`)
     .bind(userId)
-    .first<UserRow>();
+    .first<UserRow & { announcement_seen: string | null }>();
   if (!row) return c.text('User not found', 404);
+  const announcement = activeLaunchAnnouncement(c.env);
   return c.json({
+    // The 1.0 launch pop-up (LAUNCH-ONLY, removed in 1.1): the id of the
+    // announcement this person has not been shown yet, or null. Just the id --
+    // the picture is the frontend's own asset.
+    unseenAnnouncement: announcement && row.announcement_seen !== announcement.id ? announcement.id : null,
     ...mapUser(row, isOwner(c.env, userId)),
     // The frontend reads the current version from here rather than holding a
     // copy of it -- two constants in two deployables that must agree is the
@@ -53,6 +59,21 @@ meRoutes.post('/accept-policy', async (c) => {
     .run();
   c.set('acceptedPolicyVersion', CURRENT_POLICY_VERSION);
   return c.json({ ok: true, policyVersion: CURRENT_POLICY_VERSION });
+});
+
+// The 1.0 launch pop-up has been shown (LAUNCH-ONLY, removed in 1.1).
+// Recorded when it appears, not when it is closed, so it shows once even if
+// the tab is closed with it open. Only the live announcement's id is
+// accepted; anything else is a no-op rather than an error, since a stale tab
+// naming an old one has nothing useful to be told.
+meRoutes.post('/announcement-seen', requirePolicyAcceptance, async (c) => {
+  const userId = c.get('userId');
+  const body = await readJsonBody<{ id?: unknown }>(c);
+  const announcement = activeLaunchAnnouncement(c.env);
+  if (announcement && body.id === announcement.id) {
+    await c.env.DB.prepare(`UPDATE users SET announcement_seen = ? WHERE id = ?`).bind(announcement.id, userId).run();
+  }
+  return c.json({ ok: true });
 });
 
 meRoutes.patch('/', requirePolicyAcceptance, async (c) => {
@@ -121,7 +142,7 @@ meRoutes.get('/export', async (c) => {
     // (*_ciphertext, *_iv) and the user_id that is the export's own key.
     // dm_channel_id is the id of the Discord DM channel the bot uses to reach
     // you: an address, not a credential -- nothing can be sent with it alone.
-    profile: `SELECT ${PROFILE_COLUMNS}, dm_channel_id, created_at, updated_at, last_login_at, last_login_attempt_at
+    profile: `SELECT ${PROFILE_COLUMNS}, dm_channel_id, created_at, updated_at, last_login_at, last_login_attempt_at, announcement_seen
               FROM users WHERE id = ?`,
     serverMemberships: `SELECT guild_id, nickname, is_member, verified_at FROM user_guild_membership WHERE user_id = ?`,
     personalEvents: `SELECT * FROM personal_events WHERE user_id = ?`,
@@ -216,6 +237,8 @@ meRoutes.get('/export', async (c) => {
     groupIdleChecks: `SELECT n.* FROM group_activity_nudges n
                       JOIN groups g ON g.id = n.group_id WHERE g.created_by = ?`,
     inactivityWarnings: `SELECT * FROM account_purge_warnings WHERE user_id = ?`,
+    // The 1.0 launch announcement DM (LAUNCH-ONLY, removed in 1.1).
+    launchAnnouncements: `SELECT * FROM announcement_log WHERE user_id = ?`,
     // Includes the server name the person typed, which is their own input.
     serverRequests: `SELECT * FROM guild_add_requests WHERE requested_by = ?`,
 

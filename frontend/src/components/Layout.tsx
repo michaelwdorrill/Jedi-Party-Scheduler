@@ -4,6 +4,7 @@ import { useAuth } from '../auth/AuthContext';
 import { APP_VERSION, PUBLISHED_AT } from '../lib/legal';
 import { buttonClass } from './ui';
 import Sky from './Sky';
+import LaunchAnnouncement from './LaunchAnnouncement';
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   `rounded-md px-3 py-2 font-display text-sm uppercase tracking-wide ${
@@ -28,6 +29,9 @@ export default function Layout() {
   return (
     <>
       <Sky />
+      {/* LAUNCH-ONLY (1.0); removed in 1.1. Here, inside the policy gate, so
+          it never covers the agreement screen. */}
+      <LaunchAnnouncement />
       <div className="uo-page flex min-h-screen flex-col">
       {logoutBanner === 'queued' && (
         <div className="bg-warning-surface/75 px-4 py-2 text-center text-sm text-warning-text">

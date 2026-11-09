@@ -674,6 +674,17 @@ in the sandbox.
       gets the invite with the picker, and the day is its own event. SchedulerTest
       picks that day in Discord. → On the day's own event, SchedulerTest shows
       **accepted**. *(Before: the pick was saved on the poll row only.)*
+- [ ] **B10** The 1.0 launch announcement (LAUNCH-ONLY; IDEAS 105). Worker and
+      frontend both, so a rebuild. **a)** Within a tick or two of the sandbox
+      deploy, both accounts with notifications on get one Discord DM: *"Uncle
+      Owen and Aunt Beru are proud to announce that we are feature complete!
+      Feel free to use Uncle Owen for all your scheduling needs!"* with the
+      "We've hit 1.0!" picture attached. Only once -- nothing more on later
+      ticks. **b)** Open the app (the rebuilt bundle): the picture pops up
+      once. Clicking the picture leaves it; the X, a click outside it, or
+      Escape closes it. Reload → it does not come back. Log in as the other
+      account in another browser → it pops up there too, once. **c)** An account
+      with notifications off gets no DM but still sees the pop-up.
 
 ---
 

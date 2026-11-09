@@ -1809,6 +1809,47 @@ so they add no fixed query to a tick (pass9's empty-tick ceiling). Test:
 invites". What this item still describes -- notices themselves ranking ahead
 of invites -- is unchanged and still 1.0.1.
 
+### 105. The 1.0 launch announcement — built for 1.0, comes out in 1.1
+
+Michael's request (9 Nov 2026): when 1.0 launches, everyone gets a Discord DM
+with the "We've hit 1.0!" picture (Uncle Owen and Aunt Beru) and the text
+*"Uncle Owen and Aunt Beru are proud to announce that we are feature
+complete! Feel free to use Uncle Owen for all your scheduling needs!"*, and
+the same picture pops up the first time each person opens the app
+afterwards (X, click outside, or Escape to close).
+
+His answers: the DM respects the notifications toggle (the pop-up still
+reaches people who turned DMs off); only people still in an allow-listed
+server get the DM, like every other DM; the pop-up is once per account, for
+everyone, new sign-ups included.
+
+**This is a launch thing, not a feature. 1.0.x keeps it; 1.1 removes it.**
+What comes out in 1.1:
+
+- `worker/src/lib/launchAnnouncement.ts`, `launchAnnouncementImage.ts`, and
+  `worker/scripts/gen-launch-image.mjs`
+- `sweepLaunchAnnouncement` and its line in `runReminderSweep`
+  (`worker/src/cron/reminders.ts`), the `launch_announcement` cursor name
+- the `attachment` parameter on `sendBotDm` and `deliverThroughOutbox`, and
+  `'announcement_log'` in `OutboxTable`
+- `unseenAnnouncement` and `POST /me/announcement-seen` in
+  `worker/src/routes/me.ts`; `LAUNCH_ANNOUNCEMENT` in `env.ts` and both
+  `[vars]` blocks of `wrangler.toml`
+- `frontend/src/components/LaunchAnnouncement.tsx`, its line in `Layout.tsx`,
+  `unseenAnnouncement` on `User`, and `frontend/public/announcements/`
+- `test/launchAnnouncement.test.ts` and the `forms` capture in
+  `test/helpers.ts` if nothing else uses it
+
+What stays, deliberately: migration 0049's `announcement_log` table and
+`users.announcement_seen` column. Dropping them is a migration for no gain.
+The rows are people's own records, and they stay in the export and are
+removed on deletion like any other DM log. Retire them in a later cleanup
+if ever. The privacy policy's mention of the announcement DM should come
+out with 1.1's policy text, whenever that next changes.
+
+Built and tested 9 Nov 2026 (6 worker tests, revert-checked; pop-up driven
+in the built bundle).
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.

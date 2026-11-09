@@ -13,6 +13,9 @@ export interface User {
   // exactly the drift this avoids having at all.
   policyVersion: number;
   acceptedPolicyVersion: number;
+  // The 1.0 launch pop-up (LAUNCH-ONLY, removed in 1.1): the id of the
+  // announcement this account hasn't been shown yet, or null.
+  unseenAnnouncement: string | null;
 }
 
 export interface Guild {

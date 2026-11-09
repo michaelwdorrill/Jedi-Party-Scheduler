@@ -29,6 +29,7 @@ import {
   type DmRecipient,
 } from '../lib/outbox';
 import { editBotDm } from '../lib/discord';
+import { activeLaunchAnnouncement, launchAnnouncementImage } from '../lib/launchAnnouncement';
 import { cancelButton, cancelOccurrenceButton, linkButton, pollSelect, rsvpButtons } from '../lib/dmComponents';
 import { LIMITS } from '../lib/validate';
 import { chunkIds, chunkRows, conditionalRowsSql, placeholders } from '../lib/d1';
@@ -3641,6 +3642,70 @@ async function runIsolated(name: string, fn: () => Promise<void>): Promise<void>
   }
 }
 
+// The 1.0 launch announcement's DM (lib/launchAnnouncement.ts). LAUNCH-ONLY:
+// removed in 1.1, with everything else listed in docs/IDEAS.md item 105.
+//
+// Who gets it, per Michael's three answers (9 Nov 2026): everyone with
+// notifications on -- the toggle is respected, as for every other DM; the
+// pop-up still reaches people who turned them off -- and only people still in
+// an allow-listed server, the same rule every other DM follows.
+//
+// Costs nothing when no announcement is live (no query at all, which is what
+// keeps pass9's empty-tick ceiling), and nothing once it is finished: the
+// first tick that finds nobody left to send to records that in the cursor
+// store, which every tick already reads in one statement. Ranked near the end
+// of the tick, behind everything about actual plans: a launch note can wait
+// fifteen minutes; an invite or a reminder should not.
+//
+// Never-attempted rows sort first, so people still waiting on a first try are
+// not stuck behind a retry backing off.
+async function sweepLaunchAnnouncement(env: Env, budget: TickBudget, cursors: CursorStore): Promise<void> {
+  const announcement = activeLaunchAnnouncement(env);
+  if (!announcement || cursors.get('launch_announcement') === announcement.id) return;
+  if (budget.exhausted || !budget.trySpend(1)) return;
+
+  const { results } = await env.DB.prepare(
+    `SELECT u.id, u.notifications_enabled, u.dm_channel_id, u.timezone
+     FROM users u
+     LEFT JOIN announcement_log al ON al.user_id = u.id AND al.announcement_id = ?
+     WHERE u.notifications_enabled = 1
+       AND EXISTS (
+         SELECT 1 FROM user_guild_membership m
+         JOIN guilds g ON g.id = m.guild_id AND g.is_active = 1
+         WHERE m.user_id = u.id AND m.is_member = 1 AND m.verified_at >= ?
+       )
+       AND (al.id IS NULL OR (al.delivered_at IS NULL AND al.failed_at IS NULL AND al.attempt_count < ?))
+     ORDER BY (al.id IS NOT NULL), u.id
+     LIMIT ?`,
+  )
+    .bind(announcement.id, membershipCutoff(), MAX_DELIVERY_ATTEMPTS, Math.max(1, budget.deliveriesAffordable))
+    .all<ParticipantRow>();
+
+  if (results.length === 0) {
+    cursors.set('launch_announcement', announcement.id);
+    return;
+  }
+
+  const image = launchAnnouncementImage(announcement);
+  for (const user of results) {
+    if (budget.exhausted) return;
+    try {
+      await deliverThroughOutbox(
+        env,
+        'announcement_log',
+        { user_id: user.id, announcement_id: announcement.id },
+        user,
+        announcement.dm,
+        budget,
+        null,
+        image,
+      );
+    } catch (err) {
+      console.error(`sweepLaunchAnnouncement failed for user ${user.id}:`, err);
+    }
+  }
+}
+
 export async function runReminderSweep(env: Env): Promise<void> {
   // Order matters: transition deadline-passed polls first so their invitees
   // get a poll_resolved DM in the same tick, then invites, then time-based
@@ -3713,6 +3778,8 @@ export async function runReminderSweep(env: Env): Promise<void> {
   await runIsolated('idleGroups', () => sweepIdleGroups(env, budget, cursors));
   await runIsolated('groupDrift', () => sweepGroupDrift(env, budget));
   await runIsolated('organizerRsvpNotices', () => sweepOrganizerRsvpNotices(env, budget));
+  // LAUNCH-ONLY (1.0); removed in 1.1.
+  await runIsolated('launchAnnouncement', () => sweepLaunchAnnouncement(env, budget, cursors));
   await runIsolated('pruneStaleSessions', () => pruneStaleSessions(env));
   await runIsolated('pruneOAuthCallbackCounts', () => pruneOAuthCallbackCounts(env));
   await runIsolated('purgeTerminalHistory', () => sweepPurgeTerminalHistory(env, budget));
