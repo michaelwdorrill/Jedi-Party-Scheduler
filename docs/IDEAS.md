@@ -1894,6 +1894,47 @@ Michael's call), and/or have a 400 for a malformed ID count as "not a member"
 rather than "try again". The second needs care, because a 400 for any other
 reason must not remove a real person. Not 1.0.
 
+### 108. A general review of Discord notifications, for 1.0.2 (Michael, 9 Nov 2026)
+
+Michael's call, after one day of the 1.0 walkthrough found four separate
+delivery problems in the same machinery:
+
+1. Invites starved behind cancelled-invite edits (`bd0d957`).
+2. Then behind a one-time pile of those edits (`f44ed2c`).
+3. The launch announcement starved at the end of the tick (`9ff1210`).
+4. A scheduled run executing a version replaced eleven minutes earlier
+   (below).
+
+On top of that come IDEAS 104 (cancellation notices ahead of invites) and
+107 (sandbox seed accounts burning a third of every tick). The common thread
+is ordering and budget. About thirty sweeps share one Free-plan allowance of
+roughly 13 deliveries a tick. Their order was set feature by feature, and a
+sweep near the end can be starved indefinitely without anything saying so.
+The only signal is the generic "Cron tick exhausted" warning.
+
+What the review should cover:
+
+- **Priority:** an explicit order for every sweep, written down with the
+  reason for each position, instead of order of arrival.
+- **Fairness:** caps per sweep, or a reserved share, so no sweep can take
+  everything and none can be starved indefinitely. The launch announcement's
+  per-tick cap is the pattern.
+- **Visibility:** a permanent, compact per-tick budget line (what the
+  temporary trace in `59d137f` showed), now that Workers Logs keeps three
+  days, so starvation shows up in the logs rather than as "no DM arrived".
+- **Scan costs:** sweeps that pay per event to find nothing (multi-winner
+  closed, confirmed options) could fold their discovery into fewer queries,
+  the way the cancellation cascade's invite-edit flag did.
+- **IDEAS 104 and 107** folded in.
+
+**Operational gotcha found along the way (9 Nov, 5:45 PM run).** The sandbox's
+scheduled run executed version `778ea481` (the 5:21 deploy) although
+`cd1416e6` had deployed at 5:34. GitHub and wrangler both reported success.
+So after a deploy, don't infer from the clock what code a cron run executed:
+read `$workers.scriptVersion.id` on a log line from that run and compare it to
+the deploy's "Current Version ID". This matters for the 1.0 production deploy,
+whose first runs send the launch announcement.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
