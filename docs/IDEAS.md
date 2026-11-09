@@ -1953,6 +1953,24 @@ followed by the 1.0 pop-up, which covers the banner. Any other app-level
 fetch of gated data needs the same treatment, so it belongs in IDEAS 108's
 review sweep.
 
+### 110. Launch night: production's Discord app lacked the add-bot redirect
+
+P1 (9 Nov 2026). The first production add-bot request stopped at Discord's
+"Invalid OAuth2 redirect_uri". The self-service add-bot flow (specs/0015)
+arrived after 0.7.2, and production's Discord application had only ever been
+given the login redirect (`/auth/callback`), never
+`/guild-requests/callback`. SETUP lists both, but nothing checks them, and
+the sandbox's application had both, so the walkthrough couldn't catch it.
+Michael added the redirect in the portal and the flow then worked end to end
+(email in the inbox, DKIM-verified, Reject link fine).
+
+The same class as IDEAS 109: a difference only production has. Two
+follow-ups for 1.0.1: add a line to RELEASE-TESTING's pre-merge list
+("production's Discord app has exactly the redirects SETUP section 1
+lists"), and consider having the Worker log, once, which OAuth redirect URIs
+it will use. Discord's API offers no way to read an app's registered
+redirects with a bot token, so an automated check isn't possible.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
