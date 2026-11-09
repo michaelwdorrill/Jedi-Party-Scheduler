@@ -50,7 +50,14 @@ EMAIL_FROM_ADDRESS = ""
 # report differently between the two environments: the sandbox should be
 # switched to "live" first, verified, and only then production -- which is the
 # sandbox-first rule applied to a config flag rather than to code.
-GOOGLE_SYNC_MODE = "off"
+#
+# Live in production from 1.0 (Michael, 9 Nov 2026), after running live on the
+# sandbox since 0.8.1. Production has its own Google Cloud project ("Uncle
+# Owen"), separate from the sandbox's so the 100-user lifetime cap and the
+# publishing status are its own. It is published "In production" -- unverified,
+# warning screen accepted (IDEAS 64) -- and NOT Testing, which would expire
+# every connection after 7 days. Its client secret and token key are secrets.
+GOOGLE_SYNC_MODE = "live"
 # The Google OAuth client id. Not a secret (it appears in the authorize URL
 # every user's browser sees), same as DISCORD_CLIENT_ID above. The matching
 # GOOGLE_CLIENT_SECRET and GOOGLE_TOKEN_ENCRYPTION_KEY are set with
@@ -59,8 +66,9 @@ GOOGLE_SYNC_MODE = "off"
 #
 # Production needs its OWN client, not the sandbox's: a redirect URI is
 # registered per client, so the sandbox's would refuse to send anyone back to
-# the production Worker. Left blank until that client exists.
-GOOGLE_CLIENT_ID = ""
+# the production Worker. This is production's own client, "Uncle Owen
+# Production", whose one redirect URI is this Worker's /google/callback.
+GOOGLE_CLIENT_ID = "767835704577-51fbld55v5oh4vsl2kpgqbmabeohk4f6.apps.googleusercontent.com"
 # Which Cloudflare plan this Worker runs on: "free" or "paid". Free and Paid
 # differ by more than an order of magnitude in D1 queries and outbound
 # subrequests allowed per invocation, and the 15-minute cron sizes its own
@@ -72,6 +80,15 @@ WORKERS_PLAN = "free"
 # "We've hit 1.0!" picture to everyone, and a one-time pop-up. LAUNCH-ONLY --
 # 1.1 removes this var and the code behind it (docs/IDEAS.md item 105).
 LAUNCH_ANNOUNCEMENT = "1.0"
+
+# Workers Logs (policy decision F8, 9 Nov 2026): kept, disclosed in the Privacy
+# Policy, and stated here so the code decides it rather than a dashboard toggle
+# that could change without anyone noticing -- the policy says how long
+# Cloudflare keeps these lines, and that has to stay true. What the app logs:
+# Discord IDs and usernames, server names on bot-add requests; never event
+# titles, descriptions or DM text (the policy draft's Part E).
+[observability]
+enabled = true
 
 [[d1_databases]]
 binding = "DB"
@@ -173,3 +190,8 @@ migrations_dir = "migrations"
 # wrong half of the app.
 [env.sandbox.triggers]
 crons = ["*/15 * * * *"]
+
+# Same as production's [observability] above (F8), stated per environment so
+# neither depends on whether wrangler inherits it.
+[env.sandbox.observability]
+enabled = true
