@@ -1576,6 +1576,13 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
   move feature, but item 96 makes it more common: shifting a 7-11 PM session an
   hour now carries its end to midnight. Fix: treat the end as exclusive (bucket
   on `endAt - 1` when `endAt > startAt`). Display only; the event itself is right.
+- **A poll day's own event has no way back to its poll.** Michael, 10 Nov,
+  during 5.15: from a day that became its own event you can't get to the poll
+  -- the other candidate days and everyone's votes. `events.created_from_poll_id`
+  already holds the link; `GET /events/:id` doesn't return it. Return the poll's
+  id and title (joined, so a poll purged after 90 days simply yields no link
+  rather than a 404) and show "From the poll …" on the page. Same audience:
+  the day's event copies the poll's invite list.
 
 ### 101. What the Pass 24 reviews found, and what was done with it
 
