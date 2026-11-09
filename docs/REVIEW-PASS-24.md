@@ -41,7 +41,7 @@ the happy paths render, not that the edges are right.
 | Branch | `claude/practical-ptolemy-xqv8nj` |
 | Base (Pass 23 cleared) | `2133fb5` |
 | Head | the branch tip (this file's commit or later) |
-| Code diff | `git diff 2133fb5 HEAD -- worker/src frontend/src worker/wrangler.toml worker/scripts` |
+| Code diff | `git diff 2133fb5 HEAD -- worker/src frontend/src worker/wrangler.toml worker/scripts worker/migrations` |
 | Sandbox Worker | `https://jedi-party-scheduler-worker-sandbox.uncleowen.workers.dev` (deployed from the `sandbox` branch, same `worker/` tree as head) |
 | Frontend | local only: `VITE_API_BASE_URL=<sandbox worker> npm run build && npx vite preview --port 5173 --strictPort` in `frontend/` |
 | Tests | `cd worker && npx vitest run` (873), `cd frontend && npx vitest run` (153) |
@@ -54,7 +54,7 @@ mechanics.
 
 | Item | What | Main code | Tests | Walkthrough |
 |---|---|---|---|---|
-| **92** | OAuth callbacks rate-limited (bar clause 3) | `worker/src/lib/rateLimit.ts:64`, three callers | `rateLimit.test.ts` (7) | 0.0b — refusal **not yet observed live** |
+| **92** | OAuth callbacks rate-limited (bar clause 3) — **reworked 9 Nov**: the Cloudflare binding never refused, now an exact count in D1 | `worker/src/lib/rateLimit.ts:91`, three callers, migration 0048, cron prune | `rateLimit.test.ts` (12) | 0.0b / timetable R92 — binding **failed live**; the D1 counter's run is pending |
 | **94** | Organizer moves one occurrence of a series | `routes/events.ts:546`, `lib/events.ts:313`, `MoveOccurrenceForm.tsx` | `occurrenceMove.test.ts` (11) | 2.21–2.27, 3.20 |
 | **95** | A sole invitee's time change waits for the organizer; organizer can't vote | `lib/changeRequests.ts:203`, `:298`, `cron/reminders.ts:857` | `changeRequests.test.ts` (+5, one replaced) | 3.9–3.11, 3.21 |
 | **96** | Moving a start moves the end by the same elapsed time | `frontend/src/lib/timeRange.ts:76`, five forms | `timeRange.test.ts` (+6) | 2.28–2.31 |
@@ -77,35 +77,61 @@ verifies, spends a token exchange (Discord's, or Google's for
 `/google/callback`). F-59 made a forged state cost an HMAC; it did not bound
 the rate.
 
-**What.** Cloudflare's Workers rate-limiting binding, `OAUTH_CALLBACK_LIMITER`,
-20 per 60 s, keyed on `CF-Connecting-IP`. Called in all three callbacks
-**after** the signature check and **before** the exchange
-(`auth.ts:176`, `google.ts:208`, `guildRequests.ts:103`). Refusal: 429 with
-*"Too many login attempts from this address…"* on Discord's two; a redirect to
-`?google=rate_limited` on Google's, with a matching message in
-`ConnectedCalendars`. Separate `namespace_id`s for production (1001) and
-sandbox (1002); `check-env-parity.mjs:145` fails CI if either environment
-lacks the binding or they share a namespace.
+**What happened first.** This shipped as Cloudflare's Workers rate-limiting
+binding (`OAUTH_CALLBACK_LIMITER`, 20 per 60 s), with seven tests against a
+fake binding that counted exactly. The walkthrough's first live run of the
+loop (R92, 9 Nov) drove 25, then 60 at one a second, then 25 real callbacks at
+the sandbox: **every one reached Discord's token exchange**. A temporary log in
+`wrangler tail` showed every call sharing one key and the binding answering
+`success: true` to all of them. The binding is removed (commit `6775e54`);
+IDEAS 92 has the account and the lesson (a test double for a platform service
+tests the use of its contract, not the contract).
+
+**What.** An exact count in D1. Migration 0048 adds
+`oauth_callback_counts(bucket PK, window_start, count)`.
+`oauthCallbackAllowed` (`rateLimit.ts:91`) derives the bucket as an
+HMAC-SHA256 of `CF-Connecting-IP` under `JWT_SIGNING_KEY`, truncated to 16
+bytes (`:63`) — the address is never stored and the row has no user column.
+It deletes earlier minutes' rows, then does one atomic
+`INSERT … ON CONFLICT(bucket) DO UPDATE … RETURNING count`, and refuses above
+20 per calendar minute. Called in all three callbacks **after** the signature
+check and **before** the exchange (`auth.ts:176`, `google.ts:208`,
+`guildRequests.ts:103`). Refusal: 429 with *"Too many login attempts from this
+address…"* on Discord's two; a redirect to `?google=rate_limited` on Google's,
+with a matching message in `ConnectedCalendars`. The cron tick also prunes
+earlier minutes (`pruneOAuthCallbackCounts`, `rateLimit.ts:136`, called at
+`cron/reminders.ts:3635`), so a row outlives its minute by at most one
+fifteen-minute tick even when nobody logs in — the privacy draft states that
+figure. The binding is gone from `wrangler.toml`, `env.ts` and
+`check-env-parity.mjs`.
 
 **Choices to examine.**
-- **Fails open** when the binding is absent (`env.OAUTH_CALLBACK_LIMITER`
-  undefined), so local `wrangler dev` and a misconfigured deploy still log
-  people in. The parity check is what stops "absent" reaching production.
-  Is that the right side to fail on?
+- **Fails open** if the database can't be written (logged). The argument:
+  login writes D1 too (user upsert, membership sync), so an outage that
+  disables the limiter has already disabled what it protects. Is that the
+  right side to fail on?
+- **A missing `RETURNING` row is a fault, not zero.** The first draft read it as
+  zero against the test shim and allowed everything silently.
 - **No header → one shared bucket** (`'no-connecting-ip'`), never an
   unlimited one.
-- **Per-colocation, not global** — documented in the file as a real weakness:
-  N Cloudflare locations give N × 20.
+- **Fixed calendar-minute window**: a burst straddling a boundary can reach 40.
+  The `CASE` reset inside the upsert is backed up by the `DELETE`, so it is not
+  separately testable; the code comment says so.
+- **IPv6 keyed on the full address**, so a caller with a prefix can rotate.
+- **Pseudonymous, not anonymous**: with the key, an IPv4 bucket can be reversed
+  by trying all four billion. The policy draft treats it as personal data.
+- **One more uncharged statement per cron tick** for the prune; `pass9`'s
+  empty-tick bound went 32 → 33, the full-tick ≤50 ceiling and pass6's purge
+  fit still pass.
 - The edge alternative (a WAF rule) needs a Cloudflare zone; the domain is on
   Namecheap/GitHub Pages. `docs/SETUP.md` has the comparison.
 
-**Evidence so far.** Seven tests against a fake binding, revert-checked. The
-sandbox deploy accepting the binding. Logins all through the walkthrough
-working, i.e. the cap does not bite ordinary use. **The refusal itself has
-never been observed against the real binding.** The re-run timetable now has a
-PowerShell loop that drives 25 real `/auth/login` → `/auth/callback` pairs
-(signed state, dummy code) in a few seconds; the 21st onward should return the
-429 text.
+**Evidence so far.** Twelve tests driving the real counter through the SQLite
+shim, revert-checked: never refusing fails six; ignoring the address, storing
+it, skipping the callback's clean-up, and dropping the cron prune each fail
+their own. **The live refusal against the deployed counter has not been seen
+yet** — R92 is to be re-run; until it is, treat 92 as unverified, which is
+exactly what the binding taught.
 
 **Please look at:** whether anything other than these three routes spends a
 provider token unauthenticated (the bar says *every* such endpoint); whether
@@ -302,8 +328,10 @@ a path that sets a multi-winner poll `cancelled` that this misses?
    attendance is a correct reading of spec 0014 (category 2 if it writes an
    answer someone did not give).
 2. **99's inference** that tells an organizer cancel from a deadline one.
-3. **92: observe the refusal live** (the timetable's loop), and confirm no
-   other unauthenticated route spends a provider token.
+3. **92: the binding failed live and was replaced by a D1 counter.** Check the
+   replacement's write (race, window, fail-open) and its privacy claim, confirm
+   no other unauthenticated route spends a provider token, and look for the
+   live R92 result before clearing it.
 4. **96's five wirings**, reproduced rather than read.
 5. **94: a change request accepted after its date was cancelled** — does it
    revive the session silently? (The page can't reach this; the accept path

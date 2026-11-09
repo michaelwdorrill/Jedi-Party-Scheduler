@@ -941,9 +941,8 @@ Those two are the ones worth alerting on.
 
 **Closed in v1.0** (IDEAS item 92), in the Worker rather than at the edge.
 
-**Two earlier versions of this section described things that could not be
-done, and both were wrong the same way**, so the history is kept rather than
-overwritten:
+**Three earlier versions of this section described things that did not work**,
+so the history is kept rather than overwritten:
 
 1. It said to add a Cloudflare rate limiting rule "on the zone serving the
    Worker". Rate limiting rules are zone-scoped and this Worker is on
@@ -954,11 +953,22 @@ overwritten:
    (`185.199.108-111.153`), and Cloudflare's Domains page is empty. That claim
    was inferred from `FRONTEND_URL` and written in the same voice as facts that
    had actually been checked.
+3. Then it described the
+   [Workers rate-limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
+   as deployed, at 20 per 60 seconds. It was deployed, and its tests passed --
+   against a fake binding that counted exactly. Against the real sandbox
+   (walkthrough R92, 9 November 2026) it **never refused once**: 25, 60 and 25
+   callbacks from one address, all sharing one key, every one answered
+   `success: true` and every one reaching Discord's token exchange. It has been
+   removed rather than left looking like protection.
 
 The lesson is one line and it is not about Cloudflare: **an unchecked claim has
 to be marked as unchecked.** A reader cannot tell an inference from a
 verification if both are written as statements, and neither can whoever wrote
-it a day later.
+it a day later. And the third adds one: **a test double for a platform service
+tests your use of its contract, not the contract** -- a guard whose job is an
+operational effect is not shown to work until that effect has been reproduced
+once against the real deployment.
 
 **What the exposure is.** `/auth/callback`, `/guild-requests/callback` and
 `/google/callback` each spend one POST to a provider's token endpoint. Discord
@@ -971,46 +981,47 @@ exchange rather than one.
 
 #### What is deployed
 
-The [Workers rate-limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/),
-GA since September 2025. It needs no zone and works on `workers.dev`.
+An exact count in D1 (migration `0048_oauth_callback_counts.sql`), in
+`src/lib/rateLimit.ts` as `oauthCallbackAllowed(env, headers)`, called in all
+three callbacks **after** the signature check and **before** the token
+exchange. After, so a forged state cannot burn a real address's allowance;
+before, because the exchange is the spend.
 
-```toml
-[[ratelimits]]
-name = "OAUTH_CALLBACK_LIMITER"
-namespace_id = "1001"
+- **Key:** an HMAC-SHA256 of `CF-Connecting-IP` under `JWT_SIGNING_KEY`,
+  truncated to 16 bytes. The address itself is never stored, and nothing in the
+  table links a row to an account. Rotating `JWT_SIGNING_KEY` changes every
+  bucket, which at worst gives every address a fresh 20 for one minute.
+- **Window:** the current calendar minute. Each call deletes rows from earlier
+  minutes, then does one atomic
+  `INSERT ... ON CONFLICT(bucket) DO UPDATE ... RETURNING count`; above **20**
+  the callback returns **429** and spends nothing. The cron tick deletes
+  earlier minutes too (`pruneOAuthCallbackCounts`), so a row outlives its
+  minute by at most one tick, about fifteen minutes, even on a day nobody logs
+  in. The privacy policy states that figure; keep the two in step.
+- **Nothing to configure.** No `wrangler.toml` entry, no binding, no dashboard
+  setting; the migration is applied by both deploy workflows like any other,
+  and `db:verify` checks the table exists.
 
-[ratelimits.simple]
-limit = 20
-period = 60
-```
+**Properties worth knowing before trusting it:**
 
-and the same under `[[env.sandbox.ratelimits]]` with `namespace_id = "1002"` --
-separate namespaces so sandbox traffic cannot consume production's allowance
-for an address. `period` must be `10` or `60`. Requires Wrangler >= 4.36.0; the
-repo is on 4.114.0.
-
-`src/lib/rateLimit.ts` exposes `oauthCallbackAllowed(env, headers)`, keyed on
-`CF-Connecting-IP`, called in all three callbacks **after** the signature check
-and **before** the token exchange. After, so a forged state cannot burn a real
-address's allowance; before, because the exchange is the spend.
-
-**Three properties worth knowing before trusting it:**
-
-- **Per Cloudflare location, not global.** A caller spread across N locations
-  gets N x 20 per minute. Still a bound, and it meets release-bar clause 3, but
-  it is not the cap an edge rule gives.
-- **Not visible in the Cloudflare dashboard.** Bindings are not surfaced there.
-  `wrangler tail` is where a refusal shows up.
-- **It fails open if the binding is missing**, so a config slip degrades the
-  bound rather than breaking every login. `check:env-parity` fails CI if the
-  binding is undeclared in either environment, or if the two share a namespace
-  id -- that check is what stops "fails open" meaning "unbounded in
-  production", so do not remove one without the other.
+- **Global and exact**, unlike the binding (which was per Cloudflare location
+  and approximate even when it worked).
+- **Fixed window.** A burst straddling a minute boundary can get up to 40 in
+  quick succession; the steady-state bound is 20 per address per minute.
+- **Per address.** Callers behind one NAT share 20 a minute -- generous, since
+  one login is one callback. IPv6 is keyed on the full address.
+- **Fails open**, with a `console.error`, if D1 cannot be written. Login itself
+  writes D1, so an outage that disables the limiter has already disabled what
+  it protects.
+- **Visible only in `wrangler tail`** as a 429 on a callback.
+- **Checking it by hand:** walkthrough step 0.0b in `docs/RELEASE-TESTING.md`
+  (25 callbacks from one machine; the first 20 print a login failure from
+  Discord, the last 5 the 429 page). Wait a minute before logging in afterwards.
 
 #### The custom domain, still worth doing, but not as release work
 
 Putting the Worker on `api.uncleowen.space` would let a WAF rule replace the
-binding -- blocking before the Worker is invoked, at no invocation cost, and
+D1 counter -- blocking before the Worker is invoked, at no invocation cost, and
 visible where it is configured -- and would make Worker and frontend same-site.
 
 It is **DNS work, not release work**, and it is bigger than it looks here:

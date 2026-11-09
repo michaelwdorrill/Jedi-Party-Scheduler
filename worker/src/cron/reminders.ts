@@ -15,6 +15,7 @@ import {
 import { inviteStatements, type ResolvedInvitee } from '../lib/eventWrites';
 import { newId } from '../lib/ids';
 import { pruneStaleSessions } from '../lib/sessions';
+import { pruneOAuthCallbackCounts } from '../lib/rateLimit';
 import { deleteUserCompletely, MEMBERSHIP_GRACE_MS, revalidateStaleMemberships } from '../lib/db';
 import { commonServerSet } from '../lib/groups';
 import {
@@ -3631,6 +3632,7 @@ export async function runReminderSweep(env: Env): Promise<void> {
   await runIsolated('groupDrift', () => sweepGroupDrift(env, budget));
   await runIsolated('organizerRsvpNotices', () => sweepOrganizerRsvpNotices(env, budget));
   await runIsolated('pruneStaleSessions', () => pruneStaleSessions(env));
+  await runIsolated('pruneOAuthCallbackCounts', () => pruneOAuthCallbackCounts(env));
   await runIsolated('purgeTerminalHistory', () => sweepPurgeTerminalHistory(env, budget));
   // Source-independent retry consumers (F-04-H2): a row whose source
   // event/poll/group has already left every other sweep's scan window can

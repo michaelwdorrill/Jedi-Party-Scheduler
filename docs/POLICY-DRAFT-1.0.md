@@ -52,7 +52,7 @@ And these things the code does are **not mentioned at all**:
 
 | # | Missing | Where it lives |
 |---|---|---|
-| A6 | **Your IP address is used for rate-limiting** the three login/connect callbacks (item 92). It is the key of Cloudflare's rate-limit counter for about a minute and is never written to the database | `worker/src/lib/rateLimit.ts` |
+| A6 | **Your IP address is used for rate-limiting** the three login/connect callbacks (item 92). A keyed one-way code made from it (HMAC-SHA256 under a server secret, truncated; never the address) is written to the database table `oauth_callback_counts` with a per-minute count, linked to no account, and deleted within about fifteen minutes. *(Changed 9 Nov: the first version used Cloudflare's rate-limit binding and wrote nothing; that binding was shown never to refuse and was replaced.)* **For the reviewers:** the code is pseudonymous, not anonymous -- whoever holds the key could recover an IPv4 address by trying all four billion -- so the draft treats it as personal data and states its retention. Like all data, it also sits in D1's recovery copies for the Time Travel window (F6). | `worker/src/lib/rateLimit.ts`; `worker/migrations/0048_oauth_callback_counts.sql` |
 | A7 | **The full text of every DM sent to you is kept**, not just a record that it was sent (`content` in five log tables), for as long as the event it was about exists | `notification_log`, `change_request_log`, `organizer_rsvp_notice_log`, `group_nudge_log`, `account_purge_warnings` |
 | A8 | **Change requests**: proposed times, free-text messages, the organizer's decision note, and votes on them. Who sees them is asymmetric (requesters see their own; the organizer sees all with tallies, never who voted how) | `event_change_requests`, `event_change_request_votes`; spec 0003 |
 | A9 | **Your answers are visible to the other invitees**: RSVPs, poll votes (with your name), submitted availability ranges. Version 5 says event details are visible to invitees, but not that your *answers* are | `worker/src/routes/events.ts` (poll voters, invite list) |
@@ -122,10 +122,12 @@ and votes on them); and personal time blocks.
 
 **Your IP address, briefly.** The three places where signing in or connecting
 an account costs the service a request to Discord or Google are
-rate-limited, so a script can't hammer them. Your IP address is the key for
-that limit: Cloudflare counts requests from it for about a minute. Uncle Owen
-never writes your IP address to its database, and never uses it for anything
-else.
+rate-limited, so a script can't hammer them. To count attempts, Uncle Owen
+turns your IP address into a scrambled code that can't be turned back into the
+address without a secret key only the service holds, and keeps that code with a
+count for the current minute. It is not linked to your account, and it is
+deleted within about fifteen minutes. Your IP address itself is never written to
+Uncle Owen's database, and is never used for anything else.
 
 **If you ask to add the bot to a server.** That server's ID and name, your
 Discord user ID, and when the request was made and decided. The request
@@ -218,8 +220,8 @@ None of this involves profiling or decisions about you beyond these rules.
 
 Never sold, rented or shared for advertising. It is processed only by the
 services needed to run Uncle Owen:
-- **Cloudflare** runs the application and its database, and keeps the
-  rate-limit counters described above.
+- **Cloudflare** runs the application and its database. Like any host, it
+  receives your IP address with each request.
 - **GitHub** serves the website's files. Like any web host, it receives your
   IP address when your browser loads the site.
 - **Discord** handles login and delivers the messages you get from the bot,
@@ -242,7 +244,7 @@ it to be shared.
 | Cancelled events and finished polls | 90 days after they ended or were cancelled |
 | Messages the bot sent you (text and delivery record) | The event they were about is removed, or your account is deleted |
 | Login sessions | 7 days after they start, or sooner if you log out |
-| Your IP address in the rate-limit counter | About one minute; never stored by Uncle Owen |
+| The scrambled code made from your IP address, for the login limit | At most about fifteen minutes; the address itself is never stored |
 | Sign-in cookies | 10 minutes |
 | Database recovery copies (Cloudflare D1 "Time Travel") | *[7]* days, after which deleted data cannot be restored — see F6 |
 
@@ -395,7 +397,7 @@ Every factual statement in Parts B and C, and where it is made true.
 | Sessions: created/last used/expires/revoked/replaced; 7-day expiry; replaced kept until expiry | `worker/src/lib/sessions.ts:10`, `pruneStaleSessions` (`:96`) | read |
 | Policy version and time agreed are kept | `users.accepted_policy_version`, `accepted_policy_at` | schema |
 | Last login and last refused login kept | `users.last_login_at`, `last_login_attempt_at` (`auth.ts` callback) | schema; read |
-| IP used as the rate-limit key, ~60 s, never stored | `worker/src/lib/rateLimit.ts`; `wrangler.toml` `[ratelimits.simple] period = 60`; no IP column anywhere | grep for `CF-Connecting-IP`; schema |
+| IP never stored; a keyed code of it kept with a per-minute count, not linked to an account, deleted within ~15 min | `worker/src/lib/rateLimit.ts:63` (`callbackBucket`: HMAC under `JWT_SIGNING_KEY`), `:91` (deletes earlier minutes on each callback), `:136` + `cron/reminders.ts:3635` (deleted every 15-minute tick); migration 0048 has no IP or user column | `rateLimit.test.ts` "never stores the address", "removes earlier minutes", "the cron tick removes a finished minute"; grep for `CF-Connecting-IP` |
 | The three limited routes | `auth.ts:176`, `google.ts:208`, `guildRequests.ts:103` | read; timetable R92 |
 | Bot-add request stores server id/name, requester, times | `guild_add_requests` | schema |
 | Google is switched off in production | `wrangler.toml` `GOOGLE_SYNC_MODE = "off"`; `googleCalendar.ts:102` | read |
@@ -448,13 +450,14 @@ Every factual statement in Parts B and C, and where it is made true.
 | `google_event_links` | which sessions were written to Google | you | yes | yes | — |
 | `google_pending_connections` | encrypted credential + Google email, during connect only | you | **no** | yes | expires |
 | `google_orphaned_inserts` | Google event ids + **Google email** to clean up | you | **no** | yes | after cleanup |
+| `oauth_callback_counts` | a keyed one-way code made from a caller's IP address, the current minute, a count (login rate limit, item 92) | a caller, unlinked to any account | no — nothing ties it to you | n/a | every callback and every cron tick delete earlier minutes (≤ ~15 min) |
 | `cron_cursors` | internal sweep positions | nobody | n/a | n/a | — |
 
 ### Outside services
 
 | Service | Receives | When |
 |---|---|---|
-| Cloudflare | everything above (hosting, D1 database), request metadata incl. IP; rate-limit counters keyed on IP | always |
+| Cloudflare | everything above (hosting, D1 database), request metadata incl. IP | always |
 | GitHub (Pages) | site file requests, incl. IP | when the site loads |
 | Discord | OAuth (login); DM text; button presses back; server-membership and voice-channel lookups by the bot | always |
 | Resend | owner email about a bot-add request | **only if `EMAIL_MODE = "live"`** (production: stub) |

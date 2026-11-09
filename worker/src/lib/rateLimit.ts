@@ -32,8 +32,8 @@ import type { Env } from '../env';
 // Cloudflare documents that binding as approximate and per-location; for this
 // Worker it did not limit anything, so it is gone rather than kept as a control
 // that only looks like one. An exact count in the database the app already uses
-// costs one small write per callback -- a handful a day -- and is something the
-// test suite can actually exercise.
+// costs two small statements per callback -- a handful a day -- and is something
+// the test suite can actually exercise.
 //
 // Deliberately generous. One human login spends one callback; a retry or two
 // spends a few more. The cap only has to be low enough to matter to a loop and
@@ -97,9 +97,10 @@ export async function oauthCallbackAllowed(env: Env, headers: Headers): Promise<
     // one address cannot both see 20. The DELETE keeps the table to the current
     // minute's callers, and is also what starts each address afresh in a new
     // minute; the CASE repeats that inside the write for the one case the
-    // DELETE can't see, two callbacks straddling the minute boundary. Two plain statements rather than a batch() because only
-    // a single statement's .first() returns the RETURNING row the same way in
-    // D1 and in the test harness.
+    // DELETE can't see, two callbacks straddling the minute boundary. Two plain
+    // statements rather than a batch() because only a single statement's
+    // .first() returns the RETURNING row the same way in D1 and in the test
+    // harness.
     await env.DB.prepare(`DELETE FROM oauth_callback_counts WHERE window_start < ?`).bind(windowStart).run();
     const row = await env.DB.prepare(
       `INSERT INTO oauth_callback_counts (bucket, window_start, count) VALUES (?, ?, 1)
@@ -124,4 +125,17 @@ export async function oauthCallbackAllowed(env: Env, headers: Headers): Promise<
     console.error('OAuth callback limiter could not count; allowing:', err);
     return true;
   }
+}
+
+// The DELETE in oauthCallbackAllowed only runs when somebody calls back, so on
+// a quiet day the last caller's row would sit here until the next login -- for
+// hours or days, against a privacy policy that says how long it is kept. The
+// cron tick calls this, so a row outlives its minute by at most one tick
+// (fifteen minutes). It is one uncharged statement a tick, like the session
+// prune it runs beside, and it is a no-op on an empty table.
+export async function pruneOAuthCallbackCounts(env: Env): Promise<void> {
+  const now = Date.now();
+  await env.DB.prepare(`DELETE FROM oauth_callback_counts WHERE window_start < ?`)
+    .bind(now - (now % WINDOW_MS))
+    .run();
 }

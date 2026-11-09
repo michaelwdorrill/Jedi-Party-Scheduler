@@ -125,15 +125,35 @@ deployed sandbox Worker **is** the candidate.
       and is always current; the frontend is whatever your clone builds. If the
       checkout is blocked, `git stash push worker/package-lock.json`, check out
       again, then `npm ci` in `worker\` and `frontend\`.)*
-- [ ] **0.0b** The OAuth callback rate limiter is live (item 92). There is
-      nothing to click — it is a Worker binding and Cloudflare does not surface
-      bindings in the dashboard. Deploy Sandbox run #72 succeeding is the proof
-      the plan accepts it. To watch it actually refuse: with
-      `wrangler tail --env sandbox` running, log out and back in about
-      twenty-five times inside a minute. Somewhere past the twentieth you get
-      *"Too many login attempts from this address"* and the tail shows no
-      Discord token call for it. **Then wait a full minute before continuing**,
-      or the next few steps will look broken.
+- [ ] **0.0b** The OAuth callback rate limiter refuses (item 92). It is an
+      exact count in D1 (migration 0048), so there is nothing to see in any
+      dashboard — the only proof is watching it refuse. PowerShell, any folder,
+      with `$W` set to the sandbox Worker URL:
+
+      ```powershell
+      $W   = "<sandbox worker url>"
+      $ch  = "A" * 43
+      $jar = Join-Path $env:TEMP "uo-ratelimit-jar.txt"
+      foreach ($i in 1..25) {
+        $loc   = curl.exe -s -o NUL -c $jar -w "%{redirect_url}" "$W/auth/login?challenge=$ch"
+        $state = [regex]::Match($loc, 'state=([^&]+)').Groups[1].Value
+        $reply = curl.exe -s -b $jar -w " [HTTP %{http_code}]" "$W/auth/callback?code=not-a-real-code&state=$state"
+        "{0,2}  {1}" -f $i, $reply
+      }
+      Remove-Item $jar -ErrorAction SilentlyContinue
+      ```
+
+      Each pass is a real login start finished with a dummy code, which spends
+      exactly what the limit guards: one Discord token exchange. Lines 1–20
+      print *"Login failed … [HTTP 500]"* (Discord refusing the code); lines
+      21–25 print *"Too many login attempts from this address … [HTTP 429]"*.
+      The window is the calendar minute, so a run that straddles a minute
+      boundary refuses fewer or none — run it again. **Then wait a full minute
+      before logging in anywhere on the same network**, or the next steps will
+      look broken. *(Added 9 Nov: this step used to say "Deploy Sandbox
+      succeeding is the proof". It was not. The first time anyone actually ran
+      the loop, the Cloudflare rate-limiting binding it described allowed all
+      25 — then 60, then 25 more — and was replaced; IDEAS 92.)*
 
 ```
 cd frontend
@@ -622,11 +642,11 @@ Brief yourself on these before anyone else is involved:
   (P21-09, 1.0.1).
 - Nobody can leave a group; you have to remove them (IDEAS 87).
 - The OAuth callbacks **are** bounded now — item 92 was pulled into 1.0 and
-  closed in the Worker with Cloudflare's rate-limiting binding, so release-bar
-  clause 3 is met by being fixed rather than excepted. The limit is **per
-  Cloudflare location rather than global**, which is a real bound and not a
-  perfect one; the custom domain that would allow a proper edge rule is now
-  ordinary future work, not release work.
+  closed in the Worker with an exact per-address count in D1 (20 a minute), so
+  release-bar clause 3 is met by being fixed rather than excepted. The first
+  fix, Cloudflare's rate-limiting binding, was shown by step 0.0b to refuse
+  nothing and was replaced. The custom domain that would allow an edge rule
+  instead is ordinary future work, not release work.
 - Google sync is **off** in production and out of scope for 1.0.
 
 ---
@@ -652,7 +672,9 @@ after, so these are not tests that pass vacuously. What no test can see is:
 - **Real Discord.** Every DM test stubs `fetch`. Nothing has proved a real
   interaction round trip.
 - **The real cron, on real timing.** Tests call the tick directly.
-- **The rate limiter in the real runtime.** Its tests use a fake binding.
+- **The rate limiter in the real runtime.** Its tests drive the real counter
+  through a SQLite shim, not D1 itself. (The first version's tests used a fake
+  binding that counted exactly, and the real binding never refused — 0.0b.)
 - **Whether any of it makes sense to a person.**
 
 So the **Confidence** column below is not about whether the code is right. It
@@ -668,7 +690,7 @@ table, and therefore how hard to look here.
 | **Sessions** | Rotation on refresh; session families; a refresh coalescing instead of minting; revocation surviving the claim, the prune and the cap | **2.16, 2.19** | Medium logic, **zero browser** |
 | **Sessions** | Identity shared across tabs; a stale refresh no longer logs out the new account | **2.17, 2.18** | **Zero browser.** This is a two-tab bug by definition |
 | **Sessions** | A login can only be completed by the browser that started it; a refused login leaves no record | **2.19, 2.20** | Good — tested end to end |
-| **Sessions** | F-59 signed OAuth state; item 92 rate limit | **0.0b** | Good. 7 tests, revert-verified; fake binding though |
+| **Sessions** | F-59 signed OAuth state; item 92 rate limit | **0.0b** | Good. 11 tests against the real counter, revert-verified. The binding it replaced passed 7 and limited nothing, so 0.0b is the evidence |
 | **Recurrence** | Editing a recurring event rewrote its schedule | **2.11** | Good logic coverage |
 | **Recurrence** | Expansion seeded by overrides, not only nominal dates; moved occurrences findable and ordered | **3.14–3.16** | Good logic coverage |
 | **Recurrence** | Series count their own occurrences; long occurrences found in narrow windows | **2.2, 2.3, 2.11** | Good |

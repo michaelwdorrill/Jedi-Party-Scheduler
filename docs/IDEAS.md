@@ -1083,8 +1083,10 @@ configured; nobody asked whether it *could* be. The lesson is the same one item
 memory is a claim, and this project's own rule is to check claims.** The step
 that was skipped is the cheapest one -- open the dashboard and look.
 
-**Closed in v1.0 by the Workers rate-limiting binding.** Getting there took
-two reversals in one afternoon, and the second one is the entry that matters.
+**Closed in v1.0 by an exact count in D1** -- not by the Workers rate-limiting
+binding this entry first shipped, which the walkthrough showed never refusing
+anything. Getting there took three reversals; the second and third are the
+ones that matter.
 
 **Reversal 1 -- deferral to 1.0.1 was wrong.** Michael pushed back: "option 1
 doesn't seem that hard, I can do it fine." The objection on record had been
@@ -1124,13 +1126,48 @@ mail forwarding through a DNS migration for a control unrelated to either, days
 before a release. Option 1's cost went from "four lines in `wrangler.toml`" to
 "change DNS providers". Michael chose the binding.
 
-**What shipped:**
+**Reversal 3 -- the binding shipped, passed its tests, and limited nothing.**
+Walkthrough step R92 (9 November 2026) drove real callbacks at the sandbox from
+one machine: 25, then 60 at one a second, then 25 more with a temporary log
+open in `wrangler tail --env sandbox`. Every call reached Discord's token
+exchange (the HTTP 500 each one printed is Discord rejecting the fake code --
+which is to say, the spend happened). The log settled what the binding was
+doing: every call carried the same key, and the binding answered
+`success: true` to every one, though the deploy listed it at 20 per 60 seconds.
+Cloudflare documents the binding as approximate and per-location, which
+explains leakage, not zero refusals. Why it never refused here was not
+investigated further -- it did not need to be, only replaced.
 
-- `[[ratelimits]]` / `[[env.sandbox.ratelimits]]` declaring
-  `OAUTH_CALLBACK_LIMITER`, 20 per 60 seconds, on separate namespace ids so
-  sandbox traffic cannot consume production's allowance for an address.
-- `src/lib/rateLimit.ts` -- `oauthCallbackAllowed(env, headers)`, keyed on
-  `CF-Connecting-IP`.
+**How it got through.** The seven tests ran against a fake binding that
+counted exactly -- that is, against the documented contract rather than the
+platform. They were a faithful test of this code's *use* of the binding and
+said nothing at all about whether the binding limits. This is the third
+platform claim in this one entry carried by something that assumed it (a WAF
+rule that could not be applied; a zone that did not exist; a limiter that did
+not limit), and the rule it adds is specific: **a test double for a platform
+service tests your use of its contract, not the contract. A guard whose whole
+job is an operational effect is not shown to work until that effect has been
+reproduced once against the real deployment.** R92 was that reproduction, which
+is the reason it exists, and the reason it is kept.
+
+Michael chose, from three options, to count in D1: an exact count in the
+database the app already uses, rather than a second attempt at configuring the
+binding or a move to the custom domain.
+
+**What shipped** (commit `6775e54`):
+
+- Migration `0048_oauth_callback_counts.sql`: `oauth_callback_counts(bucket
+  PRIMARY KEY, window_start, count)`.
+- `src/lib/rateLimit.ts` -- `oauthCallbackAllowed(env, headers)`. The bucket
+  is an HMAC-SHA256 of the caller's `CF-Connecting-IP` under the Worker's
+  `JWT_SIGNING_KEY`, truncated to 16 bytes -- **never the address itself**, and
+  nothing links it to an account. The window is the current calendar minute.
+  Each call deletes rows from earlier minutes, then runs one atomic
+  `INSERT ... ON CONFLICT(bucket) DO UPDATE ... RETURNING count`, and refuses
+  above **20 per address per minute** with a 429 before any token exchange. A
+  missing `RETURNING` row is treated as a fault, not as a count of zero (that
+  distinction is how the first draft failed open silently against the test
+  shim).
 - Called in all three callbacks (`/auth/callback`, `/guild-requests/callback`,
   `/google/callback`), **after** the signature check and **before** the token
   exchange. After, because a forged state already costs nothing and must not be
@@ -1140,27 +1177,48 @@ before a release. Option 1's cost went from "four lines in `wrangler.toml`" to
   Bounding two of three and leaving the third is the exact shape of P21-05:
   one rule, three implementations, and the one nobody updated is the one that
   lets an answer through.
-- `check:env-parity` now fails CI if the binding is undeclared in either
-  environment, or if the two share a namespace id. This is the other half of
-  the helper's deliberate FAIL-OPEN behaviour: failing open is right at runtime
-  (a config slip should degrade the bound, not break every login) and would
-  otherwise mean an unbounded production that nothing reports. Both branches
-  revert-verified.
-- Seven tests, all revert-verified against the specific defect each names --
-  including the ordering one, checked by moving the limiter ahead of the
-  signature check and watching it fail. Two are labelled in-file as invariant
-  guards rather than reproductions.
+- **A cron-tick prune** (`pruneOAuthCallbackCounts`, beside the session prune),
+  added after `6775e54` while rewriting the privacy policy: the callback's own
+  `DELETE` only runs when someone calls back, so on a quiet day the last
+  caller's row stayed until the next login -- and the migration's comment said
+  "nothing here outlives about two minutes". It is now true to say *at most
+  about fifteen*. One more uncharged statement per tick; the empty-tick
+  assertion in `pass9.test.ts` caught it (32 -> 33) and the full-tick ceiling and
+  pass6 purge fit still pass. Revert-verified.
+- **Fails open**, logging, if the database cannot be written. That is
+  defensible here in a way it was not for the binding: login writes D1 anyway
+  (the user upsert and membership sync), so a D1 outage that disables the limiter has
+  already disabled what the limiter protects.
+- The binding is **removed** -- from `wrangler.toml`, `env.ts` and
+  `check:env-parity` -- rather than left in place looking like protection. So is
+  the temporary diagnostic log.
+- Twelve tests driving the real counter through the D1 shim: 21 calls and the
+  21st is refused; each of the three routes refuses once an address is full and
+  spends nothing; a new minute starts afresh; another address is unaffected;
+  the address is never stored and the bucket is keyed; earlier minutes are
+  removed, by a callback and by the cron tick; a forged state costs nothing;
+  fail-open is pinned. Revert-verified: never refusing fails six; ignoring the address, storing it, and skipping the
+  clean-up each fail their own. The `CASE` reset inside the upsert is backed up
+  by the `DELETE` and so not separately testable, which the code comment says.
 
-**The honest limitation, stated because it will not be visible later:** the
-binding's limits are **per Cloudflare location, not global**. A caller spread
-across N locations gets N x 20 per minute. Unbounded became
-bounded-per-source-per-location, which meets clause 3 and is a real
-improvement, but it is not the cap an edge rule would give. Cloudflare also
-advises against IP keys because users share them -- the generous threshold is
-what keeps a shared NAT harmless, and one human login spends one callback.
+**Limitations, stated because they will not be visible later:**
+
+- **Fixed window.** A burst straddling a minute boundary can get up to 40 in
+  quick succession; the steady-state bound is 20 per address per minute. A
+  sliding window would close that and is not worth the extra writes.
+- **Per address.** Callers behind one NAT share 20 a minute. One human login
+  spends one callback, so this is generous. IPv6 is keyed on the full address,
+  so a caller with a whole prefix can rotate -- the same was true of the
+  binding, and clause 3 asks for a bound on a source, not on an adversary
+  with a /64.
+- **Two D1 writes per callback.** Negligible at this scale and well inside the
+  free plan; noted because it is a cost the binding did not have, in exchange
+  for a count that is exact and global rather than per-location.
+- **Visible only in `wrangler tail`** (as a 429 on the callback), not in any
+  dashboard.
 
 **Still worth doing eventually, but on its own merits and its own schedule:**
-the custom domain. It would let the WAF rule replace this binding (blocking
+the custom domain. It would let the WAF rule replace this counter (blocking
 before the Worker is invoked, at no invocation cost, visible in the dashboard),
 and it makes Worker and frontend same-site. It is not release work, it is DNS
 work, and it should happen when nothing is riding on it. The Worker needs no

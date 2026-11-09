@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/router';
+import { runReminderSweep } from '../src/cron/reminders';
 import { callbackBucket, MAX_CALLBACKS_PER_MINUTE, oauthCallbackAllowed } from '../src/lib/rateLimit';
 import { createSession } from '../src/lib/sessions';
 import { signJwt } from '../src/lib/jwt';
@@ -177,6 +178,32 @@ describe('the OAuth callbacks are bounded (item 92, bar clause 3)', () => {
     await oauthCallbackAllowed(env, fromIp(IP));
     const rows = await countRows(env);
     expect(rows, 'the earlier minute\'s row for another address is still there').toHaveLength(1);
+  });
+
+  // The clean-up above only runs when somebody calls back. On a quiet day that
+  // left the last caller's row in place until the next login, while the privacy
+  // policy says how long it is kept -- so the cron tick prunes too.
+  it('the cron tick removes a finished minute even when nobody calls back', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2030-01-01T12:00:10Z'));
+    const { env } = setup();
+    fetchStub = stubFetch([]);
+    await oauthCallbackAllowed(env, fromIp(IP));
+    vi.setSystemTime(new Date('2030-01-01T12:15:00Z'));
+    await oauthCallbackAllowed(env, fromIp(OTHER_IP));
+    // Put the earlier row back, as if the callback's own DELETE had not run.
+    await exhaust(env, IP, 3);
+    await (env.DB as unknown as ShimDatabase)
+      .prepare(`UPDATE oauth_callback_counts SET window_start = ? WHERE count = 3`)
+      .bind(Date.parse('2030-01-01T12:00:00Z'))
+      .run();
+    expect(await countRows(env)).toHaveLength(2);
+
+    await runReminderSweep(env);
+
+    const rows = await countRows(env);
+    expect(rows, 'only the current minute survives a tick').toHaveLength(1);
+    expect(rows[0].count).toBe(1);
   });
 
   it('is consulted after the signature check, so a forged state burns no allowance', async () => {
