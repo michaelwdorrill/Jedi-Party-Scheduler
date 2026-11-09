@@ -153,7 +153,8 @@ deployed sandbox Worker **is** the candidate.
       look broken. *(Added 9 Nov: this step used to say "Deploy Sandbox
       succeeding is the proof". It was not. The first time anyone actually ran
       the loop, the Cloudflare rate-limiting binding it described allowed all
-      25 — then 60, then 25 more — and was replaced; IDEAS 92.)*
+      25 — then 60, then 25 more — and was replaced; IDEAS 92. Passed against
+      the D1 counter on 10 Nov: 20 allowed, 21–25 refused.)*
 
 ```
 cd frontend

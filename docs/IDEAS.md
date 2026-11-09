@@ -1201,6 +1201,13 @@ binding or a move to the custom domain.
   clean-up each fail their own. The `CASE` reset inside the upsert is backed up
   by the `DELETE` and so not separately testable, which the code comment says.
 
+**Seen working, 10 November 2026** (walkthrough 0.0b, timetable R92): the same
+25-callback loop that the binding let straight through, against the sandbox
+running the counter -- lines 1-20 reached Discord's token exchange (its 500 on
+the dummy code), lines 21-25 were refused with *"Too many login attempts from
+this address"* and a 429. Exactly the bound, the first time it was ever
+observed refusing anything.
+
 **Limitations, stated because they will not be visible later:**
 
 - **Fixed window.** A burst straddling a minute boundary can get up to 40 in

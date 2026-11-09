@@ -58,16 +58,16 @@ request brought back a date the organizer had cancelled, including through the
 72-hour sweep) and **P24-02** (an organizer's pre-fan-out "no" shown as "yes"
 and counted) are fixed and revert-verified; **P24-03** and **P24-04** are
 1.0.1 (IDEAS 101). Items 92, 94, 95, 96 and 99 cleared on a static read; 92
-was then reworked (the binding never refused live) and its live check is
-walkthrough 0.0b. The reviewers' own limit stands: neither executed the code,
-so the walkthrough steps (0.0b, 2.28–2.31, 3.22, 5.15–5.18, 6.3/6.3b,
+was then reworked (the binding never refused live), and the D1 counter was
+seen refusing live on 10 Nov (0.0b: 20 allowed, 21–25 refused). The reviewers' own limit stands: neither executed the code,
+so the walkthrough steps (2.28–2.31, 3.22, 5.15–5.18, 6.3/6.3b,
 6.5b, 6.6) are where "clears" becomes evidence.
 
 ## Scope at a glance
 
 | Item | What | Main code | Tests | Walkthrough |
 |---|---|---|---|---|
-| **92** | OAuth callbacks rate-limited (bar clause 3) — **reworked 9 Nov**: the Cloudflare binding never refused, now an exact count in D1 | `worker/src/lib/rateLimit.ts:91`, three callers, migration 0048, cron prune | `rateLimit.test.ts` (12) | 0.0b / timetable R92 — binding **failed live**; the D1 counter's run is pending |
+| **92** | OAuth callbacks rate-limited (bar clause 3) — **reworked 9 Nov**: the Cloudflare binding never refused, now an exact count in D1 | `worker/src/lib/rateLimit.ts:91`, three callers, migration 0048, cron prune | `rateLimit.test.ts` (12) | 0.0b / timetable R92 — binding **failed live**; the D1 counter **passed live** 10 Nov (20 allowed, 21–25 refused) |
 | **94** | Organizer moves one occurrence of a series | `routes/events.ts:546`, `lib/events.ts:313`, `MoveOccurrenceForm.tsx` | `occurrenceMove.test.ts` (11) | 2.21–2.27, 3.20 |
 | **95** | A sole invitee's time change waits for the organizer; organizer can't vote | `lib/changeRequests.ts:203`, `:298`, `cron/reminders.ts:857` | `changeRequests.test.ts` (+5, one replaced) | 3.9–3.11, 3.21 |
 | **96** | Moving a start moves the end by the same elapsed time | `frontend/src/lib/timeRange.ts:76`, five forms | `timeRange.test.ts` (+6) | 2.28–2.31 |
@@ -142,9 +142,9 @@ figure. The binding is gone from `wrangler.toml`, `env.ts` and
 **Evidence so far.** Twelve tests driving the real counter through the SQLite
 shim, revert-checked: never refusing fails six; ignoring the address, storing
 it, skipping the callback's clean-up, and dropping the cron prune each fail
-their own. **The live refusal against the deployed counter has not been seen
-yet** — R92 is to be re-run; until it is, treat 92 as unverified, which is
-exactly what the binding taught.
+their own. **Observed live on 10 November 2026** (walkthrough 0.0b / R92): 25
+real callbacks from one machine against the sandbox, the first 20 reached
+Discord's token exchange and the 21st to 25th were refused with the 429 text.
 
 **Please look at:** whether anything other than these three routes spends a
 provider token unauthenticated (the bar says *every* such endpoint); whether
