@@ -685,6 +685,16 @@ in the sandbox.
       Escape closes it. Reload → it does not come back. Log in as the other
       account in another browser → it pops up there too, once. **c)** An account
       with notifications off gets no DM but still sees the pop-up.
+- [ ] **P1** *(production, right after the 1.0 merge -- config that only
+      production has, so the sandbox cannot stand in for it.)* **Google:** at
+      https://uncleowen.space, Settings → connect Google with your own account.
+      Expect Google's "hasn't verified this app" screen (Advanced → continue),
+      then a calendar picker. Choose a calendar; within the hour a session
+      you're going to appears on it. Optionally pick a calendar to read and see
+      it arrive as personal time. **Email:** request the bot for a server you
+      administer that isn't allow-listed; an email from "Uncle Owen" reaches
+      JediParty@proton.me within a minute (check spam the first time). Decline
+      the request on the admin page.
 
 ---
 

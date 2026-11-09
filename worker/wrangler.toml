@@ -31,14 +31,21 @@ DISCORD_PUBLIC_KEY = "ce60fa5ba939ad3e1b22e6386752725ce94da9adacebf9b223c220165b
 # one var this project's sandbox/production parity guardrail
 # (scripts/check-env-parity.mjs) is EXPECTED to report differently between
 # the two environments once flipped -- see env.sandbox.vars' copy for why.
-EMAIL_MODE = "stub"
+#
+# Live in production from 1.0 (Michael, 9 Nov 2026, policy decision F4):
+# Resend account in us-east-1, uncleowen.space verified with DKIM/SPF on its
+# own subdomains (send, rsend, resend._domainkey) -- the root domain's
+# Namecheap email forwarding is untouched. RESEND_API_KEY is a secret.
+EMAIL_MODE = "live"
 # Where the one email this app sends (a pending guild-add request) goes, and
 # which Resend-verified address it comes from. Neither is a secret -- see
 # docs/SETUP.md for the one-time Resend/DNS setup both depend on. Left blank
 # until that setup happens; lib/email.ts refuses to send (loudly, not
 # silently) if EMAIL_MODE is "live" but either is still empty.
-OWNER_EMAIL_ADDRESS = ""
-EMAIL_FROM_ADDRESS = ""
+OWNER_EMAIL_ADDRESS = "JediParty@proton.me"
+# Display-name form, which Resend accepts: the inbox shows "Uncle Owen".
+# bot@ needs no mailbox, only to be on the verified domain.
+EMAIL_FROM_ADDRESS = "Uncle Owen <bot@uncleowen.space>"
 # specs/0017 / IDEAS item 2: "live" turns Google Calendar sync on; anything
 # else leaves the /google routes answering 503 and the sweep returning
 # immediately. Ships "off" here for the same reason EMAIL_MODE ships "stub" --
