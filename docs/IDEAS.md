@@ -1585,6 +1585,12 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
   press is refused with "not active" (4.12). Safe, untidy: edit the invite to
   the cancellation text and drop its controls, the way poll DMs already are.
   *Built:* `sendCancelledEventNotice` now edits every invitee's invite DM to the cancellation text with no controls, after the notices (`editSettledPollDms` renamed `editSettledInviteDms`). One budgeted query per recently cancelled event per tick (3-day window). `worker/test/cancelledInviteEdit.test.ts`, revert-checked. Series cancellations are unchanged.
+- **An empty "Change Requests" box on a cancelled event.** Seen on the 10 Nov
+  batch re-check (SchedulerTest on the called-off P24 day): the heading renders
+  with nothing under it. `ChangeRequestSection` returns null only for someone
+  neither invited nor organizing, or for the organizer with no requests; an
+  invitee on a cancelled event gets the heading and no buttons. Hide the section
+  when the event isn't active and there are no requests to show. Cosmetic, 1.0.1.
 - **[Built for 1.0, 10 Nov] A poll day's own event has no way back to its poll.** Michael, 10 Nov,
   during 5.15: from a day that became its own event you can't get to the poll
   -- the other candidate days and everyone's votes. `events.created_from_poll_id`
