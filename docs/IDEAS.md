@@ -1984,6 +1984,8 @@ decorative.
 
 ### 64. Get the Google OAuth app verified, so users stop seeing the unverified warning
 
+**Un-parked for 1.0.1 (9 Nov 2026, Michael), now that Google is live in production.** The plan, status, scope justifications and video shot list are in `docs/GOOGLE-VERIFICATION.md`. Domain, branding and policy are done; still to do are the home page description and plain-path legal pages (code), the video and the submission.
+
 Anyone connecting a Google calendar meets a Google interstitial first. Which
 one depends on the app's publishing status, and neither of the two available
 without verification is friendly:
