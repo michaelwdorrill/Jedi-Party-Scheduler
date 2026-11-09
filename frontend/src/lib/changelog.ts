@@ -20,6 +20,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: '1.0.1',
+    date: '9 November 2026',
+    summary: 'A fix for the first thing everyone saw after agreeing to the new policy.',
+    fixed: [
+      'Right after agreeing to the updated Privacy Policy and Terms, the calendar said “Couldn’t load your server list” until you pressed Try again. The list is now fetched once you’ve agreed, not before.',
+    ],
+  },
   // 1.0 is the first release to reach production since 0.7.2. The 0.8 and
   // 0.8.1 work (Google Calendar, the noticeboard) only ever ran on the
   // sandbox, so it is described here rather than as releases nobody got.

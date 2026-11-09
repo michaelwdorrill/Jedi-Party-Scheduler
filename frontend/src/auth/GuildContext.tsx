@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import { describeError } from '../lib/async';
 import type { Guild } from '../types';
 import { useAuth } from './AuthContext';
+import { policyAccepted } from '../lib/policyGate';
 
 const SELECTED_GUILD_KEY = 'jps_selected_guild';
 
@@ -23,7 +24,11 @@ interface GuildContextValue {
 const GuildContext = createContext<GuildContextValue | null>(null);
 
 export function GuildProvider({ children }: { children: ReactNode }) {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user } = useAuth();
+  // Not isAuthenticated alone: /guilds is policy-gated, so asking while the
+  // agreement screen is up gets a 403 that would otherwise stick
+  // (lib/policyGate.ts). Agreeing flips this, which re-runs the fetch below.
+  const mayFetch = policyAccepted(isAuthenticated, user);
   const [guilds, setGuilds] = useState<Guild[]>([]);
   const [selectedGuildId, setSelectedGuildId] = useState<string | null>(
     () => localStorage.getItem(SELECTED_GUILD_KEY),
@@ -33,7 +38,7 @@ export function GuildProvider({ children }: { children: ReactNode }) {
 
   const refreshGuilds = useMemo(
     () => async () => {
-      if (!isAuthenticated) {
+      if (!mayFetch) {
         setGuilds([]);
         setError(null);
         setLoading(false);
@@ -55,7 +60,7 @@ export function GuildProvider({ children }: { children: ReactNode }) {
         setLoading(false);
       }
     },
-    [isAuthenticated],
+    [mayFetch],
   );
 
   useEffect(() => {

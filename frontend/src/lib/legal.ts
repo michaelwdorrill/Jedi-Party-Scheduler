@@ -18,7 +18,7 @@ export const LAST_UPDATED = '9 November 2026';
 // rebuild, including rebuilds that ship no user-visible change at all, which
 // would make "published" mean "last redeployed" instead of "last released".
 // Bump both together when cutting a release.
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.0.1';
 export const PUBLISHED_AT = '9 November 2026, 23:04 UTC';
 
 // The person or entity legally responsible for the data ("data controller"
