@@ -1976,7 +1976,7 @@ async function sweepCancellationCascade(env: Env, budget: TickBudget): Promise<v
   // taking down the rest -- caught only by actually exercising it in a test.
   const { results } = await env.DB.prepare(
     `SELECT * FROM (
-       SELECT *, 'prompt' AS kind FROM events
+       SELECT *, 'prompt' AS kind, 0 AS invite_edit_due FROM events
        WHERE status = 'active' AND event_type = 'single' AND is_recurring = 0
          AND minimum_attendees IS NOT NULL AND auto_cancel_below_minimum = 0
        LIMIT ?
@@ -1985,14 +1985,30 @@ async function sweepCancellationCascade(env: Env, budget: TickBudget): Promise<v
      UNION ALL
 
      SELECT * FROM (
-       SELECT *, 'notice' AS kind FROM events
+       -- invite_edit_due (10 Nov batch re-check, B9): whether this event still
+       -- has an invite DM waiting for its cancellation edit. Worked out here, in
+       -- the one discovery statement, so an event whose invites are all edited
+       -- costs the tick nothing more. Charging the edit pass on every tick for
+       -- every cancellation in the window starved the new-invites sweep after
+       -- it: with sixteen recent cancellations the sandbox sent nothing at all.
+       -- Mirrors editSettledInviteDms' own conditions closely enough that a
+       -- row it would skip for good doesn't keep an event flagged.
+       SELECT *, 'notice' AS kind,
+              CASE WHEN events.event_type = 'single' AND EXISTS (
+                SELECT 1 FROM notification_log nl
+                JOIN users u ON u.id = nl.user_id AND u.dm_channel_id IS NOT NULL
+                JOIN event_invites ei ON ei.event_id = nl.event_id AND ei.user_id = nl.user_id
+                WHERE nl.event_id = events.id AND nl.notification_type = 'invite'
+                  AND nl.message_id IS NOT NULL AND nl.message_edited_at IS NULL
+              ) THEN 1 ELSE 0 END AS invite_edit_due
+       FROM events
        WHERE status = 'cancelled' AND is_recurring = 0
          AND updated_at >= ?
        LIMIT ?
      )`,
   )
     .bind(GLOBAL_SCAN_LIMIT, terminalHistoryHotCutoff(), GLOBAL_SCAN_LIMIT)
-    .all<EventRow & { kind: 'prompt' | 'notice'; minimum_attendees: number | null }>();
+    .all<EventRow & { kind: 'prompt' | 'notice'; minimum_attendees: number | null; invite_edit_due: number }>();
 
   for (const row of results) {
     if (budget.exhausted) return;
@@ -2002,7 +2018,7 @@ async function sweepCancellationCascade(env: Env, budget: TickBudget): Promise<v
         // the notice arm's rows (a plain cancel has no minimum at all).
         await maybeSendOrganizerCancelPrompt(env, budget, row as EventRow & { minimum_attendees: number });
       } else {
-        await sendCancelledEventNotice(env, budget, row);
+        await sendCancelledEventNotice(env, budget, row, !!row.invite_edit_due);
       }
     } catch (err) {
       console.error(`sweepCancellationCascade failed for event ${row.id} (${row.kind}):`, err);
@@ -2055,6 +2071,7 @@ async function sendCancelledEventNotice(
   env: Env,
   budget: TickBudget,
   event: EventRow & { minimum_attendees: number | null },
+  inviteEditDue: boolean,
 ): Promise<void> {
   const limit = budget.deliveriesAffordable;
   if (limit <= 0) return;
@@ -2090,7 +2107,7 @@ async function sendCancelledEventNotice(
   // still happening"); an edit happens once, so this generic text must never
   // be the one that lands there, even on a tick where the poll's sweep was
   // deferred.
-  if (pending.length >= limit || budget.exhausted || event.event_type !== 'single') return;
+  if (!inviteEditDue || pending.length >= limit || budget.exhausted || event.event_type !== 'single') return;
   await editSettledInviteDms(env, budget, event, () => message, []);
 }
 

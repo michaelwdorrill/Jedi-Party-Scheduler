@@ -111,3 +111,43 @@ describe("a cancelled event's invite DM", () => {
     }
   });
 });
+
+// Found on the 10 Nov batch re-check (B9): the sandbox sent nothing at all for
+// over an hour after this edit shipped. It charged the tick's budget once per
+// recently cancelled one-off on EVERY tick, edited or not, and it runs before
+// the new-invites sweep -- so with enough cancellations in the three-day window
+// (sixteen did it here) invites never went out. An event whose invites are all
+// edited must cost nothing on later ticks.
+describe('editing cancelled invites does not starve the rest of the tick', () => {
+  it('still sends a new invite with 25 recently cancelled one-offs already edited', async () => {
+    const { db, env } = setup();
+    await seedGuild(db);
+    for (const id of ['organizer', 'guest']) {
+      await seedUser(db, id);
+      await seedMembership(db, id, 'guild-1');
+    }
+    await db.prepare(`UPDATE users SET dm_channel_id = 'dm-guest' WHERE id = 'guest'`).run();
+    for (let i = 0; i < 25; i++) {
+      await seedEvent(db, { id: `c${i}`, organizerId: 'organizer', title: `cancelled ${i}`, status: 'cancelled' });
+      await seedInvite(db, `c${i}`, 'guest');
+      await db
+        .prepare(
+          `INSERT INTO notification_log (id, user_id, event_id, notification_type, occurrence_date, sent_at, delivered_at,
+             attempt_count, content, message_id, message_edited_at)
+           VALUES (?, 'guest', ?, 'invite', '', ?, ?, 1, 'x', ?, ?)`,
+        )
+        .bind(`nl-${i}`, `c${i}`, Date.now() - HOUR_MS, Date.now() - HOUR_MS, `msg-${i}`, Date.now())
+        .run();
+    }
+    await seedEvent(db, { id: 'fresh', organizerId: 'organizer', title: 'fresh', startAt: Date.now() + 48 * HOUR_MS, endAt: Date.now() + 50 * HOUR_MS });
+    await seedInvite(db, 'fresh', 'guest');
+    fetchStub = stubFetch([DM_CHANNEL_RULE, { match: '/messages/msg-', status: 200, body: {} }, dmSendRule(200), membershipRule(200)]);
+
+    for (let tick = 0; tick < 3; tick++) await runReminderSweep(env);
+
+    const sent = await db
+      .prepare(`SELECT COUNT(*) AS n FROM notification_log WHERE event_id = 'fresh' AND notification_type = 'invite'`)
+      .first<{ n: number }>();
+    expect(sent!.n, 'the new invite went out within three ticks').toBe(1);
+  });
+});

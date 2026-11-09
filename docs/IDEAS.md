@@ -1590,7 +1590,20 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
   event's invite is never edited on cancellation, so its buttons stay, and a
   press is refused with "not active" (4.12). Safe, untidy: edit the invite to
   the cancellation text and drop its controls, the way poll DMs already are.
-  *Built:* `sendCancelledEventNotice` now edits every invitee's invite DM to the cancellation text with no controls, after the notices (`editSettledPollDms` renamed `editSettledInviteDms`). One budgeted query per recently cancelled event per tick (3-day window). `worker/test/cancelledInviteEdit.test.ts`, revert-checked. Series cancellations are unchanged.
+  *Built:* `sendCancelledEventNotice` now edits every invitee's invite DM to the cancellation text with no controls, after the notices (`editSettledPollDms` renamed `editSettledInviteDms`). `worker/test/cancelledInviteEdit.test.ts`, revert-checked. Series cancellations are unchanged.
+  **Regression in the first version, caught on the re-check (B9) and fixed the
+  same day.** As shipped in `f908add` the edit pass charged the tick's budget
+  once per recently cancelled one-off on *every* tick, edited or not, and it
+  runs before the new-invites sweep. The sandbox had enough cancellations from
+  the day's testing that it sent nothing at all from 17:05 to after 18:30 UTC --
+  an invite for B9 never arrived, and a read-only query showed no
+  notification_log row of any kind since the deploy. Reproduced in a test (16+
+  recent cancellations starve a new invite; without the edit, 25 don't). Fix:
+  the cancellation sweep's one discovery statement now computes
+  `invite_edit_due`, and only events with an invite still waiting for its edit
+  pay for the pass; edited events cost nothing more. Revert-checked. The note
+  this entry used to carry -- "one budgeted query per recently cancelled event
+  per tick" -- was the bug, stated as a cost and accepted without measuring.
 - **[Built for 1.0, 10 Nov] The Discord night picker doesn't reach a day that is its own event.** Seen
   on the 10 Nov batch re-check (B4): SchedulerTest's invite to the still-open
   poll "P24 organizer no" offers "Pick every night that works", and its only
@@ -1772,6 +1785,18 @@ patches in the worker (Vite 7.3.8, nanoid, source-map-js). Production audits:
   npm 10.9.4's arborist bug ("Cannot read properties of null (reading
   'edgesOut')") on this tree; needs a lockfile refresh, which is its own change.
 None of these is in anything a user's browser or the deployed Worker runs.
+
+### 104. Many recent cancellations still delay invites (older than 1.0's batch)
+
+Found while measuring item 100's regression (10 Nov 2026). Even with the edit
+pass gated, the cancellation sweep's notice arm does work per cancelled event in
+its three-day window, and it runs before new invites: at about 25 recent
+cancellations a new invite waits an extra tick, and at about 40 it waits for
+several. A friend group won't see this; a sandbox after a day of testing nearly
+did. Not 1.0: the fix is to give the notice arm the same "is there anything
+left to do" flag in its discovery query (a notice already sent to everyone
+costs nothing), or to move it after new invites. Measure with the test shape in
+`cancelledInviteEdit.test.ts`.
 
 ## Parked until after 1.0
 
