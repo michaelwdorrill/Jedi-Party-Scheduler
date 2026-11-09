@@ -84,23 +84,10 @@ migrations_dir = "migrations"
 [triggers]
 crons = ["*/15 * * * *"]
 
-# Bounds the three unauthenticated OAuth callbacks (item 92 / release-bar
-# clause 3). See worker/src/lib/rateLimit.ts for why the bound is here rather
-# than a zone-level WAF rule, and for the per-colocation caveat.
-#
-# `namespace_id` is just an identifier for the counter namespace, and production
-# and the sandbox deliberately use different ones so a sandbox loop can never
-# consume production's allowance.
-[[ratelimits]]
-name = "OAUTH_CALLBACK_LIMITER"
-namespace_id = "1001"
-
-# Expanded rather than an inline table on purpose: scripts/check-env-parity.mjs
-# parses the subset of TOML this file uses, and its header says inline tables
-# are outside it. Staying inside that subset is cheaper than growing a parser.
-[ratelimits.simple]
-limit = 20
-period = 60
+# Item 92's bound on the three OAuth callbacks is counted in D1 (migration
+# 0048, src/lib/rateLimit.ts), not by a Cloudflare rate-limiting binding: the
+# binding that used to be declared here never refused a request in the
+# sandbox, so it was removed rather than left looking like protection.
 
 # A second, isolated deployment to build and test against instead of building
 # directly in prod (docs/specs/0002-sandbox-and-promotion.md). Same Cloudflare
@@ -178,12 +165,3 @@ migrations_dir = "migrations"
 # wrong half of the app.
 [env.sandbox.triggers]
 crons = ["*/15 * * * *"]
-
-# The sandbox's own counter namespace -- see the production block above.
-[[env.sandbox.ratelimits]]
-name = "OAUTH_CALLBACK_LIMITER"
-namespace_id = "1002"
-
-[env.sandbox.ratelimits.simple]
-limit = 20
-period = 60

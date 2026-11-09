@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/router';
-import { MAX_CALLBACKS_PER_MINUTE } from '../src/lib/rateLimit';
+import { callbackBucket, MAX_CALLBACKS_PER_MINUTE, oauthCallbackAllowed } from '../src/lib/rateLimit';
 import { createSession } from '../src/lib/sessions';
 import { signJwt } from '../src/lib/jwt';
 import { seedGuild, seedMembership, seedUser, setup, stubFetch, type FetchStub } from './helpers';
@@ -21,40 +21,42 @@ import type { ShimDatabase } from './d1shim';
 //   3. It keys on CF-Connecting-IP, so one caller cannot lock out another.
 //   4. An ordinary login still works. (The control. This is the one that
 //      matters more than the other three put together.)
+//
+// Rewritten 9 November 2026, when the bound moved from Cloudflare's
+// rate-limiting binding (which never refused anything in the sandbox) to a
+// count in D1. The tests used to run against a fake binding that counted
+// exactly -- which is how a binding that did not count at all passed them.
+// They now drive the real counter, in the same database the app uses.
 
 let fetchStub: FetchStub | null = null;
 afterEach(() => {
   fetchStub?.restore();
   fetchStub = null;
+  vi.useRealTimers();
 });
 
 const app = buildApp();
 
-interface FakeLimiter {
-  limit(options: { key: string }): Promise<{ success: boolean }>;
-  keys: string[];
+// Fills an address's allowance for the current minute, as if it had already
+// made `count` callbacks -- so a route test can check the refusal without
+// twenty real logins first. Uses the same bucket derivation as the code.
+async function exhaust(env: Env, ip: string, count = MAX_CALLBACKS_PER_MINUTE): Promise<void> {
+  const bucket = await callbackBucket(env, new Headers({ 'CF-Connecting-IP': ip }));
+  const now = Date.now();
+  await (env.DB as unknown as ShimDatabase)
+    .prepare(`INSERT INTO oauth_callback_counts (bucket, window_start, count) VALUES (?, ?, ?)`)
+    .bind(bucket, now - (now % 60_000), count)
+    .run();
 }
 
-// Counts per key the way the real binding does, so a test that exhausts one
-// address proves nothing about another. `keys` records every consultation,
-// which is how the ordering test sees that a forged state never reached here.
-function fakeLimiter(limit = MAX_CALLBACKS_PER_MINUTE): FakeLimiter {
-  const counts = new Map<string, number>();
-  const keys: string[] = [];
-  return {
-    keys,
-    async limit({ key }) {
-      keys.push(key);
-      const next = (counts.get(key) ?? 0) + 1;
-      counts.set(key, next);
-      return { success: next <= limit };
-    },
-  };
+async function countRows(env: Env): Promise<{ bucket: string; count: number }[]> {
+  const { results } = await (env.DB as unknown as ShimDatabase)
+    .prepare(`SELECT bucket, count FROM oauth_callback_counts`)
+    .all<{ bucket: string; count: number }>();
+  return results;
 }
 
-function withLimiter(env: Env, limiter: FakeLimiter): Env {
-  return { ...env, OAUTH_CALLBACK_LIMITER: limiter as unknown as RateLimit };
-}
+const fromIp = (ip: string) => new Headers({ 'CF-Connecting-IP': ip });
 
 function tokenEndpointCalls(stub: FetchStub): string[] {
   return stub.calls.filter((u) => u.includes('/oauth2/token'));
@@ -98,7 +100,7 @@ describe('the OAuth callbacks are bounded (item 92, bar clause 3)', () => {
   it('still completes an ordinary login — the control', async () => {
     const { db, env: base } = setup();
     await seedGuild(db as ShimDatabase, 'guild-1');
-    const env = withLimiter(base, fakeLimiter());
+    const env = base;
     fetchStub = discordLoginStub();
 
     const res = await realLoginCallback(env, IP);
@@ -107,46 +109,78 @@ describe('the OAuth callbacks are bounded (item 92, bar clause 3)', () => {
     expect(tokenEndpointCalls(fetchStub).length).toBe(1);
   });
 
+  it('allows exactly MAX_CALLBACKS_PER_MINUTE from one address in a minute, then refuses', async () => {
+    // The property the Cloudflare binding never had in the sandbox: the
+    // twenty-first callback from one address in a minute is refused.
+    const { env } = setup();
+    const answers: boolean[] = [];
+    for (let i = 0; i < MAX_CALLBACKS_PER_MINUTE + 1; i++) answers.push(await oauthCallbackAllowed(env, fromIp(IP)));
+    expect(answers.slice(0, MAX_CALLBACKS_PER_MINUTE).every(Boolean)).toBe(true);
+    expect(answers[MAX_CALLBACKS_PER_MINUTE]).toBe(false);
+  });
+
   it('refuses with 429 and spends nothing once an address is over the limit', async () => {
-    const { db, env: base } = setup();
+    const { db, env } = setup();
     await seedGuild(db as ShimDatabase, 'guild-1');
-    // A limit of 1 rather than 20 so this is one refusal rather than twenty
-    // successful logins first. The threshold is a constant; the behaviour at
-    // the boundary is what is under test.
-    const env = withLimiter(base, fakeLimiter(1));
     fetchStub = discordLoginStub();
+    await exhaust(env, IP);
 
-    const first = await realLoginCallback(env, IP, 'a');
-    expect(first.status).not.toBe(429);
-    expect(tokenEndpointCalls(fetchStub).length).toBe(1);
+    const res = await realLoginCallback(env, IP, 'b');
+    expect(res.status).toBe(429);
+    // The whole point: the refusal costs Discord nothing.
+    expect(tokenEndpointCalls(fetchStub).length).toBe(0);
+  });
 
-    const second = await realLoginCallback(env, IP, 'b');
-    expect(second.status).toBe(429);
-    // The whole point: the refusal costs Discord nothing. Still one call.
-    expect(tokenEndpointCalls(fetchStub).length).toBe(1);
+  it('starts counting again in the next minute', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2030-01-01T12:00:10Z'));
+    const { env } = setup();
+    await exhaust(env, IP);
+    expect(await oauthCallbackAllowed(env, fromIp(IP))).toBe(false);
+
+    vi.setSystemTime(new Date('2030-01-01T12:01:05Z'));
+    expect(await oauthCallbackAllowed(env, fromIp(IP))).toBe(true);
   });
 
   it('keys on CF-Connecting-IP, so one caller cannot lock out another', async () => {
-    const { db, env: base } = setup();
+    const { db, env } = setup();
     await seedGuild(db as ShimDatabase, 'guild-1');
-    const limiter = fakeLimiter(1);
-    const env = withLimiter(base, limiter);
     fetchStub = discordLoginStub();
-
-    await realLoginCallback(env, IP, 'a');
+    await exhaust(env, IP);
     expect((await realLoginCallback(env, IP, 'b')).status).toBe(429);
 
     // A different address is unaffected -- a global counter would refuse here,
     // which would turn one attacker into an outage for everyone.
     const other = await realLoginCallback(env, OTHER_IP, 'c');
     expect(other.status).not.toBe(429);
-    expect(limiter.keys).toContain(OTHER_IP);
+  });
+
+  it('never stores the address, only a keyed fingerprint of it', async () => {
+    const { env } = setup();
+    await oauthCallbackAllowed(env, fromIp(IP));
+    const rows = await countRows(env);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].bucket).not.toContain(IP);
+    expect(rows[0].bucket).toMatch(/^[0-9a-f]{32}$/);
+    // Keyed: the same address under a different secret is a different bucket,
+    // so the stored value can't be reversed by hashing every IPv4 address.
+    const other = await callbackBucket({ ...env, JWT_SIGNING_KEY: 'a-different-secret' }, fromIp(IP));
+    expect(other).not.toBe(rows[0].bucket);
+  });
+
+  it("removes earlier minutes' counts, so nothing outlives the window", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2030-01-01T12:00:10Z'));
+    const { env } = setup();
+    await oauthCallbackAllowed(env, fromIp(OTHER_IP));
+    vi.setSystemTime(new Date('2030-01-01T12:01:10Z'));
+    await oauthCallbackAllowed(env, fromIp(IP));
+    const rows = await countRows(env);
+    expect(rows, 'the earlier minute\'s row for another address is still there').toHaveLength(1);
   });
 
   it('is consulted after the signature check, so a forged state burns no allowance', async () => {
-    const { env: base } = setup();
-    const limiter = fakeLimiter(1);
-    const env = withLimiter(base, limiter);
+    const { env } = setup();
     fetchStub = discordLoginStub();
 
     // F-59's exact request: both halves of the comparison supplied by the
@@ -158,28 +192,26 @@ describe('the OAuth callbacks are bounded (item 92, bar clause 3)', () => {
     );
     expect(forged.status).toBe(400);
     expect(
-      limiter.keys,
-      'a forged state consumed limiter budget, so an attacker could exhaust a real address for free',
+      await countRows(env),
+      'a forged state consumed allowance, so an attacker could exhaust a real address for free',
     ).toEqual([]);
   });
 
-  // INVARIANT GUARD, not a reproduction: with no binding there is nothing to
-  // remove, so this passes either way. It pins the deliberate fail-open choice
-  // so that a later change to fail closed has to argue with a named test
-  // rather than silently break every login in `wrangler dev`.
-  it('fails open when the binding is absent, rather than breaking every login', async () => {
-    const { db, env } = setup();
+  // INVARIANT GUARD: pins the deliberate fail-open choice, so a later change to
+  // fail closed has to argue with a named test. A database that can't take
+  // this write can't complete the login after it either.
+  it('fails open when the count cannot be written, rather than refusing everyone', async () => {
+    const { db, env: base } = setup();
     await seedGuild(db as ShimDatabase, 'guild-1');
     fetchStub = discordLoginStub();
-
-    // No OAUTH_CALLBACK_LIMITER at all -- `wrangler dev`, and any deploy where
-    // the binding was dropped. scripts/check-env-parity.mjs is what stops the
-    // second case reaching production silently; this pins the runtime half.
-    expect(env.OAUTH_CALLBACK_LIMITER).toBeUndefined();
-    const res = await realLoginCallback(env, IP);
-
-    expect(res.status).not.toBe(429);
-    expect(tokenEndpointCalls(fetchStub).length).toBe(1);
+    const failingBatch = new Proxy(base.DB, {
+      get(target, prop) {
+        if (prop === 'prepare') throw new Error('D1 unavailable');
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    expect(await oauthCallbackAllowed({ ...base, DB: failingBatch }, fromIp(IP))).toBe(true);
   });
 
   it('bounds /guild-requests/callback on the same rule', async () => {
@@ -187,7 +219,8 @@ describe('the OAuth callbacks are bounded (item 92, bar clause 3)', () => {
     await seedUser(db as ShimDatabase, 'u1');
     await seedGuild(db as ShimDatabase, 'guild-1');
     await seedMembership(db as ShimDatabase, 'u1', 'guild-1');
-    const env = withLimiter(base, fakeLimiter(0));
+    const env = base;
+    await exhaust(env, IP);
     fetchStub = discordLoginStub();
 
     const { id: sessionId } = await createSession(env, 'u1');
@@ -225,12 +258,13 @@ describe('the OAuth callbacks are bounded (item 92, bar clause 3)', () => {
     await seedGuild(db as ShimDatabase, 'guild-1');
     await seedMembership(db as ShimDatabase, 'u1', 'guild-1');
     const env: Env = {
-      ...withLimiter(base, fakeLimiter(0)),
+      ...base,
       GOOGLE_SYNC_MODE: 'live',
       GOOGLE_CLIENT_ID: 'google-client-id',
       GOOGLE_CLIENT_SECRET: 'google-client-secret',
       GOOGLE_TOKEN_ENCRYPTION_KEY: 'test-google-encryption-key-at-least-32-chars',
     };
+    await exhaust(env, IP);
     fetchStub = stubFetch([
       { match: '/oauth2/token', status: 200, body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
     ]);

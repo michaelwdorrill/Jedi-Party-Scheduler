@@ -25,13 +25,16 @@ import type { Env } from '../env';
 // nothing to do with either. docs/SETUP.md has the full comparison; the edge
 // rule stays available if the domain ever moves for its own reasons.
 //
-// THE LIMITS ARE PER-COLOCATION, NOT GLOBAL. Cloudflare documents this
-// plainly, and it is a real weakness rather than a footnote: a caller spread
-// across N Cloudflare locations gets N x MAX_CALLBACKS_PER_MINUTE. It is still
-// a bound -- unbounded became bounded-per-source-per-location, and a single
-// attacker no longer costs an unlimited number of token exchanges. Stated here
-// so nobody later reads this file and believes it is a global cap.
-
+// THE CLOUDFLARE BINDING DID NOT WORK, SO THIS COUNTS IN D1. Until 9 November
+// 2026 this called Cloudflare's rate-limiting binding. The walkthrough drove 25,
+// then 60, then 25 real callbacks at it from one address; `wrangler tail` showed
+// every call sharing one key and the binding answering "allowed" to all of them.
+// Cloudflare documents that binding as approximate and per-location; for this
+// Worker it did not limit anything, so it is gone rather than kept as a control
+// that only looks like one. An exact count in the database the app already uses
+// costs one small write per callback -- a handful a day -- and is something the
+// test suite can actually exercise.
+//
 // Deliberately generous. One human login spends one callback; a retry or two
 // spends a few more. The cap only has to be low enough to matter to a loop and
 // high enough that a whole friend group behind one NAT never notices it --
@@ -44,55 +47,81 @@ export const MAX_CALLBACKS_PER_MINUTE = 20;
 // whole reason the endpoint is worth bounding. The generous threshold above is
 // what keeps the shared-IP case harmless.
 const CONNECTING_IP = 'CF-Connecting-IP';
+const NO_IP_BUCKET = 'no-connecting-ip';
+const WINDOW_MS = 60 * 1000;
 
 // Cloudflare sets CF-Connecting-IP at the edge and overwrites any client-
 // supplied value, so a deployed Worker always has one. It is absent in local
-// `wrangler dev` and in tests. Those share a single bucket rather than
-// skipping the limiter, so the absent-header path can never be the more
-// permissive one -- if this assumption about the edge is ever wrong, the
-// failure is a shared cap, not an open door.
-const NO_IP_BUCKET = 'no-connecting-ip';
+// `wrangler dev` and in tests; those share a single bucket rather than skipping
+// the limit, so the absent-header path can never be the more permissive one.
+//
+// The address is never stored. The bucket is an HMAC of it under the Worker's
+// signing secret, domain-separated by a prefix so the value is useless for
+// anything else: a plain hash of an IPv4 address can be reversed by trying all
+// four billion, and a keyed one cannot without the key. Exported so the tests
+// can address a bucket without knowing how it is derived.
+export async function callbackBucket(env: Env, headers: Headers): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(env.JWT_SIGNING_KEY),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const mac = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    new TextEncoder().encode(`oauth-callback-limit:${headers.get(CONNECTING_IP) ?? NO_IP_BUCKET}`),
+  );
+  return [...new Uint8Array(mac).slice(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 /**
  * True if this callback may spend a token exchange.
  *
  * Call it AFTER the signed state verifies and BEFORE the exchange: a forged
- * state already costs nothing, so letting it consume limiter budget would let
- * an attacker exhaust the allowance for real logins from the same address
- * without ever paying for a valid state.
+ * state already costs nothing, so letting it consume the allowance would let an
+ * attacker exhaust real logins from the same address without ever paying for a
+ * valid state.
+ *
+ * Fixed one-minute windows: at most MAX_CALLBACKS_PER_MINUTE per address per
+ * calendar minute, so a burst straddling a minute boundary can reach twice
+ * that. Still a bound, and the simplest one a single atomic statement can hold.
  */
 export async function oauthCallbackAllowed(env: Env, headers: Headers): Promise<boolean> {
-  const limiter = env.OAUTH_CALLBACK_LIMITER;
-  // Absent only when the binding is missing from wrangler.toml. Fail open, so
-  // a configuration slip degrades the control rather than breaking every
-  // login -- and scripts/check-env-parity.mjs fails CI if the binding stops
-  // being declared for either environment, which is what keeps "fail open"
-  // from quietly meaning "no limit in production".
-  if (!limiter) {
-    console.log(JSON.stringify({ evt: 'oauth-limiter', binding: 'absent' }));
+  const bucket = await callbackBucket(env, headers);
+  const now = Date.now();
+  const windowStart = now - (now % WINDOW_MS);
+  try {
+    // The increment and the read are one statement, so two callbacks racing on
+    // one address cannot both see 20. The DELETE keeps the table to the current
+    // minute's callers, and is also what starts each address afresh in a new
+    // minute; the CASE repeats that inside the write for the one case the
+    // DELETE can't see, two callbacks straddling the minute boundary. Two plain statements rather than a batch() because only
+    // a single statement's .first() returns the RETURNING row the same way in
+    // D1 and in the test harness.
+    await env.DB.prepare(`DELETE FROM oauth_callback_counts WHERE window_start < ?`).bind(windowStart).run();
+    const row = await env.DB.prepare(
+      `INSERT INTO oauth_callback_counts (bucket, window_start, count) VALUES (?, ?, 1)
+       ON CONFLICT(bucket) DO UPDATE SET
+         count = CASE WHEN oauth_callback_counts.window_start = excluded.window_start
+                      THEN oauth_callback_counts.count + 1 ELSE 1 END,
+         window_start = excluded.window_start
+       RETURNING count`,
+    )
+      .bind(bucket, windowStart)
+      .first<{ count: number }>();
+    // No row is a fault, not a count of zero: reading it as zero is exactly
+    // how a limiter ends up allowing everything without anyone noticing.
+    if (!row || typeof row.count !== 'number') throw new Error('counter returned no row');
+    const count = row.count;
+    return count <= MAX_CALLBACKS_PER_MINUTE;
+  } catch (err) {
+    // Fails open, as the binding did: a database that cannot take this write
+    // cannot complete the login after it either, so refusing here would only
+    // change the error, while allowing keeps a transient fault from looking
+    // like an attack.
+    console.error('OAuth callback limiter could not count; allowing:', err);
     return true;
   }
-  const ip = headers.get(CONNECTING_IP);
-  const key = ip ?? NO_IP_BUCKET;
-  const { success } = await limiter.limit({ key });
-  // TEMPORARY DIAGNOSTIC (9 Nov 2026) -- remove before 1.0. The walkthrough's
-  // R92 drove 60 callbacks from one machine at ~1/s and the binding allowed
-  // every one. This shows, in `wrangler tail` only (no [observability] is
-  // configured, so nothing is kept), whether those calls even shared a key:
-  // IPv4 or IPv6, and an 8-character one-way fingerprint of the key -- never
-  // the address itself.
-  console.log(
-    JSON.stringify({
-      evt: 'oauth-limiter',
-      keyKind: ip ? (ip.includes(':') ? 'ipv6' : 'ipv4') : 'none',
-      keyTag: await fingerprint(key),
-      success,
-    }),
-  );
-  return success;
-}
-
-async function fingerprint(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`uo-limiter:${value}`));
-  return [...new Uint8Array(digest).slice(0, 4)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
