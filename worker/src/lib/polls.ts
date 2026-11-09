@@ -756,7 +756,9 @@ async function loadVotablePoll(
   return { status: 'recorded', event };
 }
 
-const VOTE_AS_RSVP: Record<'yes' | 'no' | 'maybe', RsvpStatus> = {
+// Exported for the fan-out seed in cron/reminders.ts (Pass 24, P24-02): a vote
+// carried onto a confirmed day's event uses the same mapping a later vote does.
+export const VOTE_AS_RSVP: Record<'yes' | 'no' | 'maybe', RsvpStatus> = {
   yes: 'accepted',
   no: 'declined',
   maybe: 'tentative',

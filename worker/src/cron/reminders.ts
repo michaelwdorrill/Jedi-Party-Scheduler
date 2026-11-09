@@ -3,7 +3,7 @@ import type { Env } from '../env';
 import type { EventRow, OverrideRow } from '../lib/events';
 import { loadOverridesForEvents } from '../lib/events';
 import { expandOccurrences, expandOccurrencesForEvent, loadRecurrenceRulesForEvents, type RecurrenceRule } from '../lib/recurrence';
-import { resolvePastDeadlinePolls } from '../lib/polls';
+import { resolvePastDeadlinePolls, VOTE_AS_RSVP } from '../lib/polls';
 import { resolvePastDeadlineChangeRequests } from '../lib/changeRequests';
 import {
   countConfirmedAttendees,
@@ -1771,26 +1771,37 @@ async function createFannedOutEvent(
   // yes is carried over as an accepted answer; before this the day's event
   // started with nobody but the organizer and asked everyone again.
   //
+  // EVERY answer is carried, not only yes (Pass 24 review, P24-02; Michael's
+  // call, 9 Nov 2026). Carrying only yes left a no-voter as "no answer" on the
+  // day -- and for the ORGANIZER that is not neutral: with no attendance row
+  // they count as going by default (ORGANIZER_UNLESS_DECLINED), so an organizer
+  // who voted "Can't make it" was shown "yes" on the poll row and counted
+  // toward the minimum, and the day survived one dropout more than its
+  // threshold allows. A vote on a confirmed day is that day's answer, which is
+  // the reading item 97 already applies to votes cast after fan-out; this
+  // applies it to the ones cast before. It also stops no-voters being reminded
+  // about a night they declined.
+  //
   // Windowed polls keep the old shape: their answers are ranges, and how a
   // withdrawn range should un-confirm a day is a separate question (IDEAS 97).
   const keepsThreshold = opt.window_block_minutes == null && opt.poll_threshold_count != null;
-  let yesVoters: string[] = [];
+  let carriedVotes: { user_id: string; vote: 'yes' | 'no' | 'maybe' }[] = [];
   if (keepsThreshold) {
     if (!budget.trySpend(1)) return 'incomplete';
     const { results } = await env.DB.prepare(
-      `SELECT v.user_id FROM event_poll_votes v
-       WHERE v.option_id = ? AND v.vote = 'yes'
+      `SELECT v.user_id, v.vote FROM event_poll_votes v
+       WHERE v.option_id = ?
          AND EXISTS (SELECT 1 FROM event_invites i WHERE i.event_id = ? AND i.user_id = v.user_id)`,
     )
       .bind(opt.id, opt.event_id)
-      .all<{ user_id: string }>();
-    yesVoters = results.map((row) => row.user_id);
+      .all<{ user_id: string; vote: 'yes' | 'no' | 'maybe' }>();
+    carriedVotes = results;
   }
 
   const newEventId = newId();
   const now = Date.now();
   const inviteStmts = inviteStatements(env, newEventId, invitees, true);
-  const attendanceStmts = chunkRows(yesVoters, ATTENDANCE_SEED_COLUMNS.length, 1).map((chunk) =>
+  const attendanceStmts = chunkRows(carriedVotes, ATTENDANCE_SEED_COLUMNS.length, 1).map((chunk) =>
     env.DB.prepare(
       conditionalRowsSql(
         'event_attendance',
@@ -1799,7 +1810,10 @@ async function createFannedOutEvent(
         'events',
         'ON CONFLICT(event_id, occurrence_date, user_id) DO NOTHING',
       ),
-    ).bind(...chunk.flatMap((userId) => [newId(), newEventId, '', userId, 'accepted', now]), newEventId),
+    ).bind(
+      ...chunk.flatMap(({ user_id, vote }) => [newId(), newEventId, '', user_id, VOTE_AS_RSVP[vote], now]),
+      newEventId,
+    ),
   );
   if (!budget.trySpend(1 + inviteStmts.length + attendanceStmts.length)) return 'incomplete';
 

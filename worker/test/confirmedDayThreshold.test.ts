@@ -147,11 +147,44 @@ describe('a confirmed multi-winner day that drops below its threshold (IDEAS 97)
       .prepare(`SELECT user_id, rsvp_status FROM event_attendance WHERE event_id = ? ORDER BY user_id`)
       .bind(day!.id)
       .all<{ user_id: string; rsvp_status: string }>();
-    // The yes-voters carried over; the no-voter was not turned into anything.
+    // Every answer carried over (P24-02): the yes-voters as accepted, and the
+    // no-voter as declined rather than left as "no answer" -- so they are not
+    // reminded about a night they said they could not make.
     expect(results).toEqual([
       { user_id: 'invitee', rsvp_status: 'accepted' },
       { user_id: 'organizer', rsvp_status: 'accepted' },
+      { user_id: 'other', rsvp_status: 'declined' },
     ]);
+  });
+
+  // Pass 24 review, P24-02. An organizer with no attendance row counts as going
+  // by default, so when only yes-votes were carried, an organizer who voted
+  // "Can't make it" before fan-out was shown "yes" on the poll row, listed as
+  // confirmed, and counted toward the minimum: the day then survived a dropout
+  // that takes the poll's own count below its threshold.
+  it("carries the organizer's Can't make it into the day, so it is neither shown as yes nor counted", async () => {
+    const { db, env } = setup();
+    const { pollId, optionId } = await seedPoll(db, env, { threshold: 2, invitees: ['a', 'b'] });
+    await vote(env, pollId, optionId, 'organizer', 'no');
+    await vote(env, pollId, optionId, 'a', 'yes');
+    await vote(env, pollId, optionId, 'b', 'yes');
+    await sweep(env);
+    const day = await session(db, optionId);
+    expect(day!.status).toBe('active');
+
+    const res = await buildApp().request(
+      `https://worker.test/events/${pollId}`,
+      { headers: { Authorization: `Bearer ${await authed(env, 'organizer')}` } },
+      env,
+    );
+    const body = (await res.json()) as { pollOptions: { myVote: string | null; confirmedUsers: { userId: string }[] }[] };
+    const option = body.pollOptions[0];
+    expect(option.myVote, 'the poll row shows the answer the organizer gave').toBe('no');
+    expect(option.confirmedUsers.map((u) => u.userId).sort()).toEqual(['a', 'b']);
+
+    // One dropout takes the day to one yes against a threshold of two.
+    await vote(env, pollId, optionId, 'a', 'no');
+    expect((await session(db, optionId))!.status).toBe('cancelled');
   });
 
   it("calls the day off when a Can't make it on the poll takes it below, and tells whoever is still coming", async () => {
