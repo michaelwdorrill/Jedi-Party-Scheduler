@@ -50,8 +50,13 @@ be needed after that edit; it was quick the first time.)
 > session is cancelled or the user declines, and removes upcoming entries when
 > the user disconnects. It only ever changes events it created itself. A
 > narrower scope would not let it create, update and delete events on an
-> existing calendar the user picks; `calendar.app.created` would force a
-> separate calendar, which users asked not to have.
+> existing calendar the user picks. `calendar.app.created` would force every
+> session onto a separate secondary calendar, which defeats the purpose:
+> users want their game nights in their main calendar, in one place with
+> everything else they have going on, so conflicts are visible and reminders
+> arrive through the phone notifications they already use. The user chooses
+> the calendar, and anyone who prefers a dedicated one can create it and
+> pick that instead.
 
 **`https://www.googleapis.com/auth/calendar.readonly`**
 > Used for two things. First, to list the user's calendars so they can choose
@@ -63,8 +68,9 @@ be needed after that edit; it was quick the first time.)
 > read is shared, sold or used for anything else (see the Privacy Policy's
 > Limited Use statement).
 
-*Michael: "which users asked not to have" in the first is a placeholder for
-the real reason you wanted the user's own calendar; change it to your words.*
+*Both approved by Michael, 9 Nov 2026. The main-calendar reasoning is his:
+everything in one place, and phone notifications that already work, with
+the choice left to the user.*
 
 ## Demo video shot list (unlisted YouTube, 3–5 minutes, English, no narration required but captions help)
 
