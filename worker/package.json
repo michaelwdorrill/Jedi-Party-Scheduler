@@ -27,7 +27,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "hono": "^4.13.7",
+    "hono": "^4.13.17",
     "luxon": "^3.5.0"
   },
   "devDependencies": {

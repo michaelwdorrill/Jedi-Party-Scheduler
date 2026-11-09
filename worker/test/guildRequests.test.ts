@@ -145,6 +145,68 @@ describe('GET /guild-requests/callback', () => {
   });
 });
 
+// IDEAS 102, found setting the sandbox right on 10 Nov: the page said "Already
+// added" from the allow-list alone, so a server the bot had left (or never
+// joined) could not be fixed from here. An allow-listed server whose bot is
+// missing now comes back with a direct invite link -- it was approved already,
+// so no new request is needed.
+describe('the add-bot list checks the bot is really there', () => {
+  async function listFor(env: Env, botAnswer: { status: number; body: unknown }) {
+    const connectRes = await call(env, '/guild-requests/connect', { redirect: 'manual' });
+    const state = new URL(connectRes.headers.get('location')!).searchParams.get('state')!;
+    const cookie = setCookieValue(connectRes);
+    fetchStub = stubFetch([
+      TOKEN_RULE,
+      guildsRule([{ id: 'already-active', name: 'Already Active', owner: true }]),
+      userRule('requester'),
+      { match: '/guilds/already-active', ...botAnswer },
+    ]);
+    const res = await call(env, `/guild-requests/callback?code=abc&state=${state}`, {
+      headers: { Cookie: cookie },
+      redirect: 'manual',
+    });
+    const hashQuery = new URLSearchParams(res.headers.get('location')!.split('?')[1] ?? '');
+    return JSON.parse(decodeURIComponent(escape(atob(hashQuery.get('data')!))));
+  }
+
+  it('offers to add the bot back to an allow-listed server it is not in', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'already-active');
+    await seedUser(db, 'requester');
+
+    const [row] = await listFor(env, { status: 404, body: { message: 'Unknown Guild', code: 10004 } });
+
+    expect(row.alreadyAdded).toBeUndefined();
+    expect(row.botMissing).toBe(true);
+    expect(row.botInviteUrl).toContain(`client_id=${env.DISCORD_CLIENT_ID}`);
+    expect(row.botInviteUrl).toContain('guild_id=already-active');
+    expect(row.botInviteUrl).toContain('disable_guild_select=true');
+    expect(row.token).toBeUndefined();
+  });
+
+  it('still says "Already added" when the bot is there', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'already-active');
+    await seedUser(db, 'requester');
+
+    const [row] = await listFor(env, { status: 200, body: { id: 'already-active' } });
+
+    expect(row.alreadyAdded).toBe(true);
+    expect(row.botMissing).toBeUndefined();
+  });
+
+  // INVARIANT GUARD: a Discord hiccup is not evidence the bot left.
+  it('says "Already added" when Discord cannot be asked', async () => {
+    const { db, env } = setup();
+    await seedGuild(db, 'already-active');
+    await seedUser(db, 'requester');
+
+    const [row] = await listFor(env, { status: 503, body: {} });
+
+    expect(row.alreadyAdded).toBe(true);
+  });
+});
+
 describe('POST /guild-requests', () => {
   async function verifyToken(env: Env, guildId = 'new-guild', guildName = 'New Guild', requestedBy = 'requester') {
     return signToken(GUILD_VERIFY_TOKEN_PURPOSE, { guildId, guildName, requestedBy }, env.JWT_SIGNING_KEY, 600);

@@ -20,6 +20,8 @@ import type {
 } from '../types';
 import { useAction, useAsync } from '../lib/async';
 import { ErrorState, InlineError, Loading, buttonClass, cardClass } from '../components/ui';
+import { pollRowVotingClosed } from '../lib/pollRow';
+import { autoCancelLine, people, peopleCan, peopleSay, unlessLeavesFewer } from '../lib/plural';
 
 type WindowDraft = { startAt: number; endAt: number };
 
@@ -132,7 +134,7 @@ export default function EventDetailPage() {
     if (
       rsvpCallsOffEvent(event, user?.id, status) &&
       !confirm(
-        `This needs ${event.minimumAttendees} people in, and saying you can't make it takes it below that. ` +
+        `This needs ${people(event.minimumAttendees ?? 0)} in, and saying you can't make it takes it below that. ` +
           `It will be called off for everyone, and the people still coming will be told. It can't be put back on afterwards.`,
       )
     ) {
@@ -267,6 +269,14 @@ export default function EventDetailPage() {
             Organized by {isOrganizer ? 'you' : event.organizerGlobalName ?? event.organizerUsername ?? 'someone no longer in this server'}
           </p>
           {event.guildName && <p className="text-sm text-faint">On {event.guildName}</p>}
+          {event.createdFromPoll && (
+            <p className="text-sm text-faint">
+              From the poll{' '}
+              <Link to={`/events/${event.createdFromPoll.id}`} className="text-accent-text hover:underline">
+                {event.createdFromPoll.title}
+              </Link>
+            </p>
+          )}
         </div>
         {isOrganizer && event.status !== 'cancelled' && (
           <div className="flex flex-wrap justify-end gap-2">
@@ -365,7 +375,7 @@ export default function EventDetailPage() {
             event.minimumAttendeesDeadlineAt == null &&
             !event.isRecurring && (
               <p className="mb-3 text-xs text-muted">
-                Called off automatically if fewer than {event.minimumAttendees} people are in.
+                {autoCancelLine(event.minimumAttendees ?? 0)}
               </p>
             )}
           {event.status === 'active' && (
@@ -378,7 +388,7 @@ export default function EventDetailPage() {
         <div className="space-y-2">
           <p className="text-sm text-muted">
             {event.pollStrategy === 'threshold'
-              ? `Confirms once ${event.pollThresholdCount} people say they're in, otherwise by the deadline.`
+              ? `Confirms once ${peopleSay(event.pollThresholdCount ?? 0)} they're in, otherwise by the deadline.`
               : "Whichever time slot has the most votes wins at the deadline."}
             {event.pollDeadlineAt && (
               <> Voting closes {formatTimeRange(event.pollDeadlineAt, event.pollDeadlineAt, zone).split(' –')[0]}.</>
@@ -398,9 +408,9 @@ export default function EventDetailPage() {
       {event.eventType === 'poll' && !isWindowed && isMultiWinner && event.pollOptions && (
         <div className="space-y-2">
           <p className="text-sm text-muted">
-            Each day is confirmed independently once {event.pollThresholdCount} people say they're in — any that
+            Each day is confirmed independently once {peopleSay(event.pollThresholdCount ?? 0)} they're in — any that
             qualify all happen, each as its own event. You can change your answer on a confirmed day any time before
-            it starts, but if that leaves fewer than {event.pollThresholdCount} in, the day is called off.
+            it starts, but {unlessLeavesFewer(event.pollThresholdCount ?? 0)}, the day is called off.
           </p>
           {event.pollOptions.map((opt) => (
             <PollOptionRow
@@ -408,7 +418,7 @@ export default function EventDetailPage() {
               option={opt}
               zone={zone}
               onVote={(vote) => handleVote(opt.id, vote)}
-              votingDisabled={!opt.confirmedAt && deadlinePassed}
+              votingDisabled={pollRowVotingClosed(opt, event.status, deadlinePassed)}
               threshold={event.pollThresholdCount}
             />
           ))}
@@ -419,7 +429,7 @@ export default function EventDetailPage() {
         <div className="space-y-3">
           <p className="text-sm text-muted">
             {event.pollStrategy === 'threshold'
-              ? `Each option confirms once ${event.pollThresholdCount} people can commit to the same block within it, otherwise the best one wins at the deadline.`
+              ? `Each option confirms once ${peopleCan(event.pollThresholdCount ?? 0)} commit to the same block within it, otherwise the best one wins at the deadline.`
               : 'The option with the best overlap wins at the deadline.'}{' '}
             Sessions are at least {formatDuration(windowInfo.blockMinutes)} long — if everyone can stay longer, they
             will be.

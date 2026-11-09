@@ -1397,11 +1397,11 @@ async function sweepPollDeadlines(env: Env, budget: TickBudget): Promise<void> {
 // own start_at at all (only its options do) and, once a confirmed day fans
 // out into a real event, offering RSVP on the *poll's* own DM is not just
 // redundant but wrong -- a decline there cannot mean "which day". Before
-// this split, multi_winner always fell through to editSettledPollDms' old
+// this split, multi_winner always fell through to editSettledInviteDms' old
 // "was cancelled" text even when genuinely resolved, because that text's
 // own condition (`start_at != null`) can never be true for a multi_winner
 // event -- found while building the fan-out this same release adds.
-async function editSettledPollDms(
+async function editSettledInviteDms(
   env: Env,
   budget: TickBudget,
   event: EventRow,
@@ -1562,7 +1562,7 @@ async function sweepSingleWinnerPollNotifications(
 
       // Only once the notifications for this poll are done, so the edit can
       // never take the allowance a DM needed (specs/0010).
-      await editSettledPollDms(
+      await editSettledInviteDms(
         env,
         budget,
         event,
@@ -1706,7 +1706,7 @@ async function sweepMultiWinnerPollClosedNotifications(
       // this event never has its own start_at, and once fan-out gives each
       // confirmed day a real event of its own, "are you coming" belongs on
       // that day's DM, not on the poll's.
-      await editSettledPollDms(env, budget, event, () => message, []);
+      await editSettledInviteDms(env, budget, event, () => message, []);
       if (budget.exhausted) return 'incomplete';
     },
   );
@@ -2072,18 +2072,26 @@ async function sendCancelledEventNotice(
     occurrenceDate: '',
     limit,
   });
-  await notifyPending(
-    env,
-    budget,
-    pending,
-    event.id,
-    notificationType,
-    '',
-    () =>
-      event.minimum_attendees != null
-        ? `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`
-        : `"${event.title}" has been cancelled by the organizer.\n${eventLink(env, event.id)}`,
-  );
+  const message =
+    event.minimum_attendees != null
+      ? `"${event.title}" has been cancelled -- attendance dropped below the minimum for it.\n${eventLink(env, event.id)}`
+      : `"${event.title}" has been cancelled by the organizer.\n${eventLink(env, event.id)}`;
+  await notifyPending(env, budget, pending, event.id, notificationType, '', () => message);
+
+  // Walkthrough 5.16 (10 Nov 2026), for 1.0: the invite DMs then went on
+  // offering I'm in / Maybe / Can't make it for an event that no longer
+  // existed. Only poll DMs were ever edited when they settled. The same edit,
+  // after the notices and ranked below them for the same reason it is there:
+  // a stale button is survivable (a press is refused), a missing notice is not.
+  // Everyone invited, not only those still coming -- the called-off day that
+  // found this had nobody left to notify, so nothing ever reached its invite.
+  // One-off events only. This arm also sees cancelled polls, whose invite DMs
+  // their own sweeps edit with the poll's own wording (item 99's "N days are
+  // still happening"); an edit happens once, so this generic text must never
+  // be the one that lands there, even on a tick where the poll's sweep was
+  // deferred.
+  if (pending.length >= limit || budget.exhausted || event.event_type !== 'single') return;
+  await editSettledInviteDms(env, budget, event, () => message, []);
 }
 
 // IDEAS item 54: the deadline-based half of the minimum-attendees cascade,

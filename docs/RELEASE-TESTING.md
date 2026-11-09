@@ -628,6 +628,43 @@ when the organizer cancels the poll, and both the dialog and the DM say so.
       the fix only yes-votes were carried, so main counted as going by default,
       the count stayed at 1, and the day stayed on.)*
 
+### Re-check: the 10 November batch
+
+Built after the 10 Nov walkthrough, all for 1.0 (IDEAS 100–103). Rebuild the
+frontend first; the Worker is deployed by CI. Uses what that walkthrough left
+in the sandbox.
+
+- [ ] **B1** Calendar, November: **R94 series!** at 8 PM shows on **Sun 15th
+      only**, not on Mon 16th (it ends at midnight).
+- [ ] **B2** Open the **Fri 13th "99 keeps its day"** day event. Under the
+      server name: **From the poll *99 keeps its day*** — click it → the
+      (cancelled) poll.
+- [ ] **B3** On that cancelled poll, Sat 14 and Sun 15 say **Voting for this day
+      has closed**; the Fri 13 row (its own event) keeps its buttons. Same on
+      **99 nothing confirmed** — no buttons on any row.
+- [ ] **B4** SchedulerTest's Discord, after the first cron tick following the
+      deploy: the **P24 organizer no** invite (the called-off day) now reads
+      *"… has been cancelled — attendance dropped below the minimum"* with
+      **no buttons**. For a fresh check: a one-off **B4 cancel me** with
+      SchedulerTest invited → after a tick the invite arrives → cancel it → after
+      the next tick that invite is edited to *"… has been cancelled by the
+      organizer"*, buttons gone.
+- [ ] **B5** A pending request for a cancelled date shows **"You've cancelled
+      that date since, so this can't be accepted"** with **Decline** only (the
+      29th's request on R94 series!, if you didn't decline it; otherwise have
+      SchedulerTest ask to move **6 Dec**, cancel 6 Dec, and open the series).
+      SchedulerTest sees no vote buttons on it.
+- [ ] **B6** "1 person": **P24 organizer no** reads *"once 1 person says they're
+      in … but if that leaves nobody in"*, and its called-off row *"Nobody was
+      still in"*. A new poll with threshold 1 reads **Confirm once [1] person
+      says yes**.
+- [ ] **B7** `/add-bot` as DM MD: **DM MD** and **UO Test Server** say *Already
+      added* (SandboxBot is in both now). The "bot isn't in this server — Add it
+      back" case is covered by tests; it only shows for an allow-listed server
+      the bot has left.
+- [ ] **B8** Dependencies (Hono, Vite): the app loads, login works, and nothing
+      in the console that wasn't there before.
+
 ---
 
 ## Phase 6 — settings, policy, and the destructive ones last

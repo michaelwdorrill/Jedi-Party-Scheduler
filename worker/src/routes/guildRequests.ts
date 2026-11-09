@@ -15,7 +15,7 @@
 import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { AppEnv } from '../lib/authMiddleware';
-import { canAdministerGuild, exchangeCodeForToken, fetchDiscordUser, fetchDiscordUserGuilds } from '../lib/discord';
+import { botGuildPresence, canAdministerGuild, exchangeCodeForToken, fetchDiscordUser, fetchDiscordUserGuilds } from '../lib/discord';
 import { oauthCallbackAllowed } from '../lib/rateLimit';
 import {
   createGuildAddRequest,
@@ -139,7 +139,14 @@ guildRequestRoutes.get('/callback', async (c) => {
     const eligible = await Promise.all(
       administered.map(async (g) => {
         const active = await c.env.DB.prepare(`SELECT 1 FROM guilds WHERE id = ? AND is_active = 1`).bind(g.id).first();
-        if (active) return { guildId: g.id, guildName: g.name, alreadyAdded: true as const };
+        if (active) {
+          // IDEAS 102 follow-up: allow-listed is not the same as the bot being
+          // there. Already approved, so no new request -- just the invite.
+          if ((await botGuildPresence(c.env.DISCORD_BOT_TOKEN, g.id)) === 'absent') {
+            return { guildId: g.id, guildName: g.name, botMissing: true as const, botInviteUrl: botInviteUrl(c.env, g.id) };
+          }
+          return { guildId: g.id, guildName: g.name, alreadyAdded: true as const };
+        }
         const payload: GuildVerifyTokenPayload = { guildId: g.id, guildName: g.name, requestedBy: discordUser.id };
         return { guildId: g.id, guildName: g.name, token: await signGuildVerifyToken(c.env, payload) };
       }),
@@ -196,9 +203,7 @@ guildRequestRoutes.post('/', async (c) => {
     // Discord was handed), so this was never an access hole -- but it leaves
     // an approved server with no bot in it and a bot sitting in a server
     // nobody approved, which is its own kind of wrong.
-    botInviteUrl:
-      `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(c.env.DISCORD_CLIENT_ID)}` +
-      `&scope=bot&permissions=0&guild_id=${encodeURIComponent(payload.guildId)}&disable_guild_select=true`,
+    botInviteUrl: botInviteUrl(c.env, payload.guildId),
   }, 201);
 });
 
@@ -302,3 +307,13 @@ guildRequestRoutes.post('/:token/decide', async (c) => {
       return c.html(decisionPage('Not found', '<p>This request no longer exists.</p>'), 404);
   }
 });
+
+// One place for the bot's invite link: the request flow and the add-bot list's
+// "add it back" both use it. See the POST handler's comment for why
+// permissions=0 and disable_guild_select=true.
+function botInviteUrl(env: { DISCORD_CLIENT_ID: string }, guildId: string): string {
+  return (
+    `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(env.DISCORD_CLIENT_ID)}` +
+    `&scope=bot&permissions=0&guild_id=${encodeURIComponent(guildId)}&disable_guild_select=true`
+  );
+}

@@ -974,7 +974,9 @@ export default function EventFormPage() {
                 onChange={(e) => setPollThreshold(Math.min(maxPollThreshold, Math.max(1, Number(e.target.value))))}
                 className={controlClass('xs', 'w-14')}
               />
-              {windowed ? 'people can make the same block' : 'people say yes'}
+              {windowed
+                ? pollThreshold === 1 ? 'person can make the same block' : 'people can make the same block'
+                : pollThreshold === 1 ? 'person says yes' : 'people say yes'}
             </label>
             <label className="flex items-center gap-1 text-sm">
               <input

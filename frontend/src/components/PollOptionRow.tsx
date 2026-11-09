@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { voteCallsOffDay } from '../lib/callOff';
 import { formatTimeRange } from '../lib/datetime';
 import type { PollOption, PollVote, PollVoter, RsvpStatus } from '../types';
+import { calledOffLine, people } from '../lib/plural';
 
 const VOTE_LABEL: Record<PollVote, string> = { yes: "I'm in", maybe: 'Maybe', no: "Can't make it" };
 
@@ -50,7 +51,7 @@ export default function PollOptionRow({
     if (
       voteCallsOffDay(option, threshold, vote) &&
       !confirm(
-        `This day needs ${threshold} people in, and saying you can't make it leaves ${option.confirmedUsers.length - 1}. ` +
+        `This day needs ${people(threshold ?? 0)} in, and saying you can't make it leaves ${option.confirmedUsers.length - 1}. ` +
           `It will be called off for everyone, and the people still coming will be told. It can't be put back on afterwards.`,
       )
     ) {
@@ -101,9 +102,7 @@ export default function PollOptionRow({
         <p className="mb-2 text-xs text-faint">{option.voters.map(voterLabel).join(', ')}</p>
       )}
       {calledOff ? (
-        <p className="text-xs text-faint">
-          Fewer than {threshold ?? 'enough'} people were still in, so this day was called off.
-        </p>
+        <p className="text-xs text-faint">{calledOffLine(threshold ?? null)}</p>
       ) : votingDisabled ? (
         <p className="text-xs text-faint">Voting for this day has closed.</p>
       ) : (

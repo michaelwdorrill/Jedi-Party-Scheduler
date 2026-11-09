@@ -635,6 +635,22 @@ describe('an accepted request never brings back a date the organizer cancelled (
     expect((await loadChangeRequest(env, 'ev1', id))!.status).toBe('pending');
   });
 
+  // Walkthrough 3.22 (10 Nov): after the cancel, the request still offered a
+  // plain Accept with no sign its date was gone; you found out by pressing it.
+  it('marks the request as being for a cancelled date, so the page can say so', async () => {
+    const { db, env } = setup();
+    const { event, id } = await seedCancelledDateWithRequest(db, env, ['inv-a', 'inv-b', 'inv-c']);
+
+    const [asOrganizer] = await listChangeRequests(env, event, 'organizer', true);
+    expect(asOrganizer.id).toBe(id);
+    expect(asOrganizer.dateCancelled).toBe(true);
+    const [asVoter] = await listChangeRequests(env, event, 'inv-b', false);
+    expect(asVoter.dateCancelled).toBe(true);
+
+    await db.prepare(`UPDATE event_occurrence_overrides SET is_cancelled = 0 WHERE event_id = 'ev1'`).run();
+    expect((await listChangeRequests(env, event, 'organizer', true))[0].dateCancelled).toBe(false);
+  });
+
   // INVARIANT GUARD: the accept path still moves a date that is on.
   it('still moves a date that has an override but is not cancelled', async () => {
     const { db, env } = setup();

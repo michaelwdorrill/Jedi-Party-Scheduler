@@ -793,6 +793,13 @@ export async function recordPollVote(
       return { status: 'closed', reason: 'This day was called off -- too few people were still in for it' };
     }
     if (answered !== 'recorded') return { status: 'forbidden' };
+  } else if (loaded.event.status !== 'active') {
+    // Pass 24, P24-04. loadVotablePoll lets a multi-winner poll past its own
+    // status check on purpose, so a day that became its own event stays
+    // answerable from here after the poll closes (item 99). A day that never
+    // did has nothing left to decide once the poll is cancelled: the vote was
+    // saved and shown as the person's answer while changing nothing.
+    return { status: 'closed', reason: 'Voting for this poll has closed' };
   }
 
   await env.DB.prepare(
@@ -831,6 +838,10 @@ export async function recordPollSelection(
   const optionIds = [...new Set(submitted)];
   const loaded = await loadVotablePoll(env, userId, eventId, optionIds);
   if (loaded.status !== 'recorded') return loaded;
+  // P24-04, the Discord night picker's half. This path never routes to a
+  // day's own event, so on a poll that is no longer active it has nothing to
+  // record at all.
+  if (loaded.event.status !== 'active') return { status: 'closed', reason: 'Voting for this poll has closed' };
 
   // Pass-22 acceptance review (RG-05). A complete-answer update is a mutation
   // of every answer this person has on this poll, and the deadline check above

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createEventWithInvites } from '../src/lib/eventWrites';
 import { runReminderSweep } from '../src/cron/reminders';
+import { recordPollSelection } from '../src/lib/polls';
 import { createSession } from '../src/lib/sessions';
 import { signJwt } from '../src/lib/jwt';
 import { buildApp } from '../src/router';
@@ -208,7 +209,13 @@ describe('a confirmed multi-winner day that drops below its threshold (IDEAS 97)
     fetchStub!.calls.length = 0;
     fetchStub!.bodies.length = 0;
     await sweep(env);
-    expect(fetchStub!.bodies.filter((b) => b?.includes(CANCEL_NOTICE)).length).toBe(1);
+    // Sends (POST .../messages) and edits (PATCH .../messages/<id>) counted
+    // apart: since the 10 Nov walkthrough the day's invite DM is also edited to
+    // the cancellation text and loses its buttons, which is a second call
+    // carrying the same words but not a second notice.
+    const calls = fetchStub!.calls.map((url, i) => ({ url, body: fetchStub!.bodies[i] }));
+    expect(calls.filter((c) => /\/messages$/.test(c.url) && c.body?.includes(CANCEL_NOTICE)).length).toBe(1);
+    expect(calls.filter((c) => /\/messages\/[^/]+$/.test(c.url) && c.body?.includes(CANCEL_NOTICE)).length).toBeGreaterThan(0);
     const { results: told } = await db
       .prepare(`SELECT user_id FROM notification_log WHERE event_id = ? AND notification_type = 'event_cancelled_below_minimum'`)
       .bind(day!.id)
@@ -287,5 +294,89 @@ describe('a confirmed multi-winner day that drops below its threshold (IDEAS 97)
     await sweep(env);
     const day = await session(db, optionId);
     expect(day).toMatchObject({ minimum_attendees: null, auto_cancel_below_minimum: 0 });
+  });
+});
+
+// Pass 24 review, P24-04, raised for 1.0 after the 10 Nov walkthrough (5.15)
+// showed the site still offering the buttons the review assumed it hid: a
+// cancelled multi-winner poll accepted votes on days that had not become their
+// own event, saved them, and showed them as the person's answer, while they
+// did nothing.
+describe('a cancelled multi-winner poll takes no more answers (P24-04)', () => {
+  it('refuses a vote on a day that never became its own event, and saves nothing', async () => {
+    const { db, env } = setup();
+    const { pollId, optionId } = await seedPoll(db, env, { threshold: 2, invitees: ['invitee'] });
+    await db.prepare(`UPDATE events SET status = 'cancelled' WHERE id = ?`).bind(pollId).run();
+
+    const res = await vote(env, pollId, optionId, 'invitee', 'yes');
+
+    expect(res.status).toBe(400);
+    expect(res.text).toMatch(/closed/i);
+    const saved = await db.prepare(`SELECT COUNT(*) AS n FROM event_poll_votes WHERE option_id = ?`).bind(optionId).first<{ n: number }>();
+    expect(saved!.n).toBe(0);
+  });
+
+  it("refuses the Discord night picker's answer too", async () => {
+    const { db, env } = setup();
+    const { pollId, optionId } = await seedPoll(db, env, { threshold: 2, invitees: ['invitee'] });
+    await db.prepare(`UPDATE events SET status = 'cancelled' WHERE id = ?`).bind(pollId).run();
+
+    expect((await recordPollSelection(env, 'invitee', pollId, [optionId])).status).toBe('closed');
+  });
+
+  // INVARIANT GUARD: a day that is its own event still answers from the poll's
+  // row after the poll is cancelled -- item 99 keeps those days on.
+  it('still answers a day that is its own event', async () => {
+    const { db, env } = setup();
+    const { pollId, optionId } = await seedPoll(db, env, { threshold: 2, invitees: ['invitee'] });
+    await vote(env, pollId, optionId, 'organizer', 'yes');
+    await vote(env, pollId, optionId, 'invitee', 'yes');
+    await sweep(env);
+    await db.prepare(`UPDATE events SET status = 'cancelled' WHERE id = ?`).bind(pollId).run();
+
+    expect((await vote(env, pollId, optionId, 'invitee', 'no')).status).toBe(200);
+    expect((await session(db, optionId))!.status).toBe('cancelled');
+  });
+});
+
+// Michael, 10 Nov walkthrough: from a day that became its own event there was
+// no way back to the poll it came from.
+describe("a poll day's own event links back to its poll", () => {
+  async function eventAs(env: Env, eventId: string, userId: string) {
+    const res = await buildApp().request(
+      `https://worker.test/events/${eventId}`,
+      { headers: { Authorization: `Bearer ${await authed(env, userId)}` } },
+      env,
+    );
+    return (await res.json()) as { createdFromPoll: { id: string; title: string } | null };
+  }
+
+  it('names the poll for someone who can open it', async () => {
+    const { db, env } = setup();
+    const { pollId, optionId } = await seedPoll(db, env, { threshold: 2, invitees: ['invitee'] });
+    await vote(env, pollId, optionId, 'organizer', 'yes');
+    await vote(env, pollId, optionId, 'invitee', 'yes');
+    await sweep(env);
+    const day = await session(db, optionId);
+
+    expect((await eventAs(env, day!.id, 'invitee')).createdFromPoll).toEqual({ id: pollId, title: 'Which nights?' });
+    expect((await eventAs(env, pollId, 'invitee')).createdFromPoll).toBeNull();
+  });
+
+  it('gives no link to someone invited to the day but not to the poll', async () => {
+    const { db, env } = setup();
+    const { pollId, optionId } = await seedPoll(db, env, { threshold: 2, invitees: ['invitee'] });
+    await vote(env, pollId, optionId, 'organizer', 'yes');
+    await vote(env, pollId, optionId, 'invitee', 'yes');
+    await sweep(env);
+    const day = await session(db, optionId);
+    await seedUser(db, 'late');
+    await seedMembership(db, 'late', 'guild-1');
+    await db
+      .prepare(`INSERT INTO event_invites (id, event_id, user_id, invited_via, rsvp_status, invited_at) VALUES ('inv-late', ?, 'late', 'individual', 'pending', ?)`)
+      .bind(day!.id, Date.now())
+      .run();
+
+    expect((await eventAs(env, day!.id, 'late')).createdFromPoll).toBeNull();
   });
 });

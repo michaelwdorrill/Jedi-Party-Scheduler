@@ -1544,8 +1544,9 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
   whenever `VITE_API_BASE_URL` points at the sandbox Worker would make that
   impossible to miss. Cheap, and the cost of not having it was real tonight
   -- worth doing early in 1.0.1.
-- **"1 people".** "Called off automatically if fewer than 1 people are in"
+- **[Built for 1.0, 10 Nov] "1 people".** "Called off automatically if fewer than 1 people are in"
   on the event page, and "Confirm once 1 people say yes" on the poll form.
+  *Built:* `frontend/src/lib/plural.ts`; a threshold of 1 reads "nobody" ("Called off automatically if nobody is in"). Tested in `frontend/test/walkthroughFinds.test.ts`.
 - **Button refusals link to the front page.** The 4.12 refusal ends "Open it
   on the site: http://localhost:5173/" -- `siteLink` everywhere in
   `interactions.ts`. Linking the event itself would save the person a search.
@@ -1568,7 +1569,7 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
   been cancelled -- attendance dropped below the minimum". The organizer
   counts as coming unless they decline, so the notice reaches them. Same
   family as IDEAS 99: cancellation notices don't know who cancelled.
-- **An event ending at exactly midnight is also drawn on the next day.**
+- **[Built for 1.0, 10 Nov] An event ending at exactly midnight is also drawn on the next day.**
   Found in R94 (10 Nov): a session moved to 8 PM-12 AM showed on Sunday *and*
   Monday in the month grid. `MonthCalendarGrid.tsx` buckets an occurrence on
   every day from `startOf('day')` of its start to `startOf('day')` of its end,
@@ -1576,19 +1577,22 @@ All found while running the re-run timetable (1.1-1.6, 2.16, 4.12, 4.13,
   move feature, but item 96 makes it more common: shifting a 7-11 PM session an
   hour now carries its end to midnight. Fix: treat the end as exclusive (bucket
   on `endAt - 1` when `endAt > startAt`). Display only; the event itself is right.
-- **A cancelled event's invite DM keeps its RSVP buttons.** Seen in 5.16:
+  *Built:* `frontend/src/lib/calendarDays.ts` (`dayRange`, end exclusive), used by the month grid; revert-checked.
+- **[Built for 1.0, 10 Nov] A cancelled event's invite DM keeps its RSVP buttons.** Seen in 5.16:
   the called-off P24 day's invite still offered I'm in / Maybe / Can't make it.
   Only poll DMs are edited when they settle (`editSettledPollDms`); a one-off
   event's invite is never edited on cancellation, so its buttons stay, and a
   press is refused with "not active" (4.12). Safe, untidy: edit the invite to
   the cancellation text and drop its controls, the way poll DMs already are.
-- **A poll day's own event has no way back to its poll.** Michael, 10 Nov,
+  *Built:* `sendCancelledEventNotice` now edits every invitee's invite DM to the cancellation text with no controls, after the notices (`editSettledPollDms` renamed `editSettledInviteDms`). One budgeted query per recently cancelled event per tick (3-day window). `worker/test/cancelledInviteEdit.test.ts`, revert-checked. Series cancellations are unchanged.
+- **[Built for 1.0, 10 Nov] A poll day's own event has no way back to its poll.** Michael, 10 Nov,
   during 5.15: from a day that became its own event you can't get to the poll
   -- the other candidate days and everyone's votes. `events.created_from_poll_id`
   already holds the link; `GET /events/:id` doesn't return it. Return the poll's
   id and title (joined, so a poll purged after 90 days simply yields no link
   rather than a 404) and show "From the poll …" on the page. Same audience:
   the day's event copies the poll's invite list.
+  *Built:* `GET /events/:id` returns `createdFromPoll` (only for someone who can open the poll); the page shows "From the poll …". Tested both ways, revert-checked.
 
 ### 101. What the Pass 24 reviews found, and what was done with it
 
@@ -1623,7 +1627,7 @@ routes and sweeps -- not only the reviewer's copied SQL -- and revert-verified.
   SELECT and its INSERT un-confirms the option and the INSERT still lands,
   leaving a day event under an unconfirmed option until the next yes. Fix: add
   `AND EXISTS (... confirmed_at IS NOT NULL)` to the fan-out INSERT's WHERE.
-- **P24-04.** A cancelled multi-winner poll still accepts (meaningless) votes
+- **[Built for 1.0, 10 Nov] P24-04.** A cancelled multi-winner poll still accepts (meaningless) votes
   on unconfirmed candidates. Answer `closed` instead. **Correction, 10 Nov
   (walkthrough 5.15):** the review rated this API-only because "the site hides
   the buttons" -- it doesn't. The multi-winner rows close only when a day is
@@ -1633,6 +1637,7 @@ routes and sweeps -- not only the reviewer's copied SQL -- and revert-verified.
   saved and shown as your vote while doing nothing. Fix both sides: close the
   rows once the poll isn't active (a day that is its own event keeps its
   buttons, since they answer that event), and answer `closed` on the server.
+  *Built for 1.0, 10 Nov:* the server answers `closed` on the vote and the Discord picker paths; the page's rows use `pollRowVotingClosed`. Revert-checked each.
 - **D-16's predicate.** The inactivity stake treats `start_at IS NULL` as
   upcoming, and every series has it, so organizing or holding an invite to a
   finished-but-uncancelled series pauses account deletion forever. Over-
@@ -1643,12 +1648,13 @@ routes and sweeps -- not only the reviewer's copied SQL -- and revert-verified.
 - **97 residual.** A no on a confirmed-but-not-fanned-out day of a poll the
   deadline sweep has just resolved does not un-confirm it, so the day is born
   below threshold. Window: two sweeps in one tick.
-- **P24-01's page.** A recurring request's page gives no sign its date was
+- **[Built for 1.0, 10 Nov] P24-01's page.** A recurring request's page gives no sign its date was
   cancelled (`stale` is computed for one-off events only); the accept is now
   refused with a reason, but the organizer finds out by pressing it. And a
   sweep-declined request tells the requester only "declined", not why --
   telling them would mean reading state the decline path doesn't have, not
   matching an error message (item 91).
+  *Built for 1.0, 10 Nov (the page half):* a pending request whose date is cancelled carries `dateCancelled`; the organizer sees "You've cancelled that date since" with Decline only, voters see no vote buttons. The sweep's bare "declined" DM is unchanged.
 - **The 429 page** on a rate-limited callback is bare text in the middle of an
   OAuth redirect (cosmetic; item 100's family).
 
@@ -1703,11 +1709,39 @@ server, or deactivate it there -- or after 24 hours its members are refused as
 unverifiable, which is now the intended (and logged) behaviour. The voice-channel
 502 in item 100 is very likely the same missing bot.
 
-**Related, 1.0.1:** the add-bot page marks a server **"Already added"** from the
+**Related -- built for 1.0, 10 Nov:** the add-bot page marks a server **"Already added"** from the
 allow-list alone, so a server the bot was removed from (or, in the sandbox,
 never joined) can't be re-requested there -- Michael hit this setting the
 sandbox right and needed a direct invite link. Now that the membership check
 can tell "bot not in this server" apart, the page could use the same signal.
+*Built:* the list asks Discord whether the bot is in each allow-listed server it
+shows (`botGuildPresence`, `GET /guilds/{id}`); where it isn't, the row says so
+and offers **Add it back**, a direct invite link (already approved, so no new
+request). A Discord error keeps the old "Already added". Tested three ways.
+
+### 103. Dependencies: what 1.0 updated and what it deliberately didn't
+
+10 Nov 2026, alongside the walkthrough batch. **Updated:** Hono 4.13.7 -> 4.13.17
+(the one package that ships in the Worker; its advisory was in `serveStatic`,
+which this Worker doesn't use, but it shouldn't ship 1.0 with a known one), Vite
+8.2.2 -> 8.2.6 in the frontend (the dev/preview server; its advisories include
+Windows-specific ones and Michael runs Windows), and in-range test-tooling
+patches in the worker (Vite 7.3.8, nanoid, source-map-js). Production audits:
+**0** in both.
+
+**Not updated, on purpose, for 1.0.1:**
+- **Wrangler** (4.114.0; 4.159.0 available). `npm audit fix` would take it
+  forward 45 versions and pull in a *beta* of Miniflare 5 -- the deploy tool,
+  swapped just before a release. Its advisories (undici, sharp) are in tooling
+  that runs on Michael's machine and in CI, not in the deployed Worker. Upgrade
+  it on its own, deploy to the sandbox, and watch one release go through.
+- **Vitest 4 -> 5** (tinypool, @vitest/mocker): a major version of the test
+  runner.
+- **The frontend's ESLint / Tailwind transitive chain** (brace-expansion,
+  minimatch, js-yaml, postcss-selector-parser): `npm update` crashes with
+  npm 10.9.4's arborist bug ("Cannot read properties of null (reading
+  'edgesOut')") on this tree; needs a lockfile refresh, which is its own change.
+None of these is in anything a user's browser or the deployed Worker runs.
 
 ## Parked until after 1.0
 

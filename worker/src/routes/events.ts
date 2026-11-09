@@ -378,9 +378,25 @@ eventRoutes.get('/:eventId', async (c) => {
     }));
   }
 
+  // Michael, 10 Nov walkthrough: a poll day's own event had no way back to
+  // the poll it came from. Only offered to someone who can open that poll --
+  // the day copies the poll's invite list at fan-out, but someone invited to
+  // the day afterwards was never invited to the poll -- and a poll purged
+  // after 90 days simply yields no link rather than a 404.
+  const parentPoll = event.created_from_poll_id
+    ? await c.env.DB.prepare(
+        `SELECT p.id, p.title FROM events p
+         WHERE p.id = ? AND (p.organizer_id = ? OR EXISTS (
+           SELECT 1 FROM event_invites i WHERE i.event_id = p.id AND i.user_id = ?))`,
+      )
+        .bind(event.created_from_poll_id, userId, userId)
+        .first<{ id: string; title: string }>()
+    : null;
+
   return c.json({
     occurrenceId: event.id,
     eventId: event.id,
+    createdFromPoll: parentPoll ? { id: parentPoll.id, title: parentPoll.title } : null,
     id: event.id,
     guildId: event.guild_id,
     guildName: guild?.name ?? null,

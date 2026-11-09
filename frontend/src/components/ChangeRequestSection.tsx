@@ -272,8 +272,11 @@ export default function ChangeRequestSection({
                 {r.proposedStartAt && r.proposedEndAt && formatTimeRange(r.proposedStartAt, r.proposedEndAt, event.timezone)}
                 {r.message && <span className="text-muted"> — “{r.message}”</span>}
               </p>
+              {r.dateCancelled && (
+                <p className="mt-1 text-xs text-warning-text">That date has been cancelled, so there is nothing to vote on.</p>
+              )}
               <div className="mt-2 flex items-center gap-2">
-                {(['yes', 'maybe', 'no'] as PollVote[]).map((v) => (
+                {!r.dateCancelled && (['yes', 'maybe', 'no'] as PollVote[]).map((v) => (
                   <button
                     key={v}
                     onClick={() => onVote(r.id, v)}
@@ -339,13 +342,20 @@ export default function ChangeRequestSection({
                   This event has changed since the request was made — re-check before accepting.
                 </p>
               )}
+              {r.dateCancelled && (
+                <p className="text-xs text-warning-text">
+                  You've cancelled that date since, so this can't be accepted. Decline it to close it.
+                </p>
+              )}
               <div className="flex items-center gap-2">
-                <button
-                  onClick={() => onAccept(r.id)}
-                  className="rounded-md border border-success/60 px-2 py-1 text-xs text-success-text hover:bg-success-surface"
-                >
-                  Accept
-                </button>
+                {!r.dateCancelled && (
+                  <button
+                    onClick={() => onAccept(r.id)}
+                    className="rounded-md border border-success/60 px-2 py-1 text-xs text-success-text hover:bg-success-surface"
+                  >
+                    Accept
+                  </button>
+                )}
                 <button
                   onClick={() => onDecline(r.id)}
                   className="rounded-md border border-danger/60 px-2 py-1 text-xs text-danger-text hover:bg-danger-surface"

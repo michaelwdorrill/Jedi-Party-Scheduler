@@ -87,6 +87,9 @@ export interface ChangeRequestView {
   // Advisory only -- see "Staleness" in the spec. Never computed for a
   // recurring time_change, whose accept path doesn't consult events.revision.
   stale: boolean;
+  // A pending time change whose occurrence the organizer has cancelled since:
+  // it can only be declined (P24-01), so the page says so up front.
+  dateCancelled: boolean;
 }
 
 export async function loadChangeRequest(env: Env, eventId: string, requestId: string): Promise<ChangeRequestRow | null> {
@@ -636,6 +639,24 @@ export async function listChangeRequests(
     getMyVotesFor(env, timeChangeIds, viewerId),
   ]);
 
+  // Walkthrough 3.22 (10 Nov 2026): a pending request for a date the organizer
+  // has since cancelled offered a plain Accept, and the page gave no sign the
+  // date was gone until Accept was refused (P24-01). One read, and only for a
+  // series with open time changes.
+  const pendingDates = [
+    ...new Set(rows.filter((r) => r.kind === 'time_change' && r.status === 'pending').map((r) => r.occurrence_date)),
+  ].filter((d) => d !== '');
+  const cancelledDates = new Set<string>();
+  if (event.is_recurring && pendingDates.length > 0) {
+    const { results: cancelled } = await env.DB.prepare(
+      `SELECT occurrence_date FROM event_occurrence_overrides
+       WHERE event_id = ? AND is_cancelled = 1 AND occurrence_date IN (${pendingDates.map(() => '?').join(', ')})`,
+    )
+      .bind(event.id, ...pendingDates)
+      .all<{ occurrence_date: string }>();
+    for (const row of cancelled) cancelledDates.add(row.occurrence_date);
+  }
+
   return rows.map((r) => ({
     id: r.id,
     kind: r.kind,
@@ -660,6 +681,7 @@ export async function listChangeRequests(
     decidedAt: r.decided_at,
     decidedBy: r.decided_by,
     stale: r.kind === 'time_change' && !event.is_recurring && (event.revision ?? 0) !== r.event_revision,
+    dateCancelled: r.kind === 'time_change' && r.status === 'pending' && cancelledDates.has(r.occurrence_date),
   }));
 }
 

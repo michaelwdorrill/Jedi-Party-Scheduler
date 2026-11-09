@@ -314,6 +314,9 @@ export interface EventDetail extends EventOccurrence {
   recurrence: RecurrenceRule | null;
   invites: EventInvite[];
   pollOptions: PollOption[] | null;
+  // A poll day's own event: the poll it came from, when the viewer can open
+  // it (10 Nov 2026 walkthrough). Null for everything else.
+  createdFromPoll: { id: string; title: string } | null;
 }
 
 // Invitee change requests (docs/specs/0003-event-change-requests.md).
@@ -350,4 +353,7 @@ export interface ChangeRequestView {
   // Advisory: the event has moved since this request was filed. Never true
   // for a recurring time_change, whose accept path doesn't consult it.
   stale: boolean;
+  // A pending time change whose date the organizer has cancelled since; it can
+  // only be declined (P24-01, walkthrough 3.22).
+  dateCancelled: boolean;
 }

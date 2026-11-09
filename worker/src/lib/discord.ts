@@ -73,6 +73,30 @@ export async function fetchGuildVoiceChannels(botToken: string, guildId: string)
   return channels.filter((c) => VOICE_CHANNEL_TYPES.has(c.type)).map((c) => ({ id: c.id, name: c.name }));
 }
 
+// IDEAS 102, follow-up: whether the bot is actually in a server, for the
+// add-bot page -- which used to say "Already added" from the allow-list alone,
+// so a server the bot had left, or never joined, could not be fixed from there.
+// GET /guilds/{id} answers 200 only for a server the bot is in; 404 Unknown
+// Guild or 403 means it is not. Anything else is `unknown`, and the caller
+// keeps its old answer: a Discord hiccup is not evidence the bot left.
+export async function botGuildPresence(botToken: string, guildId: string): Promise<'present' | 'absent' | 'unknown'> {
+  try {
+    const res = await fetch(`${API_BASE}/guilds/${guildId}`, { headers: { Authorization: `Bot ${botToken}` } });
+    if (res.status === 200) return 'present';
+    if (res.status === 403) return 'absent';
+    if (res.status === 404) {
+      const code = await res.json().then(
+        (body) => (body as { code?: unknown } | null)?.code,
+        () => undefined,
+      );
+      return code === UNKNOWN_GUILD ? 'absent' : 'unknown';
+    }
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 // IDEAS item 58: the self-service add flow (specs/0015) gives an admin a
 // one-click way to put the bot into their server; this is the other half.
 // DELETE /users/@me/guilds/{id} with the *bot's own* token makes the bot
