@@ -1935,6 +1935,48 @@ read `$workers.scriptVersion.id` on a log line from that run and compare it to
 the deploy's "Current Version ID". This matters for the 1.0 production deploy,
 whose first runs send the launch announcement.
 
+### 109. The 1h "accepted" ladder rung has no lower bound, so a late-delivered reminder can claim a past event "starts in about an hour" (Michael, 9 Nov 2026)
+
+Found investigating a DM that arrived at 9:00 PM for "Koldera," an 8:00 PM
+start -- the DM read "starts in about an hour (Mon 9 Nov, 8:00 PM EST)",
+an hour *after* the event began. Not a DST bug: `start_at` is an absolute
+UTC instant computed per-occurrence by `expandOccurrences` (`lib/recurrence.ts`),
+which re-derives the local wall-clock time from the IANA zone for each
+candidate date rather than caching an offset, so a recurring series crossing
+a DST boundary gets the right UTC instant for every occurrence either side of
+it. And `formatWhen` (`cron/reminders.ts`) renders that instant through Luxon's
+`ZZZZ` token, which prints whatever abbreviation (`EST`/`EDT`) is correct for
+that specific instant -- also not cached. Both are DST-correct by construction.
+
+The actual mechanism, in `cron/reminders.ts`:
+
+- `ladderRungFor` (around line 567) picks a rung with `remaining <= rung.hours
+  * HOUR_MS` and no floor -- a deeply negative `remaining` (an event long
+  since started) still matches the *nearest* (1h) rung rather than being
+  treated as "nothing left to send."
+- For a recurring event, `sweepReminders`' window is `[now, now + 96h]`
+  (`windowEnd` at line 1154) and `expandOccurrencesForEvent` keeps an
+  occurrence in that window as long as `endAt >= windowFromMs` -- i.e. for its
+  entire duration, not just until its start. A long-running occurrence (a
+  multi-hour game night) is still "the active occurrence" an hour into it.
+- So: if the 1h rung's actual send gets delayed past the real start --
+  plausible given 108's budget/starvation findings, or ordinary outbox
+  retry/backoff -- by the time it goes out, `remaining` is negative, the
+  occurrence is still in-window because it hasn't *ended*, and
+  `ladderRungFor` still returns the 1h rung and its "starts in about an hour"
+  copy.
+
+Two independent fixes, either of which closes the symptom: give
+`ladderRungFor`'s accepted/1h case (or the ladder generally) a floor of 0, and
+treat occurrences whose `startAt` has already passed as ineligible for the
+"accepted" ladder's forward-looking rungs. The latter is probably the more
+correct of the two, since a floor alone would make the rung simply vanish
+silently rather than say anything accurate about an event already underway.
+Related to 108 (the same sweep's budget/ordering review should check whether
+this event's delay was starvation or ordinary retry backoff) but is a
+distinct bug in the rung-selection logic itself, present regardless of why
+delivery was late.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
