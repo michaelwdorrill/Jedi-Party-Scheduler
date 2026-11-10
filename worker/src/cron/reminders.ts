@@ -564,8 +564,19 @@ const LADDER_FARTHEST_HOURS = 96;
 // unanswered person 90 hours out gets nothing yet; at 95 hours they cross
 // into the 96h rung; once inside 48 hours the 96h rung is behind them and
 // this returns the 48h one instead, never both in the same tick.
+//
+// IDEAS 109: `remaining` has no floor otherwise. A delayed send (cron
+// starvation, outbox retry backoff) that doesn't catch up until after
+// startAt would still match the nearest rung on a deeply negative
+// `remaining` -- "starts in about an hour" for an event already under way.
+// A long-running recurring occurrence stays in the scan window for its
+// whole duration (gated on endAt, not startAt), so this isn't even rare:
+// any multi-hour event whose 1h rung is late enough is still "the active
+// occurrence" when the tick finally reaches it. Once an event has started,
+// no forward-looking rung describes it accurately, so none fires.
 function ladderRungFor(status: LadderStatus, startAt: number, now: number): LadderRung | null {
   const remaining = startAt - now;
+  if (remaining <= 0) return null;
   for (const rung of LADDER[status]) {
     if (remaining <= rung.hours * HOUR_MS) return rung;
   }
