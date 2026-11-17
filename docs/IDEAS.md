@@ -1977,6 +1977,18 @@ this event's delay was starvation or ordinary retry backoff) but is a
 distinct bug in the rung-selection logic itself, present regardless of why
 delivery was late.
 
+**Follow-up (not yet done):** only the floor landed (`ladderRungFor` returns
+`null` once `remaining <= 0`), covered by the new "an occurrence already
+under way gets no forward-looking ladder rung" test in `ladder.test.ts`. The
+second, "probably more correct" fix above -- treating an occurrence whose
+`startAt` has passed as ineligible for the accepted ladder's forward-looking
+rungs, rather than just suppressing its send -- is still open. With only the
+floor, a late send for an already-started event now goes silent instead of
+saying something wrong, which is strictly better but not what the write-up
+above calls the better outcome: nothing currently tells the invitee the
+event is already underway. Worth a small follow-up pass if that silence
+turns out to matter in practice.
+
 ## Parked until after 1.0
 
 Deliberately deferred past 1.0, per the rule in "How this file is kept" above.
