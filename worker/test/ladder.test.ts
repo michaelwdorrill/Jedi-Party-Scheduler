@@ -240,6 +240,48 @@ describe("decision 7's floor keeps a frequent recurring event silent until it cl
   });
 });
 
+describe('an occurrence already under way gets no forward-looking ladder rung (IDEAS 109)', () => {
+  it('sends no rung once start_at has passed, even though the occurrence has not ended', async () => {
+    const { db, env } = setup();
+    const base = Math.floor(Date.now() / 60_000) * 60_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(base);
+
+    await seedGuild(db);
+    await seedUser(db, 'organizer');
+    await seedUser(db, 'invitee');
+    await seedMembership(db, 'organizer', 'guild-1');
+    await seedMembership(db, 'invitee', 'guild-1');
+
+    // This week's occurrence started an hour ago and runs for three hours,
+    // so it is still "in the window" (endAt hasn't passed) even though its
+    // start has. A week-earlier predecessor clears decision 7's floor well
+    // before `base`.
+    const occStart = base - HOUR_MS;
+    const seriesStart = new Date(occStart - 7 * DAY_MS);
+    const startDate = seriesStart.toISOString().slice(0, 10);
+    const startTime = `${String(seriesStart.getUTCHours()).padStart(2, '0')}:${String(seriesStart.getUTCMinutes()).padStart(2, '0')}`;
+
+    await seedEvent(db, { id: 'e1', organizerId: 'organizer', isRecurring: 1, startAt: null, endAt: null });
+    await db.prepare(`UPDATE events SET timezone = 'UTC' WHERE id = 'e1'`).run();
+    await db.prepare(
+      `INSERT INTO event_recurrence_rules (event_id, freq, interval, start_date, start_time, duration_minutes, end_type)
+       VALUES ('e1', 'WEEKLY', 1, ?, ?, 180, 'never')`,
+    )
+      .bind(startDate, startTime)
+      .run();
+    await seedInvite(db, 'e1', 'invitee');
+
+    const occDate = new Date(occStart).toISOString().slice(0, 10);
+    await seedAttendance(db, 'e1', 'invitee', 'accepted', occDate);
+
+    fetchStub = stubFetch([DM_CHANNEL_RULE, dmSendRule(200), membershipRule(200)]);
+    await runReminderSweep(env);
+
+    expect(ladderRows(await notificationRows(db, 'e1', 'invitee'))).toHaveLength(0);
+  });
+});
+
 describe('the window-poll "outside your hours" notice fires exactly once', () => {
   it('notifies a submitter whose availability does not cover the resolved span, and does not repeat it', async () => {
     const { db, env } = setup();
