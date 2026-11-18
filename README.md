@@ -1,8 +1,12 @@
-# Jedi Party Scheduler
+# Uncle Owen
 
 A scheduling site for a Discord friend group. Log in with Discord, see the
 calendar for the servers you and the site's owner have both allow-listed, and
 create/RSVP to gaming sessions with your friends.
+
+Formerly "Jedi Party Scheduler" — renamed at v1.0. The Cloudflare Worker and
+D1 database still use the old `jedi-party-scheduler-*` names (see
+`worker/wrangler.toml`); they were left as-is rather than recreated.
 
 ## How it works
 
