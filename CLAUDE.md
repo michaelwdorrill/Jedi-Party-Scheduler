@@ -3,7 +3,7 @@
 ## The user's local clone
 
 Michael's local clone of this repo lives at
-`C:\Users\Michael\Documents\GitHub\Jedi-Party-Scheduler` on Windows
+`C:\Users\Michael\Projects\uncle-owen` on Windows
 (PowerShell). Anything that has to run against his real Cloudflare
 credentials — `npm run deploy:sandbox`, `db:migrate:remote:sandbox`,
 `wrangler tail`, etc. — has to run in a PowerShell terminal `cd`'d into that
